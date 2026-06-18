@@ -1,0 +1,53 @@
+cabal-version: 3.16
+name: dbos-transact-hs
+version: 0.1.0.0
+build-type: Simple
+
+common commons
+  default-language: GHC2024
+  ghc-options: -Wall
+  build-depends:
+      base >=4.21 && <5
+    , containers , stm-containers
+    , text
+    , vector
+    , template-haskell
+    , aeson
+    , generic-data
+    , witch
+    , safe-wild-cards
+    , strict-wrapper
+    , hasql
+    , hasql-th
+    , hasql-dynamic-statements
+    , hasql-pool
+    , hasql-postgresql-types
+    , postgresql-types
+    , bluefin
+    , co-log
+    , fast-logger
+    , ki
+    , mtl
+    , io-classes
+    , io-sim
+
+library
+  import: commons
+  hs-source-dirs: src
+  exposed-modules:
+      DbosTransact
+
+test-suite test
+  import: commons
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  build-depends:
+      dbos-transact-hs
+    , hedgehog
+    , tasty
+    , tasty-hunit
+    , tasty-hedgehog
+    , breakpoint
+    , nothunks
+    , rapid
