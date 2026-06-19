@@ -28,7 +28,8 @@ env:
 	cabal install -w ghc-$(GHC) --enable-documentation \
 		--package-env . --lib \
 		base containers stm-containers text vector template-haskell \
-		aeson aeson-optics generic-data optics witch safe-wild-cards strict-wrapper \
+		bytestring time uuid exceptions base64-bytestring \
+		aeson generic-data optics witch safe-wild-cards strict-wrapper \
 		hasql hasql-th hasql-dynamic-statements hasql-pool hasql-postgresql-types postgresql-types \
-		bluefin co-log fast-logger ki mtl io-classes io-sim \
-		breakpoint nothunks rapid hedgehog tasty tasty-hunit tasty-hedgehog
+		async bluefin co-log fast-logger mtl io-classes io-sim stm \
+		breakpoint nothunks rapid hedgehog tasty tasty-hunit tasty-hedgehog tasty-golden

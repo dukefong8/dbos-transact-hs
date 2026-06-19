@@ -7,47 +7,75 @@ common commons
   default-language: GHC2024
   ghc-options: -Wall
   build-depends:
-      base >=4.21 && <5
-    , containers , stm-containers
-    , text
-    , vector
-    , template-haskell
-    , aeson
-    , generic-data
-    , witch
-    , safe-wild-cards
-    , strict-wrapper
-    , hasql
-    , hasql-th
-    , hasql-dynamic-statements
-    , hasql-pool
-    , hasql-postgresql-types
-    , postgresql-types
-    , bluefin
-    , co-log
-    , fast-logger
-    , ki
-    , mtl
-    , io-classes
-    , io-sim
+    aeson,
+    async,
+    base >=4.21 && <5,
+    base64-bytestring,
+    bluefin,
+    bytestring,
+    co-log,
+    containers,
+    exceptions,
+    fast-logger,
+    generic-data,
+    hasql,
+    hasql-dynamic-statements,
+    hasql-pool,
+    hasql-postgresql-types,
+    hasql-th,
+    io-classes,
+    io-sim,
+    mtl,
+    postgresql-types,
+    safe-wild-cards,
+    stm,
+    stm-containers,
+    strict-wrapper,
+    template-haskell,
+    text,
+    time,
+    uuid,
+    vector,
+    witch
 
 library
   import: commons
   hs-source-dirs: src
   exposed-modules:
-      DbosTransact
+    DbosTransact
+    DbosTransact.Client
+    DbosTransact.Compat.Go
+    DbosTransact.Config
+    DbosTransact.Core.Model
+    DbosTransact.Core.Transition
+    DbosTransact.Effects
+    DbosTransact.Error
+    DbosTransact.Queue
+    DbosTransact.Step
+    DbosTransact.SystemDB.Postgres
+    DbosTransact.SystemDB.Schema
+    DbosTransact.Workflow
 
 test-suite test
   import: commons
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
+  other-modules:
+    DbosTransact.Compat.ChaosSpec
+    DbosTransact.Compat.IdempotencySpec
+    DbosTransact.Compat.StepSpec
+    DbosTransact.Compat.WorkflowSpec
+    DbosTransact.Core.TransitionSpec
+    DbosTransact.Golden.SchemaSpec
+
   build-depends:
-      dbos-transact-hs
-    , hedgehog
-    , tasty
-    , tasty-hunit
-    , tasty-hedgehog
-    , breakpoint
-    , nothunks
-    , rapid
+    breakpoint,
+    dbos-transact-hs,
+    hedgehog,
+    nothunks,
+    rapid,
+    tasty,
+    tasty-golden,
+    tasty-hedgehog,
+    tasty-hunit

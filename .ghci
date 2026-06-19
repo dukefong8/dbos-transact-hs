@@ -5,6 +5,7 @@
 :seti -XOverloadedRecordDot
 :seti -XMagicHash
 :seti -XPartialTypeSignatures
+:set -XExplicitNamespaces
 
 :set -Werror=deferred-out-of-scope-variables
 :set -Werror=deferred-type-errors
@@ -17,4 +18,5 @@
 :set -fplugin=Debug.Breakpoint
 
 :set -outputdir .build
-:set -isrc
+:set -isrc:test
+:load test/Main.hs

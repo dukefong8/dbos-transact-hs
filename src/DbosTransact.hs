@@ -1,9 +1,17 @@
 module DbosTransact
-  ( projectName,
-  )
-where
+  ( module DbosTransact.Config
+  , module DbosTransact.Error
+  , module DbosTransact.Effects
+  , module DbosTransact.Workflow
+  , module DbosTransact.Step
+  , module DbosTransact.Queue
+  , module DbosTransact.Client
+  ) where
 
-import Data.Text (Text, pack)
-
-projectName :: Text
-projectName = pack "dbos-transact-hs"
+import DbosTransact.Client
+import DbosTransact.Config
+import DbosTransact.Effects
+import DbosTransact.Error
+import DbosTransact.Queue
+import DbosTransact.Step
+import DbosTransact.Workflow
