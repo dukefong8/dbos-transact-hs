@@ -14,6 +14,7 @@ common commons
     bluefin,
     bytestring,
     co-log,
+    co-log-core,
     containers,
     exceptions,
     fast-logger,
@@ -41,6 +42,7 @@ library
   import: commons
   hs-source-dirs: src
   exposed-modules:
+    DBOS.Logger
     DBOS.SystemDB
     DBOS.SystemDB.Hasql
     DBOS.SystemDB.Queries

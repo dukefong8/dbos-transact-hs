@@ -31,5 +31,5 @@ env:
 		bytestring time uuid exceptions base64-bytestring \
 		aeson generic-data safe-wild-cards strict-wrapper \
 		hasql hasql-th hasql-pool hasql-postgresql-types postgresql-types \
-		async bluefin co-log fast-logger mtl io-classes io-sim stm \
+		async bluefin co-log co-log-core fast-logger mtl io-classes io-sim stm \
 		breakpoint nothunks rapid hedgehog tasty tasty-hunit tasty-hedgehog tasty-golden

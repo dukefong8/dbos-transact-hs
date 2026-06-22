@@ -71,6 +71,10 @@ import DBOS.Transact.OperationCheckpointTypes
     OperationId (..),
     OperationName (..),
   )
+import Data.Text (pack)
+import GHC.Stack (HasCallStack)
+
+import DBOS.Logger (logInfo)
 import DBOS.SystemDB.Types
   ( IdempotencyKey (..),
     MessageUUID (..),
@@ -125,12 +129,13 @@ withWorkflowExecutionStore =
   runAsk
 
 getWorkflowExecution ::
-  (db <: es, io <: es) =>
+  (HasCallStack, db <: es, io <: es) =>
   IOE io ->
   WorkflowExecutionStore db ->
   WorkflowId ->
   Eff es (Either WorkflowExecutionDecodeError (Maybe WorkflowExecution))
-getWorkflowExecution io store workflowId = do
+getWorkflowExecution io store workflowId@(WorkflowId wid) = do
+  effIO io (logInfo (pack "getWorkflowExecution: " <> wid))
   fetchWorkflowExecutionRow <- ask store
   row <- effIO io (fetchWorkflowExecutionRow workflowId)
   pure $ traverse parseWorkflowExecution row
@@ -144,14 +149,15 @@ withOperationCheckpointStore getStatus getCheckpoint =
   runAsk (getStatus, getCheckpoint)
 
 checkOperationExecution ::
-  (db <: es, io <: es) =>
+  (HasCallStack, db <: es, io <: es) =>
   IOE io ->
   OperationCheckpointStore db ->
   WorkflowId ->
   OperationId ->
   OperationName ->
   Eff es (Either OperationExecutionCheckError OperationCheckpointReplay)
-checkOperationExecution io store workflowId operationId operationName = do
+checkOperationExecution io store workflowId@(WorkflowId wid) operationId operationName = do
+  effIO io (logInfo (pack "checkOperationExecution: " <> wid))
   (getWorkflowStatus, getOperationCheckpoint) <- ask store
   workflowStatus <- effIO io (getWorkflowStatus workflowId)
   case workflowStatus of
