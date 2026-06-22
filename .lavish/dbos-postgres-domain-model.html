@@ -1,0 +1,1325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DBOS Haskell: Postgres Domain Model Review</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #62708a;
+      --line: #dce2ed;
+      --strong: #0f4c81;
+      --strong-2: #1d6b8f;
+      --accent: #2f7d57;
+      --warn: #a45d12;
+      --danger: #9d2f35;
+      --soft-blue: #eaf3fb;
+      --soft-green: #eaf6ef;
+      --soft-warn: #fff3df;
+      --soft-red: #fdecef;
+      --soft-gray: #eef2f7;
+      --code: #22314d;
+      --shadow: 0 10px 30px rgba(23, 32, 51, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+
+    a { color: var(--strong); }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, #ffffff 0%, #f0f6fb 100%);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--strong);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { line-height: 1.15; }
+
+    h1 {
+      margin: 0;
+      max-width: 880px;
+      font-size: 34px;
+      letter-spacing: 0;
+    }
+
+    .hero p {
+      max-width: 880px;
+      margin: 14px 0 0;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 22px;
+    }
+
+    .metric {
+      min-width: 0;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 24px;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .section {
+      margin-top: 28px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 24px;
+      box-shadow: 0 4px 18px rgba(23, 32, 51, 0.045);
+    }
+
+    .section h2 {
+      margin: 0 0 14px;
+      font-size: 23px;
+    }
+
+    .section > p {
+      margin: 0 0 16px;
+      color: var(--muted);
+      max-width: 880px;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 12px 0 18px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      padding: 5px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--soft-gray);
+      color: var(--code);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: normal;
+    }
+
+    .pill.blue { background: var(--soft-blue); color: var(--strong); }
+    .pill.green { background: var(--soft-green); color: var(--accent); }
+    .pill.warn { background: var(--soft-warn); color: var(--warn); }
+    .pill.red { background: var(--soft-red); color: var(--danger); }
+
+    .relationship-wrap {
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .relationship-grid {
+      min-width: 840px;
+      display: grid;
+      grid-template-columns: minmax(220px, 0.9fr) minmax(280px, 1.2fr) minmax(220px, 0.9fr);
+      gap: 18px;
+      align-items: start;
+      position: relative;
+    }
+
+    .rel-column {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .table-node {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fff;
+    }
+
+    .table-node.root {
+      border: 2px solid var(--strong);
+      background: var(--soft-blue);
+      box-shadow: var(--shadow);
+    }
+
+    .table-node h3 {
+      margin: 0 0 8px;
+      font-size: 17px;
+      overflow-wrap: anywhere;
+    }
+
+    .table-node p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .arrow-note {
+      display: block;
+      margin-top: 8px;
+      color: var(--strong-2);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .logical-note {
+      display: block;
+      margin-top: 8px;
+      color: var(--warn);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 15px;
+      background: #fff;
+    }
+
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 17px;
+      overflow-wrap: anywhere;
+    }
+
+    .card p {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .kv {
+      display: grid;
+      gap: 6px;
+      margin: 10px 0 0;
+      font-size: 13px;
+    }
+
+    .kv div {
+      display: grid;
+      grid-template-columns: 88px minmax(0, 1fr);
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .kv b {
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    code {
+      color: var(--code);
+      background: #f3f6fa;
+      border: 1px solid #e3e8f0;
+      border-radius: 5px;
+      padding: 1px 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+      overflow-wrap: anywhere;
+    }
+
+    .table-shell {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    table {
+      width: 100%;
+      min-width: 980px;
+      border-collapse: collapse;
+      background: #fff;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f3f6fa;
+      color: #31415c;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    td { overflow-wrap: anywhere; }
+
+    .status-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .status-list li {
+      padding: 7px 9px;
+      border-radius: 7px;
+      background: #f3f6fa;
+      border: 1px solid var(--line);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .decision-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    form.review {
+      min-width: 0;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    form.review h3 {
+      margin: 0 0 8px;
+      font-size: 17px;
+    }
+
+    form.review p {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    label.choice {
+      display: block;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      margin-bottom: 8px;
+      background: #fbfcfe;
+      cursor: pointer;
+    }
+
+    label.choice input {
+      margin-right: 8px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 88px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 7px;
+      background: var(--strong);
+      color: #fff;
+      padding: 9px 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: #31415c;
+    }
+
+    .source-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .source-list li {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 11px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .source-list strong {
+      display: block;
+      color: var(--ink);
+      margin-bottom: 3px;
+    }
+
+    .note {
+      padding: 12px 14px;
+      border-left: 4px solid var(--warn);
+      background: var(--soft-warn);
+      border-radius: 6px;
+      color: #603706;
+      font-size: 14px;
+    }
+
+    .code-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .code-panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #101827;
+      color: #e7edf7;
+      overflow: hidden;
+    }
+
+    .code-panel h3 {
+      margin: 0;
+      padding: 12px 14px;
+      background: #18243a;
+      color: #f6f8fb;
+      font-size: 15px;
+      border-bottom: 1px solid #26344d;
+    }
+
+    pre {
+      margin: 0;
+      padding: 14px;
+      overflow-x: auto;
+      white-space: pre;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+
+    .code-panel code {
+      color: inherit;
+      background: transparent;
+      border: 0;
+      padding: 0;
+      font-size: inherit;
+      overflow-wrap: normal;
+    }
+
+    .invariant-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .invariant-list li {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 12px;
+      font-size: 13px;
+    }
+
+    .invariant-list strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    @media (max-width: 860px) {
+      .meta-grid,
+      .cards,
+      .decision-grid,
+      .code-grid,
+      .invariant-list,
+      .source-list {
+        grid-template-columns: 1fr;
+      }
+
+      .hero { padding: 22px; }
+      h1 { font-size: 28px; }
+      .section { padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">DBOS Transact Haskell Design Review</p>
+      <h1>Postgres system schema domain model, anchored to Python DBOS</h1>
+      <p>
+        This review starts the Haskell DBOS design from the Python implementation's
+        Postgres system schema. The working assumption is exact database compatibility:
+        Haskell should understand and write the same tables, keys, indexes, and logical
+        relationships unless we explicitly choose a divergence later.
+      </p>
+      <div class="meta-grid" aria-label="Review summary">
+        <div class="metric"><strong>11</strong><span>Live DBOS system tables</span></div>
+        <div class="metric"><strong>5</strong><span>FK-backed child tables</span></div>
+        <div class="metric"><strong>6</strong><span>Standalone/control tables</span></div>
+        <div class="metric"><strong>1</strong><span>Aggregate root: workflow_status</span></div>
+      </div>
+    </header>
+
+    <section class="section" id="topology">
+      <h2>Schema Topology</h2>
+      <p>
+        The physical database model is centered on <code>workflow_status</code>. Some
+        relationships are enforced by foreign keys. Others are logical links represented
+        by text columns and runtime behavior.
+      </p>
+      <div class="legend">
+        <span class="pill blue">Physical FK + cascade delete</span>
+        <span class="pill warn">Logical relationship only</span>
+        <span class="pill green">Standalone control/config table</span>
+      </div>
+      <div class="relationship-wrap">
+        <div class="relationship-grid">
+          <div class="rel-column">
+            <article class="table-node">
+              <h3>operation_outputs</h3>
+              <p>Step, transaction, child workflow, and get-result checkpoints.</p>
+              <span class="arrow-note">workflow_uuid FK</span>
+            </article>
+            <article class="table-node">
+              <h3>notifications</h3>
+              <p>Durable messages sent to a destination workflow and consumed by recv.</p>
+              <span class="arrow-note">destination_uuid FK</span>
+            </article>
+            <article class="table-node">
+              <h3>workflow_events</h3>
+              <p>Current key-value event state for a workflow.</p>
+              <span class="arrow-note">workflow_uuid FK</span>
+            </article>
+          </div>
+          <div class="rel-column">
+            <article class="table-node root">
+              <h3>workflow_status</h3>
+              <p>
+                Workflow execution record. Holds identity, status, inputs, result,
+                queue placement, scheduling marker, parent/fork metadata, attributes,
+                executor ownership, timestamps, and serialization.
+              </p>
+            </article>
+            <article class="table-node">
+              <h3>Logical workflow links</h3>
+              <p>
+                <code>parent_workflow_id</code>, <code>forked_from</code>, and
+                <code>operation_outputs.child_workflow_id</code> are logical DBOS links,
+                not declared foreign keys in Python.
+              </p>
+              <span class="logical-note">Do not model these as enforced FKs without a deliberate compatibility decision.</span>
+            </article>
+          </div>
+          <div class="rel-column">
+            <article class="table-node">
+              <h3>workflow_events_history</h3>
+              <p>Immutable event history keyed by workflow, key, and function id.</p>
+              <span class="arrow-note">workflow_uuid FK</span>
+            </article>
+            <article class="table-node">
+              <h3>streams</h3>
+              <p>Durable stream entries keyed by workflow, stream key, and offset.</p>
+              <span class="arrow-note">workflow_uuid FK</span>
+            </article>
+            <article class="table-node">
+              <h3>control tables</h3>
+              <p>Standalone tables for queues, schedules, versions, migrations, and event dispatch idempotency.</p>
+              <span class="logical-note">queue_name, schedule_name, application_version, dispatch key</span>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="domain-terms">
+      <h2>Candidate Domain Terms</h2>
+      <p>
+        These are glossary candidates. They should move to <code>CONTEXT.md</code> only
+        after review, and the glossary should stay implementation-free.
+      </p>
+      <div class="cards">
+        <article class="card">
+          <h3>Workflow Execution</h3>
+          <p>The durable execution instance identified by <code>workflow_uuid</code>.</p>
+          <div class="kv">
+            <div><b>Storage</b><span><code>workflow_status</code></span></div>
+            <div><b>Python</b><span><code>WorkflowStatus</code>, <code>WorkflowStatusInternal</code></span></div>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Operation Checkpoint</h3>
+          <p>A recorded workflow operation result, keyed by workflow and function id.</p>
+          <div class="kv">
+            <div><b>Storage</b><span><code>operation_outputs</code></span></div>
+            <div><b>Python</b><span><code>StepInfo</code>, <code>OperationResultInternal</code></span></div>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Workflow Message</h3>
+          <p>A durable notification delivered to a destination workflow and optional topic.</p>
+          <div class="kv">
+            <div><b>Storage</b><span><code>notifications</code></span></div>
+            <div><b>Python</b><span><code>SendMessage</code>, <code>NotificationInfo</code></span></div>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Workflow Event</h3>
+          <p>A durable key-value event exposed by a workflow and fetched by key.</p>
+          <div class="kv">
+            <div><b>Storage</b><span><code>workflow_events</code>, <code>workflow_events_history</code></span></div>
+            <div><b>Python</b><span><code>set_event</code>, <code>get_event</code></span></div>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Workflow Stream</h3>
+          <p>An ordered durable stream of values under a workflow-local key.</p>
+          <div class="kv">
+            <div><b>Storage</b><span><code>streams</code></span></div>
+            <div><b>Python</b><span><code>write_stream</code>, <code>read_stream</code></span></div>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Queue Definition</h3>
+          <p>Runtime-configurable execution controls for queue-backed workflows.</p>
+          <div class="kv">
+            <div><b>Storage</b><span><code>queues</code></span></div>
+            <div><b>Python</b><span><code>Queue</code>, <code>queue_from_db_row</code></span></div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="tables">
+      <h2>System Table Inventory</h2>
+      <p>
+        Compact table view from Python source plus live <code>psql</code> verification.
+        <code>SystemSchema</code> declares 9 tables; Python migrations create the live 11-table
+        Postgres shape by adding <code>dbos_migrations</code> and <code>event_dispatch_kv</code>.
+      </p>
+      <div class="table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>Table</th>
+              <th>Primary Key</th>
+              <th>Purpose</th>
+              <th>Relationship Shape</th>
+              <th>Important Columns / Indexes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>workflow_status</code></td>
+              <td><code>workflow_uuid</code></td>
+              <td>Aggregate root for workflow execution state.</td>
+              <td>Referenced by five child tables. Also contains logical links to parent, fork, queue, schedule, and version.</td>
+              <td>
+                Status, request, inputs, output, error, timestamps, queue fields, timeout/deadline, attributes JSONB.
+                Partial indexes for pending, delayed, failed, in-flight, rate-limited, started, completed, schedule.
+                GIN index on attributes in Postgres. Unique partial index on queue/deduplication id.
+                Live migration also has partial indexes on <code>forked_from</code> and <code>parent_workflow_id</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>operation_outputs</code></td>
+              <td><code>workflow_uuid, function_id</code></td>
+              <td>Checkpointed function, step, transaction, child workflow, and get-result results.</td>
+              <td><code>workflow_uuid</code> FK to <code>workflow_status</code>, cascade delete.</td>
+              <td><code>function_name</code>, output/error, <code>child_workflow_id</code>, start/completion timestamps, serialization.</td>
+            </tr>
+            <tr>
+              <td><code>notifications</code></td>
+              <td><code>message_uuid</code></td>
+              <td>Durable workflow messages consumed by recv.</td>
+              <td><code>destination_uuid</code> FK to <code>workflow_status</code>, cascade delete.</td>
+              <td><code>topic</code>, message, consumed flag, created timestamp. Index on destination/topic.</td>
+            </tr>
+            <tr>
+              <td><code>workflow_events</code></td>
+              <td><code>workflow_uuid, key</code></td>
+              <td>Current workflow event values.</td>
+              <td><code>workflow_uuid</code> FK to <code>workflow_status</code>, cascade delete.</td>
+              <td><code>key</code>, value, serialization. Mutable current-state table.</td>
+            </tr>
+            <tr>
+              <td><code>workflow_events_history</code></td>
+              <td><code>workflow_uuid, key, function_id</code></td>
+              <td>Immutable history of workflow event writes.</td>
+              <td><code>workflow_uuid</code> FK to <code>workflow_status</code>, cascade delete.</td>
+              <td><code>function_id</code> distinguishes repeated writes to the same key.</td>
+            </tr>
+            <tr>
+              <td><code>streams</code></td>
+              <td><code>workflow_uuid, key, offset</code></td>
+              <td>Durable ordered workflow stream entries.</td>
+              <td><code>workflow_uuid</code> FK to <code>workflow_status</code>, cascade delete.</td>
+              <td><code>offset</code>, <code>function_id</code>, value, serialization.</td>
+            </tr>
+            <tr>
+              <td><code>workflow_schedules</code></td>
+              <td><code>schedule_id</code></td>
+              <td>Named cron schedule definitions and last-fire state.</td>
+              <td>Standalone table. Logical queue/workflow links by name.</td>
+              <td>Unique <code>schedule_name</code>, workflow name/class, cron expression, context, timezone, queue name.</td>
+            </tr>
+            <tr>
+              <td><code>dbos_migrations</code></td>
+              <td><code>version</code></td>
+              <td>Tracks the DBOS-managed migration version applied to the system schema.</td>
+              <td>Standalone migration metadata table.</td>
+              <td>Created by <code>ensure_dbos_schema</code> in <code>dbos/_migration.py</code>.</td>
+            </tr>
+            <tr>
+              <td><code>application_versions</code></td>
+              <td><code>version_id</code></td>
+              <td>Known application versions and timestamps.</td>
+              <td>Standalone table. Workflow rows store logical <code>application_version</code>.</td>
+              <td>Unique <code>version_name</code>, version timestamp, created timestamp.</td>
+            </tr>
+            <tr>
+              <td><code>event_dispatch_kv</code></td>
+              <td><code>service_name, workflow_fn_name, key</code></td>
+              <td>Exactly-once event-dispatch idempotency key/value table.</td>
+              <td>Standalone table, no FK to workflow status.</td>
+              <td>Live table has 6 columns and a composite primary key.</td>
+            </tr>
+            <tr>
+              <td><code>queues</code></td>
+              <td><code>queue_id</code></td>
+              <td>Database-backed queue configuration.</td>
+              <td>Standalone table. Workflow rows and schedules link by <code>queue_name</code>.</td>
+              <td>Unique queue name, concurrency, worker concurrency, rate limit, priority flag, partition flag, polling interval.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="haskell-verticals">
+      <h2>Haskell ADT Implementation Status: Two Vertical Slices</h2>
+      <p>
+        These sketches have partially landed in the committed code. The current implementation lives under
+        <code>DBOS.Transact</code> and <code>DBOS.SystemDB</code>, with internal parsers and types under those namespaces.
+        It makes illegal workflow/checkpoint states harder to express while preserving the live Python DBOS Postgres wire
+        shape at the persistence boundary.
+      </p>
+      <div class="legend">
+        <span class="pill blue">Vertical 1: workflow execution</span>
+        <span class="pill green">Vertical 2: operation checkpoints</span>
+        <span class="pill warn">DB rows stay compatibility-shaped</span>
+      </div>
+      <p class="note">
+        Effect style update validated against committed code: pure ADTs, parsers, and replay decisions stay separate from
+        effects. Effectful DBOS operations use Bluefin 0.7 scoped value-level capabilities with <code>IOE</code>, not
+        DBOS-specific <code>Handle</code> records. Hasql pools and sessions stay in <code>DBOS.SystemDB.Hasql</code>.
+      </p>
+      <div class="code-grid">
+        <article class="code-panel">
+          <h3>Raw DB Row Boundary</h3>
+          <pre><code>-- Compatibility-shaped. Mirrors live Postgres.
+data WorkflowStatusRow = WorkflowStatusRow
+  { rowWorkflowUuid :: Text
+  , rowStatus :: Maybe Text
+  , rowName :: Maybe Text
+  , rowInputs :: Maybe Text
+  , rowOutput :: Maybe Text
+  , rowError :: Maybe Text
+  , rowSerialization :: Maybe Text
+  , rowParentWorkflowId :: Maybe Text
+  , rowForkedFrom :: Maybe Text
+  , rowAttributes :: Maybe Value
+  }
+
+data OperationOutputRow = OperationOutputRow
+  { rowOpWorkflowUuid :: Text
+  , rowFunctionId :: Int32
+  , rowFunctionName :: Text
+  , rowOpOutput :: Maybe Text
+  , rowOpError :: Maybe Text
+  , rowChildWorkflowId :: Maybe Text
+  , rowStartedAtMs :: Maybe Int64
+  , rowCompletedAtMs :: Maybe Int64
+  , rowOpSerialization :: Maybe Text
+  }</code></pre>
+        </article>
+        <article class="code-panel">
+          <h3>Parse Boundary</h3>
+          <pre><code>data DbDecodeError
+  = UnknownWorkflowStatus Text
+  | MissingRequiredColumn Text
+  | InvalidSerializedValue Text
+  | InvalidCheckpointShape OperationOutputRow
+  | InvalidWorkflowId Text
+
+parseWorkflowExecution
+  :: WorkflowStatusRow
+  -> Either DbDecodeError WorkflowExecution
+
+parseOperationCheckpoint
+  :: OperationOutputRow
+  -> Either DbDecodeError OperationCheckpoint
+
+parseSerializedWorkflowValue
+  :: Text
+  -> Maybe Text
+  -> Either DbDecodeError SerializedWorkflowValue</code></pre>
+        </article>
+        <article class="code-panel">
+          <h3>Workflow Execution ADTs</h3>
+          <pre><code>newtype WorkflowId = WorkflowId Text
+newtype WorkflowName = WorkflowName Text
+newtype ExecutorId = ExecutorId Text
+newtype ApplicationVersion = ApplicationVersion Text
+newtype Millis = Millis Int64
+
+data WorkflowStatus
+  = Pending
+  | Success
+  | Error
+  | MaxRecoveryAttemptsExceeded
+  | Cancelled
+  | Enqueued
+  | Delayed
+
+data SerializedWorkflowValue = SerializedWorkflowValue
+  { serializedText :: Text
+  , serialization :: Maybe Serialization
+  }
+
+newtype Serialization = Serialization Text
+
+data WorkflowOutcome
+  = WorkflowSucceeded SerializedWorkflowValue
+  | WorkflowFailed SerializedWorkflowValue
+
+data WorkflowExecution = WorkflowExecution
+  { workflowId :: WorkflowId
+  , workflowStatus :: WorkflowStatus
+  , workflowName :: Maybe WorkflowName
+  , workflowInputs :: Maybe SerializedWorkflowValue
+  , workflowOutcome :: Maybe WorkflowOutcome
+  , workflowExecutor :: Maybe ExecutorId
+  , workflowCreatedAt :: Millis
+  , workflowUpdatedAt :: Millis
+  , workflowQueueName :: Maybe Text
+  , workflowApplicationVersion :: Maybe ApplicationVersion
+  , workflowRecoveryAttempts :: Maybe Int64
+  , workflowParentId :: Maybe WorkflowId
+  , workflowForkedFrom :: Maybe WorkflowId
+  , workflowAttributesJson :: Maybe Value
+  }</code></pre>
+        </article>
+        <article class="code-panel">
+          <h3>Workflow Execution Handle API</h3>
+          <pre><code>data WorkflowStartReason
+  = NormalStart
+  | RecoveryStart
+  | DequeuedStart
+
+data WorkflowStore = WorkflowStore
+  { wsPool :: Pool
+  , wsLogger :: Logger.Handle
+  , wsExecutorId :: Maybe ExecutorId
+  }
+
+withWorkflowStore
+  :: WorkflowStoreConfig
+  -> Logger.Handle
+  -> (WorkflowStore -> IO a)
+  -> IO a
+
+data NewWorkflowExecution = NewWorkflowExecution
+  { newWorkflowId :: WorkflowId
+  , newWorkflowName :: WorkflowName
+  , newWorkflowInputs :: SerializedWorkflowValue
+  , newWorkflowQueueName :: Maybe Text
+  , newWorkflowParentId :: Maybe WorkflowId
+  , newWorkflowTimeoutMs :: Maybe Millis
+  , newWorkflowDeadlineMs :: Maybe Millis
+  , newWorkflowAttributesJson :: Maybe Value
+  }
+
+data InitWorkflowDecision = InitWorkflowDecision
+  { initStatus :: WorkflowStatus
+  , initDeadlineMs :: Maybe Millis
+  , initShouldExecute :: Bool
+  }
+
+initWorkflowExecution
+  :: WorkflowStore
+  -> NewWorkflowExecution
+  -> WorkflowStartReason
+  -> Maybe Int64
+  -> IO InitWorkflowDecision
+
+completeWorkflowExecution
+  :: WorkflowStore
+  -> WorkflowId
+  -> WorkflowOutcome
+  -> IO ()
+
+getWorkflowExecution
+  :: WorkflowStore
+  -> WorkflowId
+  -> IO (Maybe WorkflowExecution)
+
+awaitWorkflowOutcome
+  :: WorkflowStore
+  -> WorkflowId
+  -> PollInterval
+  -> IO WorkflowOutcome</code></pre>
+        </article>
+        <article class="code-panel">
+          <h3>Operation Checkpoint ADTs</h3>
+          <pre><code>newtype FunctionId = FunctionId Int32
+newtype FunctionName = FunctionName Text
+
+data OperationSlot = OperationSlot
+  { slotWorkflowId :: WorkflowId
+  , slotFunctionId :: FunctionId
+  , slotExpectedName :: FunctionName
+  }
+
+data SerializedOutcome
+  = SerializedSuccess SerializedWorkflowValue
+  | SerializedFailure SerializedWorkflowValue
+
+data CheckpointBody
+  = OperationResult SerializedOutcome
+  | ChildWorkflowStarted WorkflowId
+  | AwaitedWorkflowResult WorkflowId SerializedOutcome
+
+data OperationCheckpoint = OperationCheckpoint
+  { checkpointSlot :: OperationSlot
+  , checkpointBody :: CheckpointBody
+  , checkpointStartedAt :: Maybe Millis
+  , checkpointCompletedAt :: Maybe Millis
+  }</code></pre>
+        </article>
+        <article class="code-panel">
+          <h3>Operation Checkpoint Handle API</h3>
+          <pre><code>data CheckOperationResult
+  = OperationNotRecorded
+  | OperationAlreadyRecorded OperationCheckpoint
+
+data CheckOperationError
+  = CheckedWorkflowMissing WorkflowId
+  | CheckedWorkflowCancelled WorkflowId
+  | UnexpectedOperationName
+      { expectedName :: FunctionName
+      , recordedName :: FunctionName
+      }
+
+checkOperationExecution
+  :: WorkflowStore
+  -> OperationSlot
+  -> IO (Either CheckOperationError CheckOperationResult)
+
+recordOperationResult
+  :: WorkflowStore
+  -> OperationSlot
+  -> Millis
+  -> SerializedOutcome
+  -> IO (Either RecordCheckpointError ())
+
+recordChildWorkflow
+  :: WorkflowStore
+  -> OperationSlot
+  -> WorkflowId
+  -> IO (Either RecordCheckpointError ())
+
+recordAwaitedWorkflowResult
+  :: WorkflowStore
+  -> OperationSlot
+  -> WorkflowId
+  -> SerializedOutcome
+  -> IO ()</code></pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="parse-boundary">
+      <h2>Domain Boundary: Parse, Don’t Validate</h2>
+      <p>
+        Alexis King's article reframes validation as a weaker form of parsing:
+        parse less-structured input into more-structured output, preserve what was
+        learned in the type, and reject invalid shapes before execution logic acts on
+        them. For DBOS, the external input is not only user input; it is also Postgres
+        rows and serialized text read from durable state.
+      </p>
+      <div class="cards">
+        <article class="card">
+          <h3>Raw rows are not domain values</h3>
+          <p><code>WorkflowStatusRow</code> and <code>OperationOutputRow</code> should mirror Python compatibility exactly, including nullable columns. Domain code should not consume them directly.</p>
+          <span class="pill blue">Boundary type</span>
+        </article>
+        <article class="card">
+          <h3>Parse once, then execute</h3>
+          <p>Functions like <code>parseWorkflowExecution</code> and <code>parseOperationCheckpoint</code> should reject unknown statuses, missing required values, and impossible output/error/child combinations before workflow logic runs.</p>
+          <span class="pill green">No shotgun validation</span>
+        </article>
+        <article class="card">
+          <h3>Serialized values need proof</h3>
+          <p>A <code>SerializedWorkflowValue</code> should only exist after parsing a non-null payload and serialization tag into a supported durable format.</p>
+          <span class="pill green">Refined payload</span>
+        </article>
+        <article class="card">
+          <h3>Use ADTs for checkpoint shape</h3>
+          <p>The DB row permits nullable <code>output</code>, <code>error</code>, and <code>child_workflow_id</code>. The domain ADT should collapse those fields into legal cases.</p>
+          <span class="pill warn">Compatibility outside, precision inside</span>
+        </article>
+        <article class="card">
+          <h3>Parser failures are operational facts</h3>
+          <p>Bad durable data should surface as explicit decode errors, not as partial pattern matches or “impossible” branches inside execution.</p>
+          <span class="pill red">Fail before acting</span>
+        </article>
+        <article class="card">
+          <h3>Multiple passes are allowed</h3>
+          <p>Parse the row shape first, then parse serialized application payloads only when that branch needs them. The key rule is not to act on unparsed data.</p>
+          <span class="pill blue">Context-sensitive parsing</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="handle-pattern">
+      <h2>Effect Style: Handle Pattern</h2>
+      <p>
+        The handle-pattern article argues for a deliberately simple effect boundary:
+        pure code stays pure, IO-heavy services carry their mutable/external resources
+        behind explicit capabilities, and exported effectful functions require those
+        capabilities at the type surface. For DBOS, the committed version uses Bluefin
+        scoped capabilities for workflow stores and Hasql pools for Postgres access.
+      </p>
+      <div class="cards">
+        <article class="card">
+          <h3>Scoped capabilities first</h3>
+          <p>Use Bluefin 0.7 value-level capabilities with <code>IOE</code> for effectful DBOS services. Keep Postgres access concrete in <code>DBOS.SystemDB.Hasql</code>.</p>
+          <span class="pill blue">Recommended</span>
+        </article>
+        <article class="card">
+          <h3>Pool lifecycle</h3>
+          <p>System DB resources are acquired and released through <code>acquirePool</code> and <code>releasePool</code>. Test fixtures use <code>bracket</code> around the pool.</p>
+          <span class="pill green">Resource safety</span>
+        </article>
+        <article class="card">
+          <h3>Qualified imports</h3>
+          <p>Use short function names because the module name carries context: <code>WorkflowStore.init</code>, <code>WorkflowStore.complete</code>, <code>Checkpoint.recordResult</code>.</p>
+          <span class="pill green">Readable API</span>
+        </article>
+        <article class="card">
+          <h3>Pure core remains separate</h3>
+          <p>Status codecs, row/domain conversion, conflict classification, and transition decisions stay pure and are used by the Hasql adapter and Bluefin store capabilities.</p>
+          <span class="pill warn">Do not bury policy in SQL glue</span>
+        </article>
+        <article class="card">
+          <h3>Future polymorphism path</h3>
+          <p>If tests or a simulator require substitution, introduce another scoped capability provider while preserving call sites that depend on <code>DBOS.Transact</code>.</p>
+          <span class="pill blue">Later abstraction</span>
+        </article>
+        <article class="card">
+          <h3>Still rejected for v1</h3>
+          <p>DBOS-specific handle records and broad typeclass APIs remain out of scope; the committed boundary is Bluefin capabilities plus concrete Hasql DB access.</p>
+          <span class="pill red">Premature abstraction risk</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="haskell-invariants">
+      <h2>Design Invariants To Preserve</h2>
+      <p>
+        These are the constraints the Haskell ADTs should make visible while SQL
+        encoding/decoding stays faithful to the live DBOS schema.
+      </p>
+      <ul class="invariant-list">
+        <li><strong>Status strings are compatibility data.</strong> The Haskell sum type must encode/decode exactly the Python values: <code>PENDING</code>, <code>SUCCESS</code>, <code>ERROR</code>, <code>MAX_RECOVERY_ATTEMPTS_EXCEEDED</code>, <code>CANCELLED</code>, <code>ENQUEUED</code>, <code>DELAYED</code>.</li>
+        <li><strong>Workflow init returns a decision, not just a row.</strong> Python's insert/upsert returns current status, effective deadline, and whether this executor should run the workflow.</li>
+        <li><strong>Operation result is exclusive.</strong> A normal operation checkpoint has either serialized output or serialized error, never both.</li>
+        <li><strong>Replay checks names.</strong> If an operation slot is already recorded with a different function name, Haskell should surface an unexpected-operation error before executing user code.</li>
+        <li><strong>Cancelled workflow aborts operation checks.</strong> Python raises during checkpoint lookup when the containing workflow is cancelled.</li>
+        <li><strong>Child workflow links are logical.</strong> Haskell wrappers can type them as <code>WorkflowId</code>, but the database must keep Python's unconstrained text-link semantics.</li>
+      </ul>
+    </section>
+
+    <section class="section" id="grill">
+      <h2>Grill Questions Move To Codex CLI</h2>
+      <p>
+        This page is now a static design reference. The <code>grill-with-docs</code>
+        interview continues in the Codex CLI thread so decisions can be challenged,
+        documented, and applied directly without using Lavish prompt controls.
+      </p>
+      <div class="cards">
+        <article class="card">
+          <h3>Resolved</h3>
+          <p>Use rich domain ADTs with separate DB row codecs.</p>
+          <span class="pill green">Parse boundary</span>
+        </article>
+        <article class="card">
+          <h3>Resolved</h3>
+          <p>Use handle-first concrete <code>IO</code> APIs for v1.</p>
+          <span class="pill green">Effect style</span>
+        </article>
+        <article class="card">
+          <h3>Resolved</h3>
+          <p>Parse raw DB payload/tag pairs into <code>SerializedWorkflowValue</code>.</p>
+          <span class="pill green">Serialized values</span>
+        </article>
+        <article class="card">
+          <h3>Resolved</h3>
+          <p>Parse <code>OperationOutputRow</code> into the narrower <code>CheckpointBody</code> ADT.</p>
+          <span class="pill green">Checkpoint shape</span>
+        </article>
+        <article class="card">
+          <h3>Resolved From Earlier Lavish Feedback</h3>
+          <p>Add typed Haskell wrappers for logical workflow links, but keep the DB representation unconstrained where Python does.</p>
+          <span class="pill blue">Logical links</span>
+        </article>
+        <article class="card">
+          <h3>Next CLI Grill</h3>
+          <p>Define exact module boundaries and first source files for these ADTs, row parsers, and handle APIs.</p>
+          <span class="pill warn">Ask in Codex CLI</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="python-map">
+      <h2>Python Class and Function Ownership</h2>
+      <p>
+        These are implementation owners in Python. The Haskell design should copy the
+        storage semantics first, then choose Haskell-native module boundaries.
+      </p>
+      <div class="cards">
+        <article class="card">
+          <h3><code>SystemSchema</code></h3>
+          <p>Declares the SQLAlchemy table objects, columns, primary keys, indexes, and FKs.</p>
+          <div class="kv"><div><b>File</b><span><code>dbos/_schemas/system_database.py</code></span></div></div>
+        </article>
+        <article class="card">
+          <h3><code>SystemDatabase</code></h3>
+          <p>Owns the database behavior: lifecycle, workflow state, operation checkpoints, events, messages, streams, queues, schedules, and versions.</p>
+          <div class="kv"><div><b>File</b><span><code>dbos/_sys_db.py</code></span></div></div>
+        </article>
+        <article class="card">
+          <h3><code>PostgresSystemDatabase</code></h3>
+          <p>Creates the Postgres engine, creates the system database/schema, serializes migrations with advisory locks, uses LISTEN/NOTIFY, and implements JSONB containment for attributes.</p>
+          <div class="kv"><div><b>File</b><span><code>dbos/_sys_db_postgres.py</code></span></div></div>
+        </article>
+        <article class="card">
+          <h3><code>_migration.py</code></h3>
+          <p>Creates <code>dbos_migrations</code>, applies DBOS-managed migrations, and defines live migration-only objects such as <code>event_dispatch_kv</code> and extra indexes.</p>
+          <div class="kv"><div><b>File</b><span><code>dbos/_migration.py</code></span></div></div>
+        </article>
+        <article class="card">
+          <h3><code>DBOS</code></h3>
+          <p>Public facade for workflow decorators, launch, workflow management, queues, notifications, events, streams, sleep, schedules, and client-like APIs.</p>
+          <div class="kv"><div><b>File</b><span><code>dbos/_dbos.py</code></span></div></div>
+        </article>
+        <article class="card">
+          <h3><code>DBOSClient</code></h3>
+          <p>External client surface for workflow lookup, enqueue, list, queue, schedule, and attribute operations without depending on a launched DBOS process.</p>
+          <div class="kv"><div><b>File</b><span><code>dbos/_client.py</code></span></div></div>
+        </article>
+        <article class="card">
+          <h3><code>Queue</code></h3>
+          <p>Runtime queue object with in-memory and database-backed modes. Database-backed getters/setters delegate to the <code>queues</code> table.</p>
+          <div class="kv"><div><b>File</b><span><code>dbos/_queue.py</code></span></div></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="psql-verification">
+      <h2>Live psql Verification</h2>
+      <p>
+        This section records schema-discovery evidence from local Postgres using the exported connection variables
+        <code>PGHOST</code>, <code>PGPORT</code>, <code>PGUSER</code>, and <code>PGPASSWORD</code>.
+        The current DBOS system databases <code>postgres_dbos_sys</code> and
+        <code>dbostestpy_dbos_sys</code> both report this 11-table shape in schema
+        <code>dbos</code>.
+      </p>
+      <p class="note">
+        The committed Haskell tests use the local <code>dbos</code> database and verify fixture rows in
+        <code>dbos.workflow_status</code>, <code>dbos.operation_outputs</code>, and <code>dbos.notifications</code> after
+        <code>cabal test</code>. That end-to-end gate is documented in <code>AGENTS.md</code> and
+        <code>docs/tdd-workflow.md</code>.
+      </p>
+      <div class="table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>Live Check</th>
+              <th>Result</th>
+              <th>Design Impact</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Tables in current system DB</td>
+              <td><code>application_versions</code>, <code>dbos_migrations</code>, <code>event_dispatch_kv</code>, <code>notifications</code>, <code>operation_outputs</code>, <code>queues</code>, <code>streams</code>, <code>workflow_events</code>, <code>workflow_events_history</code>, <code>workflow_schedules</code>, <code>workflow_status</code></td>
+              <td>Haskell should model 11 live tables, not just the 9 declared in <code>SystemSchema</code>.</td>
+            </tr>
+            <tr>
+              <td>Foreign keys</td>
+              <td><code>notifications.destination_uuid</code>, <code>operation_outputs.workflow_uuid</code>, <code>streams.workflow_uuid</code>, <code>workflow_events.workflow_uuid</code>, and <code>workflow_events_history.workflow_uuid</code> all reference <code>workflow_status.workflow_uuid</code>.</td>
+              <td>The original five FK-backed child relationships are confirmed.</td>
+            </tr>
+            <tr>
+              <td><code>workflow_status</code> live columns</td>
+              <td>35 columns, including migration-only <code>request</code>; <code>attributes</code> is <code>jsonb</code> live.</td>
+              <td>Haskell should consume this Python-migrated schema, not generate or migrate it.</td>
+            </tr>
+            <tr>
+              <td>Indexes</td>
+              <td>30 live indexes, including <code>idx_workflow_status_attributes</code> GIN, <code>idx_workflow_status_forked_from</code>, <code>idx_workflow_status_parent_workflow_id</code>, and duplicate notification topic indexes: <code>idx_notifications</code> plus <code>idx_workflow_topic</code>.</td>
+              <td>Index compatibility needs its own Haskell golden test against live Postgres metadata.</td>
+            </tr>
+            <tr>
+              <td>Exported default <code>PGDATABASE=postgres</code></td>
+              <td>Also has a <code>dbos</code> schema, but it contains older/extra tables <code>datasource_outputs</code> and <code>transaction_outputs</code>, and <code>workflow_status</code> has 34 columns.</td>
+              <td>Do not use the default app database as the current schema target; use the DBOS system database derived from it, <code>postgres_dbos_sys</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="states">
+      <h2>Workflow Status Vocabulary</h2>
+      <p>
+        Python's <code>WorkflowStatusString</code> defines the status values. Active
+        workflows are <code>PENDING</code>, <code>ENQUEUED</code>, and <code>DELAYED</code>.
+      </p>
+      <ul class="status-list">
+        <li>PENDING</li>
+        <li>SUCCESS</li>
+        <li>ERROR</li>
+        <li>MAX_RECOVERY_ATTEMPTS_EXCEEDED</li>
+        <li>CANCELLED</li>
+        <li>ENQUEUED</li>
+        <li>DELAYED</li>
+      </ul>
+    </section>
+
+    <section class="section" id="compat">
+      <h2>Compatibility Notes For Haskell</h2>
+      <p>
+        These are the initial constraints implied by exact Python DB compatibility.
+      </p>
+      <div class="cards">
+        <article class="card">
+          <h3>Preserve live physical schema</h3>
+          <p>Keep table names, column names, primary keys, nullability, and partial index behavior aligned with Python migrations and live Postgres metadata.</p>
+          <span class="pill blue">Required for DB interop</span>
+        </article>
+        <article class="card">
+          <h3>Use Hasql for transactions</h3>
+          <p>Implement DBOS transaction queries with <code>hasql</code>, <code>hasql-th</code>, and Postgres type codecs. Do not add a Haskell-owned schema migration subsystem.</p>
+          <span class="pill blue">ADR 0004</span>
+        </article>
+        <article class="card">
+          <h3>Do not promote logical links</h3>
+          <p>Text links like <code>parent_workflow_id</code>, <code>forked_from</code>, and <code>child_workflow_id</code> are not physical FKs in Python.</p>
+          <span class="pill warn">Needs deliberate divergence if changed</span>
+        </article>
+        <article class="card">
+          <h3>Model JSON carefully</h3>
+          <p><code>attributes</code> is generic JSON in SQLAlchemy with a Postgres JSONB variant and GIN containment index.</p>
+          <span class="pill green">Haskell type needs query semantics</span>
+        </article>
+      </div>
+      <p class="note">
+        Historical Haskell HEAD had a partial schema and an extra <code>event_dispatch_kv</code>
+        table. Because the chosen target is exact Python DB compatibility, that old shape
+        is context only and should not drive the new schema unless we explicitly revisit it.
+      </p>
+    </section>
+
+    <section class="section" id="review">
+      <h2>Static Review Surface</h2>
+      <p>
+        Lavish annotations remain useful for pointing at parts of the visual artifact,
+        but structured design grilling now happens in the Codex CLI thread. This avoids
+        splitting the design interview across two input surfaces.
+      </p>
+    </section>
+
+    <section class="section" id="sources">
+      <h2>Evidence Used</h2>
+      <ul class="source-list">
+        <li><strong>Python schema</strong><code>/Users/duke/dev/dbos-transact-py/dbos/_schemas/system_database.py</code></li>
+        <li><strong>Persistence behavior</strong><code>/Users/duke/dev/dbos-transact-py/dbos/_sys_db.py</code></li>
+        <li><strong>Postgres behavior</strong><code>/Users/duke/dev/dbos-transact-py/dbos/_sys_db_postgres.py</code></li>
+        <li><strong>Migrations and live-only tables</strong><code>/Users/duke/dev/dbos-transact-py/dbos/_migration.py</code></li>
+        <li><strong>Runtime facade</strong><code>/Users/duke/dev/dbos-transact-py/dbos/_dbos.py</code></li>
+        <li><strong>Queue API</strong><code>/Users/duke/dev/dbos-transact-py/dbos/_queue.py</code></li>
+        <li><strong>Glossary created in this pass</strong><code>/Users/duke/dev/dbos-transact-hs/CONTEXT.md</code></li>
+        <li><strong>Compatibility ADR created in this pass</strong><code>/Users/duke/dev/dbos-transact-hs/docs/adr/0001-python-db-compatibility.md</code></li>
+        <li><strong>Effect-style ADR created in this pass</strong><code>/Users/duke/dev/dbos-transact-hs/docs/adr/0002-handle-first-effect-style.md</code></li>
+        <li><strong>Parse-boundary ADR created in this pass</strong><code>/Users/duke/dev/dbos-transact-hs/docs/adr/0003-parse-database-rows-into-domain-types.md</code></li>
+        <li><strong>Hasql/no-migrations ADR created in this pass</strong><code>/Users/duke/dev/dbos-transact-hs/docs/adr/0004-use-hasql-for-dbos-transactions-without-haskell-migrations.md</code></li>
+        <li><strong>Handle pattern reference</strong><code>https://jaspervdj.be/posts/2018-03-08-handle-pattern.html</code></li>
+        <li><strong>Parse, Don't Validate reference</strong><code>https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/</code></li>
+        <li><strong>Current Haskell repo state</strong><code>/Users/duke/dev/dbos-transact-hs/dbos-transact-hs.cabal</code>, <code>src/DBOS/Transact.hs</code>, and <code>src/DBOS/SystemDB/Hasql.hs</code></li>
+      </ul>
+    </section>
+  </main>
+
+</body>
+</html>

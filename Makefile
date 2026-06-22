@@ -10,10 +10,10 @@ PACKAGE ?= dbos-transact-hs
 dev:
 	ghciwatch --clear --no-interrupt-reloads \
 		--command ghci-$(GHC) \
-		--error-file ghcid.txt \
+		--error-file .ghcid.txt \
 		--restart-glob Makefile \
 		--restart-glob .ghc.environment.* \
-		--enable-eval --watch .
+		--watch src --watch test
 
 
 build:
@@ -29,7 +29,7 @@ env:
 		--package-env . --lib \
 		base containers stm-containers text vector template-haskell \
 		bytestring time uuid exceptions base64-bytestring \
-		aeson generic-data optics witch safe-wild-cards strict-wrapper \
-		hasql hasql-th hasql-dynamic-statements hasql-pool hasql-postgresql-types postgresql-types \
+		aeson generic-data safe-wild-cards strict-wrapper \
+		hasql hasql-th hasql-pool hasql-postgresql-types postgresql-types \
 		async bluefin co-log fast-logger mtl io-classes io-sim stm \
 		breakpoint nothunks rapid hedgehog tasty tasty-hunit tasty-hedgehog tasty-golden

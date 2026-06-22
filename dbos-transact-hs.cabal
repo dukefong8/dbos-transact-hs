@@ -1,11 +1,11 @@
-cabal-version: 3.16
+cabal-version: 3.6
 name: dbos-transact-hs
 version: 0.1.0.0
 build-type: Simple
 
 common commons
   default-language: GHC2024
-  ghc-options: -Wall
+  ghc-options: -Wall -threaded
   build-depends:
     aeson,
     async,
@@ -36,25 +36,23 @@ common commons
     time,
     uuid,
     vector,
-    witch
 
 library
   import: commons
   hs-source-dirs: src
   exposed-modules:
-    DbosTransact
-    DbosTransact.Client
-    DbosTransact.Compat.Go
-    DbosTransact.Config
-    DbosTransact.Core.Model
-    DbosTransact.Core.Transition
-    DbosTransact.Effects
-    DbosTransact.Error
-    DbosTransact.Queue
-    DbosTransact.Step
-    DbosTransact.SystemDB.Postgres
-    DbosTransact.SystemDB.Schema
-    DbosTransact.Workflow
+    DBOS.SystemDB
+    DBOS.SystemDB.Hasql
+    DBOS.SystemDB.Queries
+    DBOS.Transact
+  other-modules:
+    DBOS.Transact.OperationCheckpointParse
+    DBOS.Transact.OperationCheckpointReplay
+    DBOS.Transact.OperationCheckpointTypes
+    DBOS.SystemDB.Types
+    DBOS.Transact.WorkflowExecutionParse
+    DBOS.Transact.WorkflowExecutionStatus
+    DBOS.Transact.WorkflowExecutionTypes
 
 test-suite test
   import: commons
@@ -62,13 +60,10 @@ test-suite test
   hs-source-dirs: test
   main-is: Main.hs
   other-modules:
-    DbosTransact.Compat.ChaosSpec
-    DbosTransact.Compat.IdempotencySpec
-    DbosTransact.Compat.StepSpec
-    DbosTransact.Compat.WorkflowSpec
-    DbosTransact.Core.TransitionSpec
-    DbosTransact.Golden.SchemaSpec
-
+    DBOS.SchemaTest
+    DBOS.SystemDBHasqlTest
+    DBOS.SystemDBTest
+    DBOS.TransactTest
   build-depends:
     breakpoint,
     dbos-transact-hs,
@@ -78,4 +73,4 @@ test-suite test
     tasty,
     tasty-golden,
     tasty-hedgehog,
-    tasty-hunit
+    tasty-hunit,

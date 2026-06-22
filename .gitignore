@@ -2,6 +2,7 @@ dist-newstyle/
 .build/
 .ghc.environment.*
 ghcid.txt
+.ghcid.txt
 .agent/
 .envrc
 tags*
