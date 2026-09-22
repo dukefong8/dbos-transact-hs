@@ -1,1 +1,4 @@
-packages: .
+packages:
+  .
+  ../ihp/ihp-typed-sql
+  ../ihp/ihp-router

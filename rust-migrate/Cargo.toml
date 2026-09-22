@@ -1,0 +1,14 @@
+[package]
+name = "dbos-hs-migrate"
+version = "0.1.0"
+edition = "2021"
+
+# Not part of any workspace: this crate only drives the Rust migration
+# runner against the shared development database. Never add dependencies
+# beyond what the runner call needs.
+[workspace]
+
+[dependencies]
+dbos = { path = "../../dbos-transact-rust/crates/dbos", default-features = false }
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+tokio = { version = "=1.53.1", features = ["macros", "rt"] }

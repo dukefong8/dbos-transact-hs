@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DBOS Rust → Haskell Port: starter-demo parity, then widget-store engine</title>
+  <style>
+    :root {
+      --bg: #f7f9fb;
+      --panel: #ffffff;
+      --ink: #14202b;
+      --muted: #5d6b79;
+      --line: #d9e1e8;
+      --accent: #0f766e;
+      --accent-2: #075985;
+      --warn: #b45309;
+      --bad: #b91c1c;
+      --good: #15803d;
+      --code-bg: #101820;
+      --code-ink: #d8edf2;
+      --shadow: 0 12px 34px rgba(20, 32, 43, 0.08);
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #eef5f8 0, var(--bg) 420px);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+    header { padding: 40px max(24px, calc((100vw - 1180px) / 2)) 24px; border-bottom: 1px solid var(--line); }
+    header .kicker { color: var(--accent-2); font-weight: 700; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+    header h1 { margin: 8px 0; font-size: 30px; line-height: 1.2; }
+    header p { color: var(--muted); max-width: 80ch; }
+    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 28px 0 80px; display: grid; gap: 24px; min-width: 0; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 24px; min-width: 0; }
+    section h2 { margin: 0 0 4px; font-size: 21px; }
+    section .sub { color: var(--muted); margin: 0 0 16px; }
+    .grid2 { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; }
+    @media (max-width: 860px) { .grid2 { grid-template-columns: minmax(0,1fr); } }
+    .card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+    .card h3 { margin: 0 0 6px; font-size: 16px; }
+    .card p, .card li { font-size: 14px; }
+    .badge { display: inline-block; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 2px 10px; margin-right: 6px; }
+    .b-keep { background: #dcfce7; color: #166534; }
+    .b-cut { background: #fee2e2; color: #991b1b; }
+    .b-new { background: #e0f2fe; color: #075985; }
+    .b-defer { background: #fef3c7; color: #92400e; }
+    .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+    th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+    th { background: #f1f5f9; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+    tr:last-child td { border-bottom: none; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+    pre.gate { background: var(--code-bg); color: var(--code-ink); border-radius: 10px; padding: 16px; overflow-x: auto; font-size: 12.5px; }
+    figure.diagram { margin: 0; border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #fbfdff; }
+    figure.diagram svg { width: 100%; height: auto; display: block; }
+    figcaption { color: var(--muted); font-size: 13px; margin-top: 8px; }
+    .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+    .steps li { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+    .steps li strong { display: block; margin-bottom: 2px; }
+    .steps li span { color: var(--muted); font-size: 13.5px; }
+    form.review { border: 1px dashed var(--accent-2); border-radius: 10px; padding: 14px 16px; margin-top: 14px; }
+    form.review label { display: block; padding: 6px 0; font-size: 14px; }
+    form.review button { margin-top: 10px; background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 9px 16px; font-weight: 700; cursor: pointer; }
+    .queued-state { font-size: 13px; color: var(--muted); margin-top: 8px; }
+    footer.note { color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+<header>
+  <div class="kicker">Port plan · dbos-transact-rust → dbos-transact-hs</div>
+  <h1>Starter-demo parity first, widget-store core engine next</h1>
+  <p>Goal 1: Haskell–Rust feature parity running the starter demo, evaluated against the recorded gate (<span class="mono">docs/starter-e2e-gate.md</span>). Goal 2: complete the core engine in order to run the widget-store demo. Sources: <span class="mono">crates/dbos/src/lib.rs:28–73</span>, <span class="mono">sysdb/*</span>, <span class="mono">git log</span> (103 commits, v0.5.0), current <span class="mono">src/DBOS/**</span>. Built on plain <span class="mono">IO</span> + <span class="mono">io-classes</span> with <span class="mono">io-sim</span> tests and a real Aeson codec; Bluefin lives only at the external seam.</p>
+  <p><span class="badge b-new">DB via ihp-typed-sql (sqlx analogue)</span> Reviewer direction: port the sqlx layer with <span class="mono">~/dev/ihp/ihp-typed-sql</span> — compile-time-checked <span class="mono">[typedSql| … |]</span> quasiquotes run through <span class="mono">IHP.TypedSql.Hasql</span> on an explicit pool, the Haskell counterpart of sqlx <span class="mono">query!</span> macros. <span class="mono">cabal.project</span> already wires <span class="mono">../ihp/ihp-typed-sql</span> as a local package and <span class="mono">build-depends</span> carries it; ~20 statements run through it in production (Phase 2).</p>
+  <p><span class="badge b-cut">Bluefin only at external seam</span><span class="badge b-keep">Phase 1 done (Codec + seam + typedSql)</span><span class="badge b-keep">keep pure parse/replay</span><span class="badge b-defer">defer select / client</span></p>
+</header>
+<main>
+  <section id="dependency-layers">
+    <h2>1 · Rust dependency layers dictate the port order</h2>
+    <p class="sub">Derived from <span class="mono">use crate::</span> imports. Arrows point from a layer to what it depends on. The highlighted path is the minimal-gate slice.</p>
+    <figure class="diagram">
+      <svg viewBox="0 0 960 400" role="img" aria-label="Layered module dependency diagram">
+        <title>Layered module dependencies with minimal-gate highlight</title>
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="currentColor"></path>
+          </marker>
+        </defs>
+        <!-- layer boxes -->
+        <g id="layer0" font-size="12">
+          <title>Layer 0 — no sibling deps (serialization ✓ ported as DBOS.Transact.Codec in Phase 1; rest unported)</title>
+          <rect x="20" y="20" width="920" height="58" rx="10" fill="#f1f5f9" stroke="#94a3b8"></rect>
+          <text x="36" y="42" font-weight="bold">Layer 0 · leaf modules (no sibling imports) · 1 ported</text>
+          <text x="36" y="60">error · sysdb/error · sysdb/retry · sysdb/notify · config · serialization ✓ Codec · identity · sysdb/types (2668 LOC)</text>
+        </g>
+        <g id="layer1" font-size="12">
+          <title>Layer 1 — sysdb trait + postgres impl + connection bundle</title>
+          <rect x="20" y="94" width="920" height="58" rx="10" fill="#e0f2fe" stroke="#075985" stroke-width="2"></rect>
+          <text x="36" y="116" font-weight="bold">Layer 1 · sysdb trait (1622) + postgres impl (7064) + connection ★ GATE FOUNDATION</text>
+          <text x="36" y="134">sysdb/mod · sysdb/postgres + listener/notifier · migrations 1–47 + 100–108 · connection</text>
+        </g>
+        <g id="layer2" font-size="12">
+          <title>Layer 2 — durable core: checkpoint, context, step, sleep</title>
+          <rect x="20" y="168" width="450" height="58" rx="10" fill="#e0f2fe" stroke="#075985" stroke-width="2"></rect>
+          <text x="36" y="190" font-weight="bold">Layer 2 · durable core ★</text>
+          <text x="36" y="208">checkpoint (1011) · context (820) · step (1477) · sleep (90)</text>
+        </g>
+        <g id="layer3" font-size="12">
+          <title>Layer 3 — handle, event, registry</title>
+          <rect x="490" y="168" width="450" height="58" rx="10" fill="#f1f5f9" stroke="#94a3b8"></rect>
+          <text x="506" y="190" font-weight="bold">Layer 3 · handle · event · registry (490)</text>
+          <text x="506" y="208">handle (477) · event (300) — needed only for recv/get_event</text>
+        </g>
+        <g id="layer4" font-size="12">
+          <title>Layer 4 — workflow runner + instance lifecycle</title>
+          <rect x="20" y="242" width="450" height="58" rx="10" fill="#e0f2fe" stroke="#075985" stroke-width="2"></rect>
+          <text x="36" y="264" font-weight="bold">Layer 4 · workflow runner (2187) + instance (578) ★</text>
+          <text x="36" y="282">start/run/enqueue · spawn_execution · outcome gate</text>
+        </g>
+        <g id="layer5" font-size="12">
+          <title>Layer 5 — fan-out: wait, select, message</title>
+          <rect x="490" y="242" width="450" height="58" rx="10" fill="#fef3c7" stroke="#b45309"></rect>
+          <text x="506" y="264" font-weight="bold">Layer 5 · wait (838) · select (844) · message (829)</text>
+          <text x="506" y="282">message DONE · waits/select DEFERRED</text>
+        </g>
+        <g id="layer6" font-size="12">
+          <title>Layer 6 — queue, dequeue, recovery; client/management out of scope</title>
+          <rect x="20" y="316" width="920" height="58" rx="10" fill="#e0f2fe" stroke="#075985" stroke-width="2"></rect>
+          <text x="36" y="338" font-weight="bold">Layer 6 · queue (916) + dequeue (766) + recovery (55) ★ QUEUES IN SCOPE · client/management OUT</text>
+          <text x="36" y="356">enqueue · claim ENQUEUED→PENDING · DELAYED transition · PENDING-claim recovery stub</text>
+        </g>
+        <!-- edges -->
+        <g stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)">
+          <line x1="480" y1="94" x2="480" y2="80"></line>
+          <line x1="245" y1="168" x2="245" y2="154"></line>
+          <line x1="715" y1="168" x2="715" y2="154"></line>
+          <line x1="245" y1="242" x2="245" y2="228"></line>
+          <line x1="715" y1="242" x2="715" y2="228"></line>
+          <line x1="480" y1="316" x2="480" y2="302"></line>
+        </g>
+      </svg>
+      <figcaption>History agrees: sysdb first, core engine (#2–#8), then recovery/client/management, then waits/messages, macros last. Port bottom-up; never start with <span class="mono">select_step!</span> (543 LOC proc-macro, most volatile).</figcaption>
+    </figure>
+  </section>
+
+  <section id="module-table">
+    <h2>2 · What each Rust module becomes (starter parity → widget-store engine)</h2>
+    <p class="sub">Current as of 2026-09-22 (63/63 cabal). Goal 1 rows are done unless marked; goal-2 rows name the widget-store delta.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Rust module</th><th>Role (1 line)</th><th>Haskell today</th><th>Plan disposition</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">sysdb/types</td><td>Row shapes, step-name strings, outcomes</td><td>Done: workflow/notification/queue/event rows, <span class="mono">Id'</span> PKs, <span class="mono">DbosMigration</span>, queue + message helpers</td><td><span class="badge b-keep">done</span> goal 2 adds version rows only</td></tr>
+          <tr><td class="mono">sysdb/mod + postgres</td><td>SystemDatabase trait + PG impl (sqlx compile-checked queries)</td><td>Done: ~20 <span class="mono">[typedSql| … |]</span> statements via <span class="mono">IHP.TypedSql.Hasql</span> (fetch/start/record/sleep/events/messages/queues/claim/recovery/list)</td><td><span class="badge b-keep">done</span> goal 2 adds child-start atomic pair + version registration</td></tr>
+          <tr><td class="mono">sysdb/migrations + migrations/*.sql</td><td>Embedded corpus (62 scripts, 1–47 + 100–108) + <span class="mono">{{schema}}</span> rendering + runner</td><td>Absent (ADR-0004: no Haskell migrations)</td><td><span class="badge b-defer">do not port</span> <strong>decided: always migrate with the Rust runner</strong> (same corpus the port tracks; Rust test-support itself migrates-then-clones via TEMPLATE). Add a <span class="mono">make db-migrate</span> prerequisite before build/test; hardcode <span class="mono">dbos.</span> qualification (no <span class="mono">{{schema}}</span> templating). Python compatibility stays a row-format contract (status strings, codecs, sentinels), verified by the hs-* fixtures — not by who ran the DDL. Done in Phase 1: 0006/0007 recorded, 0001 amended, 0002/0004 marked superseded. Done in Phase 2: <span class="mono">rust-migrate/</span> crate + <span class="mono">make db-migrate</span> (verified 108→108 no-op) + ceiling test pinning 108.</td></tr>
+          <tr><td class="mono">serialization</td><td>Opaque JSON encode/decode</td><td>Ported in Phase 1</td><td><span class="badge b-keep">done</span> <span class="mono">DBOS.Transact.Codec</span> mirrors <span class="mono">serialization.rs</span> (encode, absent→null, what-tagged errors); oracle-verified 4/4. Goal 2 uses it at the registry boundary for typed inputs/outputs.</td></tr>
+          <tr><td class="mono">config/connection/identity</td><td>Pool bundle + app/version resolution</td><td>Done for the gate: env pool config, explicit <span class="mono">ExecutorId</span>/<span class="mono">ApplicationVersion</span> params (no resolution)</td><td><span class="badge b-keep">done</span> goal 2: stable app-level default (env) so restarts recover; full resolution stays out</td></tr>
+          <tr><td class="mono">checkpoint/step/context</td><td>Record-or-not decision, replay skip, retries</td><td>Done: <span class="mono">runStep</span>/<span class="mono">sleepStep</span> + parse/replay, error paths, cancellation never records</td><td><span class="badge b-keep">done</span> goal 2: verify default retry semantics against the oracle before relying on once-only steps</td></tr>
+          <tr><td class="mono">workflow/registry/instance</td><td>Start/run/enqueue, typed registry, launch/shutdown</td><td>Done: <span class="mono">Registry</span> + <span class="mono">runWorkflow</span> (SUCCESS/ERROR outcomes) + <span class="mono">Executor</span> (launch sweep, tracked spawn, quiet shutdown) + <span class="mono">superviseForever</span></td><td><span class="badge b-keep">done</span> goal 2 adds child start/await + app error channel (message-string failures as <span class="mono">ERROR</span> outcomes)</td></tr>
+          <tr><td class="mono">message</td><td>send/send_bulk + in-workflow recv</td><td>Done: <span class="mono">sendMessage</span>/<span class="mono">sendMessages</span>, checkpointed <span class="mono">recvMessage</span> (take+record in one CTE), recorded absence on timeout</td><td><span class="badge b-keep">done</span> nothing new for goal 2</td></tr>
+          <tr><td class="mono">queue/dequeue/recovery</td><td>DB-rows queues, claim loop, re-enqueue dead executors</td><td>Done: register/fetch/update, enqueue, single-statement claim, <span class="mono">dequeuePass</span>, recovery sweep</td><td><span class="badge b-keep">done</span> nothing new for goal 2</td></tr>
+          <tr><td class="mono">event</td><td>Workflow events set/get</td><td>Done: idempotent upsert + zero-poll + blocking read (polling, no LISTEN/NOTIFY)</td><td><span class="badge b-keep">done</span> deviation kept: no checkpointed step row, history table unwritten — replay-safe, row-for-row incomplete</td></tr>
+          <tr><td class="mono">children (workflow.rs child start/await)</td><td>Child workflow with parent link</td><td>Absent: no child start, no getResult await</td><td><span class="badge b-new">goal 2 first</span> the dispatch workflow needs start-without-await; history #6 confirms it precedes everything goal 2 adds</td></tr>
+          <tr><td class="mono">wait/select/client/mgmt</td><td>Fan-out waits, durable race, operator API</td><td>Absent</td><td><span class="badge b-defer">defer</span> neither demo touches them</td></tr>
+          <tr><td class="mono">dbos-macros</td><td>select_step! proc macro</td><td>Absent</td><td><span class="badge b-defer">defer</span> last, if ever</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="comparison">
+    <h2>3 · Current vs target shape</h2>
+    <p class="sub">The deletion is the point: one execution model, one codec, one DB seam.</p>
+    <div class="grid2">
+      <div class="card"><h3>Starting point (reshaped in Phases 1–2; kept as record)</h3><ul><li>Bluefin 0.7 <span class="mono">Ask</span> stores in <span class="mono">DBOS.Transact</span> over hand-written sessions — <strong>done:</strong> relocated to the external seam over plain-Haskell internals</li><li><span class="mono">co-log</span> + <span class="mono">fast-logger</span> shim in <span class="mono">DBOS.Logger</span> — <strong>done:</strong> deleted for explicit <span class="mono">LogAction</span></li><li>Hasql-TH sessions in <span class="mono">Queries.hs</span> + the <span class="mono">hasql-th</span> dependency — <strong>done:</strong> removed, replaced by <span class="mono">[typedSql| … |]</span></li><li>Opaque <span class="mono">Text</span> payloads, hardcoded pool constants — <strong>done:</strong> <span class="mono">DBOS.Codec</span> + explicit pool/config params</li></ul></div>
+      <div class="card"><h3>Built since (where each target item landed)</h3><ul><li>Internal (no Bluefin): <span class="mono">DBOS.Transact.Codec/Log</span>, <span class="mono">DBOS.SystemDB</span> typedSql IO fns, <span class="mono">DBOS.Transact.Step/Workflow/Registry/Executor/Supervisor</span> — all logic + tests here</li><li>External (Bluefin only): thin capability handles over internals for scope safety</li><li><span class="mono">DBOS.SystemDB</span>: <span class="mono">[typedSql| … |]</span> statements via <span class="mono">IHP.TypedSql.Hasql</span> sessions on an explicit pool; explicit column lists required (star selects rejected at compile time, which enforces ADR-0003 boundary discipline)</li><li>Execution model: plain <span class="mono">IO</span> + <span class="mono">async</span>/<span class="mono">STM</span> (the predicted <span class="mono">MonadAsync</span>/<span class="mono">io-sim</span> abstraction was never needed — live-DB tests with short sleeps cover it; <span class="mono">io-classes</span>/<span class="mono">io-sim</span> remain unused deps)</li><li>Error-path step record, message INSERT + checkpointed recv, queue claim loop — all shipped</li></ul></div>
+    </div>
+    <div id="target-sigs"></div>
+    <script type="module">
+      import { File } from "https://esm.sh/@pierre/diffs@1.2.10?bundle";
+      const theme = { light: "github-light", dark: "github-dark" };
+      const options = { theme, themeType: "light", overflow: "wrap" };
+      const target = {
+        name: "src/DBOS/Transact.hs (shipped surface, grouped re-exports)",
+        contents: "module DBOS.Transact\n  ( -- * Workflow executions\n    WorkflowExecution(..), parseWorkflowExecution, getWorkflowExecution, ..\n    -- * Operation checkpoints\n    OperationCheckpoint(..), runStep, sleepStep, StepError(..), ..\n    -- * Durable value codec\n    encodeWorkflowValue, decodeWorkflowValue, CodecError(..), ..\n    -- * Structured logging\n    DbosLogMsg(..), nullLogAction, withStdoutLogger, ..\n    -- * Workflow messages\n    SendMessage(..), notificationRowForMessage, nullTopicSentinel, ..\n    -- * Workflow registry and runner\n    WorkflowRegistry, registerWorkflow, runWorkflow, WorkflowRunError(..), ..\n    -- * Executor lifecycle\n    Executor(..), launchExecutor, spawnWorkflow, shutdownExecutor, ..\n  ) where\n",
+      };
+      new File(options).render({ containerWrapper: document.querySelector("#target-sigs"), file: target });
+    </script>
+  </section>
+
+  <section id="phases">
+    <h2>4 · Phased execution (TDD, one public test at a time)</h2>
+    <p class="sub">Each phase ends with <span class="mono">cabal test</span> + the psql mirror gate + the Rust oracle check below. No refactoring while red; no Haskell migrations (ADR-0004 stands).</p>
+    <ol class="steps">
+      <li id="ph1"><strong>Phase 1 · Reset + Codec — DONE 2026-09-22 (37/37 cabal, 7-row psql mirror, 4/4 oracle)</strong><span>History: migration runner + serialization leaf. Delivered: two-layer seam split (Rule 4), explicit <span class="mono">LogAction m DbosLogMsg</span> replacing the global shim (Rule 5, kept <span class="mono">co-log-core</span> + <span class="mono">fast-logger</span>), <span class="mono">hasql-th</span> fully removed via the typedSql rewrite of all 7 statements (caught 4 real schema truths: PK/FK <span class="mono">Id'</span> columns, nullable status/topic, non-null timestamps, int4→<span class="mono">Int</span>), <span class="mono">DBOS.Codec</span> mirroring <span class="mono">serialization.rs</span>, ADR 0006/0007 recorded + 0001 amended + 0002/0004 superseded, <span class="mono">make dev</span> green (20 modules). Deviation folded back: hasql-th removal moved forward from Phase 2.</span></li>
+      <li id="ph2"><strong>Phase 2 · Workflow lifecycle (typedSql) — DONE 2026-09-22 (40/40 cabal, 7-row psql mirror, 14/14 lifecycle oracle)</strong><span>History: sysdb foundation (init/get/list, NewWorkflow). Delivered: <span class="mono">make db-migrate</span> via a <span class="mono">rust-migrate/</span> crate driving the public Rust runner (idempotent, verified <span class="mono">108→108</span>); migration-ceiling test pinning 108 with a <span class="mono">DbosMigration</span> model; real JSON inputs through start (inputs + serialization tag params) with read-back test; finish/output round-trip (SUCCESS + Codec-decoded output). Deviations folded back: sessions kept (<span class="mono">sqlQueryTypedSession</span> + <span class="mono">Pool.use</span>) instead of WithPool direct — Session composition is required later for atomic caller-checkpoint writes; int4 maps to <span class="mono">Int</span>; single-column-table selects take the <span class="mono">TypedSqlRow</span> model path.</span></li>
+      <li id="ph3"><strong>Phase 3 · Steps — DONE 2026-09-22 (starter gate: 53/53 cabal, oracle recovery 3/3 + queues 35/35)</strong><span>History: engine #3 + failure handling #5 (steps, sleep). Delivered: <span class="mono">runStep</span> (replay-or-run, success + error record paths, <span class="mono">StepError</span>), <span class="mono">sleepStep</span> (wake-time checkpoint, replay waits the remainder), and the whole starter acceptance mirror (<span class="mono">DBOS.StarterTest</span>): steps-once, crash-and-resume, events set/get/blocking, messages send/recv/send_bulk, queues register/enqueue/dequeue/limit-change. Deviations folded back: <span class="mono">recv</span> un-deferred (Phase 4) and <span class="mono">set_event</span> is an idempotent upsert rather than a checkpointed step — replay-safe for the gate.</span></li>
+      <li id="ph4"><strong>Phase 4 · Messages — DONE 2026-09-22</strong><span>History: messages #33. Delivered: <span class="mono">sendMessage</span>/<span class="mono">sendMessages</span> (batch unnest, <span class="mono">key::destination</span> scoping, conflict-do-nothing), <span class="mono">recvMessage</span> (checkpointed <span class="mono">DBOS.recv</span>, poll-to-deadline, take-and-record in one CTE so a taken message is never unrecorded, recorded absence on timeout), <span class="mono">listWorkflowIdsByName</span>. Deferred: LISTEN/NOTIFY wake hints (polling only, semantically identical).</span></li>
+      <li id="ph5"><strong>Phase 5 · Queues — DONE 2026-09-22</strong><span>History: queues #8 + recovery #9–11 + identity shape #15. Delivered on top of the starter gate: <span class="mono">registerQueue</span>, <span class="mono">fetchQueueWorkerConcurrency</span>, <span class="mono">updateQueueWorkerConcurrency</span>, <span class="mono">enqueueWorkflow</span>, <span class="mono">dequeueWorkflows</span> (single-statement claim), <span class="mono">dequeuePass</span> (claim + dispatch through the registry, skips unregistered names with a logged warning), <span class="mono">superviseForever</span> (rounds until the executor closes; loop test proves dispatch-until-stopped), plus the executor lifecycle (<span class="mono">launchExecutor</span> with synchronous sweep, <span class="mono">spawnWorkflow</span> tracked tasks, <span class="mono">shutdownExecutor</span> leaving rows PENDING). Flake hunt folded back: tasty runs parallel on one shared DB, so executor ids are threaded through <span class="mono">tryStart</span>/<span class="mono">runWorkflow</span> and every test owns its rows (fresh UUIDs, unique names/queues, per-test executor ids). Pending: application-version registration.</span></li>
+      <li id="ph6"><strong>Phase 6 · Recovery — DONE 2026-09-22 except version gating</strong><span>History: recovery #9–11 + launch lifecycle. Delivered: <span class="mono">reenqueueForRecovery</span> (one-statement PENDING-with-dead-executor → ENQUEUED sweep), the replay-after-abandonment invariant, launch/shutdown lifecycle with cancellation that never records an outcome. Pending: executor identity resolution (env/config) and version-gated dequeue.</span></li>
+      <li id="ph7"><strong>Phase 7 · Widget-store engine (goal 2) — PENDING</strong><span>New engine work the widget demo needs, in history order: child workflows — start-from-workflow with parent link (#6, first); typed workflow inputs/outputs through the Codec at the registry boundary; the app error channel — message-string failures recorded as <span class="mono">ERROR</span> outcomes; app tables via Hasql on the same database (no new driver); the dispatch-loop + payment-webhook patterns; stable app-level executor identity so restarts recover. Demo UI stack (both demos): htmx4 + ihp-hsx over wai + warp with ihp-router dispatch; hackage ihp-hsx package, no vendored modules. Starter E2E replay (<span class="mono">docs/starter-e2e-gate.md</span> + a runnable Haskell starter app) is the acceptance gate before this phase starts. Still out for goal 2 — neither demo touches them: client #21, management #24/25/27, waits #29–31, macros #51, scheduler, streams, fork, retry policies, attributes/dedup.</span></li>
+    </ol>
+    <p class="decided"><strong>Decided (oracle):</strong> <span class="mono">~/dev/dbos-transact-rust</span> is the behavioral oracle for every phase — replay decisions, error mapping, queue transitions, and fixture rows are verified against actual Rust execution. All <span class="mono">cargo</span> invocations run from that directory (e.g. <span class="mono">cargo test -p dbos &lt;matching suite&gt;</span>); the crate is read, never copied or forked. Pin to v0.5.0 semantics; do not chase main.</p>
+    <p class="decided"><strong>Decided (ADR cleanup, executes in Phase 1):</strong> <span class="mono">0002</span> superseded by new <span class="mono">0006</span> (two-layer seam: Bluefin only outside, plain Haskell inside); <span class="mono">0004</span> superseded by new <span class="mono">0007</span> (typedSql replaces hasql-th, Rust runner replaces Python migration); <span class="mono">0001</span> amended (DDL via Rust runner, Python stays a row-format contract); <span class="mono">0003</span> + <span class="mono">0005</span> kept (boundary parsing and module shape still hold).</p>
+    <p class="decided"><strong>Decided (self-recursive loop):</strong> after each phase, before starting the next — (1) run the three gates (cabal test, psql mirror, cargo oracle); (2) diff actuals vs this plan and fold the delta back in: new translation rules → section 6, scope or order changes → sections 2/4, schema drift → migration row + risks; (3) amend ADRs when a decision moved; (4) mark artifact edits with a dated revision note so the loop is auditable. The plan is a living document, not a one-shot.</p>
+    <pre class="gate">select 'workflow_status' as table_name, workflow_uuid as id, status, name
+from dbos.workflow_status
+where workflow_uuid in ('hs-wf-1', 'hs-op-wf', 'hs-notification-wf', 'hs-simple-wf')
+union all
+select 'operation_outputs', workflow_uuid || ':' || function_id::text, null, function_name
+from dbos.operation_outputs
+where workflow_uuid in ('hs-op-wf', 'hs-simple-wf')
+union all
+select 'notifications', message_uuid, null, topic
+from dbos.notifications
+where message_uuid = 'hs-message-1'
+order by table_name, id;</pre>
+  </section>
+
+  <section id="risks">
+    <h2>5 · Risks + what's deliberately out</h2>
+    <div class="grid2">
+      <div class="card"><h3>Risks</h3><ul><li>Churn hotspot: <span class="mono">postgres.rs</span> (58 commits) — keep the Haskell DB seam narrow so upstream SQL drift lands in one module. <span class="mono">typedSql</span> turns drift into compile errors, which is the point.</li><li>Compile-time DB requirement: every <span class="mono">[typedSql| … |]</span> is described against Postgres at build time — keep the local <span class="mono">dbos</span> DB migrated (Python schema) or builds fail.</li><li>Schema drift: typedSql pins migration ranges 1–47 + 100–108 implicitly — a Python-side migration adding columns is a compile break, not a runtime surprise; treat upstream schema bumps as plan-level events.</li><li>Step-id-at-build refactor (#38/#43/#49) still settling upstream — pin to v0.5.0 semantics, don't chase main.</li><li>TypedSql sessions replaced every hand-written statement with a live test each — resolved in Phase 2.</li></ul></div>
+          <div class="card"><h3>Out of scope</h3><ul><li>streams, schedules, application_versions writes, scheduler, Kafka/conductor/admin, child workflows (goal 2), LISTEN/NOTIFY + history-table writes (known deviations)</li><li>Three decode-failure sites still crash (<span class="mono">error . show</span> in <span class="mono">fetchWorkflowStatusSession</span>, <span class="mono">fetchOperationCheckpointSession</span>, <span class="mono">fetchWorkflowStatusesSession</span>) — row parsers return <span class="mono">Either</span>, but these call sites need converting</li><li>Client/management bulk ops, waits/select races, macros</li></ul></div>
+    </div>
+    <p class="decided"><strong>Decided (Phase 5):</strong> claim loop + supervisor poll in plain <span class="mono">IO</span> with <span class="mono">async</span>/<span class="mono">STM</span> (the predicted io-classes abstraction was never needed). Message <span class="mono">recv</span> shipped in Phase 4.</p>
+  </section>
+
+  <section id="translation">
+    <h2>6 · Rust → Haskell translation notes (reviewer request)</h2>
+    <p class="sub">Grounded in <span class="mono">context.rs:19–52</span> (task-local Ctx), <span class="mono">workflow.rs:42–109,170–177,549–657</span> (Tasks, spawn_tracked 'static bound, borrowed option structs), <span class="mono">step.rs:292–335</span> + <span class="mono">event.rs:56–136</span> (<span class="mono">PendingStep&lt;'a&gt;</span> borrows), <span class="mono">sysdb/mod.rs:91–92</span> (SystemDatabase trait), <span class="mono">sysdb/postgres.rs:2582–2583</span> (its single impl), <span class="mono">error.rs:1–85</span> (Error&lt;E&gt; channel), Bluefin README + <span class="mono">Bluefin</span> module docs (value capabilities, rank-2 handlers).</p>
+    <div class="grid2">
+      <div class="card" id="impl rule"><h3>Rule 1 · Rust <span class="mono">impl</span> → Haskell module, not typeclass</h3><ul><li>Inherent impls (<span class="mono">impl Connection/DBOS/Client/Tasks/Ctx</span>) are namespaced functions — a Haskell module is exactly that. No class.</li><li><span class="mono">trait SystemDatabase</span> + its single Postgres impl → concrete <span class="mono">DBOS.SystemDB</span> module with plain functions. One backend in scope (Python-schema compatibility is the boundary), so a class would be a hypothetical seam: interface without leverage.</li><li>If tests ever need a fake DB, reach for a record-of-functions (first-class, varies per test, works under <span class="mono">io-sim</span>), not a typeclass (instances are global and fight per-test variation).</li><li><span class="mono">#[async_trait]</span> vanishes: <span class="mono">IO</span> needs no boxing; only the io-sim-covered parts abstract over <span class="mono">MonadAsync/MonadSTM</span>.</li></ul></div>
+      <div class="card" id="error rule"><h3>Rule 1b · Error channel → per-domain ADTs (built, unified DbosError deferred)</h3><ul><li><span class="mono">Error&lt;E&gt;</span> became one ADT per domain — <span class="mono">CodecError</span>, <span class="mono">StepError</span>, <span class="mono">WorkflowRunError</span>, decode errors — instead of the predicted unified <span class="mono">DbosError e</span>. The generic parameter bought nothing with one backend and total functions; revisit if a second error producer needs combining.</li><li><span class="mono">trait DurableError</span> (blanket over Serialize + Deserialize + Error) → constraints at use sites: <span class="mono">(ToJSON e, FromJSON e, Exception e)</span>. No class declaration needed.</li><li>Rust enums with payloads (<span class="mono">Outcome</span>, step records) → Haskell ADTs directly — already the pattern in <span class="mono">OperationCheckpointTypes.hs</span>. <span class="mono">#[non_exhaustive]</span> → hide constructors or document the wildcard arm.</li></ul></div>
+    </div>
+    <div class="grid2" style="margin-top:16px">
+      <div class="card" id="ctx rule"><h3>Rule 2a · Ambient context → explicit arguments (built, no WorkflowCtx record)</h3><ul><li><span class="mono">tokio::task_local! CURRENT: Ctx</span> vanished entirely: bodies take <span class="mono">(Pool, WorkflowId, input)</span> explicitly. No ambient state, no <span class="mono">ReaderT</span>, no context accessors — there was never a second caller needing them.</li><li>Step ids are caller-passed <span class="mono">OperationId</span>s (matching the settled step-id-at-build shape #38/#43/#49); no shared step counter exists. The step-leaf rule is structural: steps take plain <span class="mono">IO</span> bodies, never nested runners.</li></ul></div>
+      <div class="card" id="scope rule"><h3>Rule 2b · Resource scopes → supervised async (built on plain async/STM)</h3><ul><li>Per-attempt <span class="mono">CancellationToken</span> → fresh <span class="mono">Async</span> handle + <span class="mono">cancel</span> from the <span class="mono">async</span> package. Same rule as Rust: mint per attempt, never share across retries.</li><li><span class="mono">Tasks</span> abort-set → <span class="mono">Executor</span> holding <span class="mono">TVar [Async]</span> + closed flag; post-close arrivals cancelled on arrival; shutdown cancels all and waits. Rows stay <span class="mono">PENDING</span> so a later executor recovers — preserved and tested.</li><li>Dequeue supervisor → <span class="mono">superviseForever</span> rounds on plain <span class="mono">IO</span> with short sleeps. The predicted <span class="mono">MonadTimer</span>/io-sim determinism was never needed — live-DB tests with tight deadlines cover it; <span class="mono">io-classes</span>/<span class="mono">io-sim</span> remain unused deps.</li></ul></div>
+    </div>
+    <div class="card" style="margin-top:16px" id="either rule"><h3>Rule 3 · <span class="mono">Either</span> in the core, base async exceptions at the edges (built)</h3><ul><li>Domain/durable failures (not-found, cancelled, decode conflict, replay mismatch, recorded step error) → explicit per-domain <span class="mono">Either</span> returns, mirroring Rust <span class="mono">Result&lt;T, Error&lt;E&gt;&gt;</span> (<span class="mono">error.rs</span>). Errors are data here: they are inspected for replay decisions and written into columns — exceptions would hide that control flow.</li><li>Cancellation (<span class="mono">AsyncCancelled</span>/<span class="mono">ThreadKilled</span>) is rethrown without recording — the shutdown test proves rows stay <span class="mono">PENDING</span>; body failures become <span class="mono">ERROR</span> outcomes. No <span class="mono">MonadThrow</span>/<span class="mono">MonadCatch</span> abstraction and no retry policy yet (<span class="mono">retry.rs</span> unported); <span class="mono">io-classes</span> stays an unused dep.</li></ul></div>
+    <div class="card" style="margin-top:16px" id="lifetime rule"><h3>Rule 4 · Bluefin seams in two layers (decided)</h3><ul><li>Where Rust uses lifetimes for scope: <span class="mono">PendingStep&lt;'a&gt;</span> borrows step names/keys (<span class="mono">step.rs:292</span>, <span class="mono">event.rs:56</span>); <span class="mono">InitWorkflowCaller&lt;'_&gt;</span> borrows the parent frame; <span class="mono">NewWorkflow&lt;'a&gt;/Enqueue&lt;'a&gt;/StartOptions&lt;'a&gt;</span> borrow user strings — converted to owned (<span class="mono">OwnedEnqueue</span>) before spawning, because <span class="mono">spawn_tracked</span> demands <span class="mono">F: Future + 'static</span>. Haskell needs no translation for the borrows: use owned <span class="mono">Text</span> everywhere.</li><li>Internal layer — plain Haskell, no Bluefin imports: <span class="mono">DBOS.SystemDB</span> typedSql IO fns, <span class="mono">DBOS.Workflow</span> core over an explicit <span class="mono">WorkflowCtx</span> record, <span class="mono">Either DbosError</span> returns, <span class="mono">MonadAsync/MonadSTM</span> constraints for io-sim. All logic and all tests (io-sim + live PG) live here.</li><li>External layer — Bluefin capabilities, no logic: thin <span class="mono">Ask</span> handles with rank-2 <span class="mono">withX</span> handlers over the internal functions (the existing <span class="mono">withWorkflowExecutionStore</span> shape). This is where callers get lifetime-like escape prevention; a capability cannot leave its handler. Dependency rule: Bluefin may depend on internal, never the reverse — deleting the outer layer loses scope safety but no behavior.</li></ul></div>
+    <div class="card" style="margin-top:16px" id="log rule"><h3>Rule 5 · Logging: explicit LogAction inside, fast-logger at launch, io-sim trace in tests (decided)</h3><ul><li>Delete the ambient shim (<span class="mono">DBOS.Logger</span>: global <span class="mono">unsafePerformIO</span> FastLogger, <span class="mono">logInfo :: Text -&gt; IO ()</span>) — unscoped and untestable, and it contradicts the two-layer seam. Keep the pieces, change the shape: <span class="mono">co-log-core</span> (<span class="mono">LogAction</span>) + <span class="mono">fast-logger</span> stay, <span class="mono">co-log</span> message formatting goes.</li><li>Internal layer takes an explicit <span class="mono">LogAction m DbosLogMsg</span> parameter. <span class="mono">DbosLogMsg</span> is a small structured type (severity + workflow/queue/step fields) mirroring Rust's <span class="mono">tracing</span> fields (<span class="mono">dequeue.rs</span>: <span class="mono">tracing::warn!(workflow_id, error, "the workflow is parked")</span>; spans like <span class="mono">info_span!("queue", queue = %name)</span> become a field, not text). Production instantiates it once at launch over the fast-logger backend (buffered stdout suits write-heavy DBOS traffic) and threads it down — never global.</li><li>Under simulation, instantiate the same <span class="mono">LogAction</span> over <span class="mono">say</span> — identical log calls in code, assertable trace events out, zero test-only branches. <strong>Status:</strong> the <span class="mono">say</span> half is unused so far — no io-sim test exists yet; the <span class="mono">withStdoutLogger</span>/<span class="mono">nullLogAction</span> split is what production and tests actually use.</li></ul></div>
+  </section>
+
+  <section id="receipt">
+    <h2>7 · How to read reviewer feedback</h2>
+    <p class="sub">Annotate any node, row, or phase. Open questions ride as free annotations; decided items (Phase 5, typedSql, hasql-th removal) are marked inline.</p>
+    <footer class="note">Design source: (2) matched to this repo's existing <span class="mono">.lavish/*.html</span> custom-CSS direction (not the Tailwind CDN fallback). Evidence: <span class="mono">crates/dbos/src/lib.rs</span>, <span class="mono">sysdb/*</span>, <span class="mono">git log --reverse</span>, <span class="mono">src/DBOS/**</span>, <span class="mono">AGENTS.md</span> gate.</footer>
+  </section>
+</main>
+</body>
+</html>

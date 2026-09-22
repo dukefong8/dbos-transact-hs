@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module DBOS.SystemDBHasqlTest
@@ -9,8 +10,12 @@ import Bluefin.Eff (runEff)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently)
 import Control.Exception (bracket)
+import Data.Aeson (Value, object, (.=))
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB
   ( MessageUUID (..),
     NotificationRow (..),
@@ -19,11 +24,13 @@ import DBOS.SystemDB
     fetchOperationCheckpoint,
     fetchWorkflowExecutionRow,
     fetchWorkflowStatus,
+    fetchWorkflowStatuses,
+    fetchMigrationVersion,
     recordOperationOutput,
     tryStartWorkflow,
     updateWorkflowOutcome,
   )
-import DBOS.SystemDB.Hasql
+import DBOS.SystemDB.Postgres
   ( acquirePool,
     releasePool,
     runDbOrFail,
@@ -40,12 +47,18 @@ import DBOS.Transact
     SerializedWorkflowValue (..),
     WorkflowExecution (..),
     WorkflowExecutionDecodeError,
+    WorkflowExecutionRow (..),
     WorkflowId (..),
     WorkflowName (..),
     WorkflowOutcome (..),
     WorkflowStatus (..),
+    CodecError (..),
     checkOperationExecution,
+    decodeWorkflowValue,
+    encodeWorkflowValue,
     getWorkflowExecution,
+    nullLogAction,
+    parseWorkflowExecution,
     withOperationCheckpointStore,
     withWorkflowExecutionStore,
   )
@@ -58,13 +71,16 @@ tests :: TestTree
 tests =
   testGroup
     "System DB Hasql"
-    [ testCase "gets a parsed workflow execution from live Python DBOS workflow_status rows" $
+    [ testCase "expects the Rust migration ceiling this port tracks" $ do
+        version <- withDBOSPool fetchMigrationVersion
+        version @?= Just 108,
+      testCase "gets a parsed workflow execution from live Python DBOS workflow_status rows" $
         withDBOSPool $ \pool -> do
           installFixtureRows pool
           result <-
             runEff $ \io ->
               withWorkflowExecutionStore (fetchWorkflowExecutionRow pool) $ \store ->
-                getWorkflowExecution io store (WorkflowId workflowRowId)
+                getWorkflowExecution io nullLogAction store (WorkflowId workflowRowId)
           result @?= Right (Just expectedWorkflowExecution),
       testCase "checks operation execution against live Python DBOS operation_outputs rows" $
         withDBOSPool $ \pool -> do
@@ -77,6 +93,7 @@ tests =
                 $ \store ->
                   checkOperationExecution
                     io
+                    nullLogAction
                     store
                     (WorkflowId operationWorkflowId)
                     (OperationId 1)
@@ -87,26 +104,68 @@ tests =
           installFixtureRows pool
           result <- fetchNotification pool (MessageUUID notificationMessageId)
           result @?= Just expectedNotification,
+      testCase "a batch status fetch skips rows with unknown statuses" $
+        withDBOSPool $ \pool -> do
+          goodId <- WorkflowId . UUID.toText <$> UUID.V4.nextRandom
+          badId <- WorkflowId . UUID.toText <$> UUID.V4.nextRandom
+          executorId <- ExecutorId . UUID.toText <$> UUID.V4.nextRandom
+          decision <- tryStartWorkflow pool goodId (WorkflowName "skipWorkflow") Nothing executorId (ApplicationVersion "v1")
+          decision @?= StartWorkflow
+          let WorkflowId badText = badId
+          runDbOrFail pool $
+            Session.script
+              ("insert into dbos.workflow_status (workflow_uuid, status, created_at, updated_at) values ('" <> badText <> "', 'BOGUS', 1, 1)")
+          statuses <- fetchWorkflowStatuses pool [goodId, badId]
+          statuses @?= [(goodId, Pending)],
+      testCase "starts a workflow with real JSON inputs and reads them back" $
+        withDBOSPool $ \pool -> do
+          workflowId <- WorkflowId . UUID.toText <$> UUID.V4.nextRandom
+          executorId <- ExecutorId . UUID.toText <$> UUID.V4.nextRandom
+          let inputs = encodeWorkflowValue (object ["name" .= ("s" :: Text)])
+          decision <- tryStartWorkflow pool workflowId (WorkflowName "inputWorkflow") (Just inputs) executorId (ApplicationVersion "v1")
+          decision @?= StartWorkflow
+          fetched <- fetchWorkflowExecutionRow pool workflowId
+          ((.rowWorkflowInputs) =<< fetched) @?= Just (inputs.serializedText)
+          ((.rowWorkflowSerialization) =<< fetched) @?= Just "json",
+      testCase "finishes a workflow with real JSON output and reads it back" $
+        withDBOSPool $ \pool -> do
+          workflowId <- WorkflowId . UUID.toText <$> UUID.V4.nextRandom
+          executorId <- ExecutorId . UUID.toText <$> UUID.V4.nextRandom
+          let output = encodeWorkflowValue (object ["ok" .= True])
+          decision <- tryStartWorkflow pool workflowId (WorkflowName "outputWorkflow") Nothing executorId (ApplicationVersion "v1")
+          decision @?= StartWorkflow
+          updateWorkflowOutcome pool workflowId executorId Success (Just output) Nothing
+          fetched <- fetchWorkflowExecutionRow pool workflowId
+          case fetched of
+            Nothing -> fail "expected a workflow_status row"
+            Just row -> case parseWorkflowExecution row of
+              Left err -> fail ("row failed to parse: " <> show err)
+              Right execution -> case execution.workflowExecutionOutcome of
+                Just (WorkflowSucceeded stored) ->
+                  (decodeWorkflowValue "result" (Just stored) :: Either CodecError Value)
+                    @?= Right (object ["ok" .= True] :: Value)
+                other -> fail ("unexpected workflow outcome: " <> show other),
       testCase "mirrors sync simple workflow single-owner and replay behavior" $
         withDBOSPool $ \pool -> do
           installSimpleWorkflowRows pool
           executions <- newIORef (0 :: Int)
+          executorId <- ExecutorId . UUID.toText <$> UUID.V4.nextRandom
 
           (firstResult, secondResult) <-
             concurrently
-              (runSimpleWorkflowAttempt pool executions)
-              (runSimpleWorkflowAttempt pool executions)
+              (runSimpleWorkflowAttempt pool executorId executions)
+              (runSimpleWorkflowAttempt pool executorId executions)
 
           firstResult @?= workflowOutput
           secondResult @?= workflowOutput
           readIORef executions >>= (@?= 1)
 
-          updateWorkflowOutcome pool simpleWorkflowId Pending Nothing Nothing
+          updateWorkflowOutcome pool simpleWorkflowId executorId Pending Nothing Nothing
 
           (firstRecovery, secondRecovery) <-
             concurrently
-              (runSimpleWorkflowAttempt pool executions)
-              (runSimpleWorkflowAttempt pool executions)
+              (runSimpleWorkflowAttempt pool executorId executions)
+              (runSimpleWorkflowAttempt pool executorId executions)
 
           firstRecovery @?= workflowOutput
           secondRecovery @?= workflowOutput
@@ -120,6 +179,7 @@ tests =
                 $ \store ->
                   checkOperationExecution
                     io
+                    nullLogAction
                     store
                     simpleWorkflowId
                     simpleOperationId
@@ -141,10 +201,11 @@ installSimpleWorkflowRows pool =
 
 runSimpleWorkflowAttempt ::
   Pool.Pool ->
+  ExecutorId ->
   IORef Int ->
   IO SerializedWorkflowValue
-runSimpleWorkflowAttempt pool executions = do
-  decision <- tryStartWorkflow pool simpleWorkflowId simpleWorkflowName
+runSimpleWorkflowAttempt pool executorId executions = do
+  decision <- tryStartWorkflow pool simpleWorkflowId simpleWorkflowName Nothing executorId (ApplicationVersion "v1")
   case decision of
     StartWorkflow -> do
       replayResult <-
@@ -155,17 +216,18 @@ runSimpleWorkflowAttempt pool executions = do
             $ \store ->
               checkOperationExecution
                 io
+                nullLogAction
                 store
                 simpleWorkflowId
                 simpleOperationId
                 simpleStepName
       case replayResult of
         Right (ReplayOperation (CheckpointOutput output)) ->
-          updateWorkflowOutcome pool simpleWorkflowId Success (Just workflowOutput) Nothing >> pure output
+          updateWorkflowOutcome pool simpleWorkflowId executorId Success (Just workflowOutput) Nothing >> pure output
         Right RunOperation -> do
           atomicModifyIORef' executions (\count -> (count + 1, ()))
           recordOperationOutput pool simpleWorkflowId simpleOperationId simpleStepName stepOutput
-          updateWorkflowOutcome pool simpleWorkflowId Success (Just workflowOutput) Nothing
+          updateWorkflowOutcome pool simpleWorkflowId executorId Success (Just workflowOutput) Nothing
           pure workflowOutput
         other ->
           fail ("unexpected operation replay result: " <> show other)
@@ -173,7 +235,7 @@ runSimpleWorkflowAttempt pool executions = do
       result <- awaitSimpleWorkflowResult pool 50
       case result of
         Right (Just execution)
-          | workflowExecutionOutcome execution == Just (WorkflowSucceeded workflowOutput) ->
+          | execution.workflowExecutionOutcome == Just (WorkflowSucceeded workflowOutput) ->
               pure workflowOutput
         other ->
           fail ("unexpected workflow execution result: " <> show other)
@@ -186,10 +248,10 @@ awaitSimpleWorkflowResult pool remaining = do
   result <-
     runEff $ \io ->
       withWorkflowExecutionStore (fetchWorkflowExecutionRow pool) $ \store ->
-        getWorkflowExecution io store simpleWorkflowId
+        getWorkflowExecution io nullLogAction store simpleWorkflowId
   case result of
     Right (Just execution)
-      | workflowExecutionOutcome execution == Just (WorkflowSucceeded workflowOutput) ->
+      | execution.workflowExecutionOutcome == Just (WorkflowSucceeded workflowOutput) ->
           pure result
     _ | remaining <= 0 ->
         pure result

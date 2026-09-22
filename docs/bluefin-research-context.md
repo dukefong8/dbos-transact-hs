@@ -853,3 +853,59 @@ If multishot continuations are needed, use MTL-style (e.g., `StateT Int []`) or 
 - Tom Ellis: [Fork-fragile reader-like operations in Haskell](https://h2.jaguarpaw.co.uk/posts/fork-fragile-reader-like-operations/) (June 2026) — catalogue of fork-fragile IO operations in the ecosystem
 - GHC proposal: [Scoped thread-locals](https://github.com/ghc-proposals/ghc-proposals/pull/751)
 - `context` package: [hackage](https://hackage.haskell.org/package/context) — partial implementation of IOScopedRef (fork-fragile)
+
+---
+
+## 18. Delta: local checkout 0.10.0.0 vs this document's 0.7.0.0 (verified 2026-09-22)
+
+Sources (primary, read directly): `/Users/duke/dev/bluefin` at `bb0b5fd`
+(`bluefin -> 0.10.0.0`), `bluefin/bluefin.cabal`, `bluefin/CHANGELOG.md`,
+`bluefin-internal/src/Bluefin/Internal.hs`,
+`bluefin/src/Bluefin/IO.hs`, `bluefin/src/Bluefin/Compound.hs`.
+Our build resolves `blfn-0.9.1.0` (see `.ghc.environment.*`). Only
+seam-relevant findings are recorded here; the rest of this document stands.
+
+### 18.1 Canonical capability names (0.10)
+
+`Ask`, `AskCapability`, `Await`, `JumpTo`, `Modify`, `Request`,
+`ReturnEarly`, `Tell`, `Throw`, `Yield` are canonical; `Reader`,
+`HandleReader`, `Consume`, `Jump`, `State`, `Coroutine`, `EarlyReturn`,
+`Writer`, `Exception`, `Stream` are now type synonyms
+(`Internal.hs` synonym block; CHANGELOG 0.10.0.0). Our seam imports
+`Bluefin.Capability.Ask` (`Ask`, `ask`, `runAsk`) — canonical, no change
+needed. Prefer canonical names in all new code.
+
+### 18.2 `Ask` implementation facts
+
+`Ask r e` is a newtype over `Vault.Key r`; `runAsk = runReader`
+(`Internal.hs:1614-1615, 1823-1828`). `ask` is a vault lookup that errors
+only if the type system was subverted; `local` is a bracket save/restore
+around a vault write. Our seam uses `runAsk` with plain fetch functions
+and never `local` — no fork-safety concern beyond §3–§4. `Ask` is a
+`Handle` via `OneWayCoercibleHandle`, so capabilities coerce across
+effect sets and handlers nest cheaply.
+
+### 18.3 Custom capabilities: `Handle` superclass change (0.9.0.0)
+
+`Handle` now requires the quantified superclass
+`forall e es. (e <: es) => OneWayCoercible (h e) (h es)`, and `mapHandle`
+uses `unsafeOneWayCoerce` — an invalid `OneWayCoercible` instance breaks
+type safety (CHANGELOG 0.9.0.0). When the external seam grows domain
+capabilities, follow the `Bluefin.Compound` newtype-wrap pattern (wrap
+`Modify`/`Ask`/etc. in a newtype; see `Compound.hs` Counter examples)
+rather than hand-rolled `Handle` instances.
+
+### 18.4 No-action items
+
+- 0.10 separates `Prim`'s primitive-state and capability-scope type
+  parameters (breaking) — we do not use `Prim`.
+- `Bluefin.Pipes` moved to `bluefin-examples` (0.10) — we do not use Pipes.
+- `IO` surface is stable across 0.7→0.10 for what we use: `IOE`,
+  `runEff`, `effIO` (plus `rethrowIO`, `withMonadIO`, `withEffToIO_`,
+  `withEffToIOCloneHandle`; `withEffToIO`/`runEff_` deprecated).
+
+### 18.5 Recommendation
+
+Keep the seam on `Ask` + `IOE` only. Consider bounding the currently
+unpinned `bluefin` build-dependency (e.g. `>=0.9 && <0.11`) since 0.10
+keeps the old names as synonyms — safe to adopt after a test run.

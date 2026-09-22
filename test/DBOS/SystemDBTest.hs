@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module DBOS.SystemDBTest
@@ -32,7 +33,7 @@ tests =
             { notificationDestinationId = WorkflowId "dest-wf",
               notificationTopic = nullTopicSentinel,
               notificationMessage = messageBody,
-              notificationMessageUUID = MessageUUID "generated-message-id",
+              notificationMessageUUID = MessageUUID "generated-message-id::dest-wf",
               notificationConsumed = False
             },
       testCase "maps Python SendMessage topic into a notifications row" $
@@ -43,21 +44,26 @@ tests =
             { notificationDestinationId = WorkflowId "dest-wf",
               notificationTopic = "testtopic",
               notificationMessage = messageBody,
-              notificationMessageUUID = MessageUUID "generated-message-id",
+              notificationMessageUUID = MessageUUID "generated-message-id::dest-wf",
               notificationConsumed = False
             },
       testCase "scopes Python send idempotency keys by destination workflow" $
-        notificationMessageUUID
-          ( notificationRowForMessage
-              (MessageUUID "ignored-generated-id")
-              ( SendMessage
-                  (WorkflowId "dest-wf")
-                  messageBody
-                  Nothing
-                  (Just (IdempotencyKey "idem-key"))
-              )
-          )
-          @?= MessageUUID "idem-key::dest-wf"
+        ( notificationRowForMessage
+            (MessageUUID "ignored-generated-id")
+            ( SendMessage
+                (WorkflowId "dest-wf")
+                messageBody
+                Nothing
+                (Just (IdempotencyKey "idem-key"))
+            )
+          ).notificationMessageUUID
+          @?= MessageUUID "idem-key::dest-wf",
+      testCase "scopes generated fallback ids by destination workflow" $
+        ( notificationRowForMessage
+            (MessageUUID "generated-message-id")
+            (SendMessage (WorkflowId "dest-wf") messageBody Nothing Nothing)
+          ).notificationMessageUUID
+          @?= MessageUUID "generated-message-id::dest-wf"
     ]
 
 messageBody :: SerializedWorkflowValue

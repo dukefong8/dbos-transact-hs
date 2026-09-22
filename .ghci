@@ -1,4 +1,4 @@
-:seti -XGHC2024
+:set -XGHC2024
 :seti -XDuplicateRecordFields
 :seti -XNoFieldSelectors
 :seti -XOverloadedLabels
@@ -6,6 +6,7 @@
 :seti -XMagicHash
 :seti -XPartialTypeSignatures
 :set -XExplicitNamespaces
+:set -Wall
 
 :set -Werror=deferred-out-of-scope-variables
 :set -Werror=deferred-type-errors

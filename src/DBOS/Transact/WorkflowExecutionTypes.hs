@@ -19,34 +19,34 @@ import Data.Text (Text)
 import DBOS.Transact.WorkflowExecutionStatus (WorkflowStatus)
 
 newtype WorkflowId = WorkflowId Text
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 newtype WorkflowName = WorkflowName Text
-  deriving (Eq, Show)
+  deriving stock (Eq, Ord, Show)
 
 newtype ExecutorId = ExecutorId Text
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 newtype ApplicationVersion = ApplicationVersion Text
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 newtype Millis = Millis Int64
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 newtype Serialization = Serialization Text
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data SerializedWorkflowValue = SerializedWorkflowValue
   { serializedText :: Text,
     serializedSerialization :: Maybe Serialization
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data WorkflowOutcome
   = WorkflowSucceeded SerializedWorkflowValue
   | WorkflowFailed SerializedWorkflowValue
   | WorkflowCancelled
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data WorkflowExecution = WorkflowExecution
   { workflowExecutionId :: WorkflowId,
@@ -63,7 +63,7 @@ data WorkflowExecution = WorkflowExecution
     workflowExecutionSerialization :: Maybe Serialization,
     workflowExecutionApplicationVersion :: Maybe ApplicationVersion
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data WorkflowExecutionRow = WorkflowExecutionRow
   { rowWorkflowId :: WorkflowId,
@@ -81,4 +81,4 @@ data WorkflowExecutionRow = WorkflowExecutionRow
     rowWorkflowSerialization :: Maybe Text,
     rowWorkflowApplicationVersion :: Maybe Text
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)

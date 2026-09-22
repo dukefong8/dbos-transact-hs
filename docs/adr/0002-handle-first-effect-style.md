@@ -1,4 +1,4 @@
-# Use Bluefin scoped capabilities for DBOS system services
+# Use Bluefin scoped capabilities for DBOS system services (SUPERSEDED by 0006)
 
 Effectful Haskell DBOS APIs use Bluefin 0.7 scoped value-level capabilities, not DBOS-specific `Handle` records or `Handle -> ... -> IO result` functions.
 

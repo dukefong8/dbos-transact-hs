@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module DBOS.TransactTest
@@ -32,6 +33,7 @@ import DBOS.Transact
     WorkflowStatusDecodeError (..),
     checkOperationExecution,
     getWorkflowExecution,
+    nullLogAction,
     parseOperationCheckpoint,
     parseWorkflowExecution,
     parseWorkflowStatus,
@@ -71,13 +73,13 @@ workflowExecutionTests =
         parseWorkflowExecution completedWorkflowRow
           @?= Right completedWorkflowExecution,
       testCase "parses Python DBOS recovery attempts from workflow status rows" $
-        workflowExecutionRecoveryAttempts <$> parseWorkflowExecution completedWorkflowRow
+        (.workflowExecutionRecoveryAttempts) <$> parseWorkflowExecution completedWorkflowRow
           @?= Right (Just 1),
       testCase "parses Python DBOS parent workflow links for child workflows" $
-        workflowExecutionParentId <$> parseWorkflowExecution childWorkflowRow
+        (.workflowExecutionParentId) <$> parseWorkflowExecution childWorkflowRow
           @?= Right (Just (WorkflowId "parent-wf")),
       testCase "parses direct-inserted Python workflow inputs with row serialization" $
-        (workflowExecutionInputs <$> parseWorkflowExecution directInsertedWorkflowRow)
+        ((.workflowExecutionInputs) <$> parseWorkflowExecution directInsertedWorkflowRow)
           @?= Right
             ( Just
                 SerializedWorkflowValue
@@ -86,7 +88,7 @@ workflowExecutionTests =
                   }
             ),
       testCase "does not parse cancelled Python workflows as successful output" $
-        workflowExecutionOutcome <$> parseWorkflowExecution cancelledWorkflowRow
+        (.workflowExecutionOutcome) <$> parseWorkflowExecution cancelledWorkflowRow
           @?= Right (Just WorkflowCancelled),
       testCase "rejects a workflow execution row with both output and error" $
         parseWorkflowExecution conflictingWorkflowRow
@@ -95,13 +97,13 @@ workflowExecutionTests =
         result <-
           runEff $ \io ->
             withWorkflowExecutionStore fetchCompletedWorkflowRow $ \store ->
-              getWorkflowExecution io store (WorkflowId "wf-1")
+              getWorkflowExecution io nullLogAction store (WorkflowId "wf-1")
         result @?= Right (Just completedWorkflowExecution),
       testCase "gets no workflow execution from a scoped store capability when missing" $ do
         result <-
           runEff $ \io ->
             withWorkflowExecutionStore fetchMissingWorkflowRow $ \store ->
-              getWorkflowExecution io store (WorkflowId "wf-missing")
+              getWorkflowExecution io nullLogAction store (WorkflowId "wf-missing")
         result @?= Right Nothing
     ]
 
@@ -118,6 +120,7 @@ operationCheckpointTests =
             withOperationCheckpointStore fetchCancelledWorkflowStatus fetchCheckpoint $ \store ->
               checkOperationExecution
                 io
+                nullLogAction
                 store
                 (WorkflowId "cancelled-workflow-id")
                 (OperationId 1)

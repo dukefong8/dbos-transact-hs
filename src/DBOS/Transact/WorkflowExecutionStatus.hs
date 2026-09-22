@@ -17,11 +17,11 @@ data WorkflowStatus
   | Cancelled
   | Enqueued
   | Delayed
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 newtype WorkflowStatusDecodeError
   = UnknownWorkflowStatus Text
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 parseWorkflowStatus :: Text -> Either WorkflowStatusDecodeError WorkflowStatus
 parseWorkflowStatus raw =

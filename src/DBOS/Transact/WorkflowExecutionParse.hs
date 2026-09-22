@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedRecordDot #-}
+
 module DBOS.Transact.WorkflowExecutionParse
   ( WorkflowExecutionDecodeError (..),
     parseWorkflowExecution,
@@ -24,39 +26,39 @@ data WorkflowExecutionDecodeError
   = WorkflowExecutionUnknownStatus WorkflowStatusDecodeError
   | WorkflowExecutionConflict WorkflowExecutionRow
   | WorkflowExecutionMissingOutcome WorkflowExecutionRow
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 parseWorkflowExecution ::
   WorkflowExecutionRow ->
   Either WorkflowExecutionDecodeError WorkflowExecution
 parseWorkflowExecution row = do
   status <-
-    case parseWorkflowStatus (rowWorkflowStatus row) of
+    case parseWorkflowStatus (row.rowWorkflowStatus) of
       Left err -> Left (WorkflowExecutionUnknownStatus err)
       Right parsed -> Right parsed
   outcome <- parseWorkflowOutcome row status
   pure
     WorkflowExecution
-      { workflowExecutionId = rowWorkflowId row,
+      { workflowExecutionId = row.rowWorkflowId,
         workflowExecutionStatus = status,
-        workflowExecutionName = WorkflowName <$> rowWorkflowName row,
-        workflowExecutionParentId = rowWorkflowParentId row,
+        workflowExecutionName = WorkflowName <$> row.rowWorkflowName,
+        workflowExecutionParentId = row.rowWorkflowParentId,
         workflowExecutionInputs = parseWorkflowInputs row,
         workflowExecutionOutcome = outcome,
-        workflowExecutionExecutor = ExecutorId <$> rowWorkflowExecutor row,
-        workflowExecutionCreatedAt = rowWorkflowCreatedAt row,
-        workflowExecutionUpdatedAt = rowWorkflowUpdatedAt row,
-        workflowExecutionRecoveryAttempts = rowWorkflowRecoveryAttempts row,
-        workflowExecutionQueueName = rowWorkflowQueueName row,
-        workflowExecutionSerialization = Serialization <$> rowWorkflowSerialization row,
+        workflowExecutionExecutor = ExecutorId <$> row.rowWorkflowExecutor,
+        workflowExecutionCreatedAt = row.rowWorkflowCreatedAt,
+        workflowExecutionUpdatedAt = row.rowWorkflowUpdatedAt,
+        workflowExecutionRecoveryAttempts = row.rowWorkflowRecoveryAttempts,
+        workflowExecutionQueueName = row.rowWorkflowQueueName,
+        workflowExecutionSerialization = Serialization <$> row.rowWorkflowSerialization,
         workflowExecutionApplicationVersion = ApplicationVersion
-          <$> rowWorkflowApplicationVersion row
+          <$> row.rowWorkflowApplicationVersion
       }
 
 parseWorkflowInputs :: WorkflowExecutionRow -> Maybe SerializedWorkflowValue
 parseWorkflowInputs row =
-  (\payload -> SerializedWorkflowValue payload (Serialization <$> rowWorkflowSerialization row))
-    <$> rowWorkflowInputs row
+  (\payload -> SerializedWorkflowValue payload (Serialization <$> row.rowWorkflowSerialization))
+    <$> row.rowWorkflowInputs
 
 parseWorkflowOutcome ::
   WorkflowExecutionRow ->
@@ -72,7 +74,7 @@ parseNonCancelledWorkflowOutcome ::
   WorkflowStatus ->
   Either WorkflowExecutionDecodeError (Maybe WorkflowOutcome)
 parseNonCancelledWorkflowOutcome row status =
-  case (rowWorkflowOutput row, rowWorkflowError row) of
+  case (row.rowWorkflowOutput, row.rowWorkflowError) of
     (Just _, Just _) ->
       Left (WorkflowExecutionConflict row)
     (Just output, Nothing) ->

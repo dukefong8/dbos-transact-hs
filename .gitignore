@@ -1,4 +1,6 @@
 dist-newstyle/
+rust-migrate/target/
+.haskell.hoo
 .build/
 .ghc.environment.*
 ghcid.txt

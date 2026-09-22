@@ -16,22 +16,22 @@ import DBOS.Transact.WorkflowExecutionTypes qualified as WorkflowExecution
 import Data.Text (Text)
 
 newtype OperationId = OperationId Int
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 newtype OperationName = OperationName Text
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data OperationCheckpointResult
   = CheckpointOutput SerializedWorkflowValue
   | CheckpointError SerializedWorkflowValue
   | CheckpointChildWorkflow WorkflowId
   | CheckpointAwaitedWorkflowResult WorkflowId AwaitedWorkflowResult
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data AwaitedWorkflowResult
   = AwaitedWorkflowOutput SerializedWorkflowValue
   | AwaitedWorkflowError SerializedWorkflowValue
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data OperationCheckpoint = OperationCheckpoint
   { checkpointOperationId :: OperationId,
@@ -40,18 +40,18 @@ data OperationCheckpoint = OperationCheckpoint
     checkpointCompletedAt :: Maybe WorkflowExecution.Millis,
     checkpointResult :: OperationCheckpointResult
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data OperationCheckpointReplay
   = RunOperation
   | ReplayOperation OperationCheckpointResult
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data OperationCheckpointReplayError
   = UnexpectedOperationName OperationId OperationName OperationName
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 data OperationCheckpointDecodeError
   = EmptyOperationCheckpoint OperationId OperationName
   | ConflictingOperationCheckpointValues OperationId OperationName
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)

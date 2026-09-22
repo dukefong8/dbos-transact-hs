@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedRecordDot #-}
+
 module DBOS.Transact.OperationCheckpointReplay
   ( replayOperationCheckpoint,
   )
@@ -17,12 +19,12 @@ replayOperationCheckpoint ::
 replayOperationCheckpoint _ Nothing =
   Right RunOperation
 replayOperationCheckpoint expectedName (Just checkpoint)
-  | expectedName == checkpointOperationName checkpoint =
-      Right (ReplayOperation (checkpointResult checkpoint))
+  | expectedName == checkpoint.checkpointOperationName =
+      Right (ReplayOperation (checkpoint.checkpointResult))
   | otherwise =
       Left
         ( UnexpectedOperationName
-            (checkpointOperationId checkpoint)
+            (checkpoint.checkpointOperationId)
             expectedName
-            (checkpointOperationName checkpoint)
+            (checkpoint.checkpointOperationName)
         )
