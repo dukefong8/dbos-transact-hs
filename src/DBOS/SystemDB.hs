@@ -19,6 +19,8 @@ module DBOS.SystemDB
     Postgres.setEvent,
     Postgres.getEvent,
     Postgres.getEventBlocking,
+    Postgres.postgresEventStore,
+    Postgres.postgresStepStore,
     Postgres.sendMessage,
     Postgres.sendMessages,
     Postgres.recvMessage,

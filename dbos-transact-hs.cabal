@@ -56,6 +56,7 @@ library
     DBOS.Transact.OperationCheckpointTypes
     DBOS.Transact.Registry
     DBOS.Transact.Step
+    DBOS.Transact.Store
     DBOS.Transact.Supervisor
     DBOS.Transact.Workflow
     DBOS.SystemDB.Types
@@ -72,6 +73,8 @@ test-suite test
     DBOS.SchemaTest
     DBOS.CodecTest
     DBOS.LogTest
+    DBOS.SimDB
+    DBOS.SimTest
     DBOS.StarterTest
     DBOS.SystemDBHasqlTest
     DBOS.SystemDBTest

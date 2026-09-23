@@ -19,6 +19,7 @@ module DBOS.Transact
 
     -- * Operation checkpoints
     AwaitedWorkflowResult (..),
+    EventStore (..),
     OperationCheckpoint (..),
     OperationCheckpointDecodeError (..),
     OperationCheckpointReplay (..),
@@ -29,6 +30,7 @@ module DBOS.Transact
     OperationName (..),
     OperationCheckpointStore,
     StepError (..),
+    StepStore (..),
     checkOperationExecution,
     parseOperationCheckpoint,
     replayOperationCheckpoint,
@@ -99,6 +101,7 @@ import DBOS.Transact.Registry
     registerWorkflow,
   )
 import DBOS.Transact.Step (StepError (..), runStep, sleepStep)
+import DBOS.Transact.Store (EventStore (..), StepStore (..))
 import DBOS.Transact.Supervisor (superviseForever)
 import DBOS.Transact.Workflow (WorkflowRunError (..), runWorkflow)
 import DBOS.Transact.OperationCheckpointTypes (AwaitedWorkflowResult (..), OperationCheckpoint (..), OperationCheckpointDecodeError (..), OperationCheckpointReplay (..), OperationCheckpointReplayError (..), OperationCheckpointResult (..), OperationId (..), OperationName (..))

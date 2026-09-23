@@ -41,6 +41,7 @@ import DBOS.SystemDB
     internalQueueName,
     listWorkflowIdsByName,
     messageTo,
+    postgresStepStore,
     recvMessage,
     registerQueue,
     releasePool,
@@ -233,11 +234,11 @@ instance FromJSON RespondAllRequest where
 
 exampleWorkflowBody :: WorkflowBody
 exampleWorkflowBody pool workflowId _ = do
-  _ <- runStep pool workflowId (OperationId 1) (OperationName "step_one") (sleepMillis stepDurationMs)
+  _ <- runStep (postgresStepStore pool) workflowId (OperationId 1) (OperationName "step_one") (sleepMillis stepDurationMs)
   setEvent pool workflowId stepsEventKey (encodeWorkflowValue (1 :: Int))
-  _ <- runStep pool workflowId (OperationId 2) (OperationName "step_two") (sleepMillis stepDurationMs)
+  _ <- runStep (postgresStepStore pool) workflowId (OperationId 2) (OperationName "step_two") (sleepMillis stepDurationMs)
   setEvent pool workflowId stepsEventKey (encodeWorkflowValue (2 :: Int))
-  _ <- runStep pool workflowId (OperationId 3) (OperationName "step_three") (sleepMillis stepDurationMs)
+  _ <- runStep (postgresStepStore pool) workflowId (OperationId 3) (OperationName "step_three") (sleepMillis stepDurationMs)
   setEvent pool workflowId stepsEventKey (encodeWorkflowValue (3 :: Int))
   pure (encodeWorkflowValue ("Workflow completed" :: Text))
   where

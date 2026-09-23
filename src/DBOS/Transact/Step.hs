@@ -10,6 +10,8 @@
 -- recorded at the workflow level by 'runWorkflow', never as a step error
 -- row — step error rows only ever replay values 'recordOperationError'
 -- wrote, so a step that throws re-runs on recovery by design.
+-- The store is a parameter, so the same runner executes against Postgres in
+-- production and against an in-memory model under @io-sim@.
 module DBOS.Transact.Step
   ( StepError (..),
     runStep,
@@ -21,7 +23,6 @@ import Control.Concurrent (threadDelay)
 import DBOS.SystemDB.Postgres
   ( Pool,
     fetchOperationCheckpoint,
-    recordOperationOutput,
     recordSleep,
   )
 import DBOS.Transact.OperationCheckpointTypes
@@ -30,6 +31,7 @@ import DBOS.Transact.OperationCheckpointTypes
     OperationId,
     OperationName (..),
   )
+import DBOS.Transact.Store (StepStore (..))
 import DBOS.Transact.WorkflowExecutionTypes
   ( Millis (..),
     Serialization (..),
@@ -46,18 +48,19 @@ data StepError
   deriving stock (Eq, Show)
 
 runStep ::
-  Pool ->
+  Monad m =>
+  StepStore m ->
   WorkflowId ->
   OperationId ->
   OperationName ->
-  IO SerializedWorkflowValue ->
-  IO (Either StepError SerializedWorkflowValue)
-runStep pool workflowId operationId operationName body = do
-  checkpoint <- fetchOperationCheckpoint pool workflowId operationId
+  m SerializedWorkflowValue ->
+  m (Either StepError SerializedWorkflowValue)
+runStep store workflowId operationId operationName body = do
+  checkpoint <- (store.stepFetchResult) workflowId operationId
   case checkpoint of
     Nothing -> do
       output <- body
-      recordOperationOutput pool workflowId operationId operationName output
+      (store.stepRecordOutput) workflowId operationId operationName output
       pure (Right output)
     Just recorded -> pure (replayRecorded recorded)
   where

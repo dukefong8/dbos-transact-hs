@@ -1,8 +1,9 @@
-{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE QuasiQuotes         #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Postgres system database: @[typedSql| ... |]@ sessions over an explicit
 -- pool, in one module. The session half pins each statement's SQL
@@ -11,10 +12,12 @@
 -- sessions with polling loops for blocking reads. Plain Haskell, no Bluefin
 -- imports — the Bluefin seam lives outward of this module.
 module DBOS.SystemDB.Postgres
-  ( Pool.Pool,
+  (     Pool.Pool,
     DbosDbError (..),
     WorkflowStartDecision (..),
     DbosMigration (..),
+    postgresEventStore,
+    postgresStepStore,
     acquirePool,
     dequeueWorkflows,
     dequeueWorkflowsSession,
@@ -87,40 +90,13 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word16)
-import DBOS.SystemDB.Types
-  ( MessageUUID (..),
-    NotificationRow (..),
-    QueueConflict (..),
-    QueueName (..),
-    SendMessage (..),
-    Topic (..),
-    messageUUIDForSend,
-    nullTopicSentinel,
-  )
-import DBOS.Transact.OperationCheckpointParse
-  ( parseOperationCheckpoint,
-  )
-import DBOS.Transact.OperationCheckpointTypes
-  ( OperationCheckpoint (..),
-    OperationCheckpointDecodeError,
-    OperationId (..),
-    OperationName (..),
-  )
+import DBOS.SystemDB.Types (MessageUUID (..), NotificationRow (..), QueueConflict (..), QueueName (..), SendMessage (..), Topic (..), messageUUIDForSend, nullTopicSentinel)
+import DBOS.Transact.OperationCheckpointParse (parseOperationCheckpoint)
+import DBOS.Transact.OperationCheckpointTypes (OperationCheckpoint (..), OperationCheckpointDecodeError, OperationId (..), OperationName (..))
 import DBOS.Transact.OperationCheckpointTypes qualified as OperationCheckpointTypes
-import DBOS.Transact.WorkflowExecutionStatus
-  ( WorkflowStatus (..),
-    parseWorkflowStatus,
-  )
-import DBOS.Transact.WorkflowExecutionTypes
-  ( ApplicationVersion (..),
-    ExecutorId (..),
-    Millis (..),
-    Serialization (..),
-    SerializedWorkflowValue (..),
-    WorkflowExecutionRow (..),
-    WorkflowId (..),
-    WorkflowName (..),
-  )
+import DBOS.Transact.Store (EventStore (..), StepStore (..))
+import DBOS.Transact.WorkflowExecutionStatus (WorkflowStatus (..), parseWorkflowStatus)
+import DBOS.Transact.WorkflowExecutionTypes (ApplicationVersion (..), ExecutorId (..), Millis (..), Serialization (..), SerializedWorkflowValue (..), WorkflowExecutionRow (..), WorkflowId (..), WorkflowName (..))
 import Hasql.Connection.Settings qualified as Connection
 import Hasql.Decoders qualified as Decoders
 import Hasql.Pool qualified as Pool
@@ -296,7 +272,7 @@ tryStartWorkflowSession (WorkflowId workflowId) (WorkflowName workflowName) inpu
   let inputText = (.serializedText) <$> inputs
       serializationText = case serializedWorkflowSerialization inputs of
         Just tag -> tag
-        Nothing -> "json"
+        Nothing  -> "json"
    in fromMaybe False
         <$> sqlQueryTypedSession [typedSql|
     with inserted as (
@@ -618,7 +594,7 @@ sendMessagesSession fallbackIds messages =
     -- One serialization for the batch, as in the oracle.
     serialization =
       case messages of
-        [] -> "json"
+        []      -> "json"
         (m : _) -> maybe "json" (\(Serialization tag) -> tag) m.sendMessageBody.serializedSerialization
 
 -- | Whether an unconsumed message is waiting on the topic. A yes/no question,
@@ -1093,18 +1069,18 @@ serializedWorkflowSerialization :: Maybe SerializedWorkflowValue -> Maybe Text
 serializedWorkflowSerialization value =
   case value >>= (.serializedSerialization) of
     Just (Serialization serialization) -> Just serialization
-    Nothing -> Nothing
+    Nothing                            -> Nothing
 
 workflowStatusText :: WorkflowStatus -> Text
 workflowStatusText status =
   case status of
-    Pending -> "PENDING"
-    Success -> "SUCCESS"
-    Error -> "ERROR"
+    Pending                     -> "PENDING"
+    Success                     -> "SUCCESS"
+    Error                       -> "ERROR"
     MaxRecoveryAttemptsExceeded -> "MAX_RECOVERY_ATTEMPTS_EXCEEDED"
-    Cancelled -> "CANCELLED"
-    Enqueued -> "ENQUEUED"
-    Delayed -> "DELAYED"
+    Cancelled                   -> "CANCELLED"
+    Enqueued                    -> "ENQUEUED"
+    Delayed                     -> "DELAYED"
 
 data WorkflowStartDecision
   = StartWorkflow
@@ -1145,7 +1121,7 @@ runDbOrFail :: Pool.Pool -> Session a -> IO a
 runDbOrFail pool session = do
   result <- runDb pool session
   case result of
-    Left err -> throwIO (DbosDbError (show err))
+    Left err    -> throwIO (DbosDbError (show err))
     Right value -> pure value
 
 fetchWorkflowExecutionRow ::
@@ -1353,7 +1329,7 @@ recvMessage pool workflowId recvId (Millis timeoutMs) topic = do
           recorded <- runDbOrFail pool (fetchRecvStepSession workflowId recvId)
           case recorded of
             Just replayed -> pure replayed
-            Nothing -> waitForMessage startedAt deadline
+            Nothing       -> waitForMessage startedAt deadline
     recordTimeout startedAt = do
       completedAt <- currentTimeMillis
       runDbOrFail pool (recordRecvSession workflowId recvId Nothing (Millis startedAt) (Millis completedAt))
@@ -1456,12 +1432,30 @@ releaseWorkflowClaim ::
 releaseWorkflowClaim pool executorId workflowId =
   runDbOrFail pool (releaseWorkflowClaimSession executorId workflowId)
 
+-- | The engine's durable seams over a live pool: what production bodies
+-- receive. Simulations build the same records over an in-memory model.
+postgresStepStore :: Pool.Pool -> StepStore IO
+postgresStepStore pool =
+  StepStore
+    { stepFetchResult = fetchOperationCheckpoint pool,
+      stepRecordOutput = \workflowId operationId operationName output ->
+        recordOperationOutput pool workflowId operationId operationName output
+    }
+
+-- | Workflow events over a live pool.
+postgresEventStore :: Pool.Pool -> EventStore IO
+postgresEventStore pool =
+  EventStore
+    { eventGet = getEvent pool,
+      eventSet = setEvent pool
+    }
+
 getConnectionSettings :: IO Connection.Settings
 getConnectionSettings = do
   databaseURL <- lookupEnv "DBOS_DATABASE_URL"
   case databaseURL of
     Just url -> pure (Connection.connectionString (toText url))
-    Nothing -> getConnectionSettingsFromPGEnv
+    Nothing  -> getConnectionSettingsFromPGEnv
 
 getConnectionSettingsFromPGEnv :: IO Connection.Settings
 getConnectionSettingsFromPGEnv = do

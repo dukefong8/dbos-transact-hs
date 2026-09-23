@@ -3,6 +3,7 @@ module Main (main) where
 import DBOS.CodecTest qualified as Codec
 import DBOS.LogTest qualified as Log
 import DBOS.SchemaTest qualified as Schema
+import DBOS.SimTest qualified as Sim
 import DBOS.StarterTest qualified as Starter
 import DBOS.SystemDBHasqlTest qualified as SystemDBHasql
 import DBOS.SystemDBTest qualified as SystemDB
@@ -17,6 +18,7 @@ main =
       [ Transact.tests,
         Codec.tests,
         Log.tests,
+        Sim.tests,
         Starter.tests,
         SystemDB.tests,
         SystemDBHasql.tests,

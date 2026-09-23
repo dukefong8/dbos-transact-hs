@@ -40,6 +40,7 @@ import DBOS.SystemDB
     internalQueueName,
     listWorkflowIdsByName,
     messageTo,
+    postgresStepStore,
     recvMessage,
     recordOperationError,
     recordSleep,
@@ -104,8 +105,8 @@ tests =
           let body = do
                 atomicModifyIORef' executions (\count -> (count + 1, ()))
                 pure (encodeWorkflowValue (object ["ok" .= True]))
-          first <- runStep pool workflowId (OperationId 1) (OperationName "step_one") body
-          second <- runStep pool workflowId (OperationId 1) (OperationName "step_one") body
+          first <- runStep (postgresStepStore pool) workflowId (OperationId 1) (OperationName "step_one") body
+          second <- runStep (postgresStepStore pool) workflowId (OperationId 1) (OperationName "step_one") body
           first @?= Right (encodeWorkflowValue (object ["ok" .= True]))
           second @?= first
           readIORef executions >>= (@?= 1),
@@ -118,7 +119,7 @@ tests =
           let failure = encodeWorkflowValue (object ["message" .= ("boom" :: Text)])
           recordOperationError pool workflowId (OperationId 1) (OperationName "step_one") failure
           executions <- newIORef (0 :: Int)
-          result <- runStep pool workflowId (OperationId 1) (OperationName "step_one") (increment executions)
+          result <- runStep (postgresStepStore pool) workflowId (OperationId 1) (OperationName "step_one") (increment executions)
           result @?= Left (StepRecordedError failure)
           readIORef executions >>= (@?= 0),
       testCase "publishes a workflow event and reads it back by name" $
@@ -630,13 +631,13 @@ awaitSuccesses pool workflowIds remaining = do
 exampleWorkflow :: Pool.Pool -> WorkflowId -> IORef Int -> Maybe OperationId -> IO ()
 exampleWorkflow pool workflowId executions crashAfter = do
   crashBefore (OperationId 1)
-  _ <- runStep pool workflowId (OperationId 1) (OperationName "step_one") (countedStep executions)
+  _ <- runStep (postgresStepStore pool) workflowId (OperationId 1) (OperationName "step_one") (countedStep executions)
   setEvent pool workflowId "steps_event" (encodeWorkflowValue (1 :: Int))
   crashBefore (OperationId 2)
-  _ <- runStep pool workflowId (OperationId 2) (OperationName "step_two") (countedStep executions)
+  _ <- runStep (postgresStepStore pool) workflowId (OperationId 2) (OperationName "step_two") (countedStep executions)
   setEvent pool workflowId "steps_event" (encodeWorkflowValue (2 :: Int))
   crashBefore (OperationId 3)
-  _ <- runStep pool workflowId (OperationId 3) (OperationName "step_three") (countedStep executions)
+  _ <- runStep (postgresStepStore pool) workflowId (OperationId 3) (OperationName "step_three") (countedStep executions)
   setEvent pool workflowId "steps_event" (encodeWorkflowValue (3 :: Int))
   where
     crashBefore stepId =
