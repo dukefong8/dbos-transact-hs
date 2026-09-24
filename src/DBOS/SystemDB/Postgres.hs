@@ -13,7 +13,6 @@
 -- imports — the Bluefin seam lives outward of this module.
 module DBOS.SystemDB.Postgres
   (     Pool.Pool,
-    DbosDbError (..),
     WorkflowStartDecision (..),
     DbosMigration (..),
     postgresEventStore,
@@ -78,27 +77,27 @@ where
 
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
-import Control.Exception (Exception, throwIO)
+import Control.Exception (throwIO)
 import Control.Monad (join)
 import Data.Functor (void)
 import Data.Int (Int64)
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
-import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word16)
-import DBOS.SystemDB.Types (MessageUUID (..), NotificationRow (..), QueueConflict (..), QueueName (..), SendMessage (..), Topic (..), messageUUIDForSend, nullTopicSentinel)
+import DBOS.SystemDB.Types (MessageUUID (..), NotificationRow (..), OnExistingQueue (..), QueueName (..), SendMessage (..), Topic (..), WorkflowStatus (..), messageUUIDForSend, nullTopicSentinel, parseWorkflowStatus, recvStepName, workflowStatusText)
 import DBOS.Transact.OperationCheckpointParse (parseOperationCheckpoint)
 import DBOS.Transact.OperationCheckpointTypes (OperationCheckpoint (..), OperationCheckpointDecodeError, OperationId (..), OperationName (..))
+import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..))
 import DBOS.Transact.OperationCheckpointTypes qualified as OperationCheckpointTypes
 import DBOS.Transact.Store (EventStore (..), StepStore (..))
-import DBOS.Transact.WorkflowExecutionStatus (WorkflowStatus (..), parseWorkflowStatus)
-import DBOS.Transact.WorkflowExecutionTypes (ApplicationVersion (..), ExecutorId (..), Millis (..), Serialization (..), SerializedWorkflowValue (..), WorkflowExecutionRow (..), WorkflowId (..), WorkflowName (..))
+import DBOS.SystemDB.Types (Duration (..), Timestamp (..), addTimeout, timestampNow, timestampToEpochMs)
+import DBOS.Transact.WorkflowExecutionTypes (ApplicationVersion (..), ExecutorId (..), Serialization (..), SerializedWorkflowValue (..), WorkflowExecutionRow (..), WorkflowId (..), WorkflowName (..))
 import Hasql.Connection.Settings qualified as Connection
 import Hasql.Decoders qualified as Decoders
+import Hasql.Errors qualified as Errors
 import Hasql.Pool qualified as Pool
 import Hasql.Pool.Config qualified as PoolConfig
 import Hasql.PostgresqlTypes ()
@@ -454,16 +453,16 @@ recordSleepSession ::
   OperationId ->
   OperationCheckpointTypes.OperationName ->
   SerializedWorkflowValue ->
-  Millis ->
-  Millis ->
+  Timestamp ->
+  Timestamp ->
   Session ()
 recordSleepSession
   (WorkflowId workflowId)
   (OperationId operationId)
   (OperationCheckpointTypes.OperationName operationName)
   output
-  (Millis startedMs)
-  (Millis completedMs) =
+  (Timestamp startedMs)
+  (Timestamp completedMs) =
     let functionId = fromIntegral operationId :: Int
         outputText = output.serializedText
         serialization = serializedWorkflowSerialization (Just output)
@@ -627,15 +626,15 @@ takeNotificationSession ::
   WorkflowId ->
   OperationId ->
   Maybe Topic ->
-  Millis ->
-  Millis ->
+  Timestamp ->
+  Timestamp ->
   Session (Maybe SerializedWorkflowValue)
 takeNotificationSession
   (WorkflowId workflowId)
   (OperationId operationId)
   topic
-  (Millis startedMs)
-  (Millis completedMs) = do
+  (Timestamp startedMs)
+  (Timestamp completedMs) = do
     rows <-
       sqlQueryTypedSession [typedSql|
         with taken as (
@@ -668,7 +667,7 @@ takeNotificationSession
         select
           ${workflowId},
           ${functionId},
-          'DBOS.recv',
+          ${recvStepName},
           taken.message,
           null,
           null,
@@ -700,7 +699,7 @@ fetchRecvStepSession (WorkflowId workflowId) (OperationId operationId) =
     from dbos.operation_outputs
     where workflow_uuid = ${workflowId}
       and function_id = ${functionId}
-      and function_name = 'DBOS.recv'
+      and function_name = ${recvStepName}
     limit 1
   |]
   where
@@ -713,15 +712,15 @@ recordRecvSession ::
   WorkflowId ->
   OperationId ->
   Maybe SerializedWorkflowValue ->
-  Millis ->
-  Millis ->
+  Timestamp ->
+  Timestamp ->
   Session ()
 recordRecvSession
   (WorkflowId workflowId)
   (OperationId operationId)
   taken
-  (Millis startedMs)
-  (Millis completedMs) =
+  (Timestamp startedMs)
+  (Timestamp completedMs) =
     void $ sqlExecTypedSession [typedSql|
       insert into dbos.operation_outputs
         (
@@ -739,7 +738,7 @@ recordRecvSession
         (
           ${workflowId},
           ${functionId},
-          'DBOS.recv',
+          ${recvStepName},
           ${outputText}::text,
           null,
           null,
@@ -771,16 +770,16 @@ listWorkflowIdsByNameSession workflowName limitCount = do
     |]
   pure [WorkflowId key | Id key <- rows]
 
--- | Register a queue, seeding its worker concurrency. 'NeverUpdate' leaves an
--- existing row alone; the other two overwrite it.
+-- | Register a queue, seeding its worker concurrency. 'LeaveExisting' leaves
+-- an existing row alone; 'UpdateExisting' overwrites it.
 registerQueueSession ::
   QueueName ->
   Maybe Int ->
-  QueueConflict ->
+  OnExistingQueue ->
   Session ()
-registerQueueSession (QueueName queueName) workerConcurrency conflict =
-  case conflict of
-    NeverUpdate ->
+registerQueueSession (QueueName queueName) workerConcurrency onExisting =
+  case onExisting of
+    LeaveExisting ->
       void $ sqlExecTypedSession [typedSql|
         insert into dbos.queues
           (name, worker_concurrency, created_at, updated_at)
@@ -793,11 +792,7 @@ registerQueueSession (QueueName queueName) workerConcurrency conflict =
           )
         on conflict (name) do nothing
       |]
-    AlwaysUpdate ->
-      overwrite
-    UpdateIfLatestVersion ->
-      -- No application versions are registered yet, so every application is
-      -- the latest by default; version gating lands with version registration.
+    UpdateExisting ->
       overwrite
   where
     overwrite =
@@ -1017,8 +1012,8 @@ decodeWorkflowExecutionRow row =
       rowWorkflowOutput = serializedWorkflowValue row.output row.serialization,
       rowWorkflowError = serializedWorkflowValue row.error row.serialization,
       rowWorkflowExecutor = row.executor_id,
-      rowWorkflowCreatedAt = Just (Millis row.created_at),
-      rowWorkflowUpdatedAt = Just (Millis row.updated_at),
+      rowWorkflowCreatedAt = Just (Timestamp row.created_at),
+      rowWorkflowUpdatedAt = Just (Timestamp row.updated_at),
       rowWorkflowRecoveryAttempts = row.recovery_attempts,
       rowWorkflowQueueName = row.queue_name,
       rowWorkflowSerialization = row.serialization,
@@ -1035,8 +1030,8 @@ decodeOperationCheckpoint row =
     (serializedWorkflowValue row.output row.serialization)
     (serializedWorkflowValue row.error row.serialization)
     (WorkflowId <$> row.child_workflow_id)
-    (Millis <$> row.started_at_epoch_ms)
-    (Millis <$> row.completed_at_epoch_ms)
+    (Timestamp <$> row.started_at_epoch_ms)
+    (Timestamp <$> row.completed_at_epoch_ms)
   where
     decodedOperationId = case row.function_id of Id key -> OperationId (fromIntegral key)
     decodedOperationName = OperationCheckpointTypes.OperationName row.function_name
@@ -1071,30 +1066,41 @@ serializedWorkflowSerialization value =
     Just (Serialization serialization) -> Just serialization
     Nothing                            -> Nothing
 
-workflowStatusText :: WorkflowStatus -> Text
-workflowStatusText status =
-  case status of
-    Pending                     -> "PENDING"
-    Success                     -> "SUCCESS"
-    Error                       -> "ERROR"
-    MaxRecoveryAttemptsExceeded -> "MAX_RECOVERY_ATTEMPTS_EXCEEDED"
-    Cancelled                   -> "CANCELLED"
-    Enqueued                    -> "ENQUEUED"
-    Delayed                     -> "DELAYED"
-
 data WorkflowStartDecision
   = StartWorkflow
   | AwaitWorkflow
   deriving stock (Eq, Show)
 
 -- | A database call that never answered: pool exhaustion, a lost connection,
--- a session error. Thrown (never recorded) so a transient outage cannot
--- become a permanent @ERROR@ workflow outcome; the row stays @PENDING@ for a
--- later launch to recover.
-newtype DbosDbError = DbosDbError String
-  deriving stock (Eq, Show)
-
-instance Exception DbosDbError
+-- a session error. Thrown as the shared 'Error' channel's 'Backend' case
+-- (never recorded) so a transient outage cannot become a permanent @ERROR@
+-- workflow outcome; the row stays @PENDING@ for a later launch to recover.
+-- Classification mirrors the oracle's: contention and connection trouble
+-- may pass, a rejected statement will not.
+classifyUsageError :: Pool.UsageError -> Error
+classifyUsageError usage =
+  Backend
+    BackendError
+      { backendMessage = message,
+        backendSqlState = sqlState,
+        backendKind = kind
+      }
+  where
+    (message, sqlState, kind) = case usage of
+      Pool.ConnectionUsageError connectionError ->
+        (Errors.toDetailedText connectionError, Nothing, Connection)
+      Pool.AcquisitionTimeoutUsageError ->
+        ("connection acquisition timed out", Nothing, Connection)
+      Pool.SessionUsageError sessionError ->
+        (Errors.toDetailedText sessionError, sqlStateOf sessionError, sessionKind sessionError)
+    sqlStateOf sessionError = lookup "code" (Errors.toDetails sessionError)
+    sessionKind sessionError
+      | Just code <- sqlStateOf sessionError,
+        code `elem` ["40001", "40P01"] = Transient
+      | Errors.isTransient sessionError = Connection
+      | Just code <- sqlStateOf sessionError,
+        "08" `Text.isPrefixOf` code = Connection
+      | otherwise = Permanent
 
 acquirePool :: IO Pool.Pool
 acquirePool = do
@@ -1121,7 +1127,7 @@ runDbOrFail :: Pool.Pool -> Session a -> IO a
 runDbOrFail pool session = do
   result <- runDb pool session
   case result of
-    Left err    -> throwIO (DbosDbError (show err))
+    Left err    -> throwIO (classifyUsageError err)
     Right value -> pure value
 
 fetchWorkflowExecutionRow ::
@@ -1212,8 +1218,8 @@ recordSleep ::
   OperationId ->
   OperationName ->
   SerializedWorkflowValue ->
-  Millis ->
-  Millis ->
+  Timestamp ->
+  Timestamp ->
   IO ()
 recordSleep pool workflowId operationId operationName output started completed =
   runDbOrFail pool (recordSleepSession workflowId operationId operationName output started completed)
@@ -1242,10 +1248,11 @@ getEventBlocking ::
   Pool.Pool ->
   WorkflowId ->
   Text ->
-  Millis ->
+  Duration ->
   IO (Maybe SerializedWorkflowValue)
-getEventBlocking pool workflowId key (Millis timeoutMs) = do
-  deadline <- addUTCTime (millisToDiffTime timeoutMs) <$> getCurrentTime
+getEventBlocking pool workflowId key duration = do
+  start <- timestampNow
+  let deadline = fromMaybe start (addTimeout start duration)
   poll deadline
   where
     poll deadline = do
@@ -1253,7 +1260,7 @@ getEventBlocking pool workflowId key (Millis timeoutMs) = do
       case found of
         Just value -> pure (Just value)
         Nothing -> do
-          now <- getCurrentTime
+          now <- timestampNow
           if now >= deadline
             then pure Nothing
             else do
@@ -1262,9 +1269,6 @@ getEventBlocking pool workflowId key (Millis timeoutMs) = do
 
 blockingPollIntervalMicros :: Int
 blockingPollIntervalMicros = 50000
-
-millisToDiffTime :: Int64 -> NominalDiffTime
-millisToDiffTime ms = fromRational (toRational ms / 1000)
 
 -- | Deliver one message. A resend under the same idempotency key is a no-op.
 sendMessage ::
@@ -1293,33 +1297,34 @@ recvMessage ::
   Pool.Pool ->
   WorkflowId ->
   OperationId ->
-  Millis ->
+  Duration ->
   Maybe Topic ->
   IO (Maybe SerializedWorkflowValue)
-recvMessage pool workflowId recvId (Millis timeoutMs) topic = do
+recvMessage pool workflowId recvId duration topic = do
   recorded <- runDbOrFail pool (fetchRecvStepSession workflowId recvId)
   case recorded of
     Just taken -> pure taken
     Nothing -> do
-      startedAt <- currentTimeMillis
-      waitForMessage startedAt (Millis (startedAt + timeoutMs))
+      startedAt <- timestampNow
+      let deadline = fromMaybe startedAt (addTimeout startedAt duration)
+      waitForMessage startedAt deadline
   where
     waitForMessage startedAt deadline = do
       hasMessage <- runDbOrFail pool (probeNotificationSession workflowId topic)
       if hasMessage
         then takeMessage startedAt deadline
         else do
-          now <- currentTimeMillis
-          let remaining = deadlineMs deadline - now
+          now <- timestampNow
+          let remaining = timestampToEpochMs deadline - timestampToEpochMs now
           if remaining <= 0
             then recordTimeout startedAt
             else do
               threadDelay (millisToMicros (min remaining recvPollIntervalMs))
               waitForMessage startedAt deadline
     takeMessage startedAt deadline = do
-      completedAt <- currentTimeMillis
+      completedAt <- timestampNow
       taken <-
-        runDbOrFail pool (takeNotificationSession workflowId recvId topic (Millis startedAt) (Millis completedAt))
+        runDbOrFail pool (takeNotificationSession workflowId recvId topic startedAt completedAt)
       case taken of
         Just value -> pure (Just value)
         -- Nothing taken: either no message is waiting, or a duplicate
@@ -1331,10 +1336,9 @@ recvMessage pool workflowId recvId (Millis timeoutMs) topic = do
             Just replayed -> pure replayed
             Nothing       -> waitForMessage startedAt deadline
     recordTimeout startedAt = do
-      completedAt <- currentTimeMillis
-      runDbOrFail pool (recordRecvSession workflowId recvId Nothing (Millis startedAt) (Millis completedAt))
+      completedAt <- timestampNow
+      runDbOrFail pool (recordRecvSession workflowId recvId Nothing startedAt completedAt)
       pure Nothing
-    deadlineMs (Millis ms) = ms
 
 -- | How long a waiting @recv@ sleeps between probes.
 recvPollIntervalMs :: Int64
@@ -1349,9 +1353,6 @@ listWorkflowIdsByName ::
 listWorkflowIdsByName pool workflowName limitCount =
   runDbOrFail pool (listWorkflowIdsByNameSession workflowName limitCount)
 
-currentTimeMillis :: IO Int64
-currentTimeMillis = round . (* 1000) <$> getPOSIXTime
-
 millisToMicros :: Int64 -> Int
 millisToMicros ms = fromIntegral (ms * 1000)
 
@@ -1360,10 +1361,10 @@ registerQueue ::
   Pool.Pool ->
   QueueName ->
   Int ->
-  QueueConflict ->
+  OnExistingQueue ->
   IO ()
-registerQueue pool queueName workerConcurrency conflict =
-  runDbOrFail pool (registerQueueSession queueName (Just workerConcurrency) conflict)
+registerQueue pool queueName workerConcurrency onExisting =
+  runDbOrFail pool (registerQueueSession queueName (Just workerConcurrency) onExisting)
 
 -- | The limit stored in the queue's row.
 fetchQueueWorkerConcurrency ::

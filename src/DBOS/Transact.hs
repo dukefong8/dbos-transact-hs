@@ -1,8 +1,9 @@
 module DBOS.Transact
   ( -- * Workflow executions
     ApplicationVersion (..),
+    Duration (..),
     ExecutorId (..),
-    Millis (..),
+    Timestamp (..),
     WorkflowExecution (..),
     WorkflowExecutionDecodeError (..),
     WorkflowExecutionStore,
@@ -13,9 +14,11 @@ module DBOS.Transact
     WorkflowStatus (..),
     WorkflowStatusDecodeError (..),
     getWorkflowExecution,
+    isTerminal,
     parseWorkflowExecution,
     parseWorkflowStatus,
     withWorkflowExecutionStore,
+    workflowStatusText,
 
     -- * Operation checkpoints
     AwaitedWorkflowResult (..),
@@ -60,7 +63,9 @@ module DBOS.Transact
     spawnWorkflow,
     superviseForever,
     -- * Workflow registry and runner
-    DbosDbError (..),
+    Error,
+    BackendError (..),
+    BackendErrorKind (..),
     DuplicateWorkflowName (..),
     WorkflowBody,
     WorkflowRegistry,
@@ -108,10 +113,10 @@ import DBOS.Transact.OperationCheckpointTypes (AwaitedWorkflowResult (..), Opera
 import GHC.Stack (HasCallStack)
 
 import DBOS.SystemDB.Types (IdempotencyKey (..), MessageUUID (..), NotificationRow (..), SendMessage (..), Topic (..), messageUUIDForSend, notificationRowForMessage, nullTopicSentinel)
-import DBOS.SystemDB.Postgres (DbosDbError (..))
+import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..))
+import DBOS.SystemDB.Types (WorkflowStatus (..), WorkflowStatusDecodeError (..), isTerminal, parseWorkflowStatus, workflowStatusText)
 import DBOS.Transact.WorkflowExecutionParse (WorkflowExecutionDecodeError (..), parseWorkflowExecution)
-import DBOS.Transact.WorkflowExecutionStatus (WorkflowStatus (..), WorkflowStatusDecodeError (..), parseWorkflowStatus)
-import DBOS.Transact.WorkflowExecutionTypes (ApplicationVersion (..), ExecutorId (..), Millis (..), Serialization (..), SerializedWorkflowValue (..), WorkflowExecution (..), WorkflowExecutionRow (..), WorkflowId (..), WorkflowName (..), WorkflowOutcome (..))
+import DBOS.Transact.WorkflowExecutionTypes (ApplicationVersion (..), Duration (..), ExecutorId (..), Serialization (..), SerializedWorkflowValue (..), Timestamp (..), WorkflowExecution (..), WorkflowExecutionRow (..), WorkflowId (..), WorkflowName (..), WorkflowOutcome (..))
 
 type WorkflowExecutionStore e = Ask (WorkflowId -> IO (Maybe WorkflowExecutionRow)) e
 

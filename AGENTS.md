@@ -15,21 +15,29 @@ Repo guide for DBOS Haskell.
 - `.lavish/rust-port-plan.html` is the living port plan; fold each phase's delta back into it (self-recursive loop) and mark edits with dated notes.
 - `CONTEXT.md` is the glossary for domain language only.
 
+## HARD RULES — Rust fidelity (module + type one-to-one)
+
+- **One Rust module maps to exactly one Haskell module.** `sysdb/types.rs` → `DBOS.SystemDB.Types`, `sysdb/error.rs` → `DBOS.SystemDB.Error`, `sysdb/retry.rs` → `DBOS.SystemDB.Retry`. Do NOT split a Rust module across several Haskell modules.
+- **One Rust type maps to exactly one Haskell type, by name.** Types, constructors, and fields keep the Rust spelling verbatim — no `SystemDb` prefixes, no renames for taste, no field splitting. Collisions with existing names are resolved as documented deviations (constructor prefixes), not by renaming the ported type.
+- **A split or a rename requires an explicit ADR** in `docs/adr/` recording why it was unavoidable. (No module split is in force today: the short-lived `DBOS.SystemDB.Time` leaf was merged back into `Types` once the cycle it broke was removed. Constructor-prefix collisions like `ForkStep` and `ErrorMaxRecoveryAttemptsExceeded` are the deviation style instead.)
+- Facades (`DBOS.SystemDB`, `DBOS.Transact`) and `[typedSql| ... |]` session modules are the port's own seams, not Rust module counterparts; they may re-export (`module Types`) but never redefine ported types.
+
 ## TDD Loop
 
 1. Run or watch `make dev` first.
-2. Monitor `.ghcid.txt` and fix compiler errors before widening the slice.
-3. Use `ghci -e ':hoogle ...'` and `ghci -e ':browse ...'` before adding any new dependency.
-4. Write one public Tasty test at a time.
-5. Implement the smallest code that passes that test.
-6. Run `cabal test` after each green compiler cycle.
-7. Tests share one live database and run in parallel (tasty default): every test must own its rows — fresh UUIDs, unique workflow/queue names, per-test executor ids. A sweep only ever matches its launching executor's id.
+2. **MUST: after every reload, `cat ghcid.txt` immediately — never sleep more than 5 seconds first.** ghciwatch always reloads in a few seconds; long waits hide both compiler errors and the tasty result, and a stale read wastes the loop (`tail ghcid.txt` is enough).
+3. **MUST: exactly one test group is enabled before and during every edit**, via the `-- $>` / `--- $>` toggle in `test/Main.hs` — a reload that runs no tests verifies nothing. The watcher's eval must never overlap the live-DB suite: two suite binaries deadlock on the shared fixture rows (reproduced `40P01`).
+4. Use `ghci -e ':hoogle ...'` and `ghci -e ':browse ...'` before adding any new dependency.
+5. Write one public Tasty test at a time.
+6. Implement the smallest code that passes that test.
+7. Run `cabal test` only when the watcher is idle — the full suite and a watcher eval must not run at the same time.
+8. Tests share one live database and run in parallel (tasty default): every test must own its rows — fresh UUIDs, unique workflow/queue names, per-test executor ids. A sweep only ever matches its launching executor's id.
 
 Use Neovim LSP document symbols to inspect module structure and exported surfaces before changing a module layout.
 
 ## End-to-End Verification
 
-For DB-backed behavior, a green `cabal test` is not the final gate. After every successful `cabal test`, run a direct `psql` query against the local Postgres `dbos` database and verify the rows the tests are expected to create or read.
+For DB-backed behavior, a green `cabal test` is not the final gate. After every successful `cabal test`, run a direct `psql` query and verify the rows the tests are expected to create or read. **Query the database the tests actually used: `$DBOS_DATABASE_URL`** (the environment's value decides — the local `dbos` database is only the default).
 
 ```sql
 select 'workflow_status' as table_name, workflow_uuid as id, status, name
@@ -66,7 +74,7 @@ The database must always be migrated with the Rust runner first: run `make db-mi
 Soft conventions: they apply only where the Rust oracle and the plan rules (`.lavish/rust-port-plan.html` §6) are silent. The oracle wins on behavior; the plan wins on architecture.
 
 - Two layers (ADR-0006): plain-Haskell internals (no Bluefin imports) hold all logic and tests; thin Bluefin capabilities live only at the external seam. Bluefin may depend inward, never outward.
-- Errors (Rule 3): per-domain `Either` ADTs in the core (`CodecError`, `StepError`, `WorkflowRunError`); base async exceptions (`AsyncCancelled`) rethrown without recording at the edges. (`io-classes`/`io-sim` are unused deps; no unified `DbosError`, no `WorkflowCtx` record — the plan §6 records what was predicted vs built.)
+- Errors (Rule 3): per-domain `Either` ADTs in the core (`CodecError`, `StepError`, `WorkflowRunError`, the shared `DBOS.SystemDB.Error`); base async exceptions (`AsyncCancelled`) rethrown without recording at the edges. Impure internals constrain effects with `io-classes` where timing must be simulated (ADR-0008: `MonadDelay` in `DBOS.SystemDB.Retry`, IO in production, IOSim in tests); no unified `DbosError`, no `WorkflowCtx` record — the plan §6 records what was predicted vs built.
 - Logging (Rule 5): explicit `LogAction m DbosLogMsg`, never ambient; `co-log-core` + `fast-logger` stay, `co-log` message formatting is out.
 - Deriving: every clause carries an explicit `stock`/`newtype` strategy.
 - Records (`NoFieldSelectors` + `OverloadedRecordDot`, both in cabal `default-extensions`):

@@ -24,7 +24,10 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB.Postgres (runDbOrFail, takeNotificationSession)
 import DBOS.SystemDB
-  ( QueueConflict (..),
+  ( BackendError (..),
+    BackendErrorKind (..),
+    Error (..),
+    OnExistingQueue (..),
     QueueName (..),
     Topic (..),
     WorkflowStartDecision (..),
@@ -40,6 +43,7 @@ import DBOS.SystemDB
     internalQueueName,
     listWorkflowIdsByName,
     messageTo,
+    millisDuration,
     postgresStepStore,
     recvMessage,
     recordOperationError,
@@ -50,17 +54,18 @@ import DBOS.SystemDB
     sendMessage,
     sendMessages,
     setEvent,
+    timestampFromEpochMs,
+    timestampNow,
+    timestampToEpochMs,
     tryStartWorkflow,
     updateQueueWorkerConcurrency,
   )
 import DBOS.Transact
   ( ApplicationVersion (..),
     CodecError (..),
-    DbosDbError (..),
     DuplicateWorkflowName (..),
     Executor (..),
     ExecutorId (..),
-    Millis (..),
     OperationId (..),
     OperationName (..),
     Serialization (..),
@@ -140,7 +145,7 @@ tests =
           decision <- tryStartWorkflow pool workflowId (WorkflowName "starterBlockingWorkflow") Nothing executorId (ApplicationVersion "v1")
           decision @?= StartWorkflow
           late <- async (threadDelay 150000 >> setEvent pool workflowId "shipped" (encodeWorkflowValue ("yes" :: Text)))
-          found <- getEventBlocking pool workflowId "shipped" (Millis 2000)
+          found <- getEventBlocking pool workflowId "shipped" (millisDuration 2000)
           wait late
           (decodeWorkflowValue "result" found :: Either CodecError (Maybe Text)) @?= Right (Just "yes"),
       testCase "a blocking event read reports absence at its deadline" $
@@ -149,7 +154,7 @@ tests =
           executorId <- freshExecutorId "hs-exec-absent"
           decision <- tryStartWorkflow pool workflowId (WorkflowName "starterAbsentWorkflow") Nothing executorId (ApplicationVersion "v1")
           decision @?= StartWorkflow
-          found <- getEventBlocking pool workflowId "never_published" (Millis 200)
+          found <- getEventBlocking pool workflowId "never_published" (millisDuration 200)
           found @?= Nothing,
       testCase "a durable sleep waits then replays the remainder" $
         withDBOSPool $ \pool -> do
@@ -158,10 +163,10 @@ tests =
           decision <- tryStartWorkflow pool workflowId (WorkflowName "starterSleepWorkflow") Nothing executorId (ApplicationVersion "v1")
           decision @?= StartWorkflow
           before <- currentTimeMillis
-          sleepStep pool workflowId (OperationId 1) (Millis 300)
+          sleepStep pool workflowId (OperationId 1) (millisDuration 300)
           afterFirst <- currentTimeMillis
           (afterFirst - before) `assertAtLeast` 250
-          sleepStep pool workflowId (OperationId 1) (Millis 300)
+          sleepStep pool workflowId (OperationId 1) (millisDuration 300)
           afterSecond <- currentTimeMillis
           assertBool ("replay slept too long: " <> show (afterSecond - afterFirst)) (afterSecond - afterFirst < 150),
       testCase "a replayed sleep waits out the recorded remainder" $
@@ -173,17 +178,18 @@ tests =
           -- A crash mid-sleep: the first run recorded a wake time 600ms out
           -- but never got there. The replay must wait the remainder instead
           -- of returning at once.
-          now <- currentTimeMillis
+          now <- timestampNow
+          let wakeAtMs = timestampToEpochMs now + 600
           recordSleep
             pool
             workflowId
             (OperationId 1)
             (OperationName "DBOS.sleep")
-            (SerializedWorkflowValue (pack (show (now + 600))) (Just (Serialization "portable_json")))
-            (Millis now)
-            (Millis (now + 600))
+            (SerializedWorkflowValue (pack (show wakeAtMs)) (Just (Serialization "portable_json")))
+            now
+            (timestampFromEpochMs wakeAtMs)
           before <- currentTimeMillis
-          sleepStep pool workflowId (OperationId 1) (Millis 50)
+          sleepStep pool workflowId (OperationId 1) (millisDuration 50)
           after <- currentTimeMillis
           (after - before) `assertAtLeast` 450,
       testCase "sends a message and a parked recv takes it exactly once" $
@@ -193,9 +199,9 @@ tests =
           decision <- tryStartWorkflow pool workflowId (WorkflowName "starterRecvWorkflow") Nothing executorId (ApplicationVersion "v1")
           decision @?= StartWorkflow
           sendMessage pool (messageTo workflowId (Topic "approval") (encodeWorkflowValue ("approve" :: Text)))
-          first <- recvMessage pool workflowId (OperationId 1) (Millis 2000) (Just (Topic "approval"))
+          first <- recvMessage pool workflowId (OperationId 1) (millisDuration 2000) (Just (Topic "approval"))
           first @?= Just (encodeWorkflowValue ("approve" :: Text))
-          second <- recvMessage pool workflowId (OperationId 1) (Millis 50) (Just (Topic "approval"))
+          second <- recvMessage pool workflowId (OperationId 1) (millisDuration 50) (Just (Topic "approval"))
           second @?= first,
       testCase "a recv with nothing to take reports absence at its deadline" $
         withDBOSPool $ \pool -> do
@@ -203,7 +209,7 @@ tests =
           executorId <- freshExecutorId "hs-exec-recv-none"
           decision <- tryStartWorkflow pool workflowId (WorkflowName "starterRecvNoneWorkflow") Nothing executorId (ApplicationVersion "v1")
           decision @?= StartWorkflow
-          result <- recvMessage pool workflowId (OperationId 1) (Millis 150) (Just (Topic "approval"))
+          result <- recvMessage pool workflowId (OperationId 1) (millisDuration 150) (Just (Topic "approval"))
           result @?= Nothing,
       testCase "a second take of one recv step reads the winner's record" $
         withDBOSPool $ \pool -> do
@@ -219,11 +225,11 @@ tests =
           -- Two takes of the same step (a duplicate execution): the first
           -- wins the step row; the second must survive the conflict instead
           -- of dying on it.
-          now <- currentTimeMillis
-          first <- runDbOrFail pool (takeNotificationSession workflowId (OperationId 1) (Just (Topic "approval")) (Millis now) (Millis now))
+          now <- timestampNow
+          first <- runDbOrFail pool (takeNotificationSession workflowId (OperationId 1) (Just (Topic "approval")) now now)
           assertBool "expected the first take to win a message" (isJust first)
-          _ <- runDbOrFail pool (takeNotificationSession workflowId (OperationId 1) (Just (Topic "approval")) (Millis now) (Millis now))
-          replayed <- recvMessage pool workflowId (OperationId 1) (Millis 2000) (Just (Topic "approval"))
+          _ <- runDbOrFail pool (takeNotificationSession workflowId (OperationId 1) (Just (Topic "approval")) now now)
+          replayed <- recvMessage pool workflowId (OperationId 1) (millisDuration 2000) (Just (Topic "approval"))
           replayed @?= first,
       testCase "send_bulk delivers every message in one call" $
         withDBOSPool $ \pool -> do
@@ -238,8 +244,8 @@ tests =
             [ messageTo firstId (Topic "approval") (encodeWorkflowValue ("yes" :: Text)),
               messageTo secondId (Topic "approval") (encodeWorkflowValue ("yes" :: Text))
             ]
-          first <- recvMessage pool firstId (OperationId 1) (Millis 2000) (Just (Topic "approval"))
-          second <- recvMessage pool secondId (OperationId 1) (Millis 2000) (Just (Topic "approval"))
+          first <- recvMessage pool firstId (OperationId 1) (millisDuration 2000) (Just (Topic "approval"))
+          second <- recvMessage pool secondId (OperationId 1) (millisDuration 2000) (Just (Topic "approval"))
           first @?= Just (encodeWorkflowValue ("yes" :: Text))
           second @?= Just (encodeWorkflowValue ("yes" :: Text)),
       testCase "lists workflows by name, newest first" $
@@ -315,7 +321,7 @@ tests =
           executorId <- freshExecutorId "hs-exec-dbdown"
           registry <- case registerWorkflow
             (WorkflowName "dbDownWorkflow")
-            (\_ _ _ -> throwIO (DbosDbError "pool exhausted"))
+            (\_ _ _ -> throwIO (Backend (BackendError "pool exhausted" Nothing Connection)))
             emptyRegistry of
             Left err -> fail ("registration failed: " <> show err)
             Right registry -> pure registry
@@ -324,9 +330,10 @@ tests =
           -- instead of a permanent ERROR.
           outcome <-
             try (runWorkflow pool registry (WorkflowName "dbDownWorkflow") workflowId Nothing executorId (ApplicationVersion "v1")) ::
-              IO (Either DbosDbError (Either WorkflowRunError SerializedWorkflowValue))
+              IO (Either Error (Either WorkflowRunError SerializedWorkflowValue))
           case outcome of
-            Left (DbosDbError _) -> pure ()
+            Left (Backend _) -> pure ()
+            Left other -> fail ("expected a backend failure, got: " <> show other)
             Right _ -> fail "expected the database failure to escape"
           status <- fetchWorkflowStatus pool workflowId
           status @?= Just Pending,
@@ -437,7 +444,7 @@ tests =
       testCase "a queue runs three of five and honours a raised limit" $
         withDBOSPool $ \pool -> do
           queueName <- uniqueQueueName "hs-starter-queue"
-          registerQueue pool queueName 3 NeverUpdate
+          registerQueue pool queueName 3 LeaveExisting
           stored <- fetchQueueWorkerConcurrency pool queueName
           stored @?= Just 3
           executorId <- freshExecutorId "hs-exec-queue"
@@ -459,12 +466,12 @@ tests =
           let allClaimed = firstBatch <> thirdBatch
           statuses <- fetchWorkflowStatuses pool allClaimed
           map snd statuses @?= replicate 5 Pending,
-      testCase "registering a queue with NeverUpdate leaves an existing row alone" $
+      testCase "registering a queue with LeaveExisting leaves an existing row alone" $
         withDBOSPool $ \pool -> do
           queueName <- uniqueQueueName "hs-starter-queue-keep"
-          registerQueue pool queueName 3 NeverUpdate
+          registerQueue pool queueName 3 LeaveExisting
           updateQueueWorkerConcurrency pool queueName 7
-          registerQueue pool queueName 3 NeverUpdate
+          registerQueue pool queueName 3 LeaveExisting
           stored <- fetchQueueWorkerConcurrency pool queueName
           stored @?= Just 7,
       testCase "crash mid-run and resume after the last finished step" $
@@ -496,7 +503,7 @@ tests =
       testCase "a supervisor pass claims up to the limit while work is running" $
         withDBOSPool $ \pool -> do
           queueName <- uniqueQueueName "hs-starter-super"
-          registerQueue pool queueName 2 NeverUpdate
+          registerQueue pool queueName 2 LeaveExisting
           executorId <- freshExecutorId "hs-exec-super"
           workflowIds <- traverse (const (freshWorkflowId "hs-starter-super-wf")) [1 .. 3 :: Int]
           mapM_
@@ -523,7 +530,7 @@ tests =
       testCase "a skipped claim is released so a later pass picks it up" $
         withDBOSPool $ \pool -> do
           queueName <- uniqueQueueName "hs-starter-skip"
-          registerQueue pool queueName 3 NeverUpdate
+          registerQueue pool queueName 3 LeaveExisting
           workflowId <- freshWorkflowId "hs-starter-skip-wf"
           enqueueWorkflow pool workflowId (WorkflowName "lateWorkflow") queueName
           skipId <- freshExecutorId "hs-exec-skip"
@@ -573,7 +580,7 @@ tests =
       testCase "dispatched work runs to SUCCESS" $
         withDBOSPool $ \pool -> do
           queueName <- uniqueQueueName "hs-starter-done"
-          registerQueue pool queueName 3 NeverUpdate
+          registerQueue pool queueName 3 LeaveExisting
           executorId <- freshExecutorId "hs-exec-done"
           workflowIds <- traverse (const (freshWorkflowId "hs-starter-done-wf")) [1 .. 3 :: Int]
           mapM_
@@ -595,7 +602,7 @@ tests =
       testCase "the supervisor loop dispatches queued work until stopped" $
         withDBOSPool $ \pool -> do
           queueName <- uniqueQueueName "hs-starter-loop"
-          registerQueue pool queueName 10 NeverUpdate
+          registerQueue pool queueName 10 LeaveExisting
           executorId <- freshExecutorId "hs-exec-loop"
           workflowIds <- traverse (const (freshWorkflowId "hs-starter-loop-wf")) [1 .. 2 :: Int]
           mapM_
@@ -609,7 +616,7 @@ tests =
             Right registry -> pure registry
           (executor, _) <-
             launchExecutor pool executorId (ApplicationVersion "v1") registry nullLogAction
-          withAsync (superviseForever executor [queueName] (Millis 50)) $ \_ ->
+          withAsync (superviseForever executor [queueName] (millisDuration 50)) $ \_ ->
             awaitSuccesses pool workflowIds 100
           statuses <- fetchWorkflowStatuses pool workflowIds
           map snd statuses @?= replicate 2 Success

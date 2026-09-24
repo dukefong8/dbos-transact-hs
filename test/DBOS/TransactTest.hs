@@ -12,7 +12,7 @@ import DBOS.Transact
   ( ApplicationVersion (..),
     AwaitedWorkflowResult (..),
     ExecutorId (..),
-    Millis (..),
+    Timestamp (..),
     OperationCheckpoint (..),
     OperationCheckpointDecodeError (..),
     OperationCheckpointReplay (..),
@@ -33,6 +33,7 @@ import DBOS.Transact
     WorkflowStatusDecodeError (..),
     checkOperationExecution,
     getWorkflowExecution,
+    isTerminal,
     nullLogAction,
     parseOperationCheckpoint,
     parseWorkflowExecution,
@@ -40,6 +41,7 @@ import DBOS.Transact
     replayOperationCheckpoint,
     withOperationCheckpointStore,
     withWorkflowExecutionStore,
+    workflowStatusText,
   )
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit ((@?=), testCase)
@@ -49,7 +51,8 @@ tests =
   testGroup
     "DBOS Transact"
     [ workflowExecutionTests,
-      operationCheckpointTests
+      operationCheckpointTests,
+      statusBehaviorTests
     ]
 
 workflowExecutionTests :: TestTree
@@ -107,6 +110,18 @@ workflowExecutionTests =
         result @?= Right Nothing
     ]
 
+statusBehaviorTests :: TestTree
+statusBehaviorTests =
+  testGroup
+    "Workflow Status behavior"
+    [ testCase "renders the stored spellings" $
+        (workflowStatusText <$> [Pending, Success, Error, MaxRecoveryAttemptsExceeded, Cancelled, Enqueued, Delayed])
+          @?= ["PENDING", "SUCCESS", "ERROR", "MAX_RECOVERY_ATTEMPTS_EXCEEDED", "CANCELLED", "ENQUEUED", "DELAYED"],
+      testCase "only finished workflows are terminal" $
+        (isTerminal <$> [Pending, Success, Error, MaxRecoveryAttemptsExceeded, Cancelled, Enqueued, Delayed])
+          @?= [False, True, True, False, True, False, False]
+    ]
+
 operationCheckpointTests :: TestTree
 operationCheckpointTests =
   testGroup
@@ -143,8 +158,8 @@ operationCheckpointTests =
           (Just stepOutput)
           Nothing
           Nothing
-          (Just (Millis 100))
-          (Just (Millis 120))
+          (Just (Timestamp 100))
+          (Just (Timestamp 120))
           @?= Right sequencedStepCheckpoint,
       testCase "parses a Python get-result checkpoint link with serialized output" $
         parseOperationCheckpoint
@@ -233,8 +248,8 @@ completedWorkflowRow =
             },
       rowWorkflowError = Nothing,
       rowWorkflowExecutor = Just "local",
-      rowWorkflowCreatedAt = Just (Millis 1),
-      rowWorkflowUpdatedAt = Just (Millis 2),
+      rowWorkflowCreatedAt = Just (Timestamp 1),
+      rowWorkflowUpdatedAt = Just (Timestamp 2),
       rowWorkflowRecoveryAttempts = Just 1,
       rowWorkflowQueueName = Just "default",
       rowWorkflowSerialization = Just "json",
@@ -259,8 +274,8 @@ completedWorkflowExecution =
               )
           ),
       workflowExecutionExecutor = Just (ExecutorId "local"),
-      workflowExecutionCreatedAt = Just (Millis 1),
-      workflowExecutionUpdatedAt = Just (Millis 2),
+      workflowExecutionCreatedAt = Just (Timestamp 1),
+      workflowExecutionUpdatedAt = Just (Timestamp 2),
       workflowExecutionRecoveryAttempts = Just 1,
       workflowExecutionQueueName = Just "default",
       workflowExecutionSerialization = Just (Serialization "json"),
@@ -355,8 +370,8 @@ sequencedStepCheckpoint =
   OperationCheckpoint
     { checkpointOperationId = OperationId 2,
       checkpointOperationName = OperationName "TryConcExec2.step2",
-      checkpointStartedAt = Just (Millis 100),
-      checkpointCompletedAt = Just (Millis 120),
+      checkpointStartedAt = Just (Timestamp 100),
+      checkpointCompletedAt = Just (Timestamp 120),
       checkpointResult = CheckpointOutput stepOutput
     }
 

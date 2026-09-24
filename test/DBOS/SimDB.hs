@@ -4,7 +4,10 @@
 -- checkpoints and workflow events. Backed by 'TVar's of 'Map's, so the same
 -- code runs under @io-sim@ and @IO@ through the 'MonadSTM' interface. Key
 -- scoping and first-write-wins recording mirror the Postgres contract; SQL
--- semantics (conflict clauses, locking reads) stay live-DB tested.
+-- semantics (conflict clauses, locking reads) stay live-DB tested. One
+-- recorded divergence: this model stores no checkpoint timestamps (always
+-- 'Nothing'), while Postgres stamps both — harmless while replay reads only
+-- the result, but revisit if replay ever consults timing.
 module DBOS.SimDB
   ( SimDB (..),
     newSimDB,

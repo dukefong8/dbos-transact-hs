@@ -38,7 +38,7 @@ import DBOS.SystemDB.Postgres
 import DBOS.Transact
   ( ApplicationVersion (..),
     ExecutorId (..),
-    Millis (..),
+    Timestamp (..),
     OperationCheckpointReplay (..),
     OperationCheckpointResult (..),
     OperationId (..),
@@ -324,8 +324,8 @@ expectedWorkflowExecution =
               )
           ),
       workflowExecutionExecutor = Just (ExecutorId "local"),
-      workflowExecutionCreatedAt = Just (Millis 1),
-      workflowExecutionUpdatedAt = Just (Millis 2),
+      workflowExecutionCreatedAt = Just (Timestamp 1),
+      workflowExecutionUpdatedAt = Just (Timestamp 2),
       workflowExecutionRecoveryAttempts = Just 1,
       workflowExecutionQueueName = Just "default",
       workflowExecutionSerialization = Just (Serialization "json"),

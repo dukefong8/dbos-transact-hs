@@ -2,10 +2,11 @@
 
 module DBOS.Transact.WorkflowExecutionTypes
   ( ApplicationVersion (..),
+    Duration (..),
     ExecutorId (..),
-    Millis (..),
     SerializedWorkflowValue (..),
     Serialization (..),
+    Timestamp (..),
     WorkflowExecution (..),
     WorkflowExecutionRow (..),
     WorkflowId (..),
@@ -16,31 +17,17 @@ where
 
 import Data.Int (Int64)
 import Data.Text (Text)
-import DBOS.Transact.WorkflowExecutionStatus (WorkflowStatus)
-
-newtype WorkflowId = WorkflowId Text
-  deriving stock (Eq, Show)
-
-newtype WorkflowName = WorkflowName Text
-  deriving stock (Eq, Ord, Show)
-
-newtype ExecutorId = ExecutorId Text
-  deriving stock (Eq, Show)
-
-newtype ApplicationVersion = ApplicationVersion Text
-  deriving stock (Eq, Show)
-
-newtype Millis = Millis Int64
-  deriving stock (Eq, Show)
-
-newtype Serialization = Serialization Text
-  deriving stock (Eq, Show)
-
-data SerializedWorkflowValue = SerializedWorkflowValue
-  { serializedText :: Text,
-    serializedSerialization :: Maybe Serialization
-  }
-  deriving stock (Eq, Show)
+import DBOS.SystemDB.Types
+  ( ApplicationVersion (..),
+    Duration (..),
+    Timestamp (..),
+    ExecutorId (..),
+    Serialization (..),
+    SerializedWorkflowValue (..),
+    WorkflowId (..),
+    WorkflowName (..),
+    WorkflowStatus,
+  )
 
 data WorkflowOutcome
   = WorkflowSucceeded SerializedWorkflowValue
@@ -56,8 +43,8 @@ data WorkflowExecution = WorkflowExecution
     workflowExecutionInputs :: Maybe SerializedWorkflowValue,
     workflowExecutionOutcome :: Maybe WorkflowOutcome,
     workflowExecutionExecutor :: Maybe ExecutorId,
-    workflowExecutionCreatedAt :: Maybe Millis,
-    workflowExecutionUpdatedAt :: Maybe Millis,
+    workflowExecutionCreatedAt :: Maybe Timestamp,
+    workflowExecutionUpdatedAt :: Maybe Timestamp,
     workflowExecutionRecoveryAttempts :: Maybe Int64,
     workflowExecutionQueueName :: Maybe Text,
     workflowExecutionSerialization :: Maybe Serialization,
@@ -74,8 +61,8 @@ data WorkflowExecutionRow = WorkflowExecutionRow
     rowWorkflowOutput :: Maybe SerializedWorkflowValue,
     rowWorkflowError :: Maybe SerializedWorkflowValue,
     rowWorkflowExecutor :: Maybe Text,
-    rowWorkflowCreatedAt :: Maybe Millis,
-    rowWorkflowUpdatedAt :: Maybe Millis,
+    rowWorkflowCreatedAt :: Maybe Timestamp,
+    rowWorkflowUpdatedAt :: Maybe Timestamp,
     rowWorkflowRecoveryAttempts :: Maybe Int64,
     rowWorkflowQueueName :: Maybe Text,
     rowWorkflowSerialization :: Maybe Text,

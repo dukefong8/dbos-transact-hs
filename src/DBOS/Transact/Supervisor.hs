@@ -18,20 +18,20 @@ import Control.Concurrent.Async (AsyncCancelled (..))
 import Control.Concurrent.STM (readTVarIO)
 import Control.Exception (AsyncException (..), SomeException, fromException, throwIO, try)
 import Control.Monad (unless, when)
+import DBOS.SystemDB.Types (Duration (..), durationAsMillis)
 import DBOS.SystemDB.Types (QueueName (..))
 import DBOS.Transact.Executor (Executor (..), dequeuePass)
 import DBOS.Transact.Log (DbosLogMsg (..), DbosSeverity (..))
-import DBOS.Transact.WorkflowExecutionTypes (Millis (..))
 import Data.Functor (void)
 
-superviseForever :: Executor -> [QueueName] -> Millis -> IO ()
-superviseForever executor queues (Millis intervalMs) = loop
+superviseForever :: Executor -> [QueueName] -> Duration -> IO ()
+superviseForever executor queues duration = loop
   where
     loop = do
       closed <- readTVarIO executor.executorClosed
       unless closed $ do
         mapM_ pollQueue queues
-        threadDelay (fromIntegral intervalMs * 1000)
+        threadDelay (fromInteger (durationAsMillis duration * 1000))
         loop
     -- The close flag is re-checked per queue so a shutdown landing mid-round
     -- stops claiming instead of parking rows PENDING that need recovery.

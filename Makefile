@@ -8,13 +8,14 @@ PACKAGE ?= dbos-transact-hs
 .PHONY: build dev env hie pg test db-migrate
 
 dev:
-	ghciwatch --clear --no-interrupt-reloads \
+	ghciwatch --no-interrupt-reloads \
 		--command ghci-$(GHC) \
-		--error-file .ghcid.txt \
+		--error-file ghcid.txt \
 		--restart-glob Makefile \
 		--restart-glob .ghc.environment.* \
 		--restart-glob '!dist-newstyle/**/*.cabal' \
 		--reload-glob  '!dist-newstyle/**/*.hs' \
+		--enable-eval \
 		--watch src \
 		--watch test
 
@@ -34,9 +35,8 @@ env:
 	rm .ghc.environment.*$(GHC)* || true
 	cabal install -w ghc-$(GHC) --enable-documentation \
 		--package-env . --lib \
-		base containers stm-containers text vector template-haskell \
-		bytestring time uuid exceptions base64-bytestring \
-		aeson generic-data safe-wild-cards strict-wrapper \
+		base template-haskell bytestring text containers vector stm-containers \
+		aeson safe-wild-cards strict-wrapper time uuid \
+		bluefin co-log co-log-core fast-logger io-classes io-classes:strict-stm io-classes:strict-mvar io-classes:si-timers io-classes:mtl io-sim mtl \
 		hasql ihp-typed-sql hasql-pool hasql-postgresql-types postgresql-types \
-		async bluefin co-log co-log-core fast-logger mtl io-classes io-sim stm \
-		breakpoint nothunks rapid hedgehog tasty tasty-hunit tasty-hedgehog tasty-golden
+		breakpoint nothunks rapid silently tasty tasty-hunit tasty-golden

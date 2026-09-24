@@ -25,6 +25,8 @@ import DBOS.SystemDB.Postgres
     fetchOperationCheckpoint,
     recordSleep,
   )
+import DBOS.SystemDB.Types (Duration (..), durationAsMillis, timestampFromEpochMs, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types (sleepStepName)
 import DBOS.Transact.OperationCheckpointTypes
   ( OperationCheckpoint (..),
     OperationCheckpointResult (..),
@@ -33,14 +35,12 @@ import DBOS.Transact.OperationCheckpointTypes
   )
 import DBOS.Transact.Store (StepStore (..))
 import DBOS.Transact.WorkflowExecutionTypes
-  ( Millis (..),
-    Serialization (..),
+  ( Serialization (..),
     SerializedWorkflowValue (..),
     WorkflowId,
   )
 import Data.Int (Int64)
 import Data.Text (pack, unpack)
-import Data.Time.Clock.POSIX (getPOSIXTime)
 
 data StepError
   = StepRecordedError SerializedWorkflowValue
@@ -79,9 +79,9 @@ sleepStep ::
   Pool ->
   WorkflowId ->
   OperationId ->
-  Millis ->
+  Duration ->
   IO ()
-sleepStep pool workflowId operationId (Millis durationMs) = do
+sleepStep pool workflowId operationId duration = do
   checkpoint <- fetchOperationCheckpoint pool workflowId operationId
   case checkpoint of
     Just recorded ->
@@ -89,35 +89,32 @@ sleepStep pool workflowId operationId (Millis durationMs) = do
         CheckpointOutput output -> waitUntilRecorded output
         _ -> pure ()
     Nothing -> do
-      now <- currentTimeMillis
-      let started = Millis now
-          wakeAt = Millis (now + durationMs)
+      now <- timestampNow
+      let durationMs = fromInteger (durationAsMillis duration)
+          wakeAtMs = timestampToEpochMs now + durationMs
       recordSleep
         pool
         workflowId
         operationId
         sleepOperationName
-        (SerializedWorkflowValue (pack (show (now + durationMs))) (Just (Serialization "portable_json")))
-        started
-        wakeAt
-      threadDelay (millisToMicros (max 0 durationMs))
+        (SerializedWorkflowValue (pack (show wakeAtMs)) (Just (Serialization "portable_json")))
+        now
+        (timestampFromEpochMs wakeAtMs)
+      threadDelay (millisToMicros durationMs)
 
 -- | The step name the oracle records every durable sleep under.
 sleepOperationName :: OperationName
-sleepOperationName = OperationName "DBOS.sleep"
+sleepOperationName = OperationName sleepStepName
 
 -- | A replayed sleep waits until the instant the first run recorded, which
 -- may already have passed — then it waits not at all. The stored text is a
 -- bare integer (@show@ on @Text@ would add quotes and never parse).
 waitUntilRecorded :: SerializedWorkflowValue -> IO ()
 waitUntilRecorded output = do
-  now <- currentTimeMillis
+  now <- timestampNow
   case reads (unpack output.serializedText) of
-    [(wakeAt, _)] -> threadDelay (millisToMicros (max 0 (wakeAt - now)))
+    [(wakeAt, _)] -> threadDelay (millisToMicros (max 0 (wakeAt - timestampToEpochMs now)))
     _ -> pure ()
-
-currentTimeMillis :: IO Int64
-currentTimeMillis = round . (* 1000) <$> getPOSIXTime
 
 millisToMicros :: Int64 -> Int
 millisToMicros ms = fromIntegral (ms * 1000)

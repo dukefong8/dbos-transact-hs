@@ -1,10 +1,9 @@
 :set -XGHC2024
-:seti -XDuplicateRecordFields
-:seti -XNoFieldSelectors
-:seti -XOverloadedLabels
-:seti -XOverloadedRecordDot
-:seti -XMagicHash
-:seti -XPartialTypeSignatures
+:set -XDuplicateRecordFields
+:set -XNoFieldSelectors
+:set -XOverloadedLabels
+:set -XOverloadedRecordDot
+:set -XPartialTypeSignatures
 :set -XExplicitNamespaces
 :set -Wall
 

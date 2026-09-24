@@ -11,7 +11,8 @@ import DBOS.Transact.OperationCheckpointTypes
     OperationId,
     OperationName,
   )
-import DBOS.Transact.WorkflowExecutionTypes (Millis, SerializedWorkflowValue, WorkflowId)
+import DBOS.SystemDB.Types (Timestamp)
+import DBOS.Transact.WorkflowExecutionTypes (SerializedWorkflowValue, WorkflowId)
 
 parseOperationCheckpoint ::
   OperationId ->
@@ -19,8 +20,8 @@ parseOperationCheckpoint ::
   Maybe SerializedWorkflowValue ->
   Maybe SerializedWorkflowValue ->
   Maybe WorkflowId ->
-  Maybe Millis ->
-  Maybe Millis ->
+  Maybe Timestamp ->
+  Maybe Timestamp ->
   Either OperationCheckpointDecodeError OperationCheckpoint
 parseOperationCheckpoint operationId operationName output errorValue childWorkflowId startedAt completedAt =
   OperationCheckpoint operationId operationName startedAt completedAt

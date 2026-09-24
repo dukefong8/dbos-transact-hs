@@ -29,7 +29,7 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB
   ( Pool,
-    QueueConflict (..),
+    OnExistingQueue (..),
     QueueName (..),
     Topic (..),
     acquirePool,
@@ -41,6 +41,7 @@ import DBOS.SystemDB
     internalQueueName,
     listWorkflowIdsByName,
     messageTo,
+    millisDuration,
     postgresStepStore,
     recvMessage,
     registerQueue,
@@ -55,7 +56,6 @@ import DBOS.Transact
   ( ApplicationVersion (..),
     Executor (..),
     ExecutorId (..),
-    Millis (..),
     OperationId (..),
     OperationName (..),
     SerializedWorkflowValue,
@@ -250,12 +250,12 @@ orderWorkflowBody pool workflowId _ = do
   pure (encodeWorkflowValue ("Order complete" :: Text))
   where
     publish (stage, key) = do
-      sleepStep pool workflowId (OperationId stage) (Millis orderStepMs)
+      sleepStep pool workflowId (OperationId stage) (millisDuration (fromIntegral orderStepMs))
       setEvent pool workflowId key (encodeWorkflowValue (key <> " at step " <> pack (show stage)))
 
 approvalWorkflowBody :: WorkflowBody
 approvalWorkflowBody pool workflowId _ = do
-  decision <- recvMessage pool workflowId (OperationId 1) (Millis approvalTimeoutMs) (Just approvalTopic)
+  decision <- recvMessage pool workflowId (OperationId 1) (millisDuration (fromIntegral approvalTimeoutMs)) (Just approvalTopic)
   let outcome = case decision of
         Just stored -> case decodeWorkflowValue "result" (Just stored) of
           Right text -> text :: Text
@@ -266,7 +266,7 @@ approvalWorkflowBody pool workflowId _ = do
 
 enqueuedWorkflowBody :: WorkflowBody
 enqueuedWorkflowBody pool workflowId _ = do
-  sleepStep pool workflowId (OperationId 1) (Millis queueSleepMs)
+  sleepStep pool workflowId (OperationId 1) (millisDuration (fromIntegral queueSleepMs))
   pure (encodeWorkflowValue ("Enqueued workflow completed" :: Text))
 
 -- ---------------------------------------------------------------------------
@@ -356,7 +356,7 @@ dispatch app EventsReadAction request respond = do
         Nothing -> respond (jsonOk (object ["key" .= key, "value" .= (Nothing :: Maybe Text), "waited_ms" .= (0 :: Int)]))
         Just workflowId -> do
           started <- getCurrentTime
-          stored <- getEventBlocking app.appPool workflowId key (Millis eventReadTimeoutMs)
+          stored <- getEventBlocking app.appPool workflowId key (millisDuration (fromIntegral eventReadTimeoutMs))
           finished <- getCurrentTime
           let waitedMs = round (diffUTCTime finished started * 1000) :: Int
           respond (jsonOk (object ["key" .= key, "value" .= (stored >>= decodeToText), "waited_ms" .= waitedMs]))
@@ -441,11 +441,11 @@ main = withStdoutLogger $ \logger -> do
   registry <- buildRegistry
   (executor, _) <-
     launchExecutor pool (ExecutorId executorId) (ApplicationVersion applicationVersion) registry logger
-  registerQueue pool demoQueueName defaultWorkerConcurrency NeverUpdate
+  registerQueue pool demoQueueName defaultWorkerConcurrency LeaveExisting
   page <- LBS.readFile "app/page.html"
   orderId <- newTVarIO Nothing
   queuedIds <- newTVarIO []
-  supervisor <- async (superviseForever executor [demoQueueName, internalQueueName] (Millis supervisorIntervalMs))
+  supervisor <- async (superviseForever executor [demoQueueName, internalQueueName] (millisDuration (fromIntegral supervisorIntervalMs)))
   mainThread <- myThreadId
   -- exitSuccess only terminates the calling thread: run from the signal
   -- handler it kills just the handler and the process lingers in warp.

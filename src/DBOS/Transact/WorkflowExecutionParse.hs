@@ -6,7 +6,7 @@ module DBOS.Transact.WorkflowExecutionParse
   )
 where
 
-import DBOS.Transact.WorkflowExecutionStatus
+import DBOS.SystemDB.Types
   ( WorkflowStatus (..),
     WorkflowStatusDecodeError,
     parseWorkflowStatus,

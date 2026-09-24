@@ -11,8 +11,8 @@ module DBOS.Transact.OperationCheckpointTypes
   )
 where
 
+import DBOS.SystemDB.Types (Timestamp)
 import DBOS.Transact.WorkflowExecutionTypes (SerializedWorkflowValue (..), WorkflowId)
-import DBOS.Transact.WorkflowExecutionTypes qualified as WorkflowExecution
 import Data.Text (Text)
 
 newtype OperationId = OperationId Int
@@ -36,8 +36,8 @@ data AwaitedWorkflowResult
 data OperationCheckpoint = OperationCheckpoint
   { checkpointOperationId :: OperationId,
     checkpointOperationName :: OperationName,
-    checkpointStartedAt :: Maybe WorkflowExecution.Millis,
-    checkpointCompletedAt :: Maybe WorkflowExecution.Millis,
+    checkpointStartedAt :: Maybe Timestamp,
+    checkpointCompletedAt :: Maybe Timestamp,
     checkpointResult :: OperationCheckpointResult
   }
   deriving stock (Eq, Show)

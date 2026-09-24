@@ -95,7 +95,10 @@ sim = do
       events = simEventStore db
       workflowId = WorkflowId "sim-wf-1"
   -- First attempt: step one finishes, then the process "crashes".
-  _ <- try (simBody steps events executions workflowId (Just (OperationId 2))) :: IOSim s (Either SimCrash ())
+  crashed <- try (simBody steps events executions workflowId (Just (OperationId 2))) :: IOSim s (Either SimCrash ())
+  case crashed of
+    Left SimCrash -> pure ()
+    Right () -> throwM (userError "the simulated crash never fired; this golden would test nothing")
   -- Restart: step one replays from its checkpoint instead of running again.
   simBody steps events executions workflowId Nothing
   count <- readTVarIO executions

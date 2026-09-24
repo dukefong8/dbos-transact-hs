@@ -1,6 +1,6 @@
 module DBOS.SystemDB
-  ( Pool.Pool,
-    Postgres.DbosDbError (..),
+  ( -- * Pool and sessions
+    Pool.Pool,
     Postgres.WorkflowStartDecision (..),
     Postgres.acquirePool,
     Postgres.releasePool,
@@ -33,36 +33,41 @@ module DBOS.SystemDB
     Postgres.dequeueWorkflows,
     Postgres.fetchWorkflowStatuses,
     Postgres.reenqueueForRecovery,
-    IdempotencyKey (..),
-    MessageUUID (..),
-    NotificationRow (..),
-    QueueConflict (..),
-    QueueName (..),
-    SendMessage (..),
-    Topic (..),
-    internalQueueName,
-    message,
-    messageTo,
-    messageUUIDForSend,
-    notificationRowForMessage,
-    nullTopicSentinel,
+    -- * Domain types (types.rs)
+    module Types,
+    -- * Error channel (error.rs)
+    Error (..),
+    BackendError (..),
+    BackendErrorKind (..),
+    invalidInput,
+    renderError,
+    renderBackendError,
+    -- * Retry (retry.rs)
+    RetryPolicy (..),
+    defaultRetryPolicy,
+    shouldRetry,
+    jitter,
+    withRetry,
+    uuidEntropy,
   )
 where
 
-import DBOS.SystemDB.Postgres qualified as Postgres
-import Hasql.Pool qualified as Pool
-import DBOS.SystemDB.Types
-  ( IdempotencyKey (..),
-    MessageUUID (..),
-    NotificationRow (..),
-    QueueConflict (..),
-    QueueName (..),
-    SendMessage (..),
-    Topic (..),
-    internalQueueName,
-    message,
-    messageTo,
-    messageUUIDForSend,
-    notificationRowForMessage,
-    nullTopicSentinel,
+import DBOS.SystemDB.Error
+  ( BackendError (..),
+    BackendErrorKind (..),
+    Error (..),
+    invalidInput,
+    renderBackendError,
+    renderError,
   )
+import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.SystemDB.Retry
+  ( RetryPolicy (..),
+    defaultRetryPolicy,
+    jitter,
+    shouldRetry,
+    uuidEntropy,
+    withRetry,
+  )
+import DBOS.SystemDB.Types as Types
+import Hasql.Pool qualified as Pool

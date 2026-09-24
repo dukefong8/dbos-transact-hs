@@ -17,9 +17,10 @@ where
 
 import Control.Concurrent.Async (AsyncCancelled (..))
 import Control.Exception (AsyncException (..), SomeException, fromException, throwIO, try)
+import DBOS.SystemDB.Error (Error (..))
+import DBOS.SystemDB.Types (WorkflowStatus (..))
 import DBOS.SystemDB.Postgres
-  ( DbosDbError (..),
-    Pool,
+  ( Pool,
     WorkflowStartDecision (..),
     fetchWorkflowExecutionRow,
     tryStartWorkflow,
@@ -28,7 +29,6 @@ import DBOS.SystemDB.Postgres
 import DBOS.Transact.Codec (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Registry (WorkflowRegistry, lookupWorkflow)
 import DBOS.Transact.WorkflowExecutionParse (parseWorkflowExecution)
-import DBOS.Transact.WorkflowExecutionStatus (WorkflowStatus (..))
 import DBOS.Transact.WorkflowExecutionTypes
   ( ApplicationVersion,
     ExecutorId,
@@ -95,7 +95,7 @@ runWorkflow pool registry name workflowId input executorId applicationVersion =
         Left failure
           | Just AsyncCancelled <- fromException failure -> throwIO failure
           | Just (_ :: AsyncException) <- fromException failure -> throwIO failure
-          | Just (_ :: DbosDbError) <- fromException failure -> throwIO failure
+          | Just (_ :: Error) <- fromException failure -> throwIO failure
           | otherwise -> do
               let complaint = encodeWorkflowValue (show (failure :: SomeException))
               updateWorkflowOutcome pool workflowId executorId Error Nothing (Just complaint)

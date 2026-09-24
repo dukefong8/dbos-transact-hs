@@ -6,7 +6,9 @@ build-type: Simple
 common commons
   default-language: GHC2024
   default-extensions:
+    DuplicateRecordFields
     NoFieldSelectors
+    OverloadedLabels
     OverloadedRecordDot
   ghc-options: -Wall -threaded
   build-depends:
@@ -27,6 +29,10 @@ common commons
     hasql-postgresql-types,
     ihp-typed-sql,
     io-classes,
+    io-classes:mtl,
+    io-classes:si-timers,
+    io-classes:strict-mvar,
+    io-classes:strict-stm,
     io-sim,
     mtl,
     postgresql-types,
@@ -60,8 +66,9 @@ library
     DBOS.Transact.Supervisor
     DBOS.Transact.Workflow
     DBOS.SystemDB.Types
+    DBOS.SystemDB.Error
+    DBOS.SystemDB.Retry
     DBOS.Transact.WorkflowExecutionParse
-    DBOS.Transact.WorkflowExecutionStatus
     DBOS.Transact.WorkflowExecutionTypes
 
 test-suite test
@@ -76,6 +83,9 @@ test-suite test
     DBOS.SimDB
     DBOS.SimTest
     DBOS.StarterTest
+    DBOS.SystemDB.TypesTest
+    DBOS.SystemDB.ErrorTest
+    DBOS.SystemDB.RetryTest
     DBOS.SystemDBHasqlTest
     DBOS.SystemDBTest
     DBOS.TransactTest
@@ -85,6 +95,7 @@ test-suite test
     hedgehog,
     nothunks,
     rapid,
+    silently,
     tasty,
     tasty-golden,
     tasty-hedgehog,
