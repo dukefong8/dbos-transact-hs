@@ -5,6 +5,7 @@ module DBOS.LogTest
   )
 where
 
+import DBOS.Prelude
 import Colog.Core.Action (LogAction (..))
 import DBOS.Transact (DbosLogMsg (..), DbosSeverity (..), WorkflowId (..), nullLogAction, withStdoutLogger)
 import Test.Tasty (TestTree, testGroup)

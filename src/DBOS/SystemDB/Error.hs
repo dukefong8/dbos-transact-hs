@@ -15,7 +15,7 @@ module DBOS.SystemDB.Error
   )
 where
 
-import Control.Exception (Exception)
+import DBOS.Prelude
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as Text

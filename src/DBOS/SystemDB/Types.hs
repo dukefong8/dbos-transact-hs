@@ -83,6 +83,7 @@ module DBOS.SystemDB.Types
     WrittenBy (..),
     newWorkflow,
     validateNewWorkflow,
+    validateAttributes,
     initialStatus,
     sleepStepName,
     recvStepName,
@@ -92,7 +93,7 @@ module DBOS.SystemDB.Types
     claimsOwnership,
     resolveWorkflowDelay,
     isValidApplicationName,
-    renameApplication,
+    renameFromApplication,
     defaultRenameBatchSize,
     defaultRenameBatching,
     zeroRowCounts,
@@ -148,9 +149,11 @@ module DBOS.SystemDB.Types
     defaultForkOptions,
     debounceValidate,
     outcomeStatus,
+    outcomeColumns,
   )
 where
 
+import DBOS.Prelude
 import Data.Char (isAscii, isAsciiLower, isDigit)
 import Data.Int (Int64)
 import Data.List (find)
@@ -162,9 +165,10 @@ import Data.Word (Word32, Word64)
 import Data.Aeson (Value (..), eitherDecodeStrict)
 import DBOS.SystemDB.Error (Error, invalidInput)
 import Control.Monad (guard)
-import Data.Time.Clock (NominalDiffTime, nominalDiffTimeToSeconds)
+import Control.Monad.Class.MonadTime (MonadTime, getCurrentTime)
+import Data.Time.Clock (nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
-import Data.Time.Clock.System (SystemTime (..), getSystemTime)
+import Data.Time.Clock.System (SystemTime (..))
 import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.Time.LocalTime (zonedTimeToUTC)
 
@@ -528,9 +532,11 @@ data RenameFrom
   deriving stock (Eq, Show)
 
 -- | The application being renamed, if the source names one. Mirrors
--- @RenameFrom::application@.
-renameApplication :: RenameFrom -> Maybe Text
-renameApplication source =
+-- @RenameFrom::application@. Spelled @renameFromApplication@ (not
+-- @renameApplication@): the class below takes the single-word camelCase
+-- name for the engine operation, so the accessor keeps the type name.
+renameFromApplication :: RenameFrom -> Maybe Text
+renameFromApplication source =
   case source of
     RenameApplication name             -> Just name
     RenameApplicationAndUnclaimed name -> Just name
@@ -1107,6 +1113,14 @@ outcomeStatus outcome =
     OutcomeOutput _ -> Success
     OutcomeError _  -> Error
 
+-- | The payload columns an outcome writes: a success carries output and no
+-- error, a failure the reverse. Mirrors @Outcome::columns@.
+outcomeColumns :: Outcome -> (Maybe Text, Maybe Text)
+outcomeColumns outcome =
+  case outcome of
+    OutcomeOutput value -> (value, Nothing)
+    OutcomeError message -> (Nothing, Just message)
+
 -- | What an awaited workflow did. 'Nothing' output is a void return, which
 -- is a success and not an absent result. Mirrors Rust @AwaitedOutcome@.
 data AwaitedOutcome
@@ -1477,13 +1491,13 @@ timestampToEpochMs (Timestamp ms) = ms
 
 -- | The current time, truncated to milliseconds. A clock set before 1970
 -- gives the epoch rather than panicking, mirroring @Timestamp::now@.
-timestampNow :: IO Timestamp
+-- Reads through 'MonadTime' rather than 'IO' so the same call returns real
+-- time in production and virtual time under @IOSim@ (ADR-0008, amended).
+timestampNow :: MonadTime m => m Timestamp
 timestampNow = do
-  MkSystemTime secs nanos <- getSystemTime
-  pure $
-    if secs < 0
-      then Timestamp 0
-      else Timestamp (fromInteger (toInteger secs * 1000 + toInteger nanos `div` 1000000))
+  now <- getCurrentTime
+  let ms = truncate (1000 * utcTimeToPOSIXSeconds now) :: Int64
+  pure (if ms < 0 then Timestamp 0 else Timestamp ms)
 
 -- | Converts to a 'SystemTime', or 'Nothing' for an instant before the epoch,
 -- mirroring @Timestamp::to_system_time@.

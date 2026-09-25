@@ -6,6 +6,7 @@ module DBOS.SystemDBTest
   )
 where
 
+import DBOS.Prelude
 import DBOS.Transact
   ( IdempotencyKey (..),
     MessageUUID (..),

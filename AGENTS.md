@@ -21,11 +21,12 @@ Repo guide for DBOS Haskell.
 - **One Rust type maps to exactly one Haskell type, by name.** Types, constructors, and fields keep the Rust spelling verbatim — no `SystemDb` prefixes, no renames for taste, no field splitting. Collisions with existing names are resolved as documented deviations (constructor prefixes), not by renaming the ported type.
 - **A split or a rename requires an explicit ADR** in `docs/adr/` recording why it was unavoidable. (No module split is in force today: the short-lived `DBOS.SystemDB.Time` leaf was merged back into `Types` once the cycle it broke was removed. Constructor-prefix collisions like `ForkStep` and `ErrorMaxRecoveryAttemptsExceeded` are the deviation style instead.)
 - Facades (`DBOS.SystemDB`, `DBOS.Transact`) and `[typedSql| ... |]` session modules are the port's own seams, not Rust module counterparts; they may re-export (`module Types`) but never redefine ported types.
+- **Keep the established `SystemDB` spelling in Haskell module, type, and class names.** Use `DBOS.SystemDB.*`, `SystemDB`, and `PostgresSystemDB` — never `SystemDatabase` — for Haskell artifacts. References to Rust's `trait SystemDatabase` keep the Rust spelling.
 
 ## TDD Loop
 
-1. Run or watch `make dev` first.
-2. **MUST: after every reload, `cat ghcid.txt` immediately — never sleep more than 5 seconds first.** ghciwatch always reloads in a few seconds; long waits hide both compiler errors and the tasty result, and a stale read wastes the loop (`tail ghcid.txt` is enough).
+1. Run or watch `make dev` first — it is the single watcher and it owns `ghcid.txt`.
+2. **MUST: after every reload, read `ghcid.txt` immediately — never sleep more than 5 seconds first.** `ghciwatch` reloads in a few seconds and rewrites `ghcid.txt` with that reload's whole result: compile errors and warnings, `All good (N modules)`, and the tasty eval output. While a reload is in flight the file still holds the previous reload, so re-read until the content changes; long waits hide both the compiler error and the tasty result (`tail ghcid.txt` is enough). Do not pipe, redirect, or `tee` the watcher — ghciwatch owns the file and a second writer corrupts it. Read the file, not the tmux pane.
 3. **MUST: exactly one test group is enabled before and during every edit**, via the `-- $>` / `--- $>` toggle in `test/Main.hs` — a reload that runs no tests verifies nothing. The watcher's eval must never overlap the live-DB suite: two suite binaries deadlock on the shared fixture rows (reproduced `40P01`).
 4. Use `ghci -e ':hoogle ...'` and `ghci -e ':browse ...'` before adding any new dependency.
 5. Write one public Tasty test at a time.
@@ -67,7 +68,7 @@ The database must always be migrated with the Rust runner first: run `make db-mi
 - Do not add schema migrations in Haskell.
 - Keep Python DBOS schema compatibility as the boundary.
 - Two layers: plain-Haskell internals hold all logic; Bluefin 0.9 `Ask`/`IOE` capabilities live only at the external seam, never in internals. Do not add DBOS-specific `Handle` records.
-- Use the existing tmux `make env` / `ghciwatch` pane; do not start duplicate watchers.
+- Use the existing tmux `make env` / `ghciwatch` pane; do not start duplicate watchers. `ghciwatch` owns `ghcid.txt`; never add a `tee` or redirect to it.
 
 ## Haskell Design Conventions (`~/dev/haskell-design-system`)
 

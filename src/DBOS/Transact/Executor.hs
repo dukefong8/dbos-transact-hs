@@ -18,25 +18,19 @@ module DBOS.Transact.Executor
   )
 where
 
+import DBOS.Prelude
 import Colog.Core.Action (LogAction (..))
-import Control.Concurrent.Async (Async, async, cancel, poll, waitCatch)
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Monad (filterM, unless, when)
 import Data.List ((\\))
 import Data.Maybe (isNothing)
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.SystemDB.Types (QueueName, internalQueueName)
+import DBOS.SystemDB.Types (ApplicationVersion, ExecutorId, QueueName, SerializedWorkflowValue, WorkflowId (..), WorkflowName (..), internalQueueName)
 import DBOS.Transact.Log (DbosLogMsg (..), DbosSeverity (..))
 import DBOS.Transact.Registry (WorkflowRegistry, lookupWorkflow)
 import DBOS.Transact.Workflow (WorkflowRunError, runWorkflow)
 import DBOS.Transact.WorkflowExecutionParse (parseWorkflowExecution)
 import DBOS.Transact.WorkflowExecutionTypes
-  ( ApplicationVersion,
-    ExecutorId,
-    SerializedWorkflowValue,
-    WorkflowExecution (..),
-    WorkflowId (..),
-    WorkflowName (..),
+  ( WorkflowExecution (..),
   )
 
 data Executor = Executor
@@ -45,8 +39,8 @@ data Executor = Executor
     executorVersion :: ApplicationVersion,
     executorRegistry :: WorkflowRegistry,
     executorLogger :: LogAction IO DbosLogMsg,
-    executorTasks :: TVar [Async (Either WorkflowRunError SerializedWorkflowValue)],
-    executorClosed :: TVar Bool
+    executorTasks :: StrictTVar IO [Async IO (Either WorkflowRunError SerializedWorkflowValue)],
+    executorClosed :: StrictTVar IO Bool
   }
 
 launchExecutor ::
@@ -57,7 +51,7 @@ launchExecutor ::
   LogAction IO DbosLogMsg ->
   IO (Executor, [WorkflowId])
 launchExecutor pool executorId version registry logger = do
-  recovered <- Postgres.reenqueueForRecovery pool executorId version internalQueueName
+  recovered <- Postgres.legacyReenqueueForRecovery pool executorId version internalQueueName
   tasks <- newTVarIO []
   closed <- newTVarIO False
   pure (Executor pool executorId version registry logger tasks closed, recovered)
@@ -70,11 +64,11 @@ spawnWorkflow ::
   WorkflowName ->
   WorkflowId ->
   Maybe SerializedWorkflowValue ->
-  IO (Async (Either WorkflowRunError SerializedWorkflowValue))
+  IO (Async IO (Either WorkflowRunError SerializedWorkflowValue))
 spawnWorkflow executor name workflowId input = do
   task <- async (runWorkflow executor.executorPool executor.executorRegistry name workflowId input executor.executorId executor.executorVersion)
   arrivalsClosed <- atomically $ do
-    modifyTVar' executor.executorTasks (task :)
+    modifyTVar executor.executorTasks (task :)
     readTVar executor.executorClosed
   when arrivalsClosed (cancel task)
   reapFinishedTasks executor
@@ -89,7 +83,7 @@ spawnWorkflow executor name workflowId input = do
 dequeuePass ::
   Executor ->
   QueueName ->
-  IO [Async (Either WorkflowRunError SerializedWorkflowValue)]
+  IO [Async IO (Either WorkflowRunError SerializedWorkflowValue)]
 dequeuePass executor queueName = do
   claimed <-
     Postgres.dequeueWorkflows
@@ -144,4 +138,4 @@ reapFinishedTasks :: Executor -> IO ()
 reapFinishedTasks executor = do
   tasks <- readTVarIO executor.executorTasks
   alive <- filterM (fmap isNothing . poll) tasks
-  atomically (modifyTVar' executor.executorTasks (\\ (tasks \\ alive)))
+  atomically (modifyTVar executor.executorTasks (\\ (tasks \\ alive)))

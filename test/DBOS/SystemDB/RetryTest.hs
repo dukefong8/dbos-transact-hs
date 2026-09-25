@@ -8,7 +8,7 @@ module DBOS.SystemDB.RetryTest
   )
 where
 
-import Control.Concurrent.Class.MonadSTM (atomically, newTVarIO, readTVarIO, writeTVar)
+import DBOS.Prelude
 import Control.Monad.Class.MonadSay (say)
 import Control.Monad.IOSim (IOSim, runSim, runSimTrace, selectTraceEventsSay)
 import Colog.Core.Action (LogAction (..))
@@ -112,7 +112,7 @@ simTests =
         length (selectTraceEventsSay (runSimTrace simAction)) @?= 2
     ]
 
--- | The same retry loop under @IOSim@: a TVar counts attempts, the logger
+-- | The same retry loop under @IOSim@: a StrictTVar IO counts attempts, the logger
 -- writes to the trace, and time is virtual.
 simAction :: IOSim s (Either Error Int)
 simAction = do

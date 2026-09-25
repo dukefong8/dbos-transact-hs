@@ -13,12 +13,13 @@ module DBOS.Transact.Store
   )
 where
 
+import DBOS.Prelude
 import DBOS.Transact.OperationCheckpointTypes
   ( OperationCheckpoint,
     OperationId,
     OperationName (..),
   )
-import DBOS.Transact.WorkflowExecutionTypes
+import DBOS.SystemDB.Types
   ( SerializedWorkflowValue,
     WorkflowId,
   )

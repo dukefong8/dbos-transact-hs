@@ -1,10 +1,15 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 
+-- | Legacy checkpoint replay for the starter seam: rerun the operation on
+-- no row, adopt the recorded result on a name match, refuse a renamed
+-- step. See "DBOS.Transact.OperationCheckpointTypes" for the seam status;
+-- do not extend.
 module DBOS.Transact.OperationCheckpointReplay
   ( replayOperationCheckpoint,
   )
 where
 
+import DBOS.Prelude
 import DBOS.Transact.OperationCheckpointTypes
   ( OperationCheckpoint (..),
     OperationCheckpointReplay (..),

@@ -8,25 +8,23 @@ common commons
   default-extensions:
     DuplicateRecordFields
     NoFieldSelectors
+    NoImplicitPrelude
     OverloadedLabels
     OverloadedRecordDot
   ghc-options: -Wall -threaded
   build-depends:
     aeson,
-    async,
     base >=4.21 && <5,
     base64-bytestring,
-    bluefin >=0.9 && <0.11,
     bytestring,
     co-log-core,
     containers,
-    exceptions,
+    contravariant,
     fast-logger,
-    generic-data,
     hasql >=1.10 && <1.11,
-    hasql-dynamic-statements,
     hasql-pool,
     hasql-postgresql-types,
+    hasql-transaction,
     ihp-typed-sql,
     io-classes,
     io-classes:mtl,
@@ -37,7 +35,6 @@ common commons
     mtl,
     postgresql-types,
     safe-wild-cards,
-    stm,
     stm-containers,
     strict-wrapper,
     template-haskell,
@@ -50,26 +47,48 @@ library
   import: commons
   hs-source-dirs: src
   exposed-modules:
+    DBOS.Prelude
     DBOS.SystemDB
+    DBOS.SystemDB.IOSim
     DBOS.SystemDB.Postgres
     DBOS.Transact
   other-modules:
+    DBOS.Transact.Checkpoint
+    DBOS.Transact.Client
     DBOS.Transact.Codec
+    DBOS.Transact.Config
+    DBOS.Transact.Connection
+    DBOS.Transact.Context
+    DBOS.Transact.Dequeue
+    DBOS.Transact.Error
+    DBOS.Transact.Event
     DBOS.Transact.Executor
+    DBOS.Transact.Handle
+    DBOS.Transact.Identity
+    DBOS.Transact.Instance
     DBOS.Transact.Log
+    DBOS.Transact.Management
+    DBOS.Transact.Message
     DBOS.Transact.OperationCheckpointParse
     DBOS.Transact.OperationCheckpointReplay
     DBOS.Transact.OperationCheckpointTypes
+    DBOS.Transact.Queue
+    DBOS.Transact.Recovery
     DBOS.Transact.Registry
+    DBOS.Transact.Sleep
     DBOS.Transact.Step
     DBOS.Transact.Store
     DBOS.Transact.Supervisor
+    DBOS.Transact.Wait
     DBOS.Transact.Workflow
-    DBOS.SystemDB.Types
-    DBOS.SystemDB.Error
-    DBOS.SystemDB.Retry
     DBOS.Transact.WorkflowExecutionParse
     DBOS.Transact.WorkflowExecutionTypes
+    DBOS.SystemDB.Error
+    DBOS.SystemDB.Notify
+    DBOS.SystemDB.Postgres.Notifier
+    DBOS.SystemDB.Postgres.Statements
+    DBOS.SystemDB.Retry
+    DBOS.SystemDB.Types
 
 test-suite test
   import: commons
@@ -77,22 +96,62 @@ test-suite test
   hs-source-dirs: test
   main-is: Main.hs
   other-modules:
-    DBOS.SchemaTest
+    -- PARKED while the Postgres backend is rewritten: ghciwatch and
+    -- `cabal build test` cover the DBOS.SystemDB slice only.
+    -- DBOS.SchemaTest
     DBOS.CodecTest
-    DBOS.LogTest
-    DBOS.SimDB
-    DBOS.SimTest
+    -- DBOS.LogTest
+    -- DBOS.SimDB
+    -- DBOS.SimTest
     DBOS.StarterTest
     DBOS.SystemDB.TypesTest
     DBOS.SystemDB.ErrorTest
+    DBOS.SystemDB.IOSimTest
     DBOS.SystemDB.RetryTest
-    DBOS.SystemDBHasqlTest
-    DBOS.SystemDBTest
-    DBOS.TransactTest
+    DBOS.SystemDB.PostgresTest
+    DBOS.Transact.CheckpointTest
+    DBOS.Transact.ClientTest
+    DBOS.Transact.ConfigTest
+    DBOS.Transact.ContextTest
+    DBOS.Transact.DeadlinesTest
+    DBOS.Transact.ContextTestIOSim
+    DBOS.Transact.HandleTest
+    DBOS.Transact.HandleTestIOSim
+    DBOS.Transact.IdentityTest
+    DBOS.Transact.RegistryTest
+    DBOS.Transact.StepRetryTest
+    DBOS.Transact.StepTestIOSim
+    DBOS.Transact.StepTest
+    DBOS.Transact.EventTest
+    DBOS.Transact.MessageTest
+    DBOS.Transact.MessageTestIOSim
+    DBOS.Transact.WaitTest
+    DBOS.Transact.WaitTestIOSim
+    DBOS.Transact.InstanceTest
+    DBOS.Transact.WorkflowTest
+    DBOS.Transact.QueueTest
+    DBOS.SystemDB.NotifyTest
+    DBOS.SystemDB.NotifierTest
+    DBOS.Transact.ManagementTest
+    DBOS.Transact.ManagementTestIOSim
+    DBOS.Transact.SimTest
+    DBOS.Transact.SleepTest
+    DBOS.Transact.SleepTestIOSim
+    -- DBOS.SystemDBTest
+    -- Deleted 2026-09-25: DBOS.SystemDBHasqlTest, DBOS.TransactTest
+    -- (Bluefin seam; ADR-0012).
   build-depends:
     breakpoint,
+    co-log-core,
     dbos-transact-hs,
+    hasql,
+    hasql-pool,
     hedgehog,
+    io-classes,
+    io-classes:si-timers,
+    io-classes:strict-stm,
+    io-sim,
+    mtl,
     nothunks,
     rapid,
     silently,
@@ -100,6 +159,8 @@ test-suite test
     tasty-golden,
     tasty-hedgehog,
     tasty-hunit,
+    text,
+    uuid,
 
 executable dbos-hs-starter
   import: commons

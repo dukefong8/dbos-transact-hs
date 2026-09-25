@@ -1,3 +1,11 @@
+-- | Legacy operation checkpoints for the starter seam (Rule 4: plain
+-- Haskell, no Bluefin imports). The engine v1 read a step row into
+-- 'OperationCheckpoint' and decided run-vs-replay from it; the class
+-- backend reads 'DBOS.SystemDB.Types.StepRecord' instead, and the new
+-- engine shares only the placement decision via "DBOS.Transact.Checkpoint".
+-- Do not extend: deletion is tracked in @docs/p76-tdd-plan.md@ L2 item 3,
+-- blocked only on the L3 starter rewire (@app/Main.hs@ still runs legacy
+-- steps over these rows through 'DBOS.Transact.Store').
 module DBOS.Transact.OperationCheckpointTypes
   ( OperationCheckpoint (..),
     OperationCheckpointDecodeError (..),
@@ -11,8 +19,8 @@ module DBOS.Transact.OperationCheckpointTypes
   )
 where
 
-import DBOS.SystemDB.Types (Timestamp)
-import DBOS.Transact.WorkflowExecutionTypes (SerializedWorkflowValue (..), WorkflowId)
+import DBOS.Prelude
+import DBOS.SystemDB.Types (SerializedWorkflowValue (..), Timestamp, WorkflowId)
 import Data.Text (Text)
 
 newtype OperationId = OperationId Int

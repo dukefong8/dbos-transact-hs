@@ -1,5 +1,14 @@
 # ghciwatch console vs. `--error-file` output (recorded 2026-09-24)
 
+> **Repo note (verified 2026-09-24):** the loop this repo actually runs does
+> not tee. The `tasty` entry point in `test/Main.hs` captures the tasty eval
+> output and writes it into `ghcid.txt` itself, before `ghciwatch`'s
+> `--error-file` write lands `All good (N modules)` and the diagnostics, so
+> the file holds the latest reload's whole result (eval output + compile
+> errors) with one writer per write and no pipeline. The `tee` recommendation
+> in this note applies only to a bare `ghciwatch` without that eval harness —
+> adding a tee on top would give the file two writers.
+
 Question: can a single file mirror exactly what `ghciwatch` prints to the console,
 i.e. is `ghciwatch ... 2>&1 | tee ghcid.txt` (no `--error-file`, no `--clear`)
 a faithful mirror?

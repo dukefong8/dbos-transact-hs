@@ -35,8 +35,8 @@ env:
 	rm .ghc.environment.*$(GHC)* || true
 	cabal install -w ghc-$(GHC) --enable-documentation \
 		--package-env . --lib \
-		base template-haskell bytestring text containers vector stm-containers \
+		base bytestring text containers vector template-haskell \
 		aeson safe-wild-cards strict-wrapper time uuid \
-		bluefin co-log co-log-core fast-logger io-classes io-classes:strict-stm io-classes:strict-mvar io-classes:si-timers io-classes:mtl io-sim mtl \
-		hasql ihp-typed-sql hasql-pool hasql-postgresql-types postgresql-types \
+		bluefin co-log co-log-core fast-logger io-sim io-classes mtl \
+		hasql ihp-typed-sql hasql-pool hasql-transaction hasql-postgresql-types postgresql-types \
 		breakpoint nothunks rapid silently tasty tasty-hunit tasty-golden

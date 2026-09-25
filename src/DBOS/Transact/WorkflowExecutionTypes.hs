@@ -1,31 +1,32 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | Legacy workflow-execution rows for the starter seam (Rule 4:
+-- plain Haskell, no Bluefin imports). The engine v1 read a workflow row
+-- into 'WorkflowExecution' and decided run-vs-replay from it; the class
+-- backend reads 'DBOS.SystemDB.Types.WorkflowRecord' instead, and every
+-- live value type ('SerializedWorkflowValue', 'WorkflowId', and friends)
+-- is defined in "DBOS.SystemDB.Types" — this module re-exports nothing.
+-- Do not extend: deletion is tracked in @docs/p76-tdd-plan.md@ L2 item 3,
+-- blocked only on the L3 starter rewire (@app/Main.hs@ still runs the
+-- legacy executor over these rows).
 module DBOS.Transact.WorkflowExecutionTypes
-  ( ApplicationVersion (..),
-    Duration (..),
-    ExecutorId (..),
-    SerializedWorkflowValue (..),
-    Serialization (..),
-    Timestamp (..),
-    WorkflowExecution (..),
+  ( WorkflowExecution (..),
     WorkflowExecutionRow (..),
-    WorkflowId (..),
-    WorkflowName (..),
     WorkflowOutcome (..),
   )
 where
 
+import DBOS.Prelude
 import Data.Int (Int64)
 import Data.Text (Text)
 import DBOS.SystemDB.Types
-  ( ApplicationVersion (..),
-    Duration (..),
-    Timestamp (..),
-    ExecutorId (..),
-    Serialization (..),
-    SerializedWorkflowValue (..),
-    WorkflowId (..),
-    WorkflowName (..),
+  ( ApplicationVersion,
+    ExecutorId,
+    Serialization,
+    SerializedWorkflowValue,
+    Timestamp,
+    WorkflowId,
+    WorkflowName,
     WorkflowStatus,
   )
 

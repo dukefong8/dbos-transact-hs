@@ -15,10 +15,10 @@ module DBOS.Transact.Log
   )
 where
 
+import DBOS.Prelude
 import Colog.Core.Action (LogAction (..))
-import Control.Exception (bracket)
 import Data.Text (Text)
-import DBOS.Transact.WorkflowExecutionTypes (WorkflowId (..))
+import DBOS.SystemDB.Types (WorkflowId (..))
 import System.Log.FastLogger (LogType' (LogStdout), defaultBufSize, newFastLogger, toLogStr)
 
 data DbosSeverity

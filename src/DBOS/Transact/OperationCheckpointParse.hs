@@ -1,8 +1,13 @@
+-- | Legacy checkpoint parsing for the starter seam: one column per result
+-- shape, exactly one of which may be present. See
+-- "DBOS.Transact.OperationCheckpointTypes" for the seam status; do not
+-- extend.
 module DBOS.Transact.OperationCheckpointParse
   ( parseOperationCheckpoint,
   )
 where
 
+import DBOS.Prelude
 import DBOS.Transact.OperationCheckpointTypes
   ( AwaitedWorkflowResult (..),
     OperationCheckpoint (..),
@@ -11,8 +16,7 @@ import DBOS.Transact.OperationCheckpointTypes
     OperationId,
     OperationName,
   )
-import DBOS.SystemDB.Types (Timestamp)
-import DBOS.Transact.WorkflowExecutionTypes (SerializedWorkflowValue, WorkflowId)
+import DBOS.SystemDB.Types (SerializedWorkflowValue, Timestamp, WorkflowId)
 
 parseOperationCheckpoint ::
   OperationId ->

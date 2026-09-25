@@ -12,11 +12,8 @@ module DBOS.Transact.Supervisor
   )
 where
 
+import DBOS.Prelude
 import Colog.Core.Action (LogAction (..))
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (AsyncCancelled (..))
-import Control.Concurrent.STM (readTVarIO)
-import Control.Exception (AsyncException (..), SomeException, fromException, throwIO, try)
 import Control.Monad (unless, when)
 import DBOS.SystemDB.Types (Duration (..), durationAsMillis)
 import DBOS.SystemDB.Types (QueueName (..))
@@ -46,7 +43,6 @@ superviseForever executor queues duration = loop
             -- ThreadKilled/UserInterrupt here would delay shutdown a full
             -- interval per queue.
             | Just AsyncCancelled <- fromException failure -> throwIO failure
-            | Just (_ :: AsyncException) <- fromException failure -> throwIO failure
             | otherwise -> do
                 let QueueName name = queue
                 unLogAction

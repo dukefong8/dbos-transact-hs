@@ -5,6 +5,7 @@ module DBOS.SystemDB.ErrorTest
   )
 where
 
+import DBOS.Prelude
 import DBOS.SystemDB (BackendError (..), BackendErrorKind (..), Error (..), renderBackendError, renderError)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))

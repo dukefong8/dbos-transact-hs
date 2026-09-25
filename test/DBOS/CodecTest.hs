@@ -1,11 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | 'DBOS.Transact.Codec' against the Rust @serialization.rs@ tests: an
+-- absent value decodes as the unit, a value round trips, the unit encodes as
+-- a value rather than an absence, and a mismatch names the half that failed.
 module DBOS.CodecTest
   ( tests,
   )
 where
 
+import DBOS.Prelude
 import Data.Aeson (Value, object, (.=))
+import Data.Text (Text)
+import Data.Word (Word32)
 import DBOS.Transact
   ( CodecError (..),
     Serialization (..),
@@ -15,44 +21,37 @@ import DBOS.Transact
     encodeWorkflowValue,
   )
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit ((@?=), testCase)
+import Test.Tasty.HUnit (testCase, (@?=))
 
 tests :: TestTree
 tests =
   testGroup
     "DBOS Codec"
-    [ testCase "encodes zero-argument workflows as JSON null" $
+    [ testCase "an absent value decodes as the unit" $ do
+        (decodeWorkflowValue "argument" Nothing :: Either CodecError ()) @?= Right ()
+        (decodeWorkflowValue "argument" Nothing :: Either CodecError (Maybe Word32)) @?= Right Nothing,
+      testCase "a value round trips" $ do
+        let encoded = encodeWorkflowValue ((1 :: Word32, "two" :: Text))
+        encoded.serializedText @?= "[1,\"two\"]"
+        (decodeWorkflowValue "argument" (Just encoded) :: Either CodecError (Word32, Text)) @?= Right (1, "two"),
+      testCase "the unit encodes as a value rather than an absence" $ do
         encodeUnit
           @?= SerializedWorkflowValue
             { serializedText = "null",
-              serializedSerialization = Just (Serialization "json")
+              serializedSerialization = Just (Serialization "rust_serde")
             },
-      testCase "round-trips an application value through JSON" $
-        decodeWorkflowValue "argument" (Just (encodeWorkflowValue (object ["ok" .= True])))
-          @?= Right (object ["ok" .= True] :: Value),
-      testCase "decodes an absent value as unit" $
-        (decodeWorkflowValue "argument" Nothing :: Either CodecError ())
-          @?= Right (),
-      testCase "rejects serialized text that is not JSON" $
-        ( decodeWorkflowValue "argument" (Just notJson) :: Either CodecError Value
-          )
-          @?= Left (CodecNotJson "argument" "not json"),
-      testCase "rejects JSON of the wrong shape" $
-        case decodeWorkflowValue "result" (Just stepOutput) :: Either CodecError Bool of
+      testCase "a mismatch names the half that failed" $
+        case decodeWorkflowValue "result" (Just (SerializedWorkflowValue "\"not a number\"" (Just (Serialization "rust_serde")))) :: Either CodecError Word32 of
           Left (CodecTypeMismatch "result" _) -> pure ()
-          other -> fail ("expected CodecTypeMismatch, got: " <> show other)
+          other -> fail ("expected CodecTypeMismatch, got: " <> show other),
+      testCase "rejects serialized text that is not JSON" $
+        (decodeWorkflowValue "argument" (Just notJson) :: Either CodecError Value)
+          @?= Left (CodecNotJson "argument" "not json")
     ]
 
 notJson :: SerializedWorkflowValue
 notJson =
   SerializedWorkflowValue
     { serializedText = "not json",
-      serializedSerialization = Just (Serialization "json")
-    }
-
-stepOutput :: SerializedWorkflowValue
-stepOutput =
-  SerializedWorkflowValue
-    { serializedText = "{\"ok\":true}",
-      serializedSerialization = Just (Serialization "json")
+      serializedSerialization = Just (Serialization "rust_serde")
     }

@@ -16,7 +16,7 @@ module DBOS.SimDB
   )
 where
 
-import Control.Concurrent.Class.MonadSTM (MonadSTM (..))
+import DBOS.Prelude
 import DBOS.Transact
   ( EventStore (..),
     OperationCheckpoint (..),
@@ -31,8 +31,8 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 
 data SimDB m = SimDB
-  { simSteps :: TVar m (Map (Text, Int) OperationCheckpoint),
-    simEvents :: TVar m (Map (Text, Text) SerializedWorkflowValue)
+  { simSteps :: StrictTVar IO m (Map (Text, Int) OperationCheckpoint),
+    simEvents :: StrictTVar IO m (Map (Text, Text) SerializedWorkflowValue)
   }
 
 newSimDB :: MonadSTM m => m (SimDB m)

@@ -12,68 +12,57 @@
 -- read once at startup, so run the app from the repo root.
 module Main (main) where
 
-import Control.Concurrent (myThreadId, threadDelay, throwTo)
-import Control.Concurrent.Async (async, cancel)
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVarIO, writeTVar)
+import DBOS.Prelude
 import Control.Monad (filterM, replicateM_)
 import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecodeStrict, encode, object, withObject, (.:), (.=))
 import Data.Aeson.Key (fromText)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Int (Int64)
+import Data.Word (Word64)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text, pack)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
-import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB
-  ( Pool,
-    OnExistingQueue (..),
-    QueueName (..),
-    Topic (..),
-    acquirePool,
-    enqueueWorkflow,
-    fetchQueueWorkerConcurrency,
-    fetchWorkflowStatuses,
-    getEvent,
-    getEventBlocking,
-    internalQueueName,
-    listWorkflowIdsByName,
-    messageTo,
-    millisDuration,
-    postgresStepStore,
-    recvMessage,
-    registerQueue,
-    releasePool,
-    sendMessage,
-    sendMessages,
-    setEvent,
-    tryStartWorkflow,
-    updateQueueWorkerConcurrency,
-  )
+import DBOS.SystemDB (Change (..), SendMessage (..), Topic (..), millisDuration)
 import DBOS.Transact
-  ( ApplicationVersion (..),
-    Executor (..),
-    ExecutorId (..),
-    OperationId (..),
-    OperationName (..),
-    SerializedWorkflowValue,
-    WorkflowBody,
+  ( Config (..),
+    Ctx,
+    DBOS,
+    Environment (..),
+    Error,
+    Queue (..),
+    QueueChange (..),
+    QueueConflict (..),
+    QueueOptions (..),
+    SerializedWorkflowValue (..),
     WorkflowId (..),
-    WorkflowName (..),
-    WorkflowRegistry,
+    WorkflowKey,
+    configFromEnv,
     decodeWorkflowValue,
-    emptyRegistry,
+    defaultQueueChange,
+    defaultQueueOptions,
     encodeWorkflowValue,
-    launchExecutor,
-    registerWorkflow,
-    runStep,
-    shutdownExecutor,
-    sleepStep,
-    spawnWorkflow,
-    superviseForever,
-    withStdoutLogger,
+    enqueueDBOSWorkflow,
+    fetchWorkflowStatuses,
+    getWorkflowEvent,
+    launchWithEnvironment,
+    listWorkflowIdsByName,
+    newDBOS,
+    newWorkflowKey,
+    queue,
+    recv,
+    registerDBOSWorkflow,
+    registerQueue,
+    runDBOSWorkflow,
+    runWorkflowStep,
+    sendWorkflowMessage,
+    sendWorkflowMessages,
+    setEvent,
+    shutdown,
+    sleepWorkflowStep,
+    updateQueue,
   )
 import IHP.Router.Trie (RouteTrie)
 import IHP.Router.WAI (HasPath (..), UrlCapture (..), routeTrieMiddleware, routes)
@@ -91,23 +80,20 @@ import Text.Read (readMaybe)
 -- Durations: shorter than the Rust original so the E2E gate stays fast.
 -- ---------------------------------------------------------------------------
 
-stepDurationMs :: Int64
+stepDurationMs :: Word64
 stepDurationMs = 2000
 
-orderStepMs :: Int64
+orderStepMs :: Word64
 orderStepMs = 1000
 
-queueSleepMs :: Int64
+queueSleepMs :: Word64
 queueSleepMs = 2000
 
-eventReadTimeoutMs :: Int64
+eventReadTimeoutMs :: Word64
 eventReadTimeoutMs = 12000
 
-approvalTimeoutMs :: Int64
+approvalTimeoutMs :: Word64
 approvalTimeoutMs = 60000
-
-supervisorIntervalMs :: Int64
-supervisorIntervalMs = 1000
 
 stepsEventKey :: Text
 stepsEventKey = "steps_event"
@@ -121,11 +107,14 @@ approvalTopic = Topic "approval"
 approvalWorkflowName :: Text
 approvalWorkflowName = "ApprovalWorkflow"
 
+enqueuedWorkflowName :: Text
+enqueuedWorkflowName = "EnqueuedWorkflow"
+
 decisionEventKey :: Text
 decisionEventKey = "decision"
 
-demoQueueName :: QueueName
-demoQueueName = QueueName "demo-queue"
+demoQueueName :: Text
+demoQueueName = "demo-queue"
 
 defaultWorkerConcurrency :: Int
 defaultWorkerConcurrency = 3
@@ -135,6 +124,9 @@ enqueueBatchSize = 5
 
 approvalListLimit :: Int64
 approvalListLimit = 20
+
+queueListLimit :: Int64
+queueListLimit = 200
 
 -- ---------------------------------------------------------------------------
 -- Routes
@@ -179,10 +171,8 @@ POST /messages/respond-all    MessagesRespondAllAction
 |]
 
 data App = App
-  { appPool :: Pool,
-    appExecutor :: Executor,
-    appOrderId :: TVar (Maybe WorkflowId),
-    appQueuedIds :: TVar [WorkflowId],
+  { appDBOS :: DBOS IO,
+    appOrderId :: StrictTVar IO (Maybe WorkflowId),
     appPage :: LBS.ByteString
   }
 
@@ -229,45 +219,65 @@ instance FromJSON RespondAllRequest where
   parseJSON = withObject "RespondAllRequest" $ \o -> RespondAllRequest <$> o .: "decision"
 
 -- ---------------------------------------------------------------------------
--- Workflows
+-- Workflows: registered bodies over the explicit context.
 -- ---------------------------------------------------------------------------
 
-exampleWorkflowBody :: WorkflowBody
-exampleWorkflowBody pool workflowId _ = do
-  _ <- runStep (postgresStepStore pool) workflowId (OperationId 1) (OperationName "step_one") (sleepMillis stepDurationMs)
-  setEvent pool workflowId stepsEventKey (encodeWorkflowValue (1 :: Int))
-  _ <- runStep (postgresStepStore pool) workflowId (OperationId 2) (OperationName "step_two") (sleepMillis stepDurationMs)
-  setEvent pool workflowId stepsEventKey (encodeWorkflowValue (2 :: Int))
-  _ <- runStep (postgresStepStore pool) workflowId (OperationId 3) (OperationName "step_three") (sleepMillis stepDurationMs)
-  setEvent pool workflowId stepsEventKey (encodeWorkflowValue (3 :: Int))
-  pure (encodeWorkflowValue ("Workflow completed" :: Text))
+exampleWorkflowBody :: () -> Ctx IO -> IO (Either Error Text)
+exampleWorkflowBody () ctx = do
+  first <- stepSleep ctx "step_one" stepDurationMs
+  case first of
+    Left err -> pure (Left err)
+    Right () -> do
+      published <- setEvent ctx stepsEventKey (1 :: Int)
+      case published of
+        Left err -> pure (Left err)
+        Right () -> continue ctx
   where
-    sleepMillis ms = threadDelay (fromIntegral ms * 1000) >> pure (encodeWorkflowValue ())
+    continue innerCtx = do
+      second <- stepSleep innerCtx "step_two" stepDurationMs
+      case second of
+        Left err -> pure (Left err)
+        Right () -> do
+          published <- setEvent innerCtx stepsEventKey (2 :: Int)
+          case published of
+            Left err -> pure (Left err)
+            Right () -> do
+              third <- stepSleep innerCtx "step_three" stepDurationMs
+              case third of
+                Left err -> pure (Left err)
+                Right () -> do
+                  lastPublished <- setEvent innerCtx stepsEventKey (3 :: Int)
+                  pure (lastPublished >> Right "Workflow completed")
 
-orderWorkflowBody :: WorkflowBody
-orderWorkflowBody pool workflowId _ = do
-  mapM_ publish (zip [1 ..] orderKeys)
-  pure (encodeWorkflowValue ("Order complete" :: Text))
+orderWorkflowBody :: () -> Ctx IO -> IO (Either Error Text)
+orderWorkflowBody () ctx = do
+  published <- mapM publish (zip [1 ..] orderKeys)
+  pure (sequence_ published >> Right "Order complete")
   where
     publish (stage, key) = do
-      sleepStep pool workflowId (OperationId stage) (millisDuration (fromIntegral orderStepMs))
-      setEvent pool workflowId key (encodeWorkflowValue (key <> " at step " <> pack (show stage)))
+      slept <- sleepWorkflowStep ctx (millisDuration orderStepMs)
+      case slept of
+        Left err -> pure (Left err)
+        Right () -> setEvent ctx key (key <> " at step " <> pack (show (stage :: Int)))
 
-approvalWorkflowBody :: WorkflowBody
-approvalWorkflowBody pool workflowId _ = do
-  decision <- recvMessage pool workflowId (OperationId 1) (millisDuration (fromIntegral approvalTimeoutMs)) (Just approvalTopic)
-  let outcome = case decision of
-        Just stored -> case decodeWorkflowValue "result" (Just stored) of
-          Right text -> text :: Text
-          Left _ -> "expired"
-        Nothing -> "expired"
-  setEvent pool workflowId decisionEventKey (encodeWorkflowValue outcome)
-  pure (encodeWorkflowValue outcome)
+approvalWorkflowBody :: () -> Ctx IO -> IO (Either Error Text)
+approvalWorkflowBody () ctx = do
+  decision <- recv ctx (Just approvalTopic) (millisDuration approvalTimeoutMs)
+  case (decision :: Either Error (Maybe Text)) of
+    Left err -> pure (Left err)
+    Right stored -> do
+      let outcome = maybe "expired" id stored
+      published <- setEvent ctx decisionEventKey outcome
+      pure (published >> Right outcome)
 
-enqueuedWorkflowBody :: WorkflowBody
-enqueuedWorkflowBody pool workflowId _ = do
-  sleepStep pool workflowId (OperationId 1) (millisDuration (fromIntegral queueSleepMs))
-  pure (encodeWorkflowValue ("Enqueued workflow completed" :: Text))
+enqueuedWorkflowBody :: () -> Ctx IO -> IO (Either Error Text)
+enqueuedWorkflowBody () ctx = do
+  slept <- sleepWorkflowStep ctx (millisDuration queueSleepMs)
+  pure (slept >> Right "Enqueued workflow completed")
+
+stepSleep :: Ctx IO -> Text -> Word64 -> IO (Either Error ())
+stepSleep ctx name milliseconds =
+  runWorkflowStep ctx name (const (threadDelay (fromIntegral milliseconds * 1000) >> pure ()))
 
 -- ---------------------------------------------------------------------------
 -- Dispatch
@@ -277,14 +287,15 @@ dispatch :: App -> StarterRoute -> Application
 dispatch app IndexAction _ respond =
   respond (responseLBS status200 [("Content-Type", "text/html; charset=utf-8")] app.appPage)
 dispatch app (StartWorkflowAction taskId) _ respond = do
-  _ <- startBackground app (WorkflowName "ExampleWorkflow") (WorkflowId taskId)
+  _ <- startBackground app (newWorkflowKey "ExampleWorkflow") (WorkflowId taskId)
   respond (textOk "")
 dispatch app (LastStepAction taskId) _ respond = do
-  step <- getEvent app.appPool (WorkflowId taskId) stepsEventKey
+  step <- getWorkflowEvent app.appDBOS (WorkflowId taskId) stepsEventKey (millisDuration 0)
   respond (textOk (progressText step))
   where
-    progressText Nothing = "0"
-    progressText (Just stored) = case decodeWorkflowValue "result" (Just stored) of
+    progressText (Left _) = "0"
+    progressText (Right Nothing) = "0"
+    progressText (Right (Just stored)) = case decodeWorkflowValue "result" (Just stored) of
       Right n -> pack (show (n :: Int))
       Left _ -> "0"
 -- Crash like kill -9: die at once with no cleanup, so in-flight rows stay
@@ -297,9 +308,12 @@ dispatch _ CrashAction _ _ = do
   hFlush stdout
   exitImmediately (ExitFailure 1)
 dispatch app QueueStatusAction _ respond = do
-  workerConcurrency <- fetchQueueWorkerConcurrency app.appPool demoQueueName
-  queuedIds <- readTVarIO app.appQueuedIds
-  statuses <- fetchWorkflowStatuses app.appPool queuedIds
+  workerConcurrency <- fetchQueueWorkerConcurrency app.appDBOS demoQueueName
+  -- The queue's rows, not this process's memory: a batch enqueued before a
+  -- restart is still on the queue, and the counts must add up against it.
+  listed <- listWorkflowIdsByName app.appDBOS enqueuedWorkflowName queueListLimit
+  let queuedIds = either (const []) id listed
+  statuses <- fetchWorkflowStatuses app.appDBOS queuedIds
   let counts :: [(Text, Int)]
       counts = Map.toList (Map.fromListWith (+) [(Text.toUpper (pack (show status)), 1) | (_, status) <- statuses])
   respond
@@ -313,8 +327,8 @@ dispatch app QueueStatusAction _ respond = do
 dispatch app QueueEnqueueAction _ respond = do
   replicateM_ enqueueBatchSize $ do
     workflowId <- freshId "queued"
-    enqueueWorkflow app.appPool workflowId (WorkflowName "EnqueuedWorkflow") demoQueueName
-    atomically (modifyTVar' app.appQueuedIds (workflowId :))
+    _ <- enqueueDBOSWorkflow app.appDBOS (newWorkflowKey enqueuedWorkflowName) workflowId Nothing demoQueueName
+    pure ()
   respond (textOk "")
 dispatch app QueueConcurrencyAction request respond = do
   parsed <- readJsonBody request
@@ -324,10 +338,10 @@ dispatch app QueueConcurrencyAction request respond = do
       let concurrency = case requested of
             Just n | n >= 1 -> n
             _ -> defaultWorkerConcurrency
-      updateQueueWorkerConcurrency app.appPool demoQueueName concurrency
+      _ <- updateQueue app.appDBOS demoQueueName (defaultQueueChange {worker_concurrency = Set (Just concurrency)})
       respond (textOk "")
 dispatch app EventsStartAction _ respond = do
-  workflowId <- startBackground app (WorkflowName "OrderWorkflow") =<< freshId "order"
+  workflowId <- startBackground app (newWorkflowKey "OrderWorkflow") =<< freshId "order"
   atomically (writeTVar app.appOrderId (Just workflowId))
   respond (textOk (workflowIdText workflowId))
 dispatch app EventsStatusAction _ respond = do
@@ -344,8 +358,8 @@ dispatch app EventsStatusAction _ respond = do
   where
     readKey Nothing key = pure (key, Nothing :: Maybe Text)
     readKey (Just workflowId) key = do
-      stored <- getEvent app.appPool workflowId key
-      pure (key, stored >>= decodeToText)
+      stored <- getWorkflowEvent app.appDBOS workflowId key (millisDuration 0)
+      pure (key, either (const Nothing) (>>= decodeToText) stored)
 dispatch app EventsReadAction request respond = do
   parsed <- readJsonBody request
   case parsed of
@@ -355,42 +369,58 @@ dispatch app EventsReadAction request respond = do
       case current of
         Nothing -> respond (jsonOk (object ["key" .= key, "value" .= (Nothing :: Maybe Text), "waited_ms" .= (0 :: Int)]))
         Just workflowId -> do
-          started <- getCurrentTime
-          stored <- getEventBlocking app.appPool workflowId key (millisDuration (fromIntegral eventReadTimeoutMs))
-          finished <- getCurrentTime
-          let waitedMs = round (diffUTCTime finished started * 1000) :: Int
-          respond (jsonOk (object ["key" .= key, "value" .= (stored >>= decodeToText), "waited_ms" .= waitedMs]))
+          started <- getMonotonicTimeNSec
+          stored <- getWorkflowEvent app.appDBOS workflowId key (millisDuration eventReadTimeoutMs)
+          finished <- getMonotonicTimeNSec
+          let waitedMs = fromIntegral ((finished - started) `div` 1000000) :: Int
+          respond (jsonOk (object ["key" .= key, "value" .= (either (const Nothing) (>>= decodeToText) stored), "waited_ms" .= waitedMs]))
 dispatch app MessagesStartAction _ respond = do
-  workflowId <- startBackground app (WorkflowName approvalWorkflowName) =<< freshId "approval"
+  workflowId <- startBackground app (newWorkflowKey approvalWorkflowName) =<< freshId "approval"
   respond (textOk (workflowIdText workflowId))
 dispatch app MessagesStatusAction _ respond = do
-  ids <- listWorkflowIdsByName app.appPool approvalWorkflowName approvalListLimit
+  listed <- listWorkflowIdsByName app.appDBOS approvalWorkflowName approvalListLimit
+  ids <- case listed of
+    Left _ -> pure []
+    Right workflowIds -> pure workflowIds
   approvals <- traverse readApproval ids
   respond (jsonOk approvals)
   where
     readApproval workflowId@(WorkflowId text) = do
-      stored <- getEvent app.appPool workflowId decisionEventKey
-      pure (object ["workflow_id" .= text, "decision" .= (stored >>= decodeToText)])
+      stored <- getWorkflowEvent app.appDBOS workflowId decisionEventKey (millisDuration 0)
+      pure (object ["workflow_id" .= text, "decision" .= (either (const Nothing) (>>= decodeToText) stored)])
 dispatch app MessagesRespondAction request respond = do
   parsed <- readJsonBody request
   case parsed of
     Left err -> respond (badRequest err)
     Right RespondRequest { respondWorkflowId = workflowId, respondDecision = decision } -> do
-      sendMessage app.appPool (messageTo (WorkflowId workflowId) approvalTopic (encodeWorkflowValue decision))
+      _ <- sendWorkflowMessage app.appDBOS (WorkflowId workflowId) (Just approvalTopic) Nothing (encodeWorkflowValue decision)
       respond (textOk "")
 dispatch app MessagesRespondAllAction request respond = do
   parsed <- readJsonBody request
   case parsed of
     Left err -> respond (badRequest err)
     Right RespondAllRequest { respondAllDecision = decision } -> do
-      ids <- listWorkflowIdsByName app.appPool approvalWorkflowName approvalListLimit
+      listed <- listWorkflowIdsByName app.appDBOS approvalWorkflowName approvalListLimit
+      ids <- case listed of
+        Left _ -> pure []
+        Right workflowIds -> pure workflowIds
       waiting <- filterM (fmap (== Nothing) . readDecision) ids
-      sendMessages app.appPool [messageTo workflowId approvalTopic (encodeWorkflowValue decision) | workflowId <- waiting]
+      _ <-
+        sendWorkflowMessages
+          app.appDBOS
+          [ SendMessage
+              { sendDestinationId = workflowId,
+                sendMessageBody = encodeWorkflowValue decision,
+                sendTopic = Just approvalTopic,
+                sendIdempotencyKey = Nothing
+              }
+            | workflowId <- waiting
+          ]
       respond (textOk (pack (show (length waiting))))
   where
     readDecision workflowId = do
-      stored <- getEvent app.appPool workflowId decisionEventKey
-      pure (stored >>= decodeToText)
+      stored <- getWorkflowEvent app.appDBOS workflowId decisionEventKey (millisDuration 0)
+      pure (either (const Nothing) (>>= decodeToText) stored)
 
 decodeToText :: SerializedWorkflowValue -> Maybe Text
 decodeToText stored = case decodeWorkflowValue "result" (Just stored) of
@@ -400,61 +430,81 @@ decodeToText stored = case decodeWorkflowValue "result" (Just stored) of
 workflowIdText :: WorkflowId -> Text
 workflowIdText (WorkflowId text) = text
 
--- | Start a workflow and return at once; the handle is dropped. The id is an
+fetchQueueWorkerConcurrency :: DBOS IO -> Text -> IO (Maybe Int)
+fetchQueueWorkerConcurrency dbos name = do
+  found <- queue dbos name
+  pure (either (const Nothing) (>>= (.worker_concurrency)) found)
+
+-- | Start a workflow and return at once; the task is dropped. The id is an
 -- idempotency key: starting the same id twice joins the workflow already
 -- running rather than failing.
-startBackground :: App -> WorkflowName -> WorkflowId -> IO WorkflowId
-startBackground app name workflowId = do
-  _ <- tryStartWorkflow app.appPool workflowId name Nothing app.appExecutor.executorId app.appExecutor.executorVersion
-  _ <- spawnWorkflow app.appExecutor name workflowId Nothing
+startBackground :: App -> WorkflowKey -> WorkflowId -> IO WorkflowId
+startBackground app key workflowId = do
+  _ <- async (runDBOSWorkflow app.appDBOS key workflowId Nothing)
   pure workflowId
 
 freshId :: Text -> IO WorkflowId
 freshId prefix = (WorkflowId . (prefix <>) . ("-" <>) . UUID.toText) <$> UUID.V4.nextRandom
 
 -- ---------------------------------------------------------------------------
--- View: app/page.html, served as read at startup.
--- ---------------------------------------------------------------------------
-
--- ---------------------------------------------------------------------------
 -- Wiring
 -- ---------------------------------------------------------------------------
 
-mustRegister :: WorkflowName -> WorkflowBody -> WorkflowRegistry -> IO WorkflowRegistry
-mustRegister name body registry = case registerWorkflow name body registry of
-  Left err -> fail ("duplicate workflow registration: " <> show err)
-  Right updated -> pure updated
+registerAll :: DBOS IO -> IO (Either Error ())
+registerAll dbos = do
+  results <-
+    sequence
+      [ registerDBOSWorkflow dbos (newWorkflowKey "ExampleWorkflow") exampleWorkflowBody,
+        registerDBOSWorkflow dbos (newWorkflowKey "OrderWorkflow") orderWorkflowBody,
+        registerDBOSWorkflow dbos (newWorkflowKey approvalWorkflowName) approvalWorkflowBody,
+        registerDBOSWorkflow dbos (newWorkflowKey enqueuedWorkflowName) enqueuedWorkflowBody
+      ]
+  pure (sequence_ results)
 
-buildRegistry :: IO WorkflowRegistry
-buildRegistry = do
-  withExample <- mustRegister (WorkflowName "ExampleWorkflow") exampleWorkflowBody emptyRegistry
-  withOrder <- mustRegister (WorkflowName "OrderWorkflow") orderWorkflowBody withExample
-  withApproval <- mustRegister (WorkflowName approvalWorkflowName) approvalWorkflowBody withOrder
-  mustRegister (WorkflowName "EnqueuedWorkflow") enqueuedWorkflowBody withApproval
+isolatedEnvironment :: Environment
+isolatedEnvironment =
+  Environment
+    { environmentCloud = False,
+      environmentAppId = "",
+      environmentAppName = Nothing,
+      environmentAppVersion = Nothing,
+      environmentExecutorId = Nothing
+    }
 
 main :: IO ()
-main = withStdoutLogger $ \logger -> do
+main = do
   port <- maybe 8081 id . (>>= readMaybe) <$> lookupEnv "PORT"
-  executorId <- maybe "hs-starter-executor" pack <$> lookupEnv "DBOS_EXECUTOR_ID"
   applicationVersion <- maybe "0.1.0" pack <$> lookupEnv "DBOS_APP_VERSION"
-  pool <- acquirePool
-  registry <- buildRegistry
-  (executor, _) <-
-    launchExecutor pool (ExecutorId executorId) (ApplicationVersion applicationVersion) registry logger
-  registerQueue pool demoQueueName defaultWorkerConcurrency LeaveExisting
+  executorId <- maybe "hs-starter-executor" pack <$> lookupEnv "DBOS_EXECUTOR_ID"
+  config0 <- configFromEnv "dbos-hs-starter"
+  let config = config0 {configAppVersion = Just applicationVersion, configExecutorId = Just executorId}
+  dbos <- newDBOS config
+  registered <- registerAll dbos
+  case registered of
+    Left err -> fail (show err)
+    Right () -> pure ()
+  launched <- launchWithEnvironment dbos isolatedEnvironment
+  case launched of
+    Left err -> fail (show err)
+    Right () -> pure ()
+  registeredQueue <-
+    registerQueue
+      dbos
+      demoQueueName
+      (defaultQueueOptions {worker_concurrency = Just defaultWorkerConcurrency})
+      NeverUpdate
+  case registeredQueue of
+    Left err -> fail (show err)
+    Right _ -> pure ()
   page <- LBS.readFile "app/page.html"
   orderId <- newTVarIO Nothing
-  queuedIds <- newTVarIO []
-  supervisor <- async (superviseForever executor [demoQueueName, internalQueueName] (millisDuration (fromIntegral supervisorIntervalMs)))
   mainThread <- myThreadId
   -- exitSuccess only terminates the calling thread: run from the signal
   -- handler it kills just the handler and the process lingers in warp.
   -- Throwing to the main thread ends the process with a quiet code 0.
-  let shutdown = do
-        cancel supervisor
-        shutdownExecutor executor
-        releasePool pool
+  let stop = do
+        shutdown dbos
         throwTo mainThread ExitSuccess
-  _ <- installHandler sigINT (CatchOnce shutdown) Nothing
-  _ <- installHandler sigTERM (CatchOnce shutdown) Nothing
-  run port (routeTrieMiddleware (starterRouteTrie (dispatch (App pool executor orderId queuedIds page))) notFound)
+  _ <- installHandler sigINT (CatchOnce stop) Nothing
+  _ <- installHandler sigTERM (CatchOnce stop) Nothing
+  run port (routeTrieMiddleware (starterRouteTrie (dispatch (App dbos orderId page))) notFound)

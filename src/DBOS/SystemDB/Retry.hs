@@ -21,6 +21,7 @@ module DBOS.SystemDB.Retry
   )
 where
 
+import DBOS.Prelude
 import Colog.Core.Action (LogAction (..))
 import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
 import Data.Text (Text)

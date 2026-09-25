@@ -11,10 +11,9 @@ module DBOS.SimTest
   )
 where
 
+import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM (MonadSTM (..))
 import Control.Monad.Class.MonadSay (MonadSay (..))
-import Control.Exception (Exception)
-import Control.Monad.Catch (MonadThrow (..), try)
 import Control.Monad.IOSim (IOSim, runSim, runSimTrace, selectTraceEventsSay)
 import DBOS.SimDB (SimDB (..), newSimDB, simEventStore, simStepStore)
 import DBOS.Transact
@@ -53,7 +52,7 @@ simBody ::
   (MonadSTM m, MonadSay m, MonadThrow m) =>
   StepStore m ->
   EventStore m ->
-  TVar m Int ->
+  StrictTVar IO m Int ->
   WorkflowId ->
   Maybe OperationId ->
   m ()

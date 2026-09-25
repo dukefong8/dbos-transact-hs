@@ -3,6 +3,7 @@ module DBOS.SchemaTest
   )
 where
 
+import DBOS.Prelude
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, (@?=), testCase)
 

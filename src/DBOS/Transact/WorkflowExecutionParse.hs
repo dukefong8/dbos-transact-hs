@@ -1,24 +1,29 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 
+-- | Legacy workflow-row parsing for the starter seam: a row becomes a
+-- 'WorkflowExecution' whose outcome the legacy runner replays. See
+-- "DBOS.Transact.WorkflowExecutionTypes" for the seam status; do not
+-- extend.
 module DBOS.Transact.WorkflowExecutionParse
   ( WorkflowExecutionDecodeError (..),
     parseWorkflowExecution,
   )
 where
 
+import DBOS.Prelude
 import DBOS.SystemDB.Types
-  ( WorkflowStatus (..),
-    WorkflowStatusDecodeError,
-    parseWorkflowStatus,
-  )
-import DBOS.Transact.WorkflowExecutionTypes
   ( ApplicationVersion (..),
     ExecutorId (..),
     Serialization (..),
     SerializedWorkflowValue (..),
-    WorkflowExecution (..),
-    WorkflowExecutionRow (..),
     WorkflowName (..),
+    WorkflowStatus (..),
+    WorkflowStatusDecodeError,
+    parseWorkflowStatus,
+  )
+import DBOS.Transact.WorkflowExecutionTypes
+  ( WorkflowExecution (..),
+    WorkflowExecutionRow (..),
     WorkflowOutcome (..),
   )
 
