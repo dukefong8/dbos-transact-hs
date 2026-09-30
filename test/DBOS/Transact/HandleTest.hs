@@ -26,13 +26,14 @@ import DBOS.Transact
     newDBOS,
     newWorkflowKey,
     registerDBOSWorkflow,
+    renderTransactError,
     retrieveWorkflow,
     runDBOSWorkflow,
     runWorkflowStep,
     shutdown,
   )
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
+import Test.Tasty.HUnit (assertEqual, testCase, (@?=))
 
 tests :: TestTree
 tests =
@@ -138,7 +139,12 @@ tests =
               case result of
                 Left (ErrorWorkflowFailed failedId message) -> do
                   failedId @?= workflowText
-                  assertBool "the recorded failure names the step" ("boom" `Text.isInfixOf` message)
+                  -- The polling path decodes the recorded failure with the
+                  -- same fidelity the local run reported: the whole rendered
+                  -- error, not a fragment. (The oracle's typed variant —
+                  -- fields and all — waits on the typed-IO phase; untyped
+                  -- text is the whole channel here.)
+                  message @?= renderTransactError (StepFailed "body" "boom")
                 other -> fail ("expected the recorded failure, got: " <> show other),
       testCase "a handle over a deleted row reports its absence" $ do
         fresh <- UUID.V4.nextRandom
@@ -172,7 +178,43 @@ tests =
             Left err -> fail (show err)
             Right handle -> do
               status <- handleStatus handle
-              status @?= Right Nothing
+              status @?= Right Nothing,
+      testCase "dropping a handle does not stop the workflow" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-handle-drop-" <> Text.take 12 suffix
+            workflowText = "hs-l2-handle-drop-id-" <> suffix
+            key = newWorkflowKey "double"
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerDBOSWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          worker <- async (runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int))))
+          -- Retrieved and immediately dropped while the run is in flight.
+          _ <- retrieveWorkflow dbos (WorkflowId workflowText)
+          outcome <- wait worker
+          case outcome of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          retrieved <- retrieveWorkflow dbos (WorkflowId workflowText)
+          case retrieved of
+            Left err -> fail (show err)
+            Right handle -> do
+              result <- handleResult handle
+              case result of
+                Right (Just stored) -> do
+                  let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
+                  assertEqual "a fresh handle reads the completed result" (Right 42) decoded
+                other -> fail (show other)
     ]
 
 isolatedEnvironment :: Environment

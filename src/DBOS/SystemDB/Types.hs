@@ -162,7 +162,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import Data.Word (Word32, Word64)
-import Data.Aeson (Value (..), eitherDecodeStrict)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, withObject, withScientific, withText, (.:), (.=))
 import DBOS.SystemDB.Error (Error, invalidInput)
 import Control.Monad (guard)
 import Control.Monad.Class.MonadTime (MonadTime, getCurrentTime)
@@ -1622,3 +1622,130 @@ millisDuration ms = Duration (fromIntegral ms / 1000)
 -- | Whether this duration spans no time. Mirrors @Duration::is_zero@.
 durationIsZero :: Duration -> Bool
 durationIsZero duration = durationAsMillis duration == 0
+
+-- * JSON codec (the replay envelope)
+--
+-- Management calls checkpointed as steps record their results as JSON, so
+-- the rows they hand back need a round trip. The envelope is opaque: only
+-- this port's replays decode it, so Haskell record names are the schema,
+-- instants reuse their ISO-8601 spelling, and wire spellings are reused
+-- where they already exist (statuses as @"PENDING"@, spans as epoch
+-- milliseconds).
+
+instance ToJSON WorkflowId where
+  toJSON (WorkflowId text) = toJSON text
+
+instance FromJSON WorkflowId where
+  parseJSON = withText "WorkflowId" (pure . WorkflowId)
+
+instance ToJSON WorkflowStatus where
+  toJSON status = toJSON (workflowStatusText status)
+
+instance FromJSON WorkflowStatus where
+  parseJSON = withText "WorkflowStatus" $ \text ->
+    case parseWorkflowStatus text of
+      Right status -> pure status
+      Left err -> fail (show err)
+
+-- | Instants as ISO-8601 text, the same spelling the schema reads. Lives
+-- here (not orphaned in @Postgres@) so statements and the replay envelope
+-- share one shape.
+instance ToJSON Timestamp where
+  toJSON = toJSON . timestampToIso8601
+
+instance FromJSON Timestamp where
+  parseJSON = withText "Timestamp" $ \text ->
+    case timestampFromIso8601 text of
+      Just timestamp -> pure timestamp
+      Nothing -> fail ("not an ISO-8601 instant: " <> Text.unpack text)
+
+instance ToJSON Duration where
+  toJSON duration = toJSON (durationAsMillis duration)
+
+instance FromJSON Duration where
+  parseJSON = withScientific "Duration" (\ms -> pure (Duration (fromIntegral (floor ms :: Integer) / 1000)))
+
+instance ToJSON WorkflowRecord where
+  toJSON record =
+    object
+      [ "workflowRecordId" .= record.workflowRecordId,
+        "workflowRecordStatus" .= record.workflowRecordStatus,
+        "workflowRecordName" .= record.workflowRecordName,
+        "workflowRecordClassName" .= record.workflowRecordClassName,
+        "workflowRecordConfigName" .= record.workflowRecordConfigName,
+        "workflowRecordInput" .= record.workflowRecordInput,
+        "workflowRecordOutput" .= record.workflowRecordOutput,
+        "workflowRecordError" .= record.workflowRecordError,
+        "workflowRecordSerialization" .= record.workflowRecordSerialization,
+        "workflowRecordExecutorId" .= record.workflowRecordExecutorId,
+        "workflowRecordApplicationVersion" .= record.workflowRecordApplicationVersion,
+        "workflowRecordRecoveryAttempts" .= record.workflowRecordRecoveryAttempts,
+        "workflowRecordQueueName" .= record.workflowRecordQueueName,
+        "workflowRecordCreatedAt" .= record.workflowRecordCreatedAt,
+        "workflowRecordUpdatedAt" .= record.workflowRecordUpdatedAt,
+        "workflowRecordStartedAt" .= record.workflowRecordStartedAt,
+        "workflowRecordCompletedAt" .= record.workflowRecordCompletedAt,
+        "workflowRecordForkedFrom" .= record.workflowRecordForkedFrom,
+        "workflowRecordParentWorkflowId" .= record.workflowRecordParentWorkflowId,
+        "workflowRecordWasForkedFrom" .= record.workflowRecordWasForkedFrom,
+        "workflowRecordOwnerXid" .= record.workflowRecordOwnerXid,
+        "workflowRecordApplicationId" .= record.workflowRecordApplicationId,
+        "workflowRecordAuthenticatedUser" .= record.workflowRecordAuthenticatedUser,
+        "workflowRecordAuthenticatedRoles" .= record.workflowRecordAuthenticatedRoles,
+        "workflowRecordAssumedRole" .= record.workflowRecordAssumedRole,
+        "workflowRecordRequest" .= record.workflowRecordRequest,
+        "workflowRecordApplicationName" .= record.workflowRecordApplicationName,
+        "workflowRecordDeduplicationId" .= record.workflowRecordDeduplicationId,
+        "workflowRecordPriority" .= record.workflowRecordPriority,
+        "workflowRecordQueuePartitionKey" .= record.workflowRecordQueuePartitionKey,
+        "workflowRecordRateLimited" .= record.workflowRecordRateLimited,
+        "workflowRecordScheduleName" .= record.workflowRecordScheduleName,
+        "workflowRecordTimeout" .= record.workflowRecordTimeout,
+        "workflowRecordDeadline" .= record.workflowRecordDeadline,
+        "workflowRecordDelayUntil" .= record.workflowRecordDelayUntil,
+        "workflowRecordDebounceDeadline" .= record.workflowRecordDebounceDeadline,
+        "workflowRecordIsDebounced" .= record.workflowRecordIsDebounced,
+        "workflowRecordAttributes" .= record.workflowRecordAttributes
+      ]
+
+instance FromJSON WorkflowRecord where
+  parseJSON = withObject "WorkflowRecord" $ \o ->
+    WorkflowRecord
+      <$> o .: "workflowRecordId"
+      <*> o .: "workflowRecordStatus"
+      <*> o .: "workflowRecordName"
+      <*> o .: "workflowRecordClassName"
+      <*> o .: "workflowRecordConfigName"
+      <*> o .: "workflowRecordInput"
+      <*> o .: "workflowRecordOutput"
+      <*> o .: "workflowRecordError"
+      <*> o .: "workflowRecordSerialization"
+      <*> o .: "workflowRecordExecutorId"
+      <*> o .: "workflowRecordApplicationVersion"
+      <*> o .: "workflowRecordRecoveryAttempts"
+      <*> o .: "workflowRecordQueueName"
+      <*> o .: "workflowRecordCreatedAt"
+      <*> o .: "workflowRecordUpdatedAt"
+      <*> o .: "workflowRecordStartedAt"
+      <*> o .: "workflowRecordCompletedAt"
+      <*> o .: "workflowRecordForkedFrom"
+      <*> o .: "workflowRecordParentWorkflowId"
+      <*> o .: "workflowRecordWasForkedFrom"
+      <*> o .: "workflowRecordOwnerXid"
+      <*> o .: "workflowRecordApplicationId"
+      <*> o .: "workflowRecordAuthenticatedUser"
+      <*> o .: "workflowRecordAuthenticatedRoles"
+      <*> o .: "workflowRecordAssumedRole"
+      <*> o .: "workflowRecordRequest"
+      <*> o .: "workflowRecordApplicationName"
+      <*> o .: "workflowRecordDeduplicationId"
+      <*> o .: "workflowRecordPriority"
+      <*> o .: "workflowRecordQueuePartitionKey"
+      <*> o .: "workflowRecordRateLimited"
+      <*> o .: "workflowRecordScheduleName"
+      <*> o .: "workflowRecordTimeout"
+      <*> o .: "workflowRecordDeadline"
+      <*> o .: "workflowRecordDelayUntil"
+      <*> o .: "workflowRecordDebounceDeadline"
+      <*> o .: "workflowRecordIsDebounced"
+      <*> o .: "workflowRecordAttributes"

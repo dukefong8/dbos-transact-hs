@@ -136,7 +136,6 @@ module DBOS.SystemDB.Postgres.Statements
   )
 where
 
-import DBOS.Prelude
 import Data.Functor (void)
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
@@ -145,6 +144,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
+import DBOS.Prelude
 import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..))
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
@@ -2445,12 +2445,12 @@ deleteScheduleStatement =
 -- delete on receive, so the read reports everything and not merely what is
 -- still waiting.
 data NotificationRecordRaw = NotificationRecordRaw
-  { notificationRawMessageUuid :: Text,
-    notificationRawTopic :: Maybe Text,
-    notificationRawMessage :: Text,
+  { notificationRawMessageUuid   :: Text,
+    notificationRawTopic         :: Maybe Text,
+    notificationRawMessage       :: Text,
     notificationRawSerialization :: Maybe Text,
-    notificationRawCreatedAt :: Int64,
-    notificationRawConsumed :: Bool
+    notificationRawCreatedAt     :: Int64,
+    notificationRawConsumed      :: Bool
   }
 
 -- | Every message a workflow was sent, in arrival order.
@@ -2473,8 +2473,8 @@ allNotificationsStatement =
 
 -- | An event a workflow published.
 data EventRecordRaw = EventRecordRaw
-  { eventRawKey :: Text,
-    eventRawValue :: Text,
+  { eventRawKey           :: Text,
+    eventRawValue         :: Text,
     eventRawSerialization :: Maybe Text
   }
 
@@ -2500,12 +2500,12 @@ allEventsStatement =
 -- the half pair of timestamps (a start without a completion measures
 -- nothing, so the completion is stamped only when a start is offered).
 data RecordChildWorkflowParams = RecordChildWorkflowParams
-  { recordChildParentId :: Text,
-    recordChildChildId :: Text,
-    recordChildStepId :: Int,
-    recordChildStepName :: Text,
-    recordChildStartedAt :: Maybe Int64,
-    recordChildCompletedAt :: Maybe Int64,
+  { recordChildParentId        :: Text,
+    recordChildChildId         :: Text,
+    recordChildStepId          :: Int,
+    recordChildStepName        :: Text,
+    recordChildStartedAt       :: Maybe Int64,
+    recordChildCompletedAt     :: Maybe Int64,
     recordChildApplicationName :: Maybe Text
   }
 

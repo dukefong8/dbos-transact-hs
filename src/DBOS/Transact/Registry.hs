@@ -15,6 +15,7 @@ module DBOS.Transact.Registry
     WorkflowRef (..),
     refKey,
     refName,
+    refRegistry,
     registerWorkflowRef,
     ErasedWorkflow,
     Registry,
@@ -25,13 +26,8 @@ module DBOS.Transact.Registry
     snapshotRegistry,
     thawRegistry,
     lookupSnapshotWorkflow,
+    lookupRegistryWorkflow,
     snapshotSize,
-    DuplicateWorkflowName (..),
-    WorkflowBody,
-    WorkflowRegistry,
-    emptyRegistry,
-    lookupWorkflow,
-    registerWorkflow,
   )
 where
 
@@ -43,9 +39,8 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.SystemDB.Postgres (Pool)
 import DBOS.SystemDB.Types (Serialization (..), SerializedWorkflowValue, WorkflowId, WorkflowName (..))
-import DBOS.Transact.Codec (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Context (Ctx)
 import DBOS.Transact.Error qualified as TransactError
 
@@ -105,6 +100,11 @@ instance Show (WorkflowRef m) where
 -- | The identity this workflow was registered under.
 refKey :: WorkflowRef m -> WorkflowKey
 refKey ref = ref.refKey
+
+-- | The registry this reference resolves bodies through: what a child
+-- start reaches for when its call site holds no snapshot.
+refRegistry :: WorkflowRef m -> Registry m
+refRegistry ref = ref.refRegistry
 
 -- | The workflow's name: the bare name, not the full identity triple.
 refName :: WorkflowRef m -> Text
@@ -178,32 +178,15 @@ thawRegistry (Registry stateVar) =
 lookupSnapshotWorkflow :: WorkflowKey -> Snapshot m -> Maybe (ErasedWorkflow m)
 lookupSnapshotWorkflow key (Snapshot workflows) = Map.lookup key workflows
 
+-- | The body registered under a key, read from the live registry rather
+-- than from a launch snapshot. Equivalent to the snapshot for as long as
+-- an executor holds it — launch freezes registration — and it is what a
+-- call site holding only a 'WorkflowRef' can reach.
+lookupRegistryWorkflow :: MonadMVar m => WorkflowKey -> Registry m -> m (Maybe (ErasedWorkflow m))
+lookupRegistryWorkflow key registry = case registry of
+  Registry mvar -> do
+    RegistryState workflows _ <- readMVar mvar
+    pure (Map.lookup key workflows)
+
 snapshotSize :: Snapshot m -> Int
 snapshotSize (Snapshot workflows) = Map.size workflows
-
-type WorkflowBody =
-  Pool ->
-  WorkflowId ->
-  Maybe SerializedWorkflowValue ->
-  IO SerializedWorkflowValue
-
-newtype WorkflowRegistry = WorkflowRegistry (Map WorkflowName WorkflowBody)
-
-newtype DuplicateWorkflowName = DuplicateWorkflowName WorkflowName
-  deriving stock (Eq, Show)
-
-emptyRegistry :: WorkflowRegistry
-emptyRegistry = WorkflowRegistry Map.empty
-
-registerWorkflow ::
-  WorkflowName ->
-  WorkflowBody ->
-  WorkflowRegistry ->
-  Either DuplicateWorkflowName WorkflowRegistry
-registerWorkflow name body (WorkflowRegistry entries) =
-  case Map.lookup name entries of
-    Just _ -> Left (DuplicateWorkflowName name)
-    Nothing -> Right (WorkflowRegistry (Map.insert name body entries))
-
-lookupWorkflow :: WorkflowName -> WorkflowRegistry -> Maybe WorkflowBody
-lookupWorkflow name (WorkflowRegistry entries) = Map.lookup name entries

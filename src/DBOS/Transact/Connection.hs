@@ -1,7 +1,7 @@
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GADTs               #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RankNTypes          #-}
 
 -- | A connection to the system database, and the settings every call
 -- through it carries. Mirrors Rust @connection.rs@: the backend handle
@@ -43,19 +43,18 @@ module DBOS.Transact.Connection
   )
 where
 
-import DBOS.Prelude
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, newTVarIO, readTVar, writeTVar)
-import Data.Word (Word32)
-import Colog.Core.Action (LogAction (..))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
+import Data.Word (Word32)
+import DBOS.Prelude
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres (Settings (..))
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.SystemDB.Types (Duration)
+import DBOS.Tracer (SomeTracer)
 import DBOS.Transact.Config (Config (..), Serializer, outcomePollInterval)
 import DBOS.Transact.Identity (Identity (..))
 
@@ -94,22 +93,24 @@ newtype ExecutionIdentity = ExecutionIdentity Int
 -- through it carries. Field names keep the oracle's, prefixed where the
 -- bare spelling collides with another ported record.
 data Connection m = Connection
-  { connSysdb :: SomeSystemDB m,
-    connSerializer :: Serializer,
-    connAppName :: Maybe Text,
+  { connSysdb               :: SomeSystemDB m,
+    connSerializer          :: Serializer,
+    connAppName             :: Maybe Text,
     connOutcomePollInterval :: Duration,
-    connOwner :: Owner,
-    connExecutionCounter :: StrictTVar m Int,
-    connGenerateWorkflowId :: m Text,
-    connEntropy :: m Word32
+    connOwner               :: Owner,
+    connExecutionCounter    :: StrictTVar m Int,
+    connGenerateWorkflowId  :: m Text,
+    connEntropy             :: m Word32,
+    connTracer              :: SomeTracer m
   }
 
 -- | Wraps an acquired backend in a connection. The surface that owns the
 -- configuration calls this after acquiring and activating the backend, and
 -- supplies the @m Text@ workflow-id generator the engine mints ids with
--- when a caller names none.
-newConnection :: MonadSTM m => SomeSystemDB m -> Serializer -> Maybe Text -> Duration -> Owner -> m Text -> m Word32 -> m (Connection m)
-newConnection sysdb serializer appName pollInterval owner generate entropy = do
+-- when a caller names none, plus the tracer the connection's workers and
+-- workflow contexts announce resource-lifetime events through.
+newConnection :: MonadSTM m => SomeSystemDB m -> Serializer -> Maybe Text -> Duration -> Owner -> m Text -> m Word32 -> SomeTracer m -> m (Connection m)
+newConnection sysdb serializer appName pollInterval owner generate entropy tracer = do
   counter <- newTVarIO 0
   pure
     Connection
@@ -120,7 +121,8 @@ newConnection sysdb serializer appName pollInterval owner generate entropy = do
         connOwner = owner,
         connExecutionCounter = counter,
         connGenerateWorkflowId = generate,
-        connEntropy = entropy
+        connEntropy = entropy,
+        connTracer = tracer
       }
 
 -- | Mint the identity of the next execution over this connection.
@@ -140,9 +142,9 @@ generatedWorkflowId conn = conn.connGenerateWorkflowId
 -- takes the resolved identity, because an application's every call is
 -- stamped with it. Acquires and activates the backend (verify-only: the
 -- Haskell port never migrates, ADR-0004/0010).
-forApplication :: Config -> Identity -> LogAction IO Text -> IO (Connection IO)
-forApplication config identity logger = do
-  backend <- Postgres.acquirePostgresSystemDB (backendConfig config identity) logger
+forApplication :: Config -> Identity -> SomeTracer IO -> IO (Connection IO)
+forApplication config identity tracer = do
+  backend <- Postgres.acquirePostgresSystemDB (backendConfig config identity) tracer
   Postgres.activatePostgresSystemDB backend
   newConnection
     (SomeSystemDB backend)
@@ -152,6 +154,7 @@ forApplication config identity logger = do
     OwnerApplication
     uuidWorkflowId
     uuidEntropy
+    tracer
 
 -- | The production id generator: a fresh v4 UUID, as the oracle mints.
 uuidWorkflowId :: IO Text

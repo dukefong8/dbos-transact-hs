@@ -22,7 +22,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), selectWorkflowStepName, timestampNow)
-import DBOS.Transact.Codec (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (Ctx, currentConnection, nextStepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError

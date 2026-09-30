@@ -9,7 +9,7 @@
 -- output is plain JSON, keeping Haskell-written rows readable by Python
 -- DBOS. Verified against the oracle: no divergence (same tag, same
 -- absent-as-null, same named halves).
-module DBOS.Transact.Codec
+module DBOS.Transact.Serialization
   ( CodecError (..),
     decodeWorkflowValue,
     encodeUnit,

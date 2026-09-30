@@ -9,7 +9,7 @@ import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
 import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), Submission (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelWorkflowStepName, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteWorkflowStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkNew, forkOptionsValidate, forkValidate, forkWorkflowStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isValidApplicationName, listSchedulesStepName, listWorkflowStepsStepName, listWorkflowsStepName, newQueue, newSchedule, newWorkflow, outcomeStatus, parseScheduleStatus, pauseScheduleStepName, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resolvedIsPartitioned, resumeScheduleStepName, resumeWorkflowStepName, scheduleStatusText, secondsDuration, selectStepStepName, selectWorkflowStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
-import DBOS.Transact (WorkflowId (..), WorkflowStatus (..))
+import DBOS.Transact (IdempotencyKey (..), MessageUUID (..), NotificationRow (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), WorkflowStatus (..), notificationRowForMessage, nullTopicSentinel)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -28,7 +28,8 @@ tests =
       filterTests,
       forkTests,
       debounceTests,
-      outcomeTests
+      outcomeTests,
+      notificationTests
     ]
 
 timestampTests :: TestTree
@@ -515,3 +516,59 @@ outcomeTests =
         outcomeStatus (OutcomeOutput Nothing) @?= Success
         outcomeStatus (OutcomeError "boom") @?= Error
     ]
+
+-- | Python send mapping against the Rust @NULL_TOPIC@ contract
+-- (@sysdb/mod.rs@, resolved @unwrap_or@ at the send call): an untopicked
+-- message files under the sentinel, and both id branches scope per
+-- recipient (@{key}::{destination}@, @postgres.rs@).
+notificationTests :: TestTree
+notificationTests =
+  testGroup
+    "Notifications"
+    [ testCase "maps Python SendMessage without topic to notifications sentinel topic" $
+        notificationRowForMessage
+          (MessageUUID "generated-message-id")
+          (SendMessage (WorkflowId "dest-wf") messageBody Nothing Nothing)
+          @?= NotificationRow
+            { notificationDestinationId = WorkflowId "dest-wf",
+              notificationTopic = nullTopicSentinel,
+              notificationMessage = messageBody,
+              notificationMessageUUID = MessageUUID "generated-message-id::dest-wf",
+              notificationConsumed = False
+            },
+      testCase "maps Python SendMessage topic into a notifications row" $
+        notificationRowForMessage
+          (MessageUUID "generated-message-id")
+          (SendMessage (WorkflowId "dest-wf") messageBody (Just (Topic "testtopic")) Nothing)
+          @?= NotificationRow
+            { notificationDestinationId = WorkflowId "dest-wf",
+              notificationTopic = "testtopic",
+              notificationMessage = messageBody,
+              notificationMessageUUID = MessageUUID "generated-message-id::dest-wf",
+              notificationConsumed = False
+            },
+      testCase "scopes Python send idempotency keys by destination workflow" $
+        ( notificationRowForMessage
+            (MessageUUID "ignored-generated-id")
+            ( SendMessage
+                (WorkflowId "dest-wf")
+                messageBody
+                Nothing
+                (Just (IdempotencyKey "idem-key"))
+            )
+          ).notificationMessageUUID
+          @?= MessageUUID "idem-key::dest-wf",
+      testCase "scopes generated fallback ids by destination workflow" $
+        ( notificationRowForMessage
+            (MessageUUID "generated-message-id")
+            (SendMessage (WorkflowId "dest-wf") messageBody Nothing Nothing)
+          ).notificationMessageUUID
+          @?= MessageUUID "generated-message-id::dest-wf"
+    ]
+
+messageBody :: SerializedWorkflowValue
+messageBody =
+  SerializedWorkflowValue
+    { serializedText = "\"hello\"",
+      serializedSerialization = Just (Serialization "json")
+    }

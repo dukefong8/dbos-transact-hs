@@ -1,9 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | 'DBOS.Transact.Codec' against the Rust @serialization.rs@ tests: an
+-- | 'DBOS.Transact.Serialization' against the Rust @serialization.rs@ tests: an
 -- absent value decodes as the unit, a value round trips, the unit encodes as
 -- a value rather than an absence, and a mismatch names the half that failed.
-module DBOS.CodecTest
+module DBOS.Transact.SerializationTest
   ( tests,
   )
 where
@@ -26,7 +26,7 @@ import Test.Tasty.HUnit (testCase, (@?=))
 tests :: TestTree
 tests =
   testGroup
-    "DBOS Codec"
+    "Transact Serialization"
     [ testCase "an absent value decodes as the unit" $ do
         (decodeWorkflowValue "argument" Nothing :: Either CodecError ()) @?= Right ()
         (decodeWorkflowValue "argument" Nothing :: Either CodecError (Maybe Word32)) @?= Right Nothing,

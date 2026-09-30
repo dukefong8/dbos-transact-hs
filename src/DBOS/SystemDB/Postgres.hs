@@ -16,8 +16,6 @@ module DBOS.SystemDB.Postgres
   (     Pool.Pool,
     WorkflowStartDecision (..),
     DbosMigration (..),
-    postgresEventStore,
-    postgresStepStore,
     acquirePool,
     dequeueWorkflows,
     dequeueWorkflowsSession,
@@ -26,13 +24,9 @@ module DBOS.SystemDB.Postgres
     fetchMigrationVersion,
     fetchNotification,
     fetchNotificationSession,
-    fetchOperationCheckpoint,
-    fetchOperationCheckpointSession,
     fetchQueueWorkerConcurrency,
     fetchQueueWorkerConcurrencySession,
     fetchRecvStepSession,
-    fetchWorkflowExecutionRow,
-    fetchWorkflowExecutionRowSession,
     fetchWorkflowStatus,
     fetchWorkflowStatusSession,
     fetchWorkflowStatuses,
@@ -49,7 +43,6 @@ module DBOS.SystemDB.Postgres
     recordOperationOutput,
     recordOperationOutputSession,
     recordRecvSession,
-    legacyRecordSleep,
     recordSleepSession,
     recvMessage,
     legacyReenqueueForRecovery,
@@ -97,7 +90,6 @@ module DBOS.SystemDB.Postgres
 where
 
 import DBOS.Prelude
-import Colog.Core.Action (LogAction (..))
 import Control.Applicative ((<|>))
 import Control.Monad (join, when)
 
@@ -119,18 +111,14 @@ import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word16, Word32)
 import DBOS.SystemDB (SystemDB (..))
 import DBOS.SystemDB.Retry (RetryPolicy (..), defaultRetryPolicy, uuidEntropy, withRetry)
+import DBOS.Tracer (SomeTracer, SysdbEvent (..), traceWith)
 import DBOS.SystemDB.Types (MessageUUID (..), NotificationRow (..), OnExistingQueue (..), QueueName (..), SendMessage (..), Topic (..), WorkflowStatus (..), messageUUIDForSend, nullTopicSentinel, parseWorkflowStatus, recvStepName, workflowStatusText)
 import DBOS.SystemDB.Notify (Registry, Subscription, eventsChannel, eventKey, messageKey, newRegistry, notified, subscribe, subscribeExclusive, unsubscribe)
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
-import DBOS.Transact.OperationCheckpointParse (parseOperationCheckpoint)
-import DBOS.Transact.OperationCheckpointTypes (OperationCheckpoint (..), OperationCheckpointDecodeError, OperationId (..), OperationName (..))
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput)
-import DBOS.Transact.OperationCheckpointTypes qualified as OperationCheckpointTypes
-import DBOS.Transact.Store (EventStore (..), StepStore (..))
 import DBOS.SystemDB.Types (ApplicationRowCounts (..), Applications (..), ApplicationVersion (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdempotencyKey (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowName (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, debounceStepName, debounceValidate, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, createScheduleStepName, getScheduleStepName, deleteScheduleStepName, pauseScheduleStepName, resumeScheduleStepName, listSchedulesStepName, updateScheduleStepName, upsertScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, validateAttributes, validateNewWorkflow)
 import DBOS.SystemDB.Types qualified as Types
-import DBOS.Transact.WorkflowExecutionTypes (WorkflowExecutionRow (..))
 import Hasql.Connection.Settings qualified as Connection
 import Hasql.Decoders qualified as Decoders
 import Hasql.Errors qualified as Errors
@@ -149,35 +137,6 @@ import System.Timeout qualified as Timeout
 import IHP.TypedSql.RowType (SqlRow)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-type WorkflowExecutionRowRaw =
-  SqlRow
-    '[ '("workflow_uuid", Id' "workflow_status"),
-       '("status", Maybe Text),
-       '("name", Maybe Text),
-       '("parent_workflow_id", Maybe Text),
-       '("inputs", Maybe Text),
-       '("output", Maybe Text),
-       '("error", Maybe Text),
-       '("executor_id", Maybe Text),
-       '("created_at", Int64),
-       '("updated_at", Int64),
-       '("recovery_attempts", Maybe Int64),
-       '("queue_name", Maybe Text),
-       '("serialization", Maybe Text),
-       '("application_version", Maybe Text)
-     ]
-
-type OperationCheckpointRaw =
-  SqlRow
-    '[ '("function_id", Id' "operation_outputs"),
-       '("function_name", Text),
-       '("output", Maybe Text),
-       '("error", Maybe Text),
-       '("child_workflow_id", Maybe Text),
-       '("started_at_epoch_ms", Maybe Int64),
-       '("completed_at_epoch_ms", Maybe Int64),
-       '("serialization", Maybe Text)
-     ]
 
 type NotificationRaw =
   SqlRow
@@ -188,32 +147,6 @@ type NotificationRaw =
        '("serialization", Maybe Text),
        '("consumed", Bool)
      ]
-
-fetchWorkflowExecutionRowSession ::
-  WorkflowId ->
-  Session (Maybe WorkflowExecutionRow)
-fetchWorkflowExecutionRowSession (WorkflowId workflowId) =
-  fmap decodeWorkflowExecutionRow
-    <$> sqlQueryTypedSession [typedSql|
-    select
-      workflow_uuid,
-      status,
-      name,
-      parent_workflow_id,
-      inputs,
-      output,
-      error,
-      executor_id,
-      created_at,
-      updated_at,
-      recovery_attempts,
-      queue_name,
-      serialization,
-      application_version
-    from dbos.workflow_status
-    where workflow_uuid = ${workflowId}
-    limit 1
-  |]
 
 fetchWorkflowStatusSession ::
   WorkflowId ->
@@ -230,30 +163,6 @@ fetchWorkflowStatusSession (WorkflowId workflowId) = do
   -- nests with the column nullability. A null status fails downstream as
   -- @UnknownWorkflowStatus ""@ rather than crashing the row decode.
   pure (join rawStatus >>= either (error . show) Just . parseWorkflowStatus)
-
-fetchOperationCheckpointSession ::
-  WorkflowId ->
-  OperationId ->
-  Session (Maybe OperationCheckpoint)
-fetchOperationCheckpointSession (WorkflowId workflowId) (OperationId operationId) = do
-  let functionId = fromIntegral operationId :: Int
-  rawCheckpoint <-
-    sqlQueryTypedSession [typedSql|
-      select
-        function_id,
-        function_name,
-        output,
-        error,
-        child_workflow_id,
-        started_at_epoch_ms,
-        completed_at_epoch_ms,
-        serialization
-      from dbos.operation_outputs
-      where workflow_uuid = ${workflowId}
-        and function_id = ${functionId}
-      limit 1
-    |]
-  pure (rawCheckpoint >>= either (error . show) Just . decodeOperationCheckpoint)
 
 fetchNotificationSession ::
   MessageUUID ->
@@ -397,14 +306,14 @@ updateWorkflowOutcomeSession (WorkflowId workflowId) (ExecutorId executorId) sta
 
 recordOperationOutputSession ::
   WorkflowId ->
-  OperationId ->
-  OperationCheckpointTypes.OperationName ->
+  Int ->
+  Text ->
   SerializedWorkflowValue ->
   Session ()
 recordOperationOutputSession
   (WorkflowId workflowId)
-  (OperationId operationId)
-  (OperationCheckpointTypes.OperationName operationName)
+  operationId
+  operationName
   output =
     let functionId = fromIntegral operationId :: Int
         outputText = output.serializedText
@@ -439,14 +348,14 @@ recordOperationOutputSession
 
 recordOperationErrorSession ::
   WorkflowId ->
-  OperationId ->
-  OperationCheckpointTypes.OperationName ->
+  Int ->
+  Text ->
   SerializedWorkflowValue ->
   Session ()
 recordOperationErrorSession
   (WorkflowId workflowId)
-  (OperationId operationId)
-  (OperationCheckpointTypes.OperationName operationName)
+  operationId
+  operationName
   errorValue =
     let functionId = fromIntegral operationId :: Int
         errorText = errorValue.serializedText
@@ -484,16 +393,16 @@ recordOperationErrorSession
 -- remainder instead of the whole duration.
 recordSleepSession ::
   WorkflowId ->
-  OperationId ->
-  OperationCheckpointTypes.OperationName ->
+  Int ->
+  Text ->
   SerializedWorkflowValue ->
   Timestamp ->
   Timestamp ->
   Session ()
 recordSleepSession
   (WorkflowId workflowId)
-  (OperationId operationId)
-  (OperationCheckpointTypes.OperationName operationName)
+  operationId
+  operationName
   output
   (Timestamp startedMs)
   (Timestamp completedMs) =
@@ -658,14 +567,14 @@ probeNotificationSession (WorkflowId workflowId) topic = do
 -- record instead of dying on the conflict.
 takeNotificationSession ::
   WorkflowId ->
-  OperationId ->
+  Int ->
   Maybe Topic ->
   Timestamp ->
   Timestamp ->
   Session (Maybe SerializedWorkflowValue)
 takeNotificationSession
   (WorkflowId workflowId)
-  (OperationId operationId)
+  operationId
   topic
   (Timestamp startedMs)
   (Timestamp completedMs) = do
@@ -724,9 +633,9 @@ takeNotificationSession
 -- absence, matching the oracle's @Outcome::Output(None)@.
 fetchRecvStepSession ::
   WorkflowId ->
-  OperationId ->
+  Int ->
   Session (Maybe (Maybe SerializedWorkflowValue))
-fetchRecvStepSession (WorkflowId workflowId) (OperationId operationId) =
+fetchRecvStepSession (WorkflowId workflowId) operationId =
   fmap decodeRecvStep
     <$> sqlQueryTypedSession [typedSql|
     select output, serialization
@@ -744,14 +653,14 @@ fetchRecvStepSession (WorkflowId workflowId) (OperationId operationId) =
 -- SQL NULL output, which a replay reads back as @Just Nothing@.
 recordRecvSession ::
   WorkflowId ->
-  OperationId ->
+  Int ->
   Maybe SerializedWorkflowValue ->
   Timestamp ->
   Timestamp ->
   Session ()
 recordRecvSession
   (WorkflowId workflowId)
-  (OperationId operationId)
+  operationId
   taken
   (Timestamp startedMs)
   (Timestamp completedMs) =
@@ -1032,44 +941,6 @@ releaseWorkflowClaimSession (ExecutorId executorId) (WorkflowId workflowId) =
       and executor_id = ${executorId}
   |]
 
-decodeWorkflowExecutionRow :: WorkflowExecutionRowRaw -> WorkflowExecutionRow
-decodeWorkflowExecutionRow row =
-  WorkflowExecutionRow
-    { rowWorkflowId = case row.workflow_uuid of Id key -> WorkflowId key,
-      -- @status@ is nullable in the schema (zero such rows in practice); an
-      -- absent status fails downstream as @UnknownWorkflowStatus ""@ rather
-      -- than crashing the row decode.
-      rowWorkflowStatus = fromMaybe "" row.status,
-      rowWorkflowName = row.name,
-      rowWorkflowParentId = WorkflowId <$> row.parent_workflow_id,
-      rowWorkflowInputs = row.inputs,
-      rowWorkflowOutput = serializedWorkflowValue row.output row.serialization,
-      rowWorkflowError = serializedWorkflowValue row.error row.serialization,
-      rowWorkflowExecutor = row.executor_id,
-      rowWorkflowCreatedAt = Just (Timestamp row.created_at),
-      rowWorkflowUpdatedAt = Just (Timestamp row.updated_at),
-      rowWorkflowRecoveryAttempts = row.recovery_attempts,
-      rowWorkflowQueueName = row.queue_name,
-      rowWorkflowSerialization = row.serialization,
-      rowWorkflowApplicationVersion = row.application_version
-    }
-
-decodeOperationCheckpoint ::
-  OperationCheckpointRaw ->
-  Either OperationCheckpointDecodeError OperationCheckpoint
-decodeOperationCheckpoint row =
-  parseOperationCheckpoint
-    decodedOperationId
-    decodedOperationName
-    (serializedWorkflowValue row.output row.serialization)
-    (serializedWorkflowValue row.error row.serialization)
-    (WorkflowId <$> row.child_workflow_id)
-    (Timestamp <$> row.started_at_epoch_ms)
-    (Timestamp <$> row.completed_at_epoch_ms)
-  where
-    decodedOperationId = case row.function_id of Id key -> OperationId (fromIntegral key)
-    decodedOperationName = OperationCheckpointTypes.OperationName row.function_name
-
 decodeNotificationRow :: NotificationRaw -> NotificationRow
 decodeNotificationRow row =
   NotificationRow
@@ -1291,19 +1162,19 @@ data PostgresSystemDB = PostgresSystemDB
     -- spawned it. Mirrors the oracle's @notifier_task@: 'close' takes it,
     -- waits out the final flush, and only then releases the pool.
     psdbNotifierTask :: StrictMVar IO (Maybe (Async IO ())),
-    psdbLog :: LogAction IO Text
+    psdbLog :: SomeTracer IO
   }
 
 -- | Builds a handle around a live pool. Mirrors Rust @from_pool@: the pool
 -- size travels separately because a hasql pool does not report it, and the
 -- schema is checked (only @"dbos"@ is served) rather than rendered.
-fromPool :: Pool.Pool -> Word32 -> Settings -> LogAction IO Text -> IO PostgresSystemDB
-fromPool pool poolSize settings logger = do
+fromPool :: Pool.Pool -> Word32 -> Settings -> SomeTracer IO -> IO PostgresSystemDB
+fromPool pool poolSize settings tracer = do
   when (settings.settingsSchema /= "dbos") $
     throwIO (invalidInput "schema" ("only the dbos schema is served, not " <> settings.settingsSchema))
   permits <- newTVarIO (pollingLimit settings.settingsPollingConcurrency poolSize)
   registry <- newRegistry
-  notifier <- notifierNew pool registry settings.settingsNotificationCoalesce logger
+  notifier <- notifierNew pool registry settings.settingsNotificationCoalesce tracer
   taskVar <- newMVar Nothing
   pure
     PostgresSystemDB
@@ -1315,15 +1186,15 @@ fromPool pool poolSize settings logger = do
         psdbNotify = registry,
         psdbNotifier = notifier,
         psdbNotifierTask = taskVar,
-        psdbLog = logger
+        psdbLog = tracer
       }
 
 -- | Connects and verifies the schema is at the migration ceiling (108).
 -- Verify-only: Haskell never migrates (ADR-0004) and never creates the
 -- database; a missing or drifted schema is a 'Backend' 'Permanent' error,
 -- not a build step.
-acquirePostgresSystemDB :: Config -> LogAction IO Text -> IO PostgresSystemDB
-acquirePostgresSystemDB config logger = do
+acquirePostgresSystemDB :: Config -> SomeTracer IO -> IO PostgresSystemDB
+acquirePostgresSystemDB config tracer = do
   pool <-
     Pool.acquire
       ( PoolConfig.settings
@@ -1334,7 +1205,7 @@ acquirePostgresSystemDB config logger = do
             PoolConfig.staticConnectionSettings (Connection.connectionString config.configUrl)
           ]
       )
-  env <- fromPool pool config.configMaxConnections config.configSettings logger
+  env <- fromPool pool config.configMaxConnections config.configSettings tracer
   verifySystemDatabase env >>= \case
     Left err -> Pool.release pool >> throwIO err
     Right () -> pure env
@@ -1367,9 +1238,9 @@ releasePostgresSystemDB env = do
     Just task -> wait task
   Pool.release env.psdbPool
 
-withPostgresSystemDB :: Config -> LogAction IO Text -> (PostgresSystemDB -> IO a) -> IO a
-withPostgresSystemDB config logger =
-  bracket (acquirePostgresSystemDB config logger) releasePostgresSystemDB
+withPostgresSystemDB :: Config -> SomeTracer IO -> (PostgresSystemDB -> IO a) -> IO a
+withPostgresSystemDB config tracer =
+  bracket (acquirePostgresSystemDB config tracer) releasePostgresSystemDB
 
 -- | Reads back the highest applied migration and requires the ceiling this
 -- port tracks (108). A higher value means the Rust corpus moved and the
@@ -1657,9 +1528,9 @@ finishInit env new maxRecoveryAttempts claiming ownerXid row =
           Just err -> pure (Left err)
           Nothing -> do
             when (row.queue_name /= new.newWorkflowQueueName) $
-              unLogAction
+              traceWith
                 env.psdbLog
-                ("workflow " <> new.newWorkflowId <> " already exists on a different queue; the stored queue is kept")
+                (SysdbQueueMismatch new.newWorkflowId)
             let ownerDiffers = row.owner_xid /= Just ownerXid
                 recoveryAttempts = fromMaybe 0 row.recovery_attempts
                 spent = case maxRecoveryAttempts of
@@ -2088,16 +1959,6 @@ debounceCallerTx app callerWid callerText callerStep startedAt completedAt reque
 -- a pattern binding in layout-sensitive positions.
 unwrapWorkflowId :: WorkflowId -> Text
 unwrapWorkflowId (Types.WorkflowId widText) = widText
-
--- | Instants as ISO-8601 text, the same spelling the schema reads.
-instance Aeson.ToJSON Timestamp where
-  toJSON = Aeson.String . timestampToIso8601
-
-instance Aeson.FromJSON Timestamp where
-  parseJSON = Aeson.withText "Timestamp" $ \text ->
-    case timestampFromIso8601 text of
-      Just timestamp -> pure timestamp
-      Nothing -> fail ("not an ISO-8601 instant: " <> Text.unpack text)
 
 -- | The stored status spelling is uppercase; the step output uses serde's
 -- variant names, as the debounce output does.
@@ -2930,7 +2791,7 @@ instance SystemDB PostgresSystemDB IO where
       ids = map unwrap workflowIds
       unwrap (Types.WorkflowId widText) = widText
       unwrapQueueName (QueueName name) = name
-  deleteWorkflows env workflowIds deleteChildren _caller
+  deleteWorkflows env workflowIds deleteChildren caller
     | null workflowIds = pure (Right 0)
     | otherwise = do
         children <- if deleteChildren
@@ -2942,8 +2803,29 @@ instance SystemDB PostgresSystemDB IO where
           Left err -> pure (Left err)
           Right descendants -> do
             let targets = List.nub (List.sort (map unwrap workflowIds <> descendants))
-            result <- runSession env "delete_workflows" (Statements.deleteWorkflowsSession targets)
-            pure (fromIntegral <$> result)
+            -- A workflow cannot delete itself, and cannot delete an
+            -- ancestor whose tree it is inside. Refused here, before
+            -- either statement runs: the alternative is a foreign key
+            -- violation surfacing as a backend error with nothing in it a
+            -- caller could act on. Only the caller's own id is checked,
+            -- not its ancestry — an ancestor is a target only when it was
+            -- named with children, and then the walk above has already put
+            -- the caller in the targets.
+            case caller of
+              Just (Types.WorkflowId callerId, _)
+                | callerId `elem` targets ->
+                    pure
+                      ( Left
+                          ( invalidInput
+                              "workflow_ids"
+                              ( "workflow " <> callerId <> " cannot delete itself: the step checkpoint for the delete "
+                                  <> "is written in the same transaction and would outlive the row it references"
+                              )
+                          )
+                      )
+              _ -> do
+                result <- runSession env "delete_workflows" (Statements.deleteWorkflowsSession targets)
+                pure (fromIntegral <$> result)
     where
       unwrap (Types.WorkflowId widText) = widText
   forkWorkflows env forks options _caller
@@ -3679,27 +3561,12 @@ runDbOrFail pool session = do
     Left err    -> throwIO (classifyUsageError err)
     Right value -> pure value
 
-fetchWorkflowExecutionRow ::
-  Pool.Pool ->
-  WorkflowId ->
-  IO (Maybe WorkflowExecutionRow)
-fetchWorkflowExecutionRow pool workflowId =
-  runDbOrFail pool (fetchWorkflowExecutionRowSession workflowId)
-
 fetchWorkflowStatus ::
   Pool.Pool ->
   WorkflowId ->
   IO (Maybe WorkflowStatus)
 fetchWorkflowStatus pool workflowId =
   runDbOrFail pool (fetchWorkflowStatusSession workflowId)
-
-fetchOperationCheckpoint ::
-  Pool.Pool ->
-  WorkflowId ->
-  OperationId ->
-  IO (Maybe OperationCheckpoint)
-fetchOperationCheckpoint pool workflowId operationId =
-  runDbOrFail pool (fetchOperationCheckpointSession workflowId operationId)
 
 fetchNotification ::
   Pool.Pool ->
@@ -3744,8 +3611,8 @@ updateWorkflowOutcome pool workflowId executorId status output errorValue =
 recordOperationOutput ::
   Pool.Pool ->
   WorkflowId ->
-  OperationId ->
-  OperationName ->
+  Int ->
+  Text ->
   SerializedWorkflowValue ->
   IO ()
 recordOperationOutput pool workflowId operationId operationName output =
@@ -3754,24 +3621,12 @@ recordOperationOutput pool workflowId operationId operationName output =
 recordOperationError ::
   Pool.Pool ->
   WorkflowId ->
-  OperationId ->
-  OperationName ->
+  Int ->
+  Text ->
   SerializedWorkflowValue ->
   IO ()
 recordOperationError pool workflowId operationId operationName errorValue =
   runDbOrFail pool (recordOperationErrorSession workflowId operationId operationName errorValue)
-
-legacyRecordSleep ::
-  Pool.Pool ->
-  WorkflowId ->
-  OperationId ->
-  OperationName ->
-  SerializedWorkflowValue ->
-  Timestamp ->
-  Timestamp ->
-  IO ()
-legacyRecordSleep pool workflowId operationId operationName output started completed =
-  runDbOrFail pool (recordSleepSession workflowId operationId operationName output started completed)
 
 legacySetEvent ::
   Pool.Pool ->
@@ -3845,7 +3700,7 @@ legacySendMessages pool messages = do
 recvMessage ::
   Pool.Pool ->
   WorkflowId ->
-  OperationId ->
+  Int ->
   Duration ->
   Maybe Topic ->
   IO (Maybe SerializedWorkflowValue)
@@ -3981,24 +3836,6 @@ releaseWorkflowClaim ::
   IO ()
 releaseWorkflowClaim pool executorId workflowId =
   runDbOrFail pool (releaseWorkflowClaimSession executorId workflowId)
-
--- | The engine's durable seams over a live pool: what production bodies
--- receive. Simulations build the same records over an in-memory model.
-postgresStepStore :: Pool.Pool -> StepStore IO
-postgresStepStore pool =
-  StepStore
-    { stepFetchResult = fetchOperationCheckpoint pool,
-      stepRecordOutput = \workflowId operationId operationName output ->
-        recordOperationOutput pool workflowId operationId operationName output
-    }
-
--- | Workflow events over a live pool.
-postgresEventStore :: Pool.Pool -> EventStore IO
-postgresEventStore pool =
-  EventStore
-    { eventGet = legacyGetEvent pool,
-      eventSet = legacySetEvent pool
-    }
 
 getConnectionSettings :: IO Connection.Settings
 getConnectionSettings = do

@@ -6,14 +6,14 @@
 module DBOS.Transact.QueueTest (tests) where
 
 import DBOS.Prelude
-import DBOS.SystemDB (AwaitedOutcome (..), Change (..), QueueRecord (..), WorkflowInitResult (..), WorkflowStatus (..), secondsDuration)
+import DBOS.SystemDB (AwaitedOutcome (..), Change (..), QueueName (..), QueueRecord (..), RateLimit (..), WorkflowInitResult (..), WorkflowStatus (..), internalQueueName, secondsDuration)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.Transact
   ( Config (..),
     CodecError,
-    Error,
+    Error (..),
     Environment (..),
     Serialization (..),
     SerializedWorkflowValue (..),
@@ -22,11 +22,13 @@ import DBOS.Transact
     QueueConflict (..),
     QueueOptions (..),
     configFromEnv,
+    defaultQueueChange,
     defaultQueueOptions,
     deleteQueue,
     decodeWorkflowValue,
     encodeWorkflowValue,
     enqueueDBOSWorkflow,
+    handleStatus,
     isLaunched,
     launchWithEnvironment,
     listQueues,
@@ -37,6 +39,7 @@ import DBOS.Transact
     queueIsPartitioned,
     registerQueue,
     registerDBOSWorkflow,
+    retrieveWorkflow,
     runDBOSWorkflow,
     waitForWorkflow,
     WorkflowId (..),
@@ -238,7 +241,288 @@ tests =
             )
             workflowIds
           high <- readTVarIO peak
-          assertEqual "the local worker budget never exceeds its limit" 2 high
+          assertEqual "the local worker budget never exceeds its limit" 2 high,
+      testCase "listen queues narrow what this process dequeues" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-listen-" <> Text.take 12 suffix
+            fastQueue = "hs-l2-listen-fast-" <> Text.take 12 suffix
+            slowQueue = "hs-l2-listen-slow-" <> Text.take 12 suffix
+            fastText = "hs-l2-listen-fast-wf-" <> suffix
+            slowText = "hs-l2-listen-slow-wf-" <> suffix
+            version = "hs-l2-version-" <> suffix
+            executorId = "hs-l2-executor-" <> suffix
+        base <- configFromEnv appName
+        let config =
+              base
+                { configAppVersion = Just version,
+                  configExecutorId = Just executorId,
+                  configListenQueues = Just [fastQueue]
+                }
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          let key = newWorkflowKey "either"
+              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body input _ = pure (Right input)
+          registered <- registerDBOSWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          mapM_
+            ( \queueName -> do
+                queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
+                case queueRegistered of
+                  Left err -> fail (show err)
+                  Right _ -> pure ()
+            )
+            [fastQueue, slowQueue]
+          let enqueueOne wid input queueName = do
+                enqueued <- enqueueDBOSWorkflow dbos key wid (Just (encodeWorkflowValue (input :: Int))) queueName
+                case enqueued of
+                  Left err -> fail (show err)
+                  Right _ -> pure ()
+          enqueueOne (WorkflowId fastText) 1 fastQueue
+          enqueueOne (WorkflowId slowText) 2 slowQueue
+          waited <- timeout 15000000 (waitForWorkflow dbos (WorkflowId fastText))
+          case waited of
+            Just (Right (AwaitedSucceeded (Just output) _)) -> do
+              let decoded = decodeWorkflowValue "result" (Just (SerializedWorkflowValue output Nothing)) :: Either CodecError Int
+              assertEqual "the listened queue runs" (Right 1) decoded
+            other -> fail ("expected the listened workflow to run, got: " <> show other)
+          -- By now several sweeps have run; the unlistened queue has not
+          -- been touched — its workflow stays ENQUEUED for a peer that
+          -- does listen to it.
+          retrieved <- retrieveWorkflow dbos (WorkflowId slowText)
+          case retrieved of
+            Left err -> fail (show err)
+            Right handle -> do
+              status <- handleStatus handle
+              status @?= Right (Just Enqueued),
+      testCase "an empty listen set dequeues from no registered queue" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-listen-none-" <> Text.take 12 suffix
+            ignoredQueue = "hs-l2-listen-ignored-" <> Text.take 12 suffix
+            ignoredText = "hs-l2-listen-ignored-wf-" <> suffix
+            internalText = "hs-l2-listen-internal-wf-" <> suffix
+            version = "hs-l2-version-" <> suffix
+            executorId = "hs-l2-executor-" <> suffix
+            QueueName internalName = internalQueueName
+        base <- configFromEnv appName
+        let config =
+              base
+                { configAppVersion = Just version,
+                  configExecutorId = Just executorId,
+                  configListenQueues = Just []
+                }
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          let key = newWorkflowKey "nothing"
+              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body input _ = pure (Right input)
+          registered <- registerDBOSWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          queueRegistered <- registerQueue dbos ignoredQueue defaultQueueOptions AlwaysUpdate
+          case queueRegistered of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          let enqueueOne wid input queueName = do
+                enqueued <- enqueueDBOSWorkflow dbos key wid (Just (encodeWorkflowValue (input :: Int))) queueName
+                case enqueued of
+                  Left err -> fail (show err)
+                  Right _ -> pure ()
+          enqueueOne (WorkflowId ignoredText) 1 ignoredQueue
+          enqueueOne (WorkflowId internalText) 2 internalName
+          -- The internal queue proves the loop is running at all, rather
+          -- than the assertion below passing because nothing works.
+          waited <- timeout 15000000 (waitForWorkflow dbos (WorkflowId internalText))
+          case waited of
+            Just (Right (AwaitedSucceeded (Just output) _)) -> do
+              let decoded = decodeWorkflowValue "result" (Just (SerializedWorkflowValue output Nothing)) :: Either CodecError Int
+              assertEqual "the internal queue still runs" (Right 2) decoded
+            other -> fail ("expected the internal workflow to run, got: " <> show other)
+          retrieved <- retrieveWorkflow dbos (WorkflowId ignoredText)
+          case retrieved of
+            Left err -> fail (show err)
+            Right handle -> do
+              status <- handleStatus handle
+              status @?= Right (Just Enqueued),
+      testCase "listen queues never exclude the internal queue" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-listen-int-" <> Text.take 12 suffix
+            otherQueue = "hs-l2-listen-other-" <> Text.take 12 suffix
+            internalText = "hs-l2-listen-int-wf-" <> suffix
+            version = "hs-l2-version-" <> suffix
+            executorId = "hs-l2-executor-" <> suffix
+            QueueName internalName = internalQueueName
+        base <- configFromEnv appName
+        let config =
+              base
+                { configAppVersion = Just version,
+                  configExecutorId = Just executorId,
+                  configListenQueues = Just [otherQueue]
+                }
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          let key = newWorkflowKey "internal"
+              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body input _ = pure (Right input)
+          registered <- registerDBOSWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          enqueued <- enqueueDBOSWorkflow dbos key (WorkflowId internalText) (Just (encodeWorkflowValue (4 :: Int))) internalName
+          case enqueued of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          waited <- timeout 15000000 (waitForWorkflow dbos (WorkflowId internalText))
+          case waited of
+            Just (Right (AwaitedSucceeded (Just output) _)) -> do
+              let decoded = decodeWorkflowValue "result" (Just (SerializedWorkflowValue output Nothing)) :: Either CodecError Int
+              assertEqual "the internal queue runs under a filter" (Right 4) decoded
+            other -> fail ("expected the internal workflow to run, got: " <> show other),
+      testCase "the internal queue name is reserved" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-reserved-" <> Text.take 12 suffix
+            QueueName internalName = internalQueueName
+        base <- configFromEnv appName
+        let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          refused <- registerQueue dbos internalName defaultQueueOptions AlwaysUpdate
+          case refused of
+            Left (ErrorConfig message) -> assertBool "names the reservation" ("reserved" `Text.isInfixOf` message)
+            other -> fail ("expected a configuration refusal, got: " <> show other)
+          refusedUpdate <- updateQueue dbos internalName defaultQueueChange
+          case refusedUpdate of
+            Left (ErrorConfig message) -> assertBool "names the reservation" ("reserved" `Text.isInfixOf` message)
+            other -> fail ("expected a configuration refusal, got: " <> show other)
+          refusedDelete <- deleteQueue dbos internalName
+          case refusedDelete of
+            Left (ErrorConfig message) -> assertBool "names the reservation" ("reserved" `Text.isInfixOf` message)
+            other -> fail ("expected a configuration refusal, got: " <> show other),
+      testCase "registering before launch is refused" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-unlaunched-" <> Text.take 12 suffix
+            queueName = "hs-l2-queue-" <> Text.take 12 suffix
+        base <- configFromEnv appName
+        let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          refused <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
+          case refused of
+            Left ErrorNotLaunched {} -> pure ()
+            other -> fail ("expected a not-launched refusal, got: " <> show other),
+      testCase "incoherent limits are refused before they reach the row" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-invalid-" <> Text.take 12 suffix
+            queueName = "hs-l2-checked-" <> Text.take 12 suffix
+        base <- configFromEnv appName
+        let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
+            rateLimit limit period = RateLimit {rateLimitLimit = limit, rateLimitPeriod = period}
+            cases =
+              [ ( "a rate limit admitting nothing",
+                  (defaultQueueOptions :: QueueOptions) {rate_limit = Just (rateLimit 0 (secondsDuration 1))},
+                  "rate_limit.limit"
+                ),
+                ( "a rate limit over no window",
+                  (defaultQueueOptions :: QueueOptions) {rate_limit = Just (rateLimit 1 (secondsDuration 0))},
+                  "rate_limit.period"
+                ),
+                ( "no workflows at all per partition",
+                  (defaultQueueOptions :: QueueOptions) {partition_concurrency = Just 0},
+                  "partition_concurrency"
+                ),
+                ( "a partition allowed more than the whole queue",
+                  (defaultQueueOptions :: QueueOptions) {concurrency = Just 2, partition_concurrency = Just 4},
+                  "must not exceed"
+                ),
+                ( "a partition allowed to start faster than the whole queue",
+                  (defaultQueueOptions :: QueueOptions)
+                    { rate_limit = Just (rateLimit 10 (secondsDuration 60)),
+                      partition_rate_limit = Just (rateLimit 5 (secondsDuration 1))
+                    },
+                  "must not exceed `rate_limit`"
+                )
+              ]
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          mapM_
+            ( \(what, options, fragment) -> do
+                refused <- registerQueue dbos queueName options AlwaysUpdate
+                case refused of
+                  Left (ErrorConfig message)
+                    | fragment `Text.isInfixOf` message -> pure ()
+                    | otherwise -> fail (Text.unpack what <> ": refusal misses " <> Text.unpack fragment <> ", got: " <> Text.unpack message)
+                  other -> fail (Text.unpack what <> " was accepted: " <> show other)
+            )
+            cases
+          missing <- queue dbos queueName
+          missing @?= Right Nothing,
+      testCase "an update cannot leave a queue incoherent" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-incoherent-" <> Text.take 12 suffix
+            queueName = "hs-l2-incoherent-q-" <> Text.take 12 suffix
+        base <- configFromEnv appName
+        let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
+            coherent =
+              (defaultQueueOptions :: QueueOptions)
+                { concurrency = Just 2,
+                  worker_concurrency = Just 2
+                }
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          registered <- registerQueue dbos queueName coherent AlwaysUpdate
+          case registered of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          -- Only wrong beside the concurrency the row already holds, so
+          -- the merged result is what gets checked.
+          refused <-
+            updateQueue
+              dbos
+              queueName
+              (defaultQueueChange {worker_concurrency = Set (Just 5)})
+          case refused of
+            Left (ErrorConfig message) -> assertBool "refuses the pair" ("must not exceed" `Text.isInfixOf` message)
+            other -> fail ("expected a pair refusal, got: " <> show other)
+          stored <- queue dbos queueName
+          case stored of
+            Right (Just receipt) -> receipt.worker_concurrency @?= Just 2
+            other -> fail ("expected the stored limits untouched, got: " <> show other)
+          -- Raising both together is coherent, and accepted.
+          raised <-
+            updateQueue
+              dbos
+              queueName
+              (defaultQueueChange {concurrency = Set (Just 5), worker_concurrency = Set (Just 5)})
+          case raised of
+            Left err -> fail (show err)
+            Right receipt -> receipt.worker_concurrency @?= Just 5
     ]
 
 -- | Polls a condition until it holds or the budget runs out.

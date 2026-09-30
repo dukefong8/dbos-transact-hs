@@ -6,11 +6,11 @@
 -- in 'BackendErrorKind', and this module only acts on the verdict.
 --
 -- The loop is monad-polymorphic — 'MonadDelay' for the wait, plus the
--- logger and the entropy provider as parameters — so the same code runs
+-- tracer and the entropy provider as parameters — so the same code runs
 -- under 'IO' in production and under @IOSim@ in tests, where time is
 -- virtual and the entropy word is fixed. It imports only its sibling
--- modules, so the log seam is a plain 'Text' action rather than the
--- engine's structured message type.
+-- modules, so attempts are announced as 'SysdbEvent' through the caller's
+-- carrier rather than the engine's message type.
 module DBOS.SystemDB.Retry
   ( RetryPolicy (..),
     defaultRetryPolicy,
@@ -22,15 +22,13 @@ module DBOS.SystemDB.Retry
 where
 
 import DBOS.Prelude
-import Colog.Core.Action (LogAction (..))
-import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
 import Data.Text (Text)
-import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word32)
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), renderError)
 import DBOS.SystemDB.Types (Duration (..), durationAsMillis, secondsDuration)
+import DBOS.Tracer (SomeTracer, SysdbEvent (..), traceWith)
 
 -- | How long to wait between attempts, and what to give up on. The
 -- defaults are Python's and Java's, which agree: one second, doubling to a
@@ -83,11 +81,11 @@ withRetry ::
   MonadDelay m =>
   RetryPolicy ->
   Text ->
-  LogAction m Text ->
+  SomeTracer m ->
   m Word32 ->
   m (Either Error a) ->
   m (Either Error a)
-withRetry policy operation logger nextEntropy work = go policy.retryPolicyInitialBackoff (0 :: Integer)
+withRetry policy operation tracer nextEntropy work = go policy.retryPolicyInitialBackoff (0 :: Integer)
   where
     go backoff attempt = do
       result <- work
@@ -100,15 +98,7 @@ withRetry policy operation logger nextEntropy work = go policy.retryPolicyInitia
               let delay = jitter bits backoff
                   delayMs = durationAsMillis delay
                   nextAttempt = attempt + 1
-              unLogAction logger
-                ( operation
-                    <> " failed (attempt "
-                    <> Text.pack (show nextAttempt)
-                    <> ", retrying in "
-                    <> Text.pack (show delayMs)
-                    <> "ms): "
-                    <> renderError err
-                )
+              traceWith tracer (SysdbRetryAttempt operation nextAttempt delayMs (renderError err))
               threadDelay (fromInteger (delayMs * 1000))
               go (min (double backoff) policy.retryPolicyMaxBackoff) nextAttempt
     double (Duration backoff) = Duration (backoff * 2)

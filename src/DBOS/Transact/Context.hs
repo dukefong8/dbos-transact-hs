@@ -59,6 +59,16 @@ module DBOS.Transact.Context
     cancelToken,
     tokenCancelled,
 
+    -- * The engine's task seam
+    TaskSpawner (..),
+    withTaskSpawner,
+    taskSpawner,
+    detachTask,
+
+    -- * The engine's tracer seam
+    withTracer,
+    contextTracer,
+
     -- * Backend access
     withSystemDB,
   )
@@ -69,6 +79,7 @@ import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomicall
 import Data.Text (Text)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Timestamp)
+import DBOS.Tracer (SomeTracer)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity, runSystemDB)
 import DBOS.Transact.Identity (Identity)
 
@@ -78,8 +89,31 @@ data Ctx m = Ctx
   { ctxConn     :: Connection m,
     ctxIdentity :: Identity,
     ctxWorkflow :: WorkflowState m,
-    ctxStep     :: Maybe (StepScope m)
+    ctxStep     :: Maybe (StepScope m),
+    ctxSpawner  :: Maybe (TaskSpawner m),
+    ctxTracer   :: SomeTracer m
   }
+
+-- | How a body reaches the task registry of the executor running it, so a
+-- child it starts is detached, counted, and abortable by shutdown — the
+-- oracle's @Arc&lt;Executor&gt;@ inside @Ctx@, narrowed to the one capability a
+-- body needs. Injected by the engine when it builds the execution's
+-- context ('withTaskSpawner'); a context built without one (a test, a
+-- client-side body) has no spawner and child starts stay record-only.
+--
+-- Lives here rather than in @Workflow@ because @Workflow@ imports this
+-- module: the type is the seam, the implementation that fills it is the
+-- engine's.
+data TaskSpawner m = TaskSpawner
+  { spawnDetached :: (TaskSpawner m -> m ()) -> m ()
+  }
+
+-- | Runs an action detached on the spawner's registry, handing the action
+-- the spawner to pass down to anything it starts. The one call site for
+-- the record's field, so callers never touch record-dot on a
+-- function-typed field.
+detachTask :: TaskSpawner m -> (TaskSpawner m -> m ()) -> m ()
+detachTask (TaskSpawner detach) = detach
 
 -- | Two contexts are equal when they are the same execution and the same
 -- step body — identity, not structure, because the mutable refs inside
@@ -119,7 +153,9 @@ newWorkflowState workflowText deadlineAt identity = do
       }
 
 -- | The context a body runs in: the connection, the resolved identity, and
--- the workflow state. No step scope: this is the workflow proper.
+-- the workflow state. No step scope: this is the workflow proper. The
+-- tracer rides in on the connection, so every execution announces through
+-- its owner's backend unless a test rebinds it with 'withTracer'.
 newCtx :: MonadSTM m => Connection m -> Identity -> WorkflowState m -> m (Ctx m)
 newCtx conn identity state =
   pure
@@ -127,8 +163,32 @@ newCtx conn identity state =
       { ctxConn = conn,
         ctxIdentity = identity,
         ctxWorkflow = state,
-        ctxStep = Nothing
+        ctxStep = Nothing,
+        ctxSpawner = Nothing,
+        ctxTracer = conn.connTracer
       }
+
+-- | Rebinds the context to carry the executor's task spawner. The engine
+-- calls this when it builds an execution's context; rebind rather than
+-- mutate, exactly like 'withAttempt'.
+withTaskSpawner :: Ctx m -> TaskSpawner m -> Ctx m
+withTaskSpawner ctx spawner = ctx {ctxSpawner = Just spawner}
+
+-- | Rebinds the context to trace resource-lifetime events through the
+-- given backend. The engine calls this when it builds an execution's
+-- context; rebind rather than mutate, exactly like 'withTaskSpawner'.
+withTracer :: SomeTracer m -> Ctx m -> Ctx m
+withTracer tracer ctx = ctx {ctxTracer = tracer}
+
+-- | The tracer this execution's resource-lifetime events go through: the
+-- engine's FastLogger backend in production, the io-sim trace in
+-- simulations, silence in tests that install nothing.
+contextTracer :: Ctx m -> SomeTracer m
+contextTracer ctx = ctx.ctxTracer
+
+-- | The spawner this context was given, if the engine gave it one.
+taskSpawner :: Ctx m -> Maybe (TaskSpawner m)
+taskSpawner ctx = ctx.ctxSpawner
 
 -- | The connection this call reaches the system database through.
 currentConnection :: Ctx m -> Connection m
@@ -266,11 +326,13 @@ inStep ctx = case ctx.ctxStep of
 -- | Runs a body under a context that is 'inStep': this attempt's marker
 -- and status, and a fresh cancellation flag. Rebinding rather than
 -- mutating — the scope lives on the context handed to the body alone, so
--- it goes out of scope with the body however the body ends.
-withAttempt :: MonadSTM m => Ctx m -> StepMarker -> StepStatus -> (Ctx m -> m a) -> m a
+-- it goes out of scope with the body however the body ends. Abandoning the
+-- attempt (cancellation, timeout kill, dropped future) fires the token, as
+-- the oracle's drop guard does; completing it leaves the token quiet.
+withAttempt :: (MonadSTM m, MonadCatch m) => Ctx m -> StepMarker -> StepStatus -> (Ctx m -> m a) -> m a
 withAttempt ctx marker status body = do
   scope <- newStepScope marker status
-  body ctx {ctxStep = Just scope}
+  body ctx {ctxStep = Just scope} `onException` cancelToken scope.scopeCancellation
 
 -- | A token that fires when the step running here is abandoned. Outside a
 -- step it never fires, so a body that is also called outside a workflow

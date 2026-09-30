@@ -37,6 +37,6 @@ env:
 		--package-env . --lib \
 		base bytestring text containers vector template-haskell \
 		aeson safe-wild-cards strict-wrapper time uuid \
-		bluefin co-log co-log-core fast-logger io-sim io-classes mtl \
+		bluefin contra-tracer contravariant fast-logger io-sim io-classes mtl \
 		hasql ihp-typed-sql hasql-pool hasql-transaction hasql-postgresql-types postgresql-types \
 		breakpoint nothunks rapid silently tasty tasty-hunit tasty-golden

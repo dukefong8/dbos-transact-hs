@@ -17,10 +17,10 @@ common commons
     base >=4.21 && <5,
     base64-bytestring,
     bytestring,
-    co-log-core,
     containers,
+    contra-tracer >=0.2.1 && <0.3,
     contravariant,
-    fast-logger,
+    fast-logger >=3.2.7 && <3.3,
     hasql >=1.10 && <1.11,
     hasql-pool,
     hasql-postgresql-types,
@@ -55,34 +55,26 @@ library
   other-modules:
     DBOS.Transact.Checkpoint
     DBOS.Transact.Client
-    DBOS.Transact.Codec
     DBOS.Transact.Config
     DBOS.Transact.Connection
     DBOS.Transact.Context
     DBOS.Transact.Dequeue
     DBOS.Transact.Error
     DBOS.Transact.Event
-    DBOS.Transact.Executor
     DBOS.Transact.Handle
     DBOS.Transact.Identity
     DBOS.Transact.Instance
-    DBOS.Transact.Log
     DBOS.Transact.Management
     DBOS.Transact.Message
-    DBOS.Transact.OperationCheckpointParse
-    DBOS.Transact.OperationCheckpointReplay
-    DBOS.Transact.OperationCheckpointTypes
     DBOS.Transact.Queue
     DBOS.Transact.Recovery
     DBOS.Transact.Registry
+    DBOS.Transact.Serialization
     DBOS.Transact.Sleep
     DBOS.Transact.Step
-    DBOS.Transact.Store
-    DBOS.Transact.Supervisor
     DBOS.Transact.Wait
     DBOS.Transact.Workflow
-    DBOS.Transact.WorkflowExecutionParse
-    DBOS.Transact.WorkflowExecutionTypes
+    DBOS.Tracer
     DBOS.SystemDB.Error
     DBOS.SystemDB.Notify
     DBOS.SystemDB.Postgres.Notifier
@@ -98,11 +90,8 @@ test-suite test
   other-modules:
     -- PARKED while the Postgres backend is rewritten: ghciwatch and
     -- `cabal build test` cover the DBOS.SystemDB slice only.
-    -- DBOS.SchemaTest
-    DBOS.CodecTest
-    -- DBOS.LogTest
-    -- DBOS.SimDB
-    -- DBOS.SimTest
+    DBOS.Transact.SerializationTest
+    DBOS.TracerTest
     DBOS.StarterTest
     DBOS.SystemDB.TypesTest
     DBOS.SystemDB.ErrorTest
@@ -113,8 +102,8 @@ test-suite test
     DBOS.Transact.ClientTest
     DBOS.Transact.ConfigTest
     DBOS.Transact.ContextTest
+    DBOS.Transact.ContextTestSim
     DBOS.Transact.DeadlinesTest
-    DBOS.Transact.ContextTestIOSim
     DBOS.Transact.HandleTest
     DBOS.Transact.HandleTestIOSim
     DBOS.Transact.IdentityTest
@@ -133,16 +122,18 @@ test-suite test
     DBOS.SystemDB.NotifyTest
     DBOS.SystemDB.NotifierTest
     DBOS.Transact.ManagementTest
-    DBOS.Transact.ManagementTestIOSim
+    DBOS.Transact.ManagementTestSim
     DBOS.Transact.SimTest
     DBOS.Transact.SleepTest
     DBOS.Transact.SleepTestIOSim
-    -- DBOS.SystemDBTest
     -- Deleted 2026-09-25: DBOS.SystemDBHasqlTest, DBOS.TransactTest
     -- (Bluefin seam; ADR-0012).
+    -- Deleted 2026-09-29: DBOS.SystemDBTest, folded into
+    -- DBOS.SystemDB.TypesTest as notificationTests (mirrors the
+    -- DBOS.SystemDB.Types home of notificationRowForMessage).
   build-depends:
     breakpoint,
-    co-log-core,
+    bytestring,
     dbos-transact-hs,
     hasql,
     hasql-pool,

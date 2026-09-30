@@ -11,6 +11,7 @@
 :set -Werror=deferred-type-errors
 
 :set -Wno-type-defaults
+:set -Wno-unused-imports
 :set -Wno-unused-top-binds
 
 :set -fdefer-type-errors

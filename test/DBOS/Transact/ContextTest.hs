@@ -1,27 +1,64 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 
--- | The context seam: a 'Ctx' is threaded explicitly, readers answer from
--- it, and step scopes are rebound rather than mutated. The stub backend
--- exists so a context can be built without a database; it is the seed of
--- the P7.7 in-memory backend.
-module DBOS.Transact.ContextTest (tests, stubConnection, testIdentity, testCtx, ctxOver) where
+-- | The context seam as test trees polymorphic on 'SystemDB' and
+-- 'Tracer': every scenario is written once against @io-classes@
+-- constraints and runs over any backend a fixture builds a 'Connection'
+-- on. This module holds the scenarios plus the live tree, which runs
+-- under @main@ on a real 'PostgresSystemDB' with a FastLogger tracer;
+-- 'ContextTestSim' holds the same tree over 'IOSimSystemDB' for eval.
+--
+-- 'ctxOver' stays exported for the suites that build their own contexts
+-- on top ('EventTest', 'ManagementTest', 'CheckpointTest').
+module DBOS.Transact.ContextTest
+  ( tests,
+    ctxOver,
+    Fixture (..),
+    scenarioWorkflowId,
+    scenarioStepIds,
+    scenarioDenseIds,
+    scenarioAttemptScope,
+    scenarioScopeStatus,
+    scenarioFirstAttempt,
+    scenarioRetryAttempt,
+    scenarioTokenFire,
+    scenarioAttemptTokens,
+    scenarioDeadline,
+    scenarioSharedCounter,
+    scenarioRerunIdentity,
+    scenarioTravelsWith,
+    scenarioNestedRunners,
+    scenarioStateInterop,
+    scenarioThrowEscape,
+    scenarioCoopFlag,
+    scenarioForkCounter,
+    scenarioNestedScope,
+    scenarioTokenOutsideStep,
+    scenarioConcurrentIsolation,
+    checkScopeStatus,
+    checkThrowEscape,
+  )
+where
 
 import DBOS.Prelude
-import Control.Monad.IO.Class (liftIO)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.List (isInfixOf)
 import Data.Text (Text)
-import DBOS.SystemDB (SystemDB (..))
 import DBOS.SystemDB.Postgres (PostgresSystemDB)
+import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   ( Connection (..),
     Ctx,
     Identity (..),
+    LogEvent (..),
     Owner (..),
     Serializer (..),
     SomeSystemDB (..),
-    StepMarker (..),
+    SomeTracer (..),
+    StepStatus (..),
+    Timestamp (..),
+    acquireFastBackend,
     cancelToken,
     cancellationToken,
     currentConnection,
@@ -29,6 +66,7 @@ import DBOS.Transact
     deadline,
     firstStepStatus,
     inStep,
+    ioTracer,
     isSameExecution,
     newConnection,
     newCtx,
@@ -37,8 +75,10 @@ import DBOS.Transact
     nextExecutionIdentity,
     nextStepId,
     nextStepMarker,
+    nullTracer,
     secondsDuration,
     stepId,
+    stepMarker,
     stepStatus,
     stepStatusCurrentAttempt,
     stepStatusId,
@@ -49,89 +89,34 @@ import DBOS.Transact
     withAttempt,
     workflowId,
   )
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, testCase, (@?=))
+import Test.Tasty (TestTree, testGroup, withResource)
+import Test.Tasty.HUnit (testCase, (@?=))
 
--- | A backend that refuses every call: enough to build a context for tests
--- that never reach the database.
-data StubDB = StubDB
+-- * Live fixtures: one backend and one FastLogger tracer for the group,
+-- passed explicitly — the same polymorphic GADT fields the sim tree fills
+-- with its mock backend and sim tracer.
 
-instance SystemDB StubDB IO where
-  initWorkflow = stub
-  getWorkflow = stub
-  listWorkflows = stub
-  getWorkflowChildren = stub
-  recordWorkflowOutcome = stub
-  awaitWorkflowResult = stub
-  awaitFirstWorkflowId = stub
-  awaitWorkflowIds = stub
-  setWorkflowDelay = stub
-  clearQueueAssignment = stub
-  updateWorkflowAttributes = stub
-  reenqueueForRecovery = stub
-  transitionDelayedWorkflows = stub
-  cancelWorkflows = stub
-  resumeWorkflows = stub
-  deleteWorkflows = stub
-  forkWorkflows = stub
-  forkFrom = stub
-  sendMessage = stub
-  sendMessages = stub
-  recv = stub
-  writeStream = stub
-  closeStream = stub
-  close = stub
-  checkStep = stub
-  recordStep = stub
-  listWorkflowSteps = stub
-  recordSleep = stub
-  setEvent = stub
-  getEvent = stub
-  getAllNotifications = stub
-  getAllEvents = stub
-  readStreamValue = stub
-  getAllStreamEntries = stub
-  createApplicationVersion = stub
-  listApplicationVersions = stub
-  getLatestApplicationVersion = stub
-  updateApplicationVersionTimestamp = stub
-  upsertQueue = stub
-  startQueuedWorkflows = stub
-  getQueuePartitions = stub
-  startQueuedPartitionedWorkflows = stub
-  getQueue = stub
-  listQueues = stub
-  updateQueue = stub
-  debounceDelayedWorkflow = stub
-  getDeduplicationKeyHolder = stub
-  deleteQueue = stub
-  createSchedule = stub
-  upsertSchedule = stub
-  applySchedules = stub
-  getSchedule = stub
-  listSchedules = stub
-  updateSchedule = stub
-  setScheduleStatus = stub
-  updateScheduleLastFiredAt = stub
-  deleteSchedule = stub
-  renameApplication = stub
-  recordChildWorkflow = stub
-  recordChildResult = stub
+-- | One backend for the whole group: pools are per-backend, so sharing
+-- bounds connections no matter how many tests run.
+acquireSuiteBackend :: IO Postgres.PostgresSystemDB
+acquireSuiteBackend = do
+  config <- Postgres.configFromEnv
+  backend <- Postgres.acquirePostgresSystemDB config nullTracer
+  Postgres.activatePostgresSystemDB backend
+  pure backend
 
-stub :: a
-stub = error "StubDB: this test never reaches the database"
-
--- | A connection over the stub backend.
-stubConnection :: IO (Connection IO)
-stubConnection =
+-- | A connection over a live backend with an explicit tracer.
+connOver :: PostgresSystemDB -> SomeTracer IO -> IO (Connection IO)
+connOver backend tracer =
   newConnection
-    (SomeSystemDB StubDB)
+    (SomeSystemDB backend)
     RustSerde
     (Just "test-app")
     (secondsDuration 1)
     OwnerApplication
     uuidWorkflowId
     uuidEntropy
+    tracer
 
 testIdentity :: Identity
 testIdentity =
@@ -142,182 +127,343 @@ testIdentity =
       identityAppId = ""
     }
 
--- | A context for a workflow with no deadline.
-testCtx :: IO (Ctx IO)
-testCtx = do
-  conn <- stubConnection
-  identity <- nextExecutionIdentity conn
-  state <- newWorkflowState "wf-1" Nothing identity
-  newCtx conn testIdentity state
-
--- | A context over a live backend, for tests that reach the database.
-ctxOver :: PostgresSystemDB -> Text -> IO (Ctx IO)
-ctxOver backend workflowText = do
-  conn <- newConnection (SomeSystemDB backend) RustSerde (Just "test-app") (secondsDuration 1) OwnerApplication uuidWorkflowId uuidEntropy
+-- | A context over a live backend with an explicit tracer, for tests that
+-- reach the database.
+ctxOver :: PostgresSystemDB -> SomeTracer IO -> Text -> IO (Ctx IO)
+ctxOver backend tracer workflowText = do
+  conn <- connOver backend tracer
   identity <- nextExecutionIdentity conn
   state <- newWorkflowState workflowText Nothing identity
   newCtx conn testIdentity state
 
-tests :: TestTree
-tests =
-  testGroup
-    "Context"
-    [ testCase "a context reads its workflow id" $ do
-        ctx <- testCtx
-        workflowId ctx @?= "wf-1",
-      testCase "a workflow's step ids are zero based and allocated once" $ do
-        ctx <- testCtx
-        result <- (,,) <$> nextStepId ctx <*> nextStepId ctx <*> nextStepId ctx
-        result @?= (0, 1, 2),
-      testCase "step ids stay dense while markers spend their own sequence" $ do
-        ctx <- testCtx
-        first <- nextStepId ctx
-        _ <- nextStepMarker ctx
-        second <- nextStepId ctx
-        _ <- nextStepMarker ctx
-        third <- nextStepId ctx
-        (first, second, third) @?= (0, 1, 2),
-      testCase "withAttempt scopes a step and leaves the outer scope alone" $ do
-        ctx <- testCtx
-        innerMarker <- nextStepMarker ctx
-        let outside = stepId ctx
-        inner <- withAttempt ctx innerMarker (firstStepStatus 4) (pure . stepId)
-        let after = stepId ctx
-        (outside, inner, after) @?= (Nothing, Just 4, Nothing),
-      testCase "a scope reports its status and id" $ do
-        ctx <- testCtx
-        marker <- nextStepMarker ctx
-        let proper = stepStatus ctx
-            properFlag = inStep ctx
-        scoped <-
-          withAttempt ctx marker (firstStepStatus 3) $ \stepped ->
-            pure (stepStatus stepped, stepId stepped, inStep stepped)
-        case (proper, properFlag, scoped) of
-          (Nothing, False, (Just status, Just 3, True)) -> do
-            stepStatusId status @?= 3
-            stepStatusCurrentAttempt status @?= 1
-          other -> fail ("expected proper Nothing and scoped status: " <> show other),
-      testCase "a first attempt reports its step, attempt 1 of 1" $ do
-        let status = firstStepStatus 3
-        stepStatusId status @?= 3
-        stepStatusCurrentAttempt status @?= 1
-        stepStatusMaxAttempts status @?= 1,
-      testCase "a retry keeps the step and moves the attempt" $ do
-        let second = nextAttempt (firstStepStatus 3)
-        stepStatusId second @?= 3
-        stepStatusCurrentAttempt second @?= 2
-        stepStatusMaxAttempts second @?= 1,
-      testCase "a fresh token is quiet until fired" $ do
-        ctx <- testCtx
-        token <- cancellationToken ctx
-        quiet <- tokenCancelled token
-        cancelToken token
-        fired <- tokenCancelled token
-        (quiet, fired) @?= (False, True),
-      testCase "each attempt watches a token of its own" $ do
-        ctx <- testCtx
-        firstMarker <- nextStepMarker ctx
-        secondMarker <- nextStepMarker ctx
-        first <- withAttempt ctx firstMarker (firstStepStatus 0) cancellationToken
-        second <- withAttempt ctx secondMarker (firstStepStatus 1) cancellationToken
-        cancelToken first
-        firstFired <- tokenCancelled first
-        secondFired <- tokenCancelled second
-        (firstFired, secondFired) @?= (True, False),
-      testCase "a deadline rides the workflow state" $ do
-        ctx <- testCtx
-        deadline ctx @?= Nothing,
-      testCase "two contexts over one workflow share its step counter" $ do
-        conn <- stubConnection
+-- | The shared tree over a real backend and a FastLogger tracer.
+liveFixture :: PostgresSystemDB -> SomeTracer IO -> Fixture IO
+liveFixture backend tracer =
+  Fixture
+    { fixtureMkCtx = ctxOver backend tracer,
+      fixtureMkConn = connOver backend tracer,
+      fixtureIdentity = testIdentity,
+      fixtureAppName = "test-app"
+    }
+
+-- * The shared tree.
+
+-- | How a tree instantiation builds its world: contexts and connections
+-- over any backend, the identity they carry, and the application name the
+-- connection reports.
+data Fixture m = Fixture
+  { fixtureMkCtx    :: Text -> m (Ctx m),
+    fixtureMkConn   :: m (Connection m),
+    fixtureIdentity :: Identity,
+    fixtureAppName  :: Text
+  }
+
+-- * Scenarios: each written once, returning a plain value the trees assert.
+
+scenarioWorkflowId :: MonadSTM m => Fixture m -> m Text
+scenarioWorkflowId fx = workflowId <$> fx.fixtureMkCtx "wf-1"
+
+scenarioStepIds :: MonadSTM m => Fixture m -> m (Int, Int, Int)
+scenarioStepIds fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  (,,) <$> nextStepId ctx <*> nextStepId ctx <*> nextStepId ctx
+
+scenarioDenseIds :: MonadSTM m => Fixture m -> m (Int, Int, Int)
+scenarioDenseIds fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  first <- nextStepId ctx
+  _ <- nextStepMarker ctx
+  second <- nextStepId ctx
+  _ <- nextStepMarker ctx
+  third <- nextStepId ctx
+  pure (first, second, third)
+
+scenarioAttemptScope :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe Int, Maybe Int, Maybe Int)
+scenarioAttemptScope fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  innerMarker <- nextStepMarker ctx
+  let outside = stepId ctx
+  inner <- withAttempt ctx innerMarker (firstStepStatus 4) (pure . stepId)
+  let after = stepId ctx
+  pure (outside, inner, after)
+
+scenarioScopeStatus :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe StepStatus, Bool, (Maybe StepStatus, Maybe Int, Bool))
+scenarioScopeStatus fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  marker <- nextStepMarker ctx
+  let proper = stepStatus ctx
+      properFlag = inStep ctx
+  scoped <-
+    withAttempt ctx marker (firstStepStatus 3) $ \stepped ->
+      pure (stepStatus stepped, stepId stepped, inStep stepped)
+  pure (proper, properFlag, scoped)
+
+scenarioFirstAttempt :: Applicative m => Fixture m -> m (Int, Word, Word)
+scenarioFirstAttempt _ =
+  let status = firstStepStatus 3
+   in pure (stepStatusId status, stepStatusCurrentAttempt status, stepStatusMaxAttempts status)
+
+scenarioRetryAttempt :: Applicative m => Fixture m -> m (Int, Word, Word)
+scenarioRetryAttempt _ =
+  let second = nextAttempt (firstStepStatus 3)
+   in pure (stepStatusId second, stepStatusCurrentAttempt second, stepStatusMaxAttempts second)
+
+scenarioTokenFire :: MonadSTM m => Fixture m -> m (Bool, Bool)
+scenarioTokenFire fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  token <- cancellationToken ctx
+  quiet <- tokenCancelled token
+  cancelToken token
+  fired <- tokenCancelled token
+  pure (quiet, fired)
+
+scenarioAttemptTokens :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Bool, Bool)
+scenarioAttemptTokens fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  firstMarker <- nextStepMarker ctx
+  secondMarker <- nextStepMarker ctx
+  first <- withAttempt ctx firstMarker (firstStepStatus 0) cancellationToken
+  second <- withAttempt ctx secondMarker (firstStepStatus 1) cancellationToken
+  cancelToken first
+  firstFired <- tokenCancelled first
+  secondFired <- tokenCancelled second
+  pure (firstFired, secondFired)
+
+scenarioDeadline :: MonadSTM m => Fixture m -> m (Maybe Timestamp)
+scenarioDeadline fx = deadline <$> fx.fixtureMkCtx "wf-1"
+
+scenarioSharedCounter :: MonadSTM m => Fixture m -> m (Int, Int)
+scenarioSharedCounter fx = do
+  conn <- fx.fixtureMkConn
+  identity <- nextExecutionIdentity conn
+  state <- newWorkflowState "wf-1" Nothing identity
+  first <- newCtx conn fx.fixtureIdentity state
+  second <- newCtx conn fx.fixtureIdentity state
+  (,) <$> nextStepId first <*> nextStepId second
+
+scenarioRerunIdentity :: MonadSTM m => Fixture m -> m (Bool, Bool)
+scenarioRerunIdentity fx = do
+  conn <- fx.fixtureMkConn
+  firstId <- nextExecutionIdentity conn
+  secondId <- nextExecutionIdentity conn
+  firstState <- newWorkflowState "wf-1" Nothing firstId
+  secondState <- newWorkflowState "wf-1" Nothing secondId
+  first <- newCtx conn fx.fixtureIdentity firstState
+  second <- newCtx conn fx.fixtureIdentity secondState
+  pure (isSameExecution first first, isSameExecution first second)
+
+scenarioTravelsWith :: MonadSTM m => Fixture m -> m (Identity, Maybe Text)
+scenarioTravelsWith fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  pure (currentIdentity ctx, (currentConnection ctx).connAppName)
+
+scenarioNestedRunners :: MonadSTM m => Fixture m -> m (Text, Text, Bool)
+scenarioNestedRunners fx = do
+  conn <- fx.fixtureMkConn
+  outerId <- nextExecutionIdentity conn
+  innerId <- nextExecutionIdentity conn
+  outerState <- newWorkflowState "wf-1" Nothing outerId
+  innerState <- newWorkflowState "wf-1" Nothing innerId
+  outer <- newCtx conn fx.fixtureIdentity outerState
+  inner <- newCtx conn fx.fixtureIdentity innerState
+  pure (workflowId outer, workflowId inner, isSameExecution outer inner)
+
+scenarioStateInterop :: MonadSTM m => Fixture m -> m Text
+scenarioStateInterop fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  ref <- newTVarIO ("" :: Text)
+  atomically (writeTVar ref "done")
+  _ <- pure ctx
+  readTVarIO ref
+
+scenarioThrowEscape :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Either MThrow.SomeException Int)
+scenarioThrowEscape fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  MThrow.try (nextStepId ctx >> MThrow.throwIO (userError "boom") >> pure 0)
+
+scenarioCoopFlag :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m) => Fixture m -> m ()
+scenarioCoopFlag _ = do
+  stop <- newTVarIO False
+  done <- newEmptyMVar
+  _ <- forkIO (waitForFlag stop done)
+  threadDelay 200000
+  atomically (writeTVar stop True)
+  waitFor (takeMVar done)
+
+scenarioForkCounter :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m) => Fixture m -> m (Int, Int)
+scenarioForkCounter fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  first <- nextStepId ctx
+  seen <- newEmptyMVar
+  _ <- forkIO (nextStepId ctx >>= putMVar seen)
+  second <- waitFor (takeMVar seen)
+  pure (first, second)
+
+scenarioNestedScope :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe Int, Maybe Int, Bool)
+scenarioNestedScope fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  let outside = stepId ctx
+  marker <- nextStepMarker ctx
+  (innerId, matches) <-
+    withAttempt ctx marker (firstStepStatus 0) $ \inner ->
+      pure (stepId inner, stepMarker inner == Just marker)
+  pure (outside, innerId, matches)
+
+scenarioTokenOutsideStep :: MonadSTM m => Fixture m -> m Bool
+scenarioTokenOutsideStep fx = do
+  ctx <- fx.fixtureMkCtx "wf-1"
+  token <- cancellationToken ctx
+  tokenCancelled token
+
+scenarioConcurrentIsolation :: (MonadMVar m, MonadAsync m) => Fixture m -> m (Text, Text)
+scenarioConcurrentIsolation fx = do
+  first <- newEmptyMVar
+  second <- newEmptyMVar
+  let child name box = do
+        conn <- fx.fixtureMkConn
         identity <- nextExecutionIdentity conn
-        state <- newWorkflowState "wf-1" Nothing identity
-        first <- newCtx conn testIdentity state
-        second <- newCtx conn testIdentity state
-        one <- nextStepId first
-        two <- nextStepId second
-        (one, two) @?= (0, 1),
-      testCase "a re-run of one id is a different execution" $ do
-        conn <- stubConnection
-        firstId <- nextExecutionIdentity conn
-        secondId <- nextExecutionIdentity conn
-        firstState <- newWorkflowState "wf-1" Nothing firstId
-        secondState <- newWorkflowState "wf-1" Nothing secondId
-        first <- newCtx conn testIdentity firstState
-        second <- newCtx conn testIdentity secondState
-        isSameExecution first first @?= True
-        isSameExecution first second @?= False,
-      testCase "the connection and identity travel with the context" $ do
-        ctx <- testCtx
-        currentIdentity ctx @?= testIdentity
-        (currentConnection ctx).connAppName @?= Just ("test-app" :: Text),
-      testCase "nested runners isolate" $ do
-        conn <- stubConnection
-        outerId <- nextExecutionIdentity conn
-        innerId <- nextExecutionIdentity conn
-        outerState <- newWorkflowState "wf-1" Nothing outerId
-        innerState <- newWorkflowState "wf-1" Nothing innerId
-        outer <- newCtx conn testIdentity outerState
-        inner <- newCtx conn testIdentity innerState
-        (workflowId outer, workflowId inner) @?= ("wf-1", "wf-1")
-        isSameExecution outer inner @?= False,
-      testCase "IO interop runs beside the context" $ do
-        ctx <- testCtx
-        ref <- newIORef ("" :: Text)
-        writeIORef ref "done"
-        result <- readIORef ref
-        result @?= "done",
-      testCase "a throw from an engine call reaches the caller" $ do
-        ctx <- testCtx
-        outcome <- try (nextStepId ctx >> throwIO (userError "boom") >> pure 0) :: IO (Either SomeException Int)
-        case outcome of
-          Left err -> assertBool "the original throw escapes" ("boom" `isInfixOf` show err)
-          Right _ -> fail "expected the throw to escape",
-      testCase "a cooperative flag cancels a wait promptly" $ do
-        stop <- newTVarIO False
-        done <- newEmptyMVar
-        _ <- forkIO (waitForFlag stop done)
-        threadDelay 200000
-        atomically (writeTVar stop True)
-        waitFor (takeMVar done),
-      testCase "a fork handed the context shares its counter" $ do
-        ctx <- testCtx
-        first <- nextStepId ctx
-        seen <- newEmptyMVar
-        _ <- forkIO (nextStepId ctx >>= putMVar seen)
-        second <- waitFor (takeMVar seen)
-        (first, second) @?= (0, 1),
-      testCase "concurrent contexts are isolated from each other" $ do
-        first <- newEmptyMVar
-        second <- newEmptyMVar
-        let child name box = do
-              conn <- stubConnection
-              identity <- nextExecutionIdentity conn
-              state <- newWorkflowState name Nothing identity
-              ctx <- newCtx conn testIdentity state
-              putMVar box (workflowId ctx)
-        a <- async (child "a" first)
-        b <- async (child "b" second)
-        wait a
-        wait b
-        x <- takeMVar first
-        y <- takeMVar second
-        (x, y) @?= ("a", "b")
-    ]
+        state <- newWorkflowState name Nothing identity
+        ctx <- newCtx conn fx.fixtureIdentity state
+        putMVar box (workflowId ctx)
+  a <- async (child "a" first)
+  b <- async (child "b" second)
+  wait a
+  wait b
+  (,) <$> takeMVar first <*> takeMVar second
+
+-- * Shared checks: pure verdicts; both trees turn them into assertions,
+-- so the IOSim typed assertions live alongside the same checks here.
+
+checkEq :: (Eq a, Show a) => a -> a -> Either String ()
+checkEq expected actual
+  | expected == actual = Right ()
+  | otherwise = Left ("expected " <> show expected <> ", got " <> show actual)
+
+checkScopeStatus :: (Maybe StepStatus, Bool, (Maybe StepStatus, Maybe Int, Bool)) -> Either String ()
+checkScopeStatus result =
+  case result of
+    (Nothing, False, (Just status, Just 3, True)) ->
+      checkEq (3 :: Int, 1 :: Word) (stepStatusId status, stepStatusCurrentAttempt status)
+    other -> Left ("expected proper Nothing and scoped status, got: " <> show other)
+
+checkThrowEscape :: Either MThrow.SomeException Int -> Either String ()
+checkThrowEscape outcome =
+  case outcome of
+    Left err
+      | "boom" `isInfixOf` show err -> Right ()
+      | otherwise -> Left ("the wrong throw escaped: " <> show err)
+    Right _ -> Left "expected the throw to escape"
+
+-- * Shared helpers, polymorphic over the same vocabulary.
 
 -- | A wait that polls a cooperative flag instead of sleeping through it.
-waitForFlag :: StrictTVar IO Bool -> StrictMVar IO () -> IO ()
+waitForFlag :: (MonadSTM m, MonadMVar m, MonadDelay m) => StrictTVar m Bool -> StrictMVar m () -> m ()
 waitForFlag stop done = do
   flag <- readTVarIO stop
   if flag
     then putMVar done ()
     else threadDelay 50000 >> waitForFlag stop done
 
--- | A result that must arrive, not a wait that may hang the suite.
-waitFor :: IO a -> IO a
+-- | A result that must arrive, not a wait that may hang the suite. Under
+-- IOSim the timeout is virtual, so a hung wait fails instantly; live it
+-- throws after five seconds, which tasty reports as a failure.
+waitFor :: (MonadTimer m, MonadThrow m) => m a -> m a
 waitFor action = do
   result <- timeout 5000000 action
   case result of
     Just value -> pure value
-    Nothing -> fail "the waiter was never woken"
+    Nothing -> MThrow.throwIO (userError "the waiter was never woken")
 
+-- * The live tree: the shared scenarios over a real 'PostgresSystemDB'
+-- with a FastLogger tracer, for @main@.
 
+tests :: TestTree
+tests =
+  withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
+    withResource acquireFastBackend snd $ \getLogger ->
+      testGroup
+        "Context"
+        [ testCase "a context reads its workflow id" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioWorkflowId fx
+            res @?= "wf-1",
+          testCase "a workflow's step ids are zero based and allocated once" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioStepIds fx
+            res @?= (0, 1, 2),
+          testCase "step ids stay dense while markers spend their own sequence" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioDenseIds fx
+            res @?= (0, 1, 2),
+          testCase "withAttempt scopes a step and leaves the outer scope alone" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioAttemptScope fx
+            res @?= (Nothing, Just 4, Nothing),
+          testCase "a scope reports its status and id" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioScopeStatus fx
+            either fail pure (checkScopeStatus res),
+          testCase "a first attempt reports its step, attempt 1 of 1" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioFirstAttempt fx
+            res @?= (3, 1, 1),
+          testCase "a retry keeps the step and moves the attempt" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioRetryAttempt fx
+            res @?= (3, 2, 1),
+          testCase "a fresh token is quiet until fired" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioTokenFire fx
+            res @?= (False, True),
+          testCase "each attempt watches a token of its own" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioAttemptTokens fx
+            res @?= (True, False),
+          testCase "a deadline rides the workflow state" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioDeadline fx
+            res @?= Nothing,
+          testCase "two contexts over one workflow share its step counter" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioSharedCounter fx
+            res @?= (0, 1),
+          testCase "a re-run of one id is a different execution" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioRerunIdentity fx
+            res @?= (True, False),
+          testCase "the connection and identity travel with the context" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioTravelsWith fx
+            res @?= (testIdentity, Just ("test-app" :: Text)),
+          testCase "nested runners isolate" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioNestedRunners fx
+            res @?= ("wf-1", "wf-1", False),
+          testCase "state interop runs beside the context" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioStateInterop fx
+            res @?= "done",
+          testCase "a throw from an engine call reaches the caller" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioThrowEscape fx
+            either fail pure (checkThrowEscape res),
+          testCase "a cooperative flag cancels a wait promptly" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            scenarioCoopFlag fx,
+          testCase "a fork handed the context shares its counter" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioForkCounter fx
+            res @?= (0, 1),
+          testCase "a nested scope reports the step that encloses it" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioNestedScope fx
+            res @?= (Nothing, Just 0, True),
+          testCase "a cancellation token outside a step never fires" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioTokenOutsideStep fx
+            res @?= False,
+          testCase "concurrent contexts are isolated from each other" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioConcurrentIsolation fx
+            res @?= ("a", "b")
+        ]

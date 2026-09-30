@@ -1,5 +1,4 @@
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -12,10 +11,15 @@
 module DBOS.SystemDB.IOSim
   ( IOSimSystemDB (..),
     simConnection,
+    simConnectionWith,
     simExecutor,
+    simExecutorWith,
+    simExecutorWithTracer,
     simInstance,
     simLaunch,
+    simLaunchWith,
     simDBOS,
+    simDBOSWith,
   )
 where
 
@@ -52,11 +56,11 @@ import DBOS.SystemDB.Types
     zeroRowCounts,
   )
 import DBOS.SystemDB.Types qualified as Types (Timestamp, timestampFromEpochMs)
+import DBOS.Tracer (SomeTracer, simTracer)
 import DBOS.Transact.Config (Serializer (..))
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), newConnection)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Instance (DBOS (..), Executor (..))
-import DBOS.Transact.Log (nullLogAction)
 import DBOS.Transact.Registry (Snapshot, newRegistry, snapshotRegistry)
 import DBOS.Transact.Workflow (newTasks)
 
@@ -275,9 +279,17 @@ mockStreamRecord =
 -- * The sim backend wrapped in a connection
 
 -- | The sim backend wrapped in a connection. Constructing this is what
--- needs @instance SystemDB IOSimSystemDB (IOSim s)@.
+-- needs @instance SystemDB IOSimSystemDB (IOSim s)@. The connection
+-- carries the io-sim tracer, so every simulated context announces through
+-- the trace unless a test rebinds it.
 simConnection :: IOSim s (Connection (IOSim s))
-simConnection = do
+simConnection = simConnectionWith simTracer
+
+-- | The sim backend wrapped in a connection carrying the given tracer: a
+-- test's say-carrier makes simulated engine calls print while staying
+-- typed-assertable.
+simConnectionWith :: SomeTracer (IOSim s) -> IOSim s (Connection (IOSim s))
+simConnectionWith tracer = do
   ids <- newTVarIO 0
   entropy <- newTVarIO 0
   newConnection
@@ -288,6 +300,7 @@ simConnection = do
     OwnerApplication
     (simGeneratedId ids)
     (simEntropy entropy)
+    tracer
 
 -- | Deterministic ids for sim: @sim-1@, @sim-2@, ...
 simGeneratedId :: StrictTVar (IOSim s) Int -> IOSim s Text
@@ -319,7 +332,6 @@ simInstance = do
     DBOS
       { dbos_config = undefined,
         dbos_registry = registry,
-        dbos_logger = nullLogAction,
         dbos_executor = executorVar,
         dbos_lifecycle = lifecycleVar
       }
@@ -327,16 +339,25 @@ simInstance = do
 -- | Freezes the registry and installs the sim executor over the snapshot:
 -- the sim equivalent of a launch, with no database behind it.
 simLaunch :: DBOS (IOSim s) -> IOSim s ()
-simLaunch dbos = do
+simLaunch = simLaunchWith simTracer
+
+-- | Launch carrying the given tracer on the installed executor's
+-- connection, so simulated engine calls print through a say-carrier.
+simLaunchWith :: SomeTracer (IOSim s) -> DBOS (IOSim s) -> IOSim s ()
+simLaunchWith tracer dbos = do
   workflows <- snapshotRegistry dbos.dbos_registry
-  executor <- simExecutorWith workflows
+  executor <- simExecutorWithTracer tracer workflows
   modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
 
 -- | A @DBOS (IOSim s)@ already launched over the mock backend.
 simDBOS :: IOSim s (DBOS (IOSim s))
-simDBOS = do
+simDBOS = simDBOSWith simTracer
+
+-- | A launched sim instance carrying the given tracer.
+simDBOSWith :: SomeTracer (IOSim s) -> IOSim s (DBOS (IOSim s))
+simDBOSWith tracer = do
   dbos <- simInstance
-  simLaunch dbos
+  simLaunchWith tracer dbos
   pure dbos
 
 -- | The sim executor over a registry snapshot: the connection checked in
@@ -348,8 +369,12 @@ simExecutor = do
   simExecutorWith workflows
 
 simExecutorWith :: Snapshot (IOSim s) -> IOSim s (Executor (IOSim s))
-simExecutorWith workflows = do
-  conn <- simConnection
+simExecutorWith = simExecutorWithTracer simTracer
+
+-- | The sim executor carrying the given tracer on its connection.
+simExecutorWithTracer :: SomeTracer (IOSim s) -> Snapshot (IOSim s) -> IOSim s (Executor (IOSim s))
+simExecutorWithTracer tracer workflows = do
+  conn <- simConnectionWith tracer
   tasks <- newTasks
   let identity =
         Identity
@@ -358,4 +383,4 @@ simExecutorWith workflows = do
             identityExecutorId = "sim-executor",
             identityAppId = ""
           }
-  pure Executor {conn = conn, identity = identity, workflows = workflows, listen_queues = Nothing, tasks = tasks}
+  pure Executor {conn = conn, identity = identity, workflows = workflows, listen_queues = Nothing, tasks = tasks, releaseTracer = pure ()}

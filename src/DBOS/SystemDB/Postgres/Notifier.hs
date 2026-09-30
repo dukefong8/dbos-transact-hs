@@ -38,7 +38,6 @@ module DBOS.SystemDB.Postgres.Notifier
 where
 
 import DBOS.Prelude
-import Colog.Core.Action (LogAction (..))
 import Control.Monad (unless, when)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -51,6 +50,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Notify (Registry, keyFor, wake)
 import DBOS.SystemDB.Types (Duration, durationAsMillis, millisDuration)
+import DBOS.Tracer (SomeTracer, SysdbEvent (..), traceWith)
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Pool qualified as Pool
@@ -103,14 +103,14 @@ data Notifier = Notifier
     -- | Whether the flush loop should make its last flush and return.
     stopping :: StrictTVar IO Bool,
     -- | Where the two Rust @tracing::warn!@s go. Not a Rust field: the port
-    -- keeps logging explicit (Rule 5).
-    log :: LogAction IO Text
+    -- keeps tracing explicit, one universal carrier per backend.
+    log :: SomeTracer IO
   }
 
 -- | Mirrors Rust @Notifier::new@; the free-function spelling follows
 -- 'DBOS.SystemDB.Postgres.configNew'.
-notifierNew :: Pool.Pool -> Registry -> Maybe Duration -> LogAction IO Text -> IO Notifier
-notifierNew pool registry interval logger = do
+notifierNew :: Pool.Pool -> Registry -> Maybe Duration -> SomeTracer IO -> IO Notifier
+notifierNew pool registry interval tracer = do
   pushing <- newTVarIO False
   pending <- newTVarIO Map.empty
   woken <- newTVarIO False
@@ -124,7 +124,7 @@ notifierNew pool registry interval logger = do
         pending = pending,
         woken = woken,
         stopping = stopping,
-        log = logger
+        log = tracer
       }
 
 -- | Starts queueing payloads for the other processes listening on the
@@ -151,7 +151,7 @@ signal notifier channel workflowId key = do
   let payload = workflowId <> "::" <> key
   case keyFor channel payload of
     Nothing ->
-      warn notifier ("signalled on an unexpected channel: " <> channel)
+      traceWith notifier.log (SysdbUnexpectedChannel channel)
     Just registryKey -> do
       wake notifier.registry registryKey
       pushing <- readTVarIO notifier.pushing
@@ -179,7 +179,7 @@ run notifier = do
   -- shutdown wakes readers elsewhere rather than leaving them to their
   -- interval.
   flush notifier
-  warn notifier "the notifier stopped"
+  traceWith notifier.log SysdbNotifierStopped
   where
     loop = do
       stopping <- readTVarIO notifier.stopping
@@ -225,22 +225,12 @@ flush notifier = do
       -- attempt limit, so a channel that cannot be pushed would hold the loop
       -- rather than the queue.
       Left usage ->
-        warn
-          notifier
-          ( Text.concat
-              [ "could not push notifications; readers fall back to re-querying: ",
-                channel,
-                " (",
-                Text.pack (show usage),
-                ")"
-              ]
+        traceWith
+          notifier.log
+          ( SysdbPushFailed channel (length payloads) (Text.pack (show usage))
           )
       Right () -> pure ()
 
 -- | The interval in microseconds, the unit 'threadDelay' takes.
 micros :: Duration -> Int
 micros = fromInteger . (* 1000) . durationAsMillis
-
--- | The notifier's own warnings go through its explicit logger.
-warn :: Notifier -> Text -> IO ()
-warn notifier message = let LogAction write = notifier.log in write message

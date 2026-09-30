@@ -46,9 +46,9 @@ Tracing:
 - `say :: String -> m ()` (`MonadSay`) — string events; `selectTraceEventsSay`,
   `selectTraceEventsSayWithTime :: SimTrace a -> [(Time, String)]`.
 - `traceM :: Typeable a => a -> m ()` / `traceSTM` — typed dynamics;
-  `selectTraceEventsDynamic[WithTime]` recovers them. Our `DbosLogMsg`
-  already has the right shape (severity + text + workflow id); emitting it
-  through `traceM` in sim and through `fast-logger` in production is exactly
+  `selectTraceEventsDynamic[WithTime]` recovers them. Our leveled helpers
+  already have the right shape (severity-tagged `Text` lines); emitting them
+  through `say` in sim and through stdout in production is exactly
   the blog's `contra-tracer` pattern (typed, filterable, assertable).
 - Pretty printers: `ppTrace`, `ppEvents`, `ppSimEvent`; 1.11 adds `ppSayTrace`.
 
@@ -92,9 +92,9 @@ and assert transition order/coverage; `exploreSimTrace id sim` for race
 coverage with replayable schedule controls. Recent commits show them
 standardising on `dynamicTracer` in sim.
 
-Lesson for us: parameterise the *tracer*, not just the monad. Our
-`LogAction m DbosLogMsg` seam already points this way — it needs to become
-`traceM`-backed under sim.
+Lesson for us: parameterise the *tracer*, not just the monad. Our old
+`LogAction m Text` seam pointed this way — since ADR-0015 it is the
+`SomeTracer m` GADT, `traceM`-backed under sim.
 
 ## 4. What this means for dbos-transact-hs
 

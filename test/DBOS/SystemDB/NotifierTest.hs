@@ -4,8 +4,7 @@
 module DBOS.SystemDB.NotifierTest (tests) where
 
 import DBOS.Prelude
-import Colog.Core.Action (LogAction (..))
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Control.Monad (replicateM_)
 import DBOS.SystemDB
   ( Notifier (..),
@@ -30,23 +29,25 @@ import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
+import DBOS.Transact (LogEvent (..), SomeTracer (..), SysdbEvent (..), mkTracer, nullTracer)
 import Hasql.Pool qualified as Pool
-import Test.Tasty (TestTree, testGroup)
+import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (testCase, (@?=))
 
 -- | The writer's half of the wakeup path: what this process wrote, told to
 -- everyone else. Every case mirrors its Rust test name.
 tests :: TestTree
 tests =
+  withResource acquireSuitePool Pool.release $ \getPool ->
   testGroup
     "Notifier"
     [ testCase "a key written repeatedly is pushed once" $ do
-        withNotifier $ \notifier -> do
+        withNotifier getPool $ \notifier -> do
           enable notifier
           replicateM_ 5 (signal notifier streamsChannel "wf" "progress")
           drained notifier >>= (@?= [(streamsChannel, ["wf::progress"])]),
       testCase "the two channels batch separately" $ do
-        withNotifier $ \notifier -> do
+        withNotifier getPool $ \notifier -> do
           enable notifier
           signal notifier eventsChannel "wf" "ready"
           signal notifier streamsChannel "wf" "progress"
@@ -56,14 +57,14 @@ tests =
                        (eventsChannel, ["wf::ready", "wf::result"])
                      ]),
       testCase "without the push a signal still wakes a local waiter" $ do
-        withNotifier $ \notifier -> do
+        withNotifier getPool $ \notifier -> do
           subscription <- subscribe notifier.registry (eventKey "wf" "ready")
           signal notifier eventsChannel "wf" "ready"
           drained notifier >>= (@?= [])
           waitFor (notified subscription),
       testCase "a flush pushes the queued payloads and drains them" $ do
         warnings <- newIORef []
-        withNotifierLogging (LogAction (\message -> modifyIORef' warnings (message :))) $ \notifier -> do
+        withNotifierLogging getPool (collectingTracer warnings) $ \notifier -> do
           enable notifier
           signal notifier eventsChannel "wf" "ready"
           flush notifier
@@ -71,8 +72,12 @@ tests =
           -- The push is dropped on failure, so a warning is the only trace a
           -- bad statement would leave; none means pg_notify ran clean.
           readIORef warnings >>= (@?= []),
+      testCase "a signal on an unknown channel is announced" $ do
+        events <- newIORef []
+        withNotifierCollecting getPool events (\notifier -> signal notifier "bogus-channel" "wf" "ready")
+        readIORef events >>= (@?= ["signalled on an unexpected channel channel=bogus-channel"]),
       testCase "the pushed payload is the key a waiter holds" $ do
-        withNotifier $ \notifier -> do
+        withNotifier getPool $ \notifier -> do
           enable notifier
           signal notifier eventsChannel "wf" "ready"
           batches <- drained notifier
@@ -83,24 +88,47 @@ tests =
             other -> fail ("expected one channel's batch, got: " <> show other)
     ]
 
--- | A notifier over a live pool. Nothing here flushes, so the pool is only
--- held; the registry is fresh per case so wakes never cross tests.
-withNotifier :: (Notifier -> IO a) -> IO a
-withNotifier = withNotifierLogging nullLogger
-
--- | A notifier whose warnings land in the given logger, so a test can see
--- what the flush loop swallowed.
-withNotifierLogging :: LogAction IO Text -> (Notifier -> IO a) -> IO a
-withNotifierLogging logger action = do
+-- | One pool for the whole group: pools bound connections, so sharing
+-- bounds them no matter how many tests run or are interrupted. The
+-- registry stays fresh per case, so wakes never cross tests.
+acquireSuitePool :: IO Pool.Pool
+acquireSuitePool = do
   config <- configFromEnv
-  bracket (acquirePostgresSystemDB config nullLogger) (Pool.release . (.psdbPool)) $ \env -> do
-    registry <- newRegistry
-    notifier <- notifierNew env.psdbPool registry Nothing logger
-    action notifier
+  env <- acquirePostgresSystemDB config nullLogger
+  pure env.psdbPool
 
--- | The notifier's retry warnings go nowhere in tests.
-nullLogger :: LogAction IO Text
-nullLogger = LogAction (const (pure ()))
+-- | A notifier over the suite pool. Nothing here flushes, so the pool is
+-- only held; the registry is fresh per case so wakes never cross tests.
+withNotifier :: IO Pool.Pool -> (Notifier -> IO a) -> IO a
+withNotifier getPool = withNotifierLogging getPool nullLogger
+
+-- | A notifier whose warnings land in the given carrier, so a test can see
+-- what the flush loop swallowed.
+withNotifierLogging :: IO Pool.Pool -> SomeTracer IO -> (Notifier -> IO a) -> IO a
+withNotifierLogging getPool tracer action = do
+  pool <- getPool
+  registry <- newRegistry
+  notifier <- notifierNew pool registry Nothing tracer
+  action notifier
+
+-- | A notifier whose rendered event lines land in the given ref. Text, not
+-- typed events: a concrete collector cannot fill the carrier's Rank-N
+-- hole, so IO tests assert on lines and sim tests on types.
+-- | A carrier collecting rendered event lines: the Rank-N hole needs a
+-- polymorphic emit, so the signature pins it explicitly.
+collectingTracer :: IORef [Text] -> SomeTracer IO
+collectingTracer ref = SomeTracer (mkTracer emit)
+  where
+    emit :: LogEvent e => e -> IO ()
+    emit e = modifyIORef' ref (renderEvent e :)
+
+withNotifierCollecting :: IO Pool.Pool -> IORef [Text] -> (Notifier -> IO a) -> IO a
+withNotifierCollecting getPool ref =
+  withNotifierLogging getPool (collectingTracer ref)
+
+-- | The notifier's warnings go nowhere in tests.
+nullLogger :: SomeTracer IO
+nullLogger = nullTracer
 
 -- | Drains what is queued, channels and payloads sorted, exactly as the Rust
 -- test helper does.

@@ -11,7 +11,7 @@
 module DBOS.Transact.StepTestIOSim (tests) where
 
 import DBOS.Prelude
-import Control.Monad.IOSim (IOSim, runSimOrThrow)
+import Control.Monad.IOSim (IOSim, runSimOrThrow, runSimTrace, selectTraceEventsDynamic)
 import Data.Text (Text)
 import DBOS.SystemDB (millisDuration)
 import DBOS.SystemDB.IOSim (simConnection)
@@ -19,12 +19,16 @@ import DBOS.Transact
   ( Ctx,
     Error (..),
     Identity (..),
+    WorkflowEvent (..),
     StepOptions (..),
     newCtx,
     newWorkflowState,
     nextExecutionIdentity,
+    runWorkflowStep,
     runWorkflowStepWith,
+    simTracer,
     stepOptionsDefault,
+    withTracer,
   )
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -65,7 +69,10 @@ tests =
           Left StepTimeout {step} -> step @?= "slow"
           other -> fail ("expected StepTimeout, got: " <> show other),
       testCase "a step within its timeout is unaffected" $ do
-        run withinTimeout @?= Right 9
+        run withinTimeout @?= Right 9,
+      testCase "a step run announces through the context tracer" $ do
+        let traced = selectTraceEventsDynamic (runSimTrace tracedRun) :: [WorkflowEvent]
+        traced @?= [StepRunning "traced" 0]
     ]
 
 -- * The mirrored cases
@@ -180,6 +187,11 @@ withinTimeout = do
 
 run :: (forall s. IOSim s a) -> a
 run = runSimOrThrow
+
+tracedRun :: IOSim s (Either Error Int)
+tracedRun = do
+  context <- withTracer simTracer <$> simCtx
+  runWorkflowStep context "traced" (const (pure (1 :: Int)))
 
 simCtx :: IOSim s (Ctx (IOSim s))
 simCtx = do

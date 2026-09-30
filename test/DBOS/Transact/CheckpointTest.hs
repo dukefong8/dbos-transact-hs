@@ -14,6 +14,7 @@ import DBOS.Transact
     firstStepStatus,
     insideAWorkflow,
     nextStepMarker,
+    nullTracer,
     pendingStepId,
     placementAt,
     placementHere,
@@ -21,38 +22,53 @@ import DBOS.Transact
     placementWhereabouts,
     withAttempt,
   )
-import DBOS.Transact.ContextTest (testCtx)
-import Test.Tasty (TestTree, testGroup)
+import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.Transact.ContextTest (ctxOver)
+import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (testCase, (@?=))
+
+-- | One backend for the whole group: contexts build real connections
+-- over it, though placement checks never reach the database.
+acquireSuiteBackend :: IO Postgres.PostgresSystemDB
+acquireSuiteBackend = do
+  config <- Postgres.configFromEnv
+  backend <- Postgres.acquirePostgresSystemDB config nullTracer
+  Postgres.activatePostgresSystemDB backend
+  pure backend
 
 tests :: TestTree
 tests =
-  testGroup
-    "Checkpoint placement"
-    [ testCase "outside a workflow takes no id and records nothing" $ do
+  withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
+    testGroup
+      "Checkpoint placement"
+      [ testCase "outside a workflow takes no id and records nothing" $ do
         let placement = placementHere Nothing 0
         placement @?= Outside
         placementStepId placement @?= Nothing
         pendingStepId (PendingStep "DBOS.sleep" (Just placement)) @?= Nothing,
       testCase "at a step boundary the call records under the allocated id" $ do
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         let placement = placementAt ctx 0
         placement @?= Recorded ctx 0
         placementStepId placement @?= Just 0
         pendingStepId (PendingStep "checkout" (Just placement)) @?= Just 0,
       testCase "inside a step body the call is plain by the leaf rule" $ do
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         marker <- nextStepMarker ctx
         withAttempt ctx marker (firstStepStatus 3) $ \stepped -> do
           let placement = placementAt stepped 1
           placement @?= PlacementInsideStep stepped
           placementStepId placement @?= Nothing,
       testCase "a recorded call polled at its boundary stays durable" $ do
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         checkHere (Recorded ctx 0) "checkout" (Just ctx)
           @?= Right (DurabilityRecorded ctx 0),
       testCase "a recorded call carried into a step is refused" $ do
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         marker <- nextStepMarker ctx
         withAttempt ctx marker (firstStepStatus 0) $ \stepped ->
           checkHere (Recorded ctx 0) "checkout" (Just stepped)
@@ -64,17 +80,20 @@ tests =
                   }
               ),
       testCase "a client's call stays plain wherever it is driven" $ do
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         checkHere ClientConnection "DBOS.cancel" Nothing @?= Right DurabilityPlain
         checkHere ClientConnection "DBOS.cancel" (Just ctx) @?= Right DurabilityPlain,
       testCase "an in-step call polled in its own body stays plain" $ do
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         marker <- nextStepMarker ctx
         withAttempt ctx marker (firstStepStatus 3) $ \stepped ->
           checkHere (PlacementInsideStep stepped) "checkout" (Just stepped)
             @?= Right DurabilityPlain,
       testCase "an in-step call carried to a sibling body is refused" $ do
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         firstMarker <- nextStepMarker ctx
         secondMarker <- nextStepMarker ctx
         withAttempt ctx firstMarker (firstStepStatus 3) $ \first ->
@@ -88,7 +107,8 @@ tests =
                     }
                 ),
       testCase "only outside has no workflow around it" $ do
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         insideAWorkflow Outside @?= False
         insideAWorkflow ClientConnection @?= True
         insideAWorkflow (Recorded ctx 0) @?= True

@@ -6,7 +6,7 @@ Repo guide for DBOS Haskell.
 
 - `src/DBOS/Transact.hs` is the public DBOS transaction facade.
 - `src/DBOS/<Domain>/*` holds internal parsers, replay logic, and types.
-- `src/DBOS/Transact/Codec.hs` (Aeson JSON, mirrors Rust `serialization.rs`) and `src/DBOS/Transact/Log.hs` (explicit `LogAction`, no ambient logger) are plain-Haskell internals with no Bluefin imports.
+- `src/DBOS/Transact/Serialization.hs` (Aeson JSON, mirrors Rust `serialization.rs`) and `src/DBOS/Tracer.hs` (explicit `SomeTracer`, no ambient tracer) are plain-Haskell internals with no Bluefin imports.
 - `src/DBOS/SystemDB/Postgres.hs` holds `[typedSql| ... |]` sessions over an explicit pool via `ihp-typed-sql` (the `hasql-th` dependency is removed).
 - `test/DBOS/<DomainTest>.hs` holds Tasty specs.
 - `rust-migrate/` is a standalone Cargo crate driving the public Rust migration runner (`make db-migrate`); it is not part of any workspace.
@@ -59,6 +59,10 @@ Expected rows include the mirrored simple workflow status row (`hs-simple-wf`, `
 
 Then check the Rust oracle: `~/dev/dbos-transact-rust` is the behavioral reference. Run matching suites from that directory (e.g. `cargo test -p dbos --test recovery` for crash-and-resume, `--test queues` for the fan-out), read-only, pinned to v0.5.0 semantics — never copy code, never chase main. The starter acceptance mirror lives in `test/DBOS/StarterTest.hs`: steps-once, crash-and-resume, events, messages, queues, all as public-behavior tests against the live database.
 
+## Three-Leg Port Gate (ADR-0016)
+
+When porting each module, all three legs must pass: (1) watcher eval on the domain's `*Sim.tests` — green with announcement lines inline; (2) `cabal test test --test-option='--pattern' --test-option='$2 == "<Group>"'` — green with matching FastLogger lines on stdout (tasty `$n` fields are 1-indexed; `$0 ~ /.../` does not parse); (3) `cargo test -p dbos --test <suite>` read-only — green, plus a structural trace comparison against the oracle's `tracing::info!` call sites (Rust integration tests install no collector, so the comparison is format-string-structural, cited by file and line). Live trees (`*Test`) ship in `defaultMain`; sim trees (`*Sim`) are eval-only — never add a `*Sim.tests` to `main`.
+
 The database must always be migrated with the Rust runner first: run `make db-migrate` (idempotent; verifies `108→108`) before build/test. The migration-ceiling test pins version 108; a higher value means the Rust corpus moved and pinned queries must be re-verified.
 
 ## Guardrails
@@ -76,7 +80,7 @@ Soft conventions: they apply only where the Rust oracle and the plan rules (`.la
 
 - Two layers (ADR-0006): plain-Haskell internals (no Bluefin imports) hold all logic and tests; thin Bluefin capabilities live only at the external seam. Bluefin may depend inward, never outward.
 - Errors (Rule 3): per-domain `Either` ADTs in the core (`CodecError`, `StepError`, `WorkflowRunError`, the shared `DBOS.SystemDB.Error`); base async exceptions (`AsyncCancelled`) rethrown without recording at the edges. Impure internals constrain effects with `io-classes` where timing must be simulated (ADR-0008: `MonadDelay` in `DBOS.SystemDB.Retry`, IO in production, IOSim in tests); no unified `DbosError`, no `WorkflowCtx` record — the plan §6 records what was predicted vs built.
-- Logging (Rule 5): explicit `LogAction m DbosLogMsg`, never ambient; `co-log-core` + `fast-logger` stay, `co-log` message formatting is out.
+- Tracing (Rule 5): explicit `SomeTracer m` (contra-tracer GADT, universal over event types), never ambient; per-domain event ADTs (`EngineEvent`, `SysdbEvent`, `WorkflowEvent`, `QueueEvent`, `ManagementEvent`) with `LogEvent`+`ToLogStr`; FastLogger Rank-N backend on IO, `traceM` on IOSim; co-log is out (ADR-0015).
 - Deriving: every clause carries an explicit `stock`/`newtype` strategy.
 - Records (`NoFieldSelectors` + `OverloadedRecordDot`, both in cabal `default-extensions`):
   - DO read with record-dot: `row.rowWorkflowStatus`, `message.logMessage`.

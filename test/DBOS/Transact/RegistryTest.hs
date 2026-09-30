@@ -15,6 +15,7 @@ import DBOS.Transact
     lookupSnapshotWorkflow,
     newRegistry,
     newWorkflowKey,
+    nullTracer,
     refKey,
     refName,
     registerTypedWorkflow,
@@ -27,17 +28,28 @@ import DBOS.Transact
     thawRegistry,
     workflowKeyFromRow,
   )
-import DBOS.Transact.ContextTest (testCtx)
+import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.Transact.ContextTest (ctxOver)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Test.Tasty (TestTree, testGroup)
+import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
+
+-- | One backend for the whole group: contexts build real connections
+-- over it, though registry checks never reach the database.
+acquireSuiteBackend :: IO Postgres.PostgresSystemDB
+acquireSuiteBackend = do
+  config <- Postgres.configFromEnv
+  backend <- Postgres.acquirePostgresSystemDB config nullTracer
+  Postgres.activatePostgresSystemDB backend
+  pure backend
 
 tests :: TestTree
 tests =
-  testGroup
-    "Workflow registry"
-    [ testCase "a key displays as the triple the references spell" $ do
+  withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
+    testGroup
+      "Workflow registry"
+      [ testCase "a key displays as the triple the references spell" $ do
         renderWorkflowKey (newWorkflowKey "checkout") @?= "checkout",
       testCase "one identity registers once" $ do
         registry <- newRegistry
@@ -88,7 +100,8 @@ tests =
           Right () -> pure ()
         snapshot <- snapshotRegistry registry
         workflow <- maybe (fail "registered workflow missing from snapshot") pure (lookupSnapshotWorkflow key snapshot)
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         result <- workflow (Just (encodeWorkflowValue (21 :: Int))) ctx
         case result of
           Right (Just output) -> decodeWorkflowValue "result" (Just output) @?= Right (42 :: Int)
@@ -104,7 +117,8 @@ tests =
           Right () -> pure ()
         snapshot <- snapshotRegistry registry
         workflow <- maybe (fail "registered workflow missing from snapshot") pure (lookupSnapshotWorkflow key snapshot)
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         result <- workflow (Just (SerializedWorkflowValue "\"not a number\"" Nothing)) ctx
         case result of
           Left err -> assertBool "names the argument" ("argument" `Text.isInfixOf` renderTransactError err)
@@ -144,7 +158,8 @@ tests =
           Right () -> pure ()
         snapshot <- snapshotRegistry registry
         workflow <- maybe (fail "registered workflow missing from snapshot") pure (lookupSnapshotWorkflow key snapshot)
-        ctx <- testCtx
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
         result <- workflow Nothing ctx
         case result of
           Right (Just output) -> do

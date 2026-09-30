@@ -9,12 +9,9 @@ module DBOS.SystemDB.RetryTest
 where
 
 import DBOS.Prelude
-import Control.Monad.Class.MonadSay (say)
-import Control.Monad.IOSim (IOSim, runSim, runSimTrace, selectTraceEventsSay)
-import Colog.Core.Action (LogAction (..))
+import Control.Monad.IOSim (IOSim, runSim, runSimTrace, selectTraceEventsDynamic)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Text (Text)
-import Data.Text qualified as Text
 import Data.Word (Word32)
 import DBOS.SystemDB
   ( BackendError (..),
@@ -25,10 +22,11 @@ import DBOS.SystemDB
     durationAsMillis,
     durationFromMs,
     jitter,
+    renderError,
     shouldRetry,
     withRetry,
   )
-import DBOS.Transact (WorkflowId (..))
+import DBOS.Transact (SysdbEvent (..), WorkflowId (..), nullTracer, simTracer)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -76,26 +74,26 @@ ioTests =
     [ testCase "a transient failure is retried until it succeeds" $ do
         policy <- fastPolicy
         calls <- newIORef (0 :: Int)
-        result <- withRetry policy "test" quietLogger (pure 0) (failUntil calls 3 transientError)
+        result <- withRetry policy "test" nullTracer (pure 0) (failUntil calls 3 transientError)
         result @?= Right 3
         readIORef calls >>= (@?= 3),
       testCase "a permanent failure is returned at once" $ do
         policy <- fastPolicy
         calls <- newIORef (0 :: Int)
-        _ <- withRetry policy "test" quietLogger (pure 0) (alwaysFail calls permanentError)
+        _ <- withRetry policy "test" nullTracer (pure 0) (alwaysFail calls permanentError)
         readIORef calls >>= (@?= 1),
       testCase "a semantic error is not retried" $ do
         policy <- fastPolicy
         calls <- newIORef (0 :: Int)
-        _ <- withRetry policy "test" quietLogger (pure 0) (alwaysFail calls semanticError)
+        _ <- withRetry policy "test" nullTracer (pure 0) (alwaysFail calls semanticError)
         readIORef calls >>= (@?= 1),
       testCase "opting out covers connection errors but not contention" $ do
         policy <- (\p -> p {retryPolicyRetryConnectionErrors = False}) <$> fastPolicy
         connectionCalls <- newIORef (0 :: Int)
-        _ <- withRetry policy "test" quietLogger (pure 0) (alwaysFail connectionCalls connectionError)
+        _ <- withRetry policy "test" nullTracer (pure 0) (alwaysFail connectionCalls connectionError)
         readIORef connectionCalls >>= (@?= 1)
         transientCalls <- newIORef (0 :: Int)
-        result <- withRetry policy "test" quietLogger (pure 0) (failUntil transientCalls 2 transientError)
+        result <- withRetry policy "test" nullTracer (pure 0) (failUntil transientCalls 2 transientError)
         result @?= Right 2
         readIORef transientCalls >>= (@?= 2)
     ]
@@ -109,11 +107,14 @@ simTests =
           Left _ -> fail "the simulation itself failed"
           Right (Left err) -> fail ("retry returned an error: " <> show err)
           Right (Right attempts) -> attempts @?= 3
-        length (selectTraceEventsSay (runSimTrace simAction)) @?= 2
+        let traced = selectTraceEventsDynamic (runSimTrace simAction) :: [SysdbEvent]
+        traced @?= [ SysdbRetryAttempt "test" 1 500 (renderError transientError),
+                     SysdbRetryAttempt "test" 2 1000 (renderError transientError)
+                   ]
     ]
 
--- | The same retry loop under @IOSim@: a StrictTVar IO counts attempts, the logger
--- writes to the trace, and time is virtual.
+-- | The same retry loop under @IOSim@: a StrictTVar IO counts attempts, the
+-- sim tracer records the structured attempts, and time is virtual.
 simAction :: IOSim s (Either Error Int)
 simAction = do
   counter <- newTVarIO (0 :: Int)
@@ -121,12 +122,7 @@ simAction = do
         attempts <- readTVarIO counter
         atomically (writeTVar counter (attempts + 1))
         pure (if attempts + 1 < 3 then Left transientError else Right (attempts + 1))
-      simLogger = LogAction (\message -> say (Text.unpack message))
-  withRetry defaultRetryPolicy "test" simLogger (pure 0) work
-
--- | A logger that discards everything, for the IO tests.
-quietLogger :: Applicative m => LogAction m Text
-quietLogger = LogAction (\_ -> pure ())
+  withRetry defaultRetryPolicy "test" simTracer (pure 0) work
 
 -- | A policy with small backoffs, so real waits stay milliseconds.
 fastPolicy :: IO RetryPolicy

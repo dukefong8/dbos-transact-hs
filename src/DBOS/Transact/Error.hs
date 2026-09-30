@@ -51,6 +51,11 @@ data Error
     ErrorWorkflowNotRegistered {key :: Text}
   | -- | The SystemDB did not grant this attempt the workflow execution claim.
     ErrorWorkflowClaimLost {workflowId :: Text}
+  | -- | Shutdown cancelled the workflow while this caller waited for it. Its
+    -- row stays @PENDING@, so a later executor recovers it: nothing was
+    -- lost, this caller simply stopped being the one waiting. Mirrors Rust
+    -- @Error::Interrupted@.
+    Interrupted {workflowId :: Text}
   | -- | A prior execution recorded a workflow failure.
     ErrorWorkflowFailed {workflowId :: Text, message :: Text}
   | -- | An operation that only makes sense inside a workflow was called
@@ -85,6 +90,7 @@ renderTransactError = \case
   StepFailed step message -> "the step " <> step <> " failed: " <> message
   ErrorWorkflowNotRegistered key -> "no workflow is registered as " <> key
   ErrorWorkflowClaimLost workflowId -> "the workflow " <> workflowId <> " is already being run elsewhere"
+  Interrupted workflowId -> "the workflow " <> workflowId <> " was interrupted by shutdown and left PENDING"
   ErrorWorkflowFailed workflowId message -> "the workflow " <> workflowId <> " failed: " <> message
   NotInWorkflow operation -> operation <> " must be called from within a workflow"
   WrongInstance operation -> operation <> " was called on a different DBOS instance than the one running this workflow"

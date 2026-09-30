@@ -19,7 +19,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..))
-import DBOS.Transact.Codec (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Context (Ctx, nextStepId, stepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 

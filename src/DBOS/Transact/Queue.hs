@@ -35,12 +35,14 @@ import DBOS.SystemDB.Types
     Applications (..),
     NewQueue (..),
     OnExistingQueue (..),
+    QueueName (..),
     QueueRecord (..),
     QueueUpdate (..),
     RateLimit,
     ResolvedLimits (..),
     Duration,
     defaultQueueUpdate,
+    internalQueueName,
     newQueue,
     queueResolvedLimits,
     secondsDuration,
@@ -247,8 +249,9 @@ validateQueueOptions queueName options =
     (<|>) Nothing other = other
 
 registerQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> QueueOptions -> QueueConflict -> m (Either TransactError.Error Queue)
-registerQueue dbos queueName options conflict =
-  case validateQueueOptions queueName options of
+registerQueue dbos queueName options conflict
+  | Just refusal <- reserved queueName = pure (Left refusal)
+  | otherwise = case validateQueueOptions queueName options of
     Left err -> pure (Left err)
     Right () -> do
       required <- requireExecutor dbos "register_queue"
@@ -284,33 +287,51 @@ listQueues dbos = do
       pure (fmap (map queueFromRecord) (either (Left . TransactError.ErrorSystemDatabase) Right result))
 
 updateQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> QueueChange -> m (Either TransactError.Error Queue)
-updateQueue dbos queueName change = do
-  required <- requireExecutor dbos "update a queue"
-  case required of
-    Left err -> pure (Left err)
-    Right executor -> do
-      stored <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getQueue db queueName)
-      case stored of
-        Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
-        Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
-        Right (Just record) -> do
-          let currentQueue = queueFromRecord record
-              desired = queueOptionsAfterChange change currentQueue
-          case validateQueueOptions queueName desired of
-            Left err -> pure (Left err)
-            Right () -> do
-              let update = queueChangeToUpdate change currentQueue
-              updated <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.updateQueue db queueName update (\_ _ -> Right ()))
-              pure (queueFromRecord <$> either (Left . TransactError.ErrorSystemDatabase) Right updated)
+updateQueue dbos queueName change = case reserved queueName of
+  Just refusal -> pure (Left refusal)
+  Nothing -> do
+    required <- requireExecutor dbos "update a queue"
+    case required of
+      Left err -> pure (Left err)
+      Right executor -> do
+        stored <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getQueue db queueName)
+        case stored of
+          Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+          Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
+          Right (Just record) -> do
+            let currentQueue = queueFromRecord record
+                desired = queueOptionsAfterChange change currentQueue
+            case validateQueueOptions queueName desired of
+              Left err -> pure (Left err)
+              Right () -> do
+                let update = queueChangeToUpdate change currentQueue
+                updated <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.updateQueue db queueName update (\_ _ -> Right ()))
+                pure (queueFromRecord <$> either (Left . TransactError.ErrorSystemDatabase) Right updated)
 
 deleteQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> m (Either TransactError.Error ())
-deleteQueue dbos queueName = do
-  required <- requireExecutor dbos "delete a queue"
-  case required of
-    Left err -> pure (Left err)
-    Right executor -> do
-      result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.deleteQueue db queueName)
-      pure (() <$ either (Left . TransactError.ErrorSystemDatabase) Right result)
+deleteQueue dbos queueName = case reserved queueName of
+  Just refusal -> pure (Left refusal)
+  Nothing -> do
+    required <- requireExecutor dbos "delete a queue"
+    case required of
+      Left err -> pure (Left err)
+      Right executor -> do
+        result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.deleteQueue db queueName)
+        pure (() <$ either (Left . TransactError.ErrorSystemDatabase) Right result)
+
+-- | The engine's own queue is not one anybody registers, updates, or
+-- deletes: it has no row and takes no limits. Mirrors the oracle's
+-- reserved-name refusal, checked before anything else, with its message.
+reserved :: Text -> Maybe TransactError.Error
+reserved queueName =
+  case internalQueueName of
+    QueueName internal
+      | queueName == internal ->
+          Just
+            ( TransactError.ErrorConfig
+                ("the queue name `" <> queueName <> "` is reserved for the engine's internal queue")
+            )
+      | otherwise -> Nothing
 
 queueRecord :: (MonadMVar m, Monad m) => Executor m -> Text -> m (Either TransactError.Error Queue)
 queueRecord executor queueName = do

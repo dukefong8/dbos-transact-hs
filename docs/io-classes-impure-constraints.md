@@ -22,7 +22,7 @@ only in tests: `test/DBOS/SimTest.hs:14-18` and `test/DBOS/SimDB.hs:16`;
   live `ghci` probes through `cabal exec`
 - Repo rules: `AGENTS.md`, `docs/adr/0006-two-layer-bluefin-seam.md`,
   `.lavish/rust-port-plan.html` §6 (lines 231–243)
-- Repo prior art: `src/DBOS/Transact/Log.hs`, `Store.hs`, `Step.hs`,
+- Repo prior art: `src/DBOS/Transact/Logger.hs`, `Store.hs`, `Step.hs`,
   `Supervisor.hs`, `Workflow.hs`, `src/DBOS/SystemDB/Postgres.hs`,
   `test/DBOS/SimTest.hs`, `test/DBOS/SimDB.hs`
 - Prior intent: `docs/io-sim-simulations.md` (read fully)
@@ -104,9 +104,9 @@ rethrown without recording … No `MonadThrow`/`MonadCatch` abstraction and no
 retry policy yet (`retry.rs` unported); `io-classes` stays an unused dep."
 Prior art for the rethrow: `Supervisor.hs:44-49` and `Workflow.hs:90-95`.
 
-**Rule 5 (logging).** `Log.hs:4-9`: "explicit 'LogAction', never ambient …
+**Rule 5 (logging).** `Logger.hs:4-9`: "explicit 'LogAction', never ambient …
 simulations instantiate it over @say@ and assert with
-@selectTraceEventsSay@". `Log.hs:41-51` defines `nullLogAction` and
+@selectTraceEventsSay@". `Logger.hs:41-51` defines `nullLogAction` and
 `withStdoutLogger`; `rust-port-plan.html:243` describes the sim half.
 
 **Seam style.** `Store.hs:9`: "Adding a seam here means adding a record,
@@ -134,7 +134,7 @@ it carries no SQLSTATE/kind to classify on.
 | Timeouts (`registerDelay`/`timeout`) | `MonadTimer` (`MonadTimer.hs:32-38`) | Yes | **Reject for retry**: `retry.rs` has no timeout; cancellation is the caller's (`retry.rs:83-85`). Defer `MonadTimer` until a caller needs it. `timeoutCancellable` does not exist in 1.11 (only `si-timers`' `registerDelayCancellable`, not a direct dep). |
 | Wall clock | `MonadTime`/`MonadMonotonicTimeNSec` (`MonadTime.hs:23-35`) | Yes | **Reject for retry**: `retry.rs` never reads a clock; the sleep is relative. Relevant only if/when `sleepStep`'s `getPOSIXTime` (`Step.hs:120-121`) is generalized. |
 | Entropy for jitter (`retry.rs:134`) | **None exists** (probe: no `MonadRandom`) | n/a | **Adopt a pure-argument shape**: `jitter :: Word32 -> Millis -> Millis` plus an injected `m Word32` source. Production: `uuid` v4 (already a dep; mirrors Rust). Sim: deterministic counter/list (mirrors `io-sim-simulations.md:148-151`). **Reject** `MonadUnique` (counter, not uniform, `MonadUnique.hs:39`) and `MonadST`+STRef as the default (see §5). |
-| Logging (`retry.rs:111-117`) | `MonadSay` exists but is not the seam | Yes | **Adopt the existing `LogAction m DbosLogMsg` parameter** (`Log.hs:18`), per Rule 5; instantiate over `say` in sim (`rust-port-plan.html:243`, `io-sim-simulations.md:46-53`). No new class. |
+| Logging (`retry.rs:111-117`) | `MonadSay` exists but is not the seam | Yes | **Adopt the existing `LogAction m Text` parameter** (`Logger.hs:18`), per Rule 5; instantiate over `say` in sim (`rust-port-plan.html:243`, `io-sim-simulations.md:46-53`). No new class. |
 | Retry loop + classification (`retry.rs:69-79,102-122`) | None needed — pure | n/a | **Adopt** as a plain recursive function in `m` over a Haskell `BackendErrorKind`-equivalent ADT (`error.rs:304-317`). `shouldRetry` stays a pure function, testable without IO. |
 | Cancellation (`retry.rs:83-85`) | `MonadCatch`/`MonadThrow`/`MonadMask` (`MonadThrow.hs:40,77,188`); `AsyncCancelled` is re-exported by `MonadAsync.hs:14,45` | Textually yes, but plan Rule 3 records "no `MonadThrow`/`MonadCatch` abstraction" yet (`rust-port-plan.html:241`) | **Defer**: keep the retry core exception-free (work returns `Either`), and put `try @DbosDbError` + explicit async rethrow in the one concrete IO adapter, exactly as `Supervisor.hs:44-49`/`Workflow.hs:90-95` do. `MonadMask` is not needed at all — no bracket in retry. Revisit together with `io-sim-simulations.md:111-118`'s engine-wide generalization. |
 | Concurrency | `MonadAsync`/`MonadFork` (`MonadAsync.hs:54`, `MonadFork.hs:41`) | Yes | **Reject for retry**: the Rust module is one sequential future with no spawn; cancellation is the caller's concern (Executor's `TVar [Async]`, `rust-port-plan.html:239`). |
@@ -170,7 +170,7 @@ from:
    counter (`MonadUnique.hs:39`), and `hashUnique` is not uniform. It is the
    right class for identity, not for entropy (`io-sim-simulations.md:148`).
 4. **Observability.** If the drawn word should be assertable, route it
-   through the existing `LogAction`/`say` seam (`Log.hs:4-9`) or
+   through the existing `LogAction`/`say` seam (`Logger.hs:4-9`) or
    `MonadEventlog.traceEventIO` (`MonadEventlog.hs:16`, IOSim maps it to
    `traceM`, `Types.hs:794-798`) — not through a new class.
 
@@ -184,7 +184,7 @@ imports), e.g. `src/DBOS/Transact/Retry.hs`:
 withRetry ::
   MonadDelay m =>
   RetryPolicy ->
-  LogAction m DbosLogMsg ->
+  LogAction m Text ->
   m Word32 ->                            -- entropy, injected
   m (Either RetryError a) ->             -- work, re-run per attempt
   m (Either RetryError a)
@@ -210,8 +210,8 @@ withRetry ::
   generalization (`io-sim-simulations.md:111-118`) or land now as
   `MonadDelay`-polymorphic; plan Rule 3's "no retry policy yet"
   (`rust-port-plan.html:241`) needs updating either way.
-- Whether `DbosLogMsg` should grow `attempt`/`delay` fields
-  (`Log.hs:32-37`) or text-encode them as the Executor does
+- Whether log lines should grow `attempt`/`delay` fields
+  (`Logger.hs:32-37`) or text-encode them as the Executor does
   (`Executor.hs:108`); Rust logs them as structured `tracing` fields
   (`retry.rs:111-117`).
 - Whether to depend on `io-classes:si-timers` for `DiffTime`-typed delays and
