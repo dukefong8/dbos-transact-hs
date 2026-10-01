@@ -49,7 +49,6 @@ library
   exposed-modules:
     DBOS.Prelude
     DBOS.SystemDB
-    DBOS.SystemDB.IOSim
     DBOS.SystemDB.Postgres
     DBOS.Transact
   other-modules:
@@ -69,6 +68,7 @@ library
     DBOS.Transact.Queue
     DBOS.Transact.Recovery
     DBOS.Transact.Registry
+    DBOS.Transact.Select
     DBOS.Transact.Serialization
     DBOS.Transact.Sleep
     DBOS.Transact.Step
@@ -92,9 +92,10 @@ test-suite test
     -- `cabal build test` cover the DBOS.SystemDB slice only.
     DBOS.Transact.SerializationTest
     DBOS.TracerTest
-    DBOS.StarterTest
+    DBOS.IOSimTracer
     DBOS.SystemDB.TypesTest
     DBOS.SystemDB.ErrorTest
+    DBOS.SystemDB.IOSim
     DBOS.SystemDB.IOSimTest
     DBOS.SystemDB.RetryTest
     DBOS.SystemDB.PostgresTest
@@ -103,29 +104,36 @@ test-suite test
     DBOS.Transact.ConfigTest
     DBOS.Transact.ContextTest
     DBOS.Transact.ContextTestSim
+    DBOS.Transact.ContextSimData
     DBOS.Transact.DeadlinesTest
     DBOS.Transact.HandleTest
-    DBOS.Transact.HandleTestIOSim
+    DBOS.Transact.HandleTestSim
     DBOS.Transact.IdentityTest
     DBOS.Transact.RegistryTest
+    DBOS.Transact.SelectTest
     DBOS.Transact.StepRetryTest
-    DBOS.Transact.StepTestIOSim
+    DBOS.Transact.StepTestSim
     DBOS.Transact.StepTest
+    DBOS.Transact.ErrorTest
     DBOS.Transact.EventTest
     DBOS.Transact.MessageTest
-    DBOS.Transact.MessageTestIOSim
+    DBOS.Transact.MessageTestSim
+    DBOS.Transact.MessageSimData
     DBOS.Transact.WaitTest
-    DBOS.Transact.WaitTestIOSim
+    DBOS.Transact.WaitTestSim
     DBOS.Transact.InstanceTest
     DBOS.Transact.WorkflowTest
+    DBOS.Transact.WorkflowTestSim
+    DBOS.Transact.WorkflowSimData
     DBOS.Transact.QueueTest
     DBOS.SystemDB.NotifyTest
     DBOS.SystemDB.NotifierTest
     DBOS.Transact.ManagementTest
     DBOS.Transact.ManagementTestSim
+    DBOS.Transact.ManagementSimData
     DBOS.Transact.SimTest
     DBOS.Transact.SleepTest
-    DBOS.Transact.SleepTestIOSim
+    DBOS.Transact.SleepTestSim
     -- Deleted 2026-09-25: DBOS.SystemDBHasqlTest, DBOS.TransactTest
     -- (Bluefin seam; ADR-0012).
     -- Deleted 2026-09-29: DBOS.SystemDBTest, folded into

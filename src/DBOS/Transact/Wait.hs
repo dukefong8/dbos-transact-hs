@@ -13,6 +13,8 @@ module DBOS.Transact.Wait
     waitForWorkflow,
     waitForFirstWorkflow,
     waitForWorkflows,
+    -- * Tracing
+    WaitEvent (..),
   )
 where
 
@@ -20,13 +22,31 @@ import DBOS.Prelude
 import DBOS.SystemDB qualified as SystemDB
 import Data.Text (Text)
 import Data.Text qualified as Text
+import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), selectWorkflowStepName, timestampNow)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer, showSeverity)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (Ctx, currentConnection, nextStepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (Ctx, contextTracer, currentConnection, nextStepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
+
+-- | Announcements from the wait paths, homed here with their owner.
+-- Mirrors the @wait.rs@ debug sites: a replayed @select_workflow@ reads
+-- its recorded winner back. The all-wait takes no placement and stays
+-- quiet, as in the oracle.
+data WaitEvent
+  = SelectWorkflowReplaying { selectReplayedWinner :: Text }
+  deriving stock (Eq, Show)
+
+instance LogEvent WaitEvent where
+  eventSeverity SelectWorkflowReplaying {} = SeverityDebug
+  renderEvent (SelectWorkflowReplaying winner) =
+    "replaying select_workflow; the same workflow wins again workflow_id=" <> winner
+
+instance ToLogStr WaitEvent where
+  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
 
 -- | Wait for the first of a set of workflows to finish, checkpointed as the
 -- @DBOS.selectWorkflow@ step so a replay reads the same winner back. A set
@@ -36,7 +56,7 @@ import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 -- waits on has changed what this position of its code means. (Deviation: the
 -- step id is taken at the call, not at the build, as everywhere in this
 -- port.)
-selectWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m) => Ctx m -> [WorkflowId] -> m (Either TransactError.Error WorkflowId)
+selectWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m) => Ctx m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowId)
 selectWorkflow ctx workflowIds = do
   let workflowText = workflowId ctx
       workflowId' = WorkflowId workflowText
@@ -46,13 +66,13 @@ selectWorkflow ctx workflowIds = do
   case checked of
     Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
     Right (Just recorded) ->
-      pure $ case recorded.stepRecordError of
+      case recorded.stepRecordError of
         -- The only refusal this call records is the empty set, so a replay
         -- reads that refusal back rather than re-deciding it — the Rust
         -- revive of the recorded error, narrowed to this call's one error.
-        Just _errorText -> Left (TransactError.InvalidArgument "select_workflow" "no workflow ids to wait for")
+        Just _errorText -> pure (Left (TransactError.InvalidArgument "select_workflow" "no workflow ids to wait for"))
         Nothing -> case recorded.stepRecordOutput of
-          Nothing -> Left (TransactError.StepFailed selectWorkflowStepName "recorded select_workflow has no output")
+          Nothing -> pure (Left (TransactError.StepFailed selectWorkflowStepName "recorded select_workflow has no output"))
           Just output ->
             case
                 ( decodeWorkflowValue
@@ -61,30 +81,34 @@ selectWorkflow ctx workflowIds = do
                     Either CodecError Text
                 )
               of
-              Left err -> Left (TransactError.ErrorDeserialization "select_workflow" (codecMessage err))
+              Left err -> pure (Left (TransactError.ErrorDeserialization "select_workflow" (codecMessage err)))
               Right winner ->
                 if WorkflowId winner `elem` workflowIds
-                  then Right (WorkflowId winner)
+                  then do
+                    runTracer (contextTracer ctx) (SelectWorkflowReplaying winner)
+                    pure (Right (WorkflowId winner))
                   else
-                    Left
-                      ( TransactError.ErrorSystemDatabase
-                          SystemDBError.UnexpectedStep
-                            { workflowId = workflowText,
-                              stepId = stepId',
-                              expected = "a select_workflow over " <> summarize workflowIds,
-                              recorded = "a select_workflow won by " <> winner
-                            }
+                    pure
+                      ( Left
+                          ( TransactError.ErrorSystemDatabase
+                              SystemDBError.UnexpectedStep
+                                { workflowId = workflowText,
+                                  stepId = stepId',
+                                  expected = "a select_workflow over " <> summarize workflowIds,
+                                  recorded = "a select_workflow won by " <> winner
+                                }
+                          )
                       )
     Right Nothing -> do
       startedAt <- timestampNow
       if null workflowIds
         then do
-          let refused = TransactError.InvalidArgument "select_workflow" "no workflow ids to wait for"
+          let refused = TransactError.InvalidArgument "select_workflow" "no workflow ids to wait for" :: (TransactError.Error TransactError.EngineOnly)
           _ <-
             withSystemDB
               ctx
               ( \db ->
-                  SystemDB.recordStep db workflowId' stepId' selectWorkflowStepName (OutcomeError (TransactError.renderTransactError refused)) Nothing (Just (StepTiming startedAt startedAt))
+                  SystemDB.recordStep db workflowId' stepId' selectWorkflowStepName (OutcomeError (TransactError.encodeErrorText refused)) Nothing (Just (StepTiming startedAt startedAt))
               )
           pure (Left refused)
         else do
@@ -115,13 +139,13 @@ selectWorkflow ctx workflowIds = do
 -- | Wait for every workflow in a set to finish. The all-wait pins nothing
 -- worth a step id, so it is not checkpointed — the Rust @join_workflows@
 -- takes no placement either.
-joinWorkflows :: (MonadSTM m, MonadDelay m, MonadTime m) => Ctx m -> [WorkflowId] -> m (Either TransactError.Error ())
+joinWorkflows :: (MonadSTM m, MonadDelay m, MonadTime m) => Ctx m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 joinWorkflows ctx workflowIds = do
   let interval = (currentConnection ctx).connOutcomePollInterval
   result <- withSystemDB ctx (\db -> SystemDB.awaitWorkflowIds db workflowIds interval)
   pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
 
-waitForWorkflow :: (MonadMVar m, MonadDelay m, MonadTime m) => DBOS m -> WorkflowId -> m (Either TransactError.Error AwaitedOutcome)
+waitForWorkflow :: (MonadMVar m, MonadDelay m, MonadTime m) => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) AwaitedOutcome)
 waitForWorkflow dbos awaitedWorkflowId = do
   running <- requireExecutor dbos "wait for a workflow"
   case running of
@@ -130,7 +154,7 @@ waitForWorkflow dbos awaitedWorkflowId = do
       result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.awaitWorkflowResult db awaitedWorkflowId executor.conn.connOutcomePollInterval True)
       pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
 
-waitForFirstWorkflow :: (MonadMVar m, MonadDelay m, MonadTime m) => DBOS m -> [WorkflowId] -> m (Either TransactError.Error WorkflowId)
+waitForFirstWorkflow :: (MonadMVar m, MonadDelay m, MonadTime m) => DBOS m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowId)
 waitForFirstWorkflow dbos workflowIds = do
   running <- requireExecutor dbos "wait for the first workflow"
   case running of
@@ -139,7 +163,7 @@ waitForFirstWorkflow dbos workflowIds = do
       result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.awaitFirstWorkflowId db workflowIds executor.conn.connOutcomePollInterval)
       pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
 
-waitForWorkflows :: (MonadMVar m, MonadDelay m, MonadTime m) => DBOS m -> [WorkflowId] -> m (Either TransactError.Error ())
+waitForWorkflows :: (MonadMVar m, MonadDelay m, MonadTime m) => DBOS m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 waitForWorkflows dbos workflowIds = do
   running <- requireExecutor dbos "wait for workflows"
   case running of

@@ -43,7 +43,9 @@ import DBOS.SystemDB
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-  ( CodecError,
+  (
+    EngineOnly,
+    CodecError,
     Client (..),
     ClientConfig (..),
     Config (..),
@@ -137,7 +139,7 @@ tests =
         withInstance "mgmt-cancel-resume" $ \dbos suffix -> do
           ran <- newIORef (0 :: Int)
           let key = newWorkflowKey "cancellable"
-              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body input _ = do
                 modifyIORef' ran (+ 1)
                 pure (Right (input + 5))
@@ -146,7 +148,7 @@ tests =
           ref <- registerRefOrFail dbos key body
           launchOrFail dbos
           started <-
-            startDBOSWorkflowRef
+            startWfRef
               dbos
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
@@ -157,7 +159,7 @@ tests =
           cancelled <- cancelWorkflows dbos [workflowId] False
           assertEqual "the cancel reports the id it moved" (Right [workflowId]) cancelled
           handle <- retrieveOrFail dbos workflowId
-          status <- handleStatus handle
+          status <- statusWf handle
           assertEqual "the row is terminal" (Right (Just Cancelled)) status
           assertEqual "a cancelled workflow did not run" 0 =<< readIORef ran
           resumed <- resumeWorkflows dbos [workflowId] Nothing
@@ -173,7 +175,7 @@ tests =
         withInstance "mgmt-resume-queue" $ \dbos suffix -> do
           let queueName = "hs-l2-mgmt-queue-" <> suffix
               key = newWorkflowKey "resumable"
-              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
               workflowText = "hs-l2-mgmt-resume-queue-" <> suffix
               workflowId = WorkflowId workflowText
@@ -184,7 +186,7 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           started <-
-            startDBOSWorkflowRef
+            startWfRef
               dbos
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
@@ -210,12 +212,12 @@ tests =
           gate <- newEmptyMVar
           let childKey = newWorkflowKey "tree-child"
               parentKey = newWorkflowKey "tree-parent"
-              childBody :: () -> Ctx IO -> IO (Either Error Int)
+              childBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               childBody () _ = putMVar childStarted () >> takeMVar gate >> pure (Right 1)
               parentText = "hs-l2-mgmt-tree-parent-" <> suffix
               parentId = WorkflowId parentText
           childRef <- registerRefOrFail dbos childKey childBody
-          let parentBody :: () -> Ctx IO -> IO (Either Error Text)
+          let parentBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
               parentBody () ctx = do
                 started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
                 case started of
@@ -230,7 +232,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           launchOrFail dbos
-          ran <- runDBOSWorkflow dbos parentKey parentId Nothing
+          ran <- runWf dbos parentKey parentId Nothing
           childId <- case ran of
             Left err -> fail (show err)
             Right (Just output) -> case decodeSerializedChildId output of
@@ -242,12 +244,12 @@ tests =
             Left err -> fail (show err)
             Right ids -> assertBool "the tree cancel names the child" (childId `elem` ids)
           handle <- retrieveOrFail dbos childId
-          status <- handleStatus handle
+          status <- statusWf handle
           assertEqual "the child is terminal" (Right (Just Cancelled)) status,
       testCase "deleting a workflow removes its row" $
         withInstance "mgmt-delete" $ \dbos suffix -> do
           let key = newWorkflowKey "deletable"
-              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body input ctx = runWorkflowStep ctx "work" (const (pure input))
               workflowText = "hs-l2-mgmt-delete-" <> suffix
               workflowId = WorkflowId workflowText
@@ -256,19 +258,19 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           launchOrFail dbos
-          ran <- runDBOSWorkflow dbos key workflowId (Just (encodeWorkflowValue (1 :: Int)))
+          ran <- runWf dbos key workflowId (Just (encodeWorkflowValue (1 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
           deleted <- deleteWorkflows dbos [workflowId] True
           assertEqual "one row was deleted" (Right 1) deleted
           handle <- retrieveOrFail dbos workflowId
-          status <- handleStatus handle
+          status <- statusWf handle
           assertEqual "the row is gone" (Right Nothing) status,
       testCase "a workflow can be retrieved by id" $
         withInstance "mgmt-retrieve" $ \dbos suffix -> do
           let key = newWorkflowKey "retrievable"
-              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right (input * 3))
               workflowText = "hs-l2-mgmt-retrieve-" <> suffix
               workflowId = WorkflowId workflowText
@@ -277,14 +279,14 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           launchOrFail dbos
-          ran <- runDBOSWorkflow dbos key workflowId (Just (encodeWorkflowValue (2 :: Int)))
+          ran <- runWf dbos key workflowId (Just (encodeWorkflowValue (2 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
           handle <- retrieveOrFail dbos workflowId
-          status <- handleStatus handle
+          status <- statusWf handle
           assertEqual "the retrieved row reports success" (Right (Just Success)) status
-          result <- handleResult handle
+          result <- resultWf handle
           case result of
             Right (Just output) -> decodeSerializedResult output @?= Right (6 :: Int)
             other -> fail ("expected the retrieved result, got: " <> show other),
@@ -292,7 +294,7 @@ tests =
         withInstance "mgmt-fork-beginning" $ \dbos suffix -> do
           attempts <- newIORef (0 :: Int)
           let key = newWorkflowKey "forkable"
-              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body _ _ = do
                 attempt <- readIORef attempts
                 modifyIORef' attempts (+ 1)
@@ -306,7 +308,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           launchOrFail dbos
-          first <- runDBOSWorkflow dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+          first <- runWf dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           assertBool "the source was supposed to fail" (isLeft first)
           forked <- forkWorkflows dbos [forkNew sourceText] defaultForkOptions
           forkedIds <- case forked of
@@ -321,12 +323,12 @@ tests =
                 other -> fail ("expected the fork to run, got: " <> show other)
             other -> fail ("expected exactly one fork, got: " <> show other)
           sourceHandle <- retrieveOrFail dbos sourceId
-          sourceStatus <- handleStatus sourceHandle
+          sourceStatus <- statusWf sourceHandle
           assertEqual "the source keeps its outcome" (Right (Just Error)) sourceStatus,
       testCase "a fork takes the id and queue it is given" $
         withInstance "mgmt-fork-placed" $ \dbos suffix -> do
           let key = newWorkflowKey "placed"
-              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
               sourceText = "hs-l2-mgmt-fork-placed-source-" <> suffix
               forkedText = "hs-l2-mgmt-fork-placed-fork-" <> suffix
@@ -341,7 +343,7 @@ tests =
           case queueRegistered of
             Left err -> fail (show err)
             Right _ -> pure ()
-          ran <- runDBOSWorkflow dbos key sourceId (Just (encodeWorkflowValue (4 :: Int)))
+          ran <- runWf dbos key sourceId (Just (encodeWorkflowValue (4 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -361,7 +363,7 @@ tests =
         withInstance "mgmt-fork-step" $ \dbos suffix -> do
           ran <- newIORef ([] :: [Text])
           let key = newWorkflowKey "staged"
-              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body _ ctx = do
                 outcomes <-
                   mapM
@@ -375,7 +377,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           launchOrFail dbos
-          first <- runDBOSWorkflow dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+          first <- runWf dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           case first of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -396,7 +398,7 @@ tests =
       testCase "bulk cancel and resume hand back every id" $
         withInstance "mgmt-bulk" $ \dbos suffix -> do
           let key = newWorkflowKey "queued"
-              echoWorkflow :: Text -> Ctx IO -> IO (Either e Text)
+              echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
               echoWorkflow message _ = pure (Right message)
           registered <- registerDBOSWorkflow dbos key echoWorkflow
           case registered of
@@ -432,7 +434,7 @@ tests =
       testCase "bulk forking hands back one new id per source, in order" $
         withInstance "mgmt-bulk-fork" $ \dbos suffix -> do
           let key = newWorkflowKey "doubling"
-              body :: Int -> Ctx IO -> IO (Either Error Int)
+              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right (input * 2))
               first = WorkflowId ("hs-l2-mgmt-bulk-fork-1-" <> suffix)
               second = WorkflowId ("hs-l2-mgmt-bulk-fork-2-" <> suffix)
@@ -442,7 +444,7 @@ tests =
             Right () -> pure ()
           launchOrFail dbos
           let runOne wid input = do
-                ran <- runDBOSWorkflow dbos key wid (Just (encodeWorkflowValue input))
+                ran <- runWf dbos key wid (Just (encodeWorkflowValue input))
                 case ran of
                   Right _ -> pure ()
                   other -> fail ("expected the source to run, got: " <> show other)
@@ -467,7 +469,7 @@ tests =
         withInstance "mgmt-resume-queue" $ \dbos suffix -> do
           let key = newWorkflowKey "queued"
               wid = WorkflowId ("hs-l2-mgmt-resume-q-" <> suffix)
-              echoWorkflow :: Text -> Ctx IO -> IO (Either e Text)
+              echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
               echoWorkflow message _ = pure (Right message)
           registered <- registerDBOSWorkflow dbos key echoWorkflow
           case registered of
@@ -492,7 +494,7 @@ tests =
         withInstance "mgmt-fork-key" $ \dbos suffix -> do
           let key = newWorkflowKey "queued"
               sourceId = WorkflowId ("hs-l2-mgmt-fork-key-src-" <> suffix)
-              echoWorkflow :: Text -> Ctx IO -> IO (Either e Text)
+              echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
               echoWorkflow message _ = pure (Right message)
           registered <- registerDBOSWorkflow dbos key echoWorkflow
           case registered of
@@ -526,7 +528,7 @@ tests =
           calls <- newIORef (0 :: Int)
           let key = newWorkflowKey "flaky"
               sourceId = WorkflowId ("hs-l2-mgmt-fork-fail-src-" <> suffix)
-              flakyBody :: Text -> Ctx IO -> IO (Either Error Int)
+              flakyBody :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               flakyBody _ ctx = do
                 first <- runWorkflowStep ctx "one" (const (pure (0 :: Int)))
                 case first of
@@ -542,7 +544,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           launchOrFail dbos
-          first <- runDBOSWorkflow dbos key sourceId (Just (encodeWorkflowValue ("hi" :: Text)))
+          first <- runWf dbos key sourceId (Just (encodeWorkflowValue ("hi" :: Text)))
           case first of
             Left (StepFailed step _) -> step @?= "two"
             other -> fail ("expected the step failure, got: " <> show other)
@@ -559,7 +561,7 @@ tests =
       testCase "attributes are replaced and can be searched" $
         withInstance "mgmt-attributes" $ \dbos suffix -> do
           let key = newWorkflowKey "tagged"
-              body :: () -> Ctx IO -> IO (Either Error Int)
+              body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body () _ = pure (Right 0)
               wid = WorkflowId ("hs-l2-mgmt-attributes-" <> suffix)
               tenant = "acme-" <> Text.take 12 suffix
@@ -571,7 +573,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           launchOrFail dbos
-          ran <- runDBOSWorkflow dbos key wid Nothing
+          ran <- runWf dbos key wid Nothing
           case ran of
             Right _ -> pure ()
             other -> fail ("expected the workflow to run, got: " <> show other)
@@ -602,7 +604,7 @@ tests =
         withInstance "mgmt-self-delete" $ \dbos suffix -> do
           let key = newWorkflowKey "self-deleter"
               wid = WorkflowId ("hs-l2-mgmt-self-" <> suffix)
-              body :: Text -> Ctx IO -> IO (Either Error ())
+              body :: Text -> Ctx IO -> IO (Either (Error EngineOnly) ())
               body ownId ctx = do
                 deleted <- deleteWorkflowsInWorkflow ctx [WorkflowId ownId] False
                 pure (void deleted)
@@ -612,7 +614,7 @@ tests =
             Right () -> pure ()
           launchOrFail dbos
           ran <-
-            runDBOSWorkflow
+            runWf
               dbos
               key
               wid
@@ -633,13 +635,13 @@ tests =
           let childKey = newWorkflowKey "deleting-child"
               parentKey = newWorkflowKey "deleted-parent"
               rootText = "hs-l2-mgmt-ancestor-" <> suffix
-              childBody :: Text -> Ctx IO -> IO (Either Error ())
+              childBody :: Text -> Ctx IO -> IO (Either (Error EngineOnly) ())
               childBody root ctx = do
                 outcome <- deleteWorkflowsInWorkflow ctx [WorkflowId root] True
                 void (tryPutMVar observed outcome)
                 pure (void outcome)
           childRef <- registerRefOrFail dbos childKey childBody
-          let parentBody :: Text -> Ctx IO -> IO (Either Error ())
+          let parentBody :: Text -> Ctx IO -> IO (Either (Error EngineOnly) ())
               parentBody root ctx = do
                 started <- startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue root))
                 case started of
@@ -651,7 +653,7 @@ tests =
             Right () -> pure ()
           launchOrFail dbos
           ran <-
-            runDBOSWorkflow
+            runWf
               dbos
               parentKey
               (WorkflowId rootText)
@@ -672,9 +674,9 @@ tests =
               -- cancelled: named on the row, with no table row for any
               -- sweep to see.
               quietQueue = "hs-l2-mgmt-quiet-" <> suffix
-              targetBody :: () -> Ctx IO -> IO (Either Error Int)
+              targetBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               targetBody () _ = pure (Right 1)
-              operatorBody :: Text -> Ctx IO -> IO (Either Error Int)
+              operatorBody :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               operatorBody target ctx = do
                 cancelled <- cancelWorkflowsInWorkflow ctx [WorkflowId target] False
                 case cancelled of
@@ -705,7 +707,7 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           ran <-
-            runDBOSWorkflow
+            runWf
               dbos
               operatorKey
               (WorkflowId operatorText)
@@ -733,11 +735,11 @@ tests =
               operatorKey = newWorkflowKey "forking-operator"
               sourceText = "hs-l2-mgmt-replay-src-" <> suffix
               operatorText = "hs-l2-mgmt-replay-op-" <> suffix
-              sourceBody :: Int -> Ctx IO -> IO (Either Error Int)
+              sourceBody :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               sourceBody value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
           shouldCrash <- newIORef True
           seen <- newEmptyMVar
-          let operatorBody :: Text -> Ctx IO -> IO (Either Error Text)
+          let operatorBody :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
               operatorBody source ctx = do
                 forked <- forkWorkflowsInWorkflow ctx [forkNew source] defaultForkOptions
                 case forked of
@@ -758,11 +760,11 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           launchOrFail dbos
-          ranSource <- runDBOSWorkflow dbos sourceKey (WorkflowId sourceText) (Just (encodeWorkflowValue (21 :: Int)))
+          ranSource <- runWf dbos sourceKey (WorkflowId sourceText) (Just (encodeWorkflowValue (21 :: Int)))
           case ranSource of
             Right _ -> pure ()
             other -> fail ("expected the source to run, got: " <> show other)
-          first <- try (runDBOSWorkflow dbos operatorKey (WorkflowId operatorText) (Just (encodeWorkflowValue (sourceText :: Text)))) :: IO (Either SomeException (Either Error (Maybe SerializedWorkflowValue)))
+          first <- try (runWf dbos operatorKey (WorkflowId operatorText) (Just (encodeWorkflowValue (sourceText :: Text)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
           case first of
             Left exception -> assertBool "the crash escapes" ("forked then crashed" `Text.isInfixOf` Text.pack (show exception))
             Right other -> fail ("expected the crash, got: " <> show other)
@@ -794,9 +796,9 @@ tests =
               operatorText = "hs-l2-mgmt-resumer-" <> suffix
               quietQueue = "hs-l2-mgmt-quiet-" <> suffix
               runQueue = "hs-l2-mgmt-run-" <> Text.take 12 suffix
-              targetBody :: () -> Ctx IO -> IO (Either Error Int)
+              targetBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               targetBody () _ = pure (Right 1)
-              operatorBody :: Text -> Ctx IO -> IO (Either Error ())
+              operatorBody :: Text -> Ctx IO -> IO (Either (Error EngineOnly) ())
               operatorBody target ctx = do
                 cancelled <- cancelWorkflowsInWorkflow ctx [WorkflowId target] False
                 case cancelled of
@@ -830,7 +832,7 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           ran <-
-            runDBOSWorkflow
+            runWf
               dbos
               operatorKey
               (WorkflowId operatorText)
@@ -863,7 +865,7 @@ tests =
             case connected of
               Left err -> fail (show err)
               Right client -> do
-                let body :: () -> Ctx IO -> IO (Either Error ())
+                let body :: () -> Ctx IO -> IO (Either (Error EngineOnly) ())
                     body () ctx = do
                       cancelled <- clientCancelWorkflows client [WorkflowId "never-existed"] False
                       case cancelled of
@@ -878,7 +880,7 @@ tests =
                   Left err -> fail (show err)
                   Right () -> pure ()
                 launchOrFail dbos
-                ran <- runDBOSWorkflow dbos operatorKey (WorkflowId operatorText) Nothing
+                ran <- runWf dbos operatorKey (WorkflowId operatorText) Nothing
                 case ran of
                   Right _ -> pure ()
                   other -> fail ("expected the operator to run, got: " <> show other)
@@ -906,7 +908,7 @@ tests =
           Left (ErrorSystemDatabase (SystemDB.InvalidInput {})) -> pure ()
           other -> fail ("expected an argument refusal, got: " <> show other)
         -- The probe that follows still takes step zero.
-        probe <- runWorkflowStep context "probe" (const (pure ()))
+        probe <- (runWorkflowStep context "probe" (const (pure ())) :: IO (Either (Error EngineOnly) ()))
         case probe of
           Left err -> fail (show err)
           Right () -> pure ()
@@ -939,7 +941,7 @@ tests =
           let key = newWorkflowKey "delayable"
               queueName = "hs-l2-delayed-work-" <> Text.take 12 suffix
               wid = WorkflowId ("hs-l2-delayed-" <> suffix)
-              body :: () -> Ctx IO -> IO (Either Error Int)
+              body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
               body () _ = pure (Right 2)
           registered <- registerDBOSWorkflowRef dbos key body
           ref <- case registered of
@@ -951,7 +953,7 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           started <-
-            startDBOSWorkflowRef
+            startWfRef
               dbos
               ref
               (startOptionsDefault {startWorkflowId = Just ("hs-l2-delayed-" <> suffix), startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 3600)})})
@@ -974,6 +976,29 @@ tests =
               assertEqual "the released workflow runs" (Right 2) decoded
             other -> fail ("expected the released run, got: " <> show other)
     ]
+
+-- * Engine-only driver aliases
+
+-- | The engine-only driver aliases the tree above reads through: each
+-- pins the error channel to 'EngineOnly' (the channel the test bodies
+-- declare), so a call site outside an annotated body does not leave it
+-- for the compiler to guess. Local copies are deliberate — this module
+-- carries only the aliases it uses, and a sibling test module repeats
+-- the ones it needs.
+runWf :: DBOS IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf = runDBOSWorkflow
+
+startWfRef :: DBOS IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
+startWfRef = startDBOSWorkflowRef
+
+retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
+retrieveWf = retrieveWorkflow
+
+resultWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+resultWf = handleResult
+
+statusWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe WorkflowStatus))
+statusWf = handleStatus
 
 -- * Helpers
 
@@ -1028,14 +1053,14 @@ isolatedEnvironment =
       environmentExecutorId = Nothing
     }
 
-registerRefOrFail :: (FromJSON argument, ToJSON result) => DBOS IO -> WorkflowKey -> (argument -> Ctx IO -> IO (Either Error result)) -> IO (WorkflowRef IO)
+registerRefOrFail :: (FromJSON argument, ToJSON result) => DBOS IO -> WorkflowKey -> (argument -> Ctx IO -> IO (Either (Error EngineOnly) result)) -> IO (WorkflowRef IO EngineOnly)
 registerRefOrFail dbos key body = do
   registered <- registerDBOSWorkflowRef dbos key body
   either (fail . show) pure registered
 
-retrieveOrFail :: DBOS IO -> WorkflowId -> IO (WorkflowHandle IO)
+retrieveOrFail :: DBOS IO -> WorkflowId -> IO (WorkflowHandle IO EngineOnly)
 retrieveOrFail dbos workflowId = do
-  retrieved <- retrieveWorkflow dbos workflowId
+  retrieved <- retrieveWf dbos workflowId
   either (fail . show) pure retrieved
 
 decodeResult :: Text -> Either CodecError Int
@@ -1047,5 +1072,5 @@ decodeSerializedResult output = decodeWorkflowValue "result" (Just output)
 decodeSerializedChildId :: SerializedWorkflowValue -> Either CodecError Text
 decodeSerializedChildId output = decodeWorkflowValue "result" (Just output)
 
-workflowTextOf :: WorkflowHandle IO -> Text
+workflowTextOf :: WorkflowHandle IO EngineOnly -> Text
 workflowTextOf handle = handleWorkflowId handle

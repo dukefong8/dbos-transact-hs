@@ -5,7 +5,8 @@
 -- validation and writes remain in the SystemDB class; this layer owns only
 -- the launched-instance guard and engine error channel.
 module DBOS.Transact.Management
-  ( cancelWorkflows,
+  ( ManagementEvent (..),
+    cancelWorkflows,
     cancelWorkflowsInWorkflow,
     resumeWorkflows,
     resumeWorkflowsInWorkflow,
@@ -25,15 +26,58 @@ where
 import DBOS.Prelude
 import Data.Text (Text)
 import Data.Word (Word64)
+import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelWorkflowStepName, deleteWorkflowStepName, forkOptionsValidate, forkValidate, forkWorkflowStepName, listWorkflowsStepName, resumeWorkflowStepName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (Ctx, currentConnection, stepId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runWorkflowStepWith, stepOptionsDefault)
-import DBOS.Tracer (ManagementEvent (..), traceWith)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer, showSeverity)
 
-cancelWorkflows :: Monad m => Connection m -> [WorkflowId] -> Bool -> m (Either TransactError.Error [WorkflowId])
+-- | Operator-action events: the management surface's announcements.
+-- Rendered lines keep the Rust @tracing!@ message bodies with their
+-- @key=value@ span fields, so operators see the same text. Mirrors
+-- @management.rs@'s @Connection@ impl: cancel guards on non-empty, delete
+-- on a positive count, fork splits one id from many, the rest announce
+-- unconditionally; the reads log nothing.
+data ManagementEvent
+  = WorkflowsCancelled { managementCancelled :: Int }
+  | WorkflowsResumed { managementRequested :: Int, managementResumed :: Int }
+  | WorkflowForked { managementForkedId :: Text }
+  | WorkflowsForked { managementForked :: Int }
+  | WorkflowsDeleted { managementDeleted :: Word64 }
+  | WorkflowDelayMoveAsked { managementWorkflowId :: Text }
+  | WorkflowAttributesReplaceAsked { managementWorkflowId :: Text }
+  deriving stock (Eq, Show)
+
+instance LogEvent ManagementEvent where
+  eventSeverity WorkflowsCancelled {}             = SeverityInfo
+  eventSeverity WorkflowsResumed {}               = SeverityInfo
+  eventSeverity WorkflowForked {}                 = SeverityInfo
+  eventSeverity WorkflowsForked {}                = SeverityInfo
+  eventSeverity WorkflowsDeleted {}               = SeverityInfo
+  eventSeverity WorkflowDelayMoveAsked {}         = SeverityInfo
+  eventSeverity WorkflowAttributesReplaceAsked {} = SeverityInfo
+  renderEvent (WorkflowsCancelled cancelled) =
+    "cancelled workflows cancelled=" <> showText cancelled
+  renderEvent (WorkflowsResumed requested resumed) =
+    "resumed workflows onto their queues requested=" <> showText requested <> " resumed=" <> showText resumed
+  renderEvent (WorkflowForked forkedId) =
+    "forked the workflow onto its queue forked_id=" <> forkedId
+  renderEvent (WorkflowsForked count) =
+    "forked workflows onto their queues count=" <> showText count
+  renderEvent (WorkflowsDeleted deleted) =
+    "deleted workflows deleted=" <> showText deleted
+  renderEvent (WorkflowDelayMoveAsked workflowId) =
+    "asked to move the workflow's release time workflow_id=" <> workflowId
+  renderEvent (WorkflowAttributesReplaceAsked workflowId) =
+    "asked to replace the workflow's attributes workflow_id=" <> workflowId
+
+instance ToLogStr ManagementEvent where
+  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
+
+cancelWorkflows :: Monad m => Connection m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflows conn workflowIds cancelChildren = do
   result <- runSystemDB conn.connSysdb (\db -> SystemDB.cancelWorkflows db workflowIds cancelChildren Nothing)
   case result of
@@ -43,13 +87,13 @@ cancelWorkflows conn workflowIds cancelChildren = do
     Right cancelled -> do
       if null cancelled
         then pure ()
-        else traceWith conn.connTracer (WorkflowsCancelled (length cancelled))
+        else runTracer conn.connTracer (WorkflowsCancelled (length cancelled))
       pure (Right cancelled)
 
 -- | Cancels workflows as a step of the calling workflow: the call takes a
 -- step id, runs once, and replays its recorded ids. Same leaf rule as
 -- every in-workflow call — inside a step body it runs plainly.
-cancelWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [WorkflowId] -> Bool -> m (Either TransactError.Error [WorkflowId])
+cancelWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflowsInWorkflow ctx workflowIds cancelChildren =
   runWorkflowStepWith
     stepOptionsDefault
@@ -57,7 +101,7 @@ cancelWorkflowsInWorkflow ctx workflowIds cancelChildren =
     cancelWorkflowStepName
     (\inner -> cancelWorkflows (currentConnection inner) workflowIds cancelChildren)
 
-resumeWorkflows :: Monad m => Connection m -> [WorkflowId] -> Maybe Text -> m (Either TransactError.Error [WorkflowId])
+resumeWorkflows :: Monad m => Connection m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflows conn workflowIds queueName = do
   result <- runSystemDB conn.connSysdb (\db -> SystemDB.resumeWorkflows db workflowIds queueName Nothing)
   case result of
@@ -66,12 +110,12 @@ resumeWorkflows conn workflowIds queueName = do
     -- had already finished still counts as requested, so this announces
     -- unconditionally.
     Right resumed -> do
-      traceWith conn.connTracer (WorkflowsResumed (length workflowIds) (length resumed))
+      runTracer conn.connTracer (WorkflowsResumed (length workflowIds) (length resumed))
       pure (Right resumed)
 
 -- | Resumes workflows as a step of the calling workflow. Same leaf rule
 -- as every in-workflow call.
-resumeWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [WorkflowId] -> Maybe Text -> m (Either TransactError.Error [WorkflowId])
+resumeWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflowsInWorkflow ctx workflowIds queueName =
   runWorkflowStepWith
     stepOptionsDefault
@@ -79,14 +123,14 @@ resumeWorkflowsInWorkflow ctx workflowIds queueName =
     resumeWorkflowStepName
     (\inner -> resumeWorkflows (currentConnection inner) workflowIds queueName)
 
-deleteWorkflows :: Monad m => Connection m -> [WorkflowId] -> Bool -> m (Either TransactError.Error Word64)
+deleteWorkflows :: Monad m => Connection m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflows conn workflowIds deleteChildren =
   deleteWorkflowsWithCaller conn workflowIds deleteChildren Nothing
 
 -- | Deletes workflows naming the calling workflow's step, so the backend
 -- refuses a target set containing the caller itself. The engine's
 -- in-workflow entry passes the step the call was checkpointed under.
-deleteWorkflowsWithCaller :: Monad m => Connection m -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either TransactError.Error Word64)
+deleteWorkflowsWithCaller :: Monad m => Connection m -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflowsWithCaller conn workflowIds deleteChildren caller = do
   result <- runSystemDB conn.connSysdb (\db -> SystemDB.deleteWorkflows db workflowIds deleteChildren caller)
   case result of
@@ -95,7 +139,7 @@ deleteWorkflowsWithCaller conn workflowIds deleteChildren caller = do
     Right deleted -> do
       if deleted == 0
         then pure ()
-        else traceWith conn.connTracer (WorkflowsDeleted deleted)
+        else runTracer conn.connTracer (WorkflowsDeleted deleted)
       pure (Right deleted)
 
 -- | Deletes workflows as a step of the calling workflow: the call takes a
@@ -104,7 +148,7 @@ deleteWorkflowsWithCaller conn workflowIds deleteChildren caller = do
 -- like every system-database failure — so a replay refuses again rather
 -- than replaying a delete. Inside a step body the call runs plainly with
 -- no caller, by the leaf rule.
-deleteWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [WorkflowId] -> Bool -> m (Either TransactError.Error Word64)
+deleteWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflowsInWorkflow ctx workflowIds deleteChildren =
   runWorkflowStepWith
     stepOptionsDefault
@@ -120,7 +164,7 @@ deleteWorkflowsInWorkflow ctx workflowIds deleteChildren =
         Nothing -> deleteWorkflows (currentConnection inner) workflowIds deleteChildren
     )
 
-forkWorkflows :: Monad m => Connection m -> [Fork] -> ForkOptions -> m (Either TransactError.Error [WorkflowId])
+forkWorkflows :: Monad m => Connection m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkWorkflows conn forks options = do
   result <- runSystemDB conn.connSysdb (\db -> SystemDB.forkWorkflows db forks options Nothing)
   case result of
@@ -134,7 +178,7 @@ forkWorkflows conn forks options = do
 -- under a second id. Arguments are refused before the step id is taken,
 -- so a refused call spends nothing. Same leaf rule as every in-workflow
 -- call.
-forkWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [Fork] -> ForkOptions -> m (Either TransactError.Error [WorkflowId])
+forkWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkWorkflowsInWorkflow ctx forks options =
   case (forkOptionsValidate options, traverse forkValidate forks) of
     (Left err, _) -> pure (Left (TransactError.ErrorSystemDatabase err))
@@ -146,7 +190,7 @@ forkWorkflowsInWorkflow ctx forks options =
         forkWorkflowStepName
         (\inner -> forkWorkflows (currentConnection inner) forks options)
 
-forkFrom :: Monad m => Connection m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either TransactError.Error [WorkflowId])
+forkFrom :: Monad m => Connection m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFrom conn workflowIds point options = do
   result <- runSystemDB conn.connSysdb (\db -> SystemDB.forkFrom db workflowIds point options Nothing)
   case result of
@@ -160,13 +204,13 @@ forkFrom conn workflowIds point options = do
 -- reports the batch size.
 announceFork :: Monad m => Connection m -> [WorkflowId] -> m ()
 announceFork conn forked = case forked of
-  [WorkflowId only] -> traceWith conn.connTracer (WorkflowForked only)
-  many -> traceWith conn.connTracer (WorkflowsForked (length many))
+  [WorkflowId only] -> runTracer conn.connTracer (WorkflowForked only)
+  many -> runTracer conn.connTracer (WorkflowsForked (length many))
 
 -- | Forks from a point as a step of the calling workflow. Arguments are
 -- refused before the step id is taken. Same leaf rule as every
 -- in-workflow call.
-forkFromInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either TransactError.Error [WorkflowId])
+forkFromInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFromInWorkflow ctx workflowIds point options =
   case forkOptionsValidate options of
     Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
@@ -181,7 +225,7 @@ forkFromInWorkflow ctx workflowIds point options =
 -- given 'Nothing'. Mirrors Rust @DBOS::update_workflow_attributes@ outside
 -- a workflow, where the call is plain: the encoding happens before any id
 -- could be taken, and the backend replaces rather than merges.
-updateWorkflowAttributes :: Monad m => Connection m -> WorkflowId -> Maybe Text -> m (Either TransactError.Error ())
+updateWorkflowAttributes :: Monad m => Connection m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 updateWorkflowAttributes conn workflowId attributes = do
   result <- runSystemDB conn.connSysdb (\db -> SystemDB.updateWorkflowAttributes db workflowId attributes Nothing)
   case result of
@@ -190,13 +234,13 @@ updateWorkflowAttributes conn workflowId attributes = do
     -- effect — no count comes back, so this announces unconditionally.
     Right () -> do
       let WorkflowId workflowText = workflowId
-      traceWith conn.connTracer (WorkflowAttributesReplaceAsked workflowText)
+      runTracer conn.connTracer (WorkflowAttributesReplaceAsked workflowText)
       pure (Right ())
 
 -- | Reads the workflows matching a filter. Mirrors Rust
 -- @DBOS::list_workflows@ outside a workflow, where the call is plain: every
 -- filter is one @WHERE@ clause, so the default returns the whole table.
-listWorkflows :: Monad m => Connection m -> WorkflowFilter -> m (Either TransactError.Error [WorkflowRecord])
+listWorkflows :: Monad m => Connection m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 listWorkflows conn filters = do
   result <- runSystemDB conn.connSysdb (\db -> SystemDB.listWorkflows db filters Nothing)
   pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
@@ -204,7 +248,7 @@ listWorkflows conn filters = do
 -- | Lists workflows as a step of the calling workflow, under the
 -- cross-SDK name, so a step listing reads the same whichever SDK wrote
 -- it. Same leaf rule as every in-workflow call.
-listWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> WorkflowFilter -> m (Either TransactError.Error [WorkflowRecord])
+listWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 listWorkflowsInWorkflow ctx filters =
   runWorkflowStepWith
     stepOptionsDefault

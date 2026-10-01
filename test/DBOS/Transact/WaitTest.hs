@@ -3,7 +3,8 @@
 
 -- | In-workflow waits against the live backend, ported from Rust
 -- @tests/waits.rs@: an empty first wait records its refusal and a replay
--- reads it back, and a recorded winner that left the set is refused.
+-- reads it back, a recorded winner that left the set is refused, and a
+-- replayed first wait reads its recorded winner back.
 module DBOS.Transact.WaitTest (tests) where
 
 import DBOS.Prelude
@@ -13,7 +14,7 @@ import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (NewWorkflow (..), Outcome (..), StepRecord (..), Submission (..), WorkflowId (..), newWorkflow, selectWorkflowStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (Error (..), joinWorkflows, nullTracer, selectWorkflow)
+import DBOS.Transact (Error (..), acquireFastBackend, ioTracer, joinWorkflows, nullTracer, selectWorkflow)
 import DBOS.Transact.ContextTest (ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -94,6 +95,32 @@ tests =
             Just _ -> pure ()
             Nothing -> fail "expected the winning select to checkpoint its output"
           other -> fail (show other),
+      testCase "a replayed first-wait reads its recorded winner back" $ do
+        backend <- getBackend
+        freshId <- UUID.V4.nextRandom
+        let firstText = "hs-l2-wait-replay-a-" <> Text.pack (UUID.toString freshId)
+            secondText = "hs-l2-wait-replay-b-" <> Text.pack (UUID.toString freshId)
+        let start text = do
+              created <- SystemDB.initWorkflow backend ((newWorkflow text) {newWorkflowName = Just "L2WaitReplay"}) Nothing Fresh Nothing
+              case created of
+                Left err -> fail (show err)
+                Right _ -> pure ()
+        start firstText
+        start secondText
+        settled <- SystemDB.recordWorkflowOutcome backend (WorkflowId secondText) (OutcomeOutput (Just "null"))
+        case settled of
+          Left err -> fail (show err)
+          Right _ -> pure ()
+        context <- ctxOver backend nullTracer firstText
+        first <- selectWorkflow context [WorkflowId firstText, WorkflowId secondText]
+        first @?= Right (WorkflowId secondText)
+        -- The replay announces through FastLogger, so the run proves the
+        -- trace seam as well as the winner it reads back.
+        (logger, cleanup) <- acquireFastBackend
+        replayContext <- ctxOver backend (ioTracer logger) firstText
+        replayed <- selectWorkflow replayContext [WorkflowId firstText, WorkflowId secondText]
+        cleanup
+        replayed @?= Right (WorkflowId secondText),
       testCase "a cancelled workflow counts as settled" $ withWorkflow getBackend "wait-cancelled" $ \backend workflowText -> do
         freshId <- UUID.V4.nextRandom
         let otherText = "hs-l2-wait-cancelled-other-" <> Text.pack (UUID.toString freshId)

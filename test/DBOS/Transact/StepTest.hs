@@ -5,6 +5,8 @@
 module DBOS.Transact.StepTest (tests) where
 
 import DBOS.Prelude
+import Data.Aeson (FromJSON, ToJSON)
+import Data.Text (Text)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -13,12 +15,16 @@ import DBOS.SystemDB (NewWorkflow (..), Submission (..), SystemDB (..), millisDu
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-  ( Ctx,
+  (
+    EngineOnly,
+    Ctx,
     Error (..),
     StepOptions (..),
     StepStatus (..),
     WorkflowId (..),
+    acquireFastBackend,
     cancellationToken,
+    ioTracer,
     nullTracer,
     runWorkflowStep,
     runWorkflowStepWith,
@@ -68,11 +74,11 @@ tests =
                 writeIORef observedStepId (stepId ctx)
                 modifyIORef' calls (+ 1)
                 pure 42
-          first <- runWorkflowStep firstContext "test_step" body
+          first <- runStep firstContext "test_step" body
           assertEqual "first execution returns the body's result" (Right 42) first
           assertEqual "the body runs inside step zero" (Just 0) =<< readIORef observedStepId
           replayContext <- ctxOver backend nullTracer workflowText
-          second <- runWorkflowStep replayContext "test_step" body
+          second <- runStep replayContext "test_step" body
           assertEqual "replay returns the recorded result" (Right 42) second
           assertEqual "replay does not run the body again" 1 =<< readIORef calls,
       testCase "a step inside a step body runs plainly and takes no id" $ do
@@ -84,16 +90,20 @@ tests =
         case created of
           Left err -> fail (show err)
           Right _ -> pure ()
-        firstContext <- ctxOver backend nullTracer workflowText
+        -- The nested run announces through FastLogger, so the run proves
+        -- the trace seam as well as the checkpoint it skips.
+        (logger, cleanup) <- acquireFastBackend
+        firstContext <- ctxOver backend (ioTracer logger) workflowText
         let innerBody :: Ctx IO -> IO Int
             innerBody _ = pure 7
             outerBody :: Ctx IO -> IO Int
             outerBody ctx = do
-              inner <- runWorkflowStep ctx "inner" innerBody
+              inner <- runStep ctx "inner" innerBody
               case inner of
                 Right n -> pure (n + 1)
                 Left err -> fail (show err)
-        outer <- runWorkflowStep firstContext "outer" outerBody
+        outer <- runStep firstContext "outer" outerBody
+        cleanup
         assertEqual "the outer body sees the inner result" (Right 8) outer
         placed <- checkStep backend (WorkflowId workflowText) 0 "outer"
         case placed of
@@ -130,12 +140,12 @@ tests =
         firstContext <- ctxOver backend nullTracer workflowText
         seen <- newIORef ([] :: [(Maybe StepStatus, Maybe StepStatus, Maybe Int)])
         attempts <- newIORef (0 :: Int)
-        first <- runWorkflowStep firstContext "first" (\_ -> pure ())
+        first <- runStep firstContext "first" (\_ -> pure ())
         assertEqual "the leading step runs" (Right ()) first
-        let outerBody :: Ctx IO -> IO (Either Error ())
+        let outerBody :: Ctx IO -> IO (Either (Error EngineOnly) ())
             outerBody ctx = do
               let outer = stepStatus ctx
-              inner <- runWorkflowStep ctx "inner" (\innerCtx -> do
+              inner <- runStep ctx "inner" (\innerCtx -> do
                 let innerStatus = stepStatus innerCtx
                     innerId = stepId innerCtx
                 modifyIORef' seen (++ [(outer, innerStatus, innerId)])
@@ -187,9 +197,9 @@ tests =
         outside <- cancellationToken ctx
         assertBool "outside a workflow there is no attempt to abandon" =<< stayedQuiet outside
         body <- cancellationToken ctx
-        let hanging :: Ctx IO -> IO (Either Error ())
+        let hanging :: Ctx IO -> IO (Either (Error EngineOnly) ())
             hanging _ = threadDelay 1000000 >> pure (Right ())
-            options = (stepOptionsDefault :: StepOptions) {timeout = Just (millisDuration 20)}
+            options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 20)}
         abandoned <- runWorkflowStepWith options ctx "times-out" hanging
         case abandoned of
           Left StepTimeout {} -> pure ()
@@ -205,3 +215,8 @@ stayedQuiet :: StrictTVar IO Bool -> IO Bool
 stayedQuiet token = do
   result <- timeout 50000 (atomically (readTVar token >>= check))
   pure (result == Nothing)
+
+-- | The simple step runner at the engine-only channel: top-level test
+-- calls do not sit in an annotated body, so the channel needs pinning.
+runStep :: (FromJSON value, ToJSON value) => Ctx IO -> Text -> (Ctx IO -> IO value) -> IO (Either (Error EngineOnly) value)
+runStep ctx name body = runWorkflowStep ctx name body

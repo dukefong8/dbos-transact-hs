@@ -1288,6 +1288,12 @@ versionTests getBackend =
               let ours = filter (\info -> info.versionInfoName == versionName) found
               map (.versionInfoTimestamp) ours @?= [timestampFromEpochMs 4102444800000]
             other -> fail ("expected versions, got: " <> show other)
+          -- Restore a timestamp that can never be latest: a far-future
+          -- stamp left behind would poison every scoped latest-version
+          -- query on the shared database (and with it, every
+          -- UpdateIfLatestVersion registration).
+          restored <- updateApplicationVersionTimestamp env versionName (timestampFromEpochMs 0) Nothing
+          restored @?= Right ()
           anyLatest <- getLatestApplicationVersion env Nothing
           case anyLatest of
             Right (Just _) -> pure ()

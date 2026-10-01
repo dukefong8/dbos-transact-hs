@@ -18,6 +18,7 @@ module DBOS.SystemDB.Retry
     jitter,
     withRetry,
     uuidEntropy,
+    SysdbEvent (..),
   )
 where
 
@@ -28,7 +29,52 @@ import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word32)
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), renderError)
 import DBOS.SystemDB.Types (Duration (..), durationAsMillis, secondsDuration)
-import DBOS.Tracer (SomeTracer, SysdbEvent (..), traceWith)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer, showSeverity)
+import System.Log.FastLogger (ToLogStr (..))
+
+-- | System-database events: retry attempts, backend warnings, notifier
+-- lifecycle. Mirrors @sysdb/retry.rs@, the @postgres@ backend and
+-- @sysdb/postgres/notifier.rs@. Owned here — the leaf every emitter
+-- already imports — so the backend and the notifier announce through it
+-- without a cycle.
+data SysdbEvent
+  = SysdbRetryAttempt { sysdbOperation :: Text, sysdbAttempt :: Integer, sysdbDelayMs :: Integer, sysdbDetail :: Text }
+  | SysdbUnexpectedChannel { sysdbChannel :: Text }
+  | SysdbQueueMismatch { sysdbWorkflowId :: Text }
+  | SysdbNotifierStopped
+  | SysdbPushFailed { sysdbPushChannel :: Text, sysdbPushCount :: Int, sysdbPushDetail :: Text }
+  deriving stock (Eq, Show)
+
+instance LogEvent SysdbEvent where
+  eventSeverity SysdbRetryAttempt {}      = SeverityWarning
+  eventSeverity SysdbUnexpectedChannel {} = SeverityWarning
+  eventSeverity SysdbQueueMismatch {}     = SeverityWarning
+  eventSeverity SysdbNotifierStopped      = SeverityDebug
+  eventSeverity SysdbPushFailed {}        = SeverityWarning
+  renderEvent (SysdbRetryAttempt operation attempt delayMs detail) =
+    "system database operation failed; retrying operation="
+      <> operation
+      <> " attempt="
+      <> showText attempt
+      <> " delay_ms="
+      <> showText delayMs
+      <> " error="
+      <> detail
+  renderEvent (SysdbUnexpectedChannel channel) =
+    "signalled on an unexpected channel channel=" <> channel
+  renderEvent (SysdbQueueMismatch workflowId) =
+    "workflow " <> workflowId <> " already exists on a different queue; the stored queue is kept"
+  renderEvent SysdbNotifierStopped = "the notifier stopped"
+  renderEvent (SysdbPushFailed channel count detail) =
+    "could not push notifications; readers fall back to re-querying channel="
+      <> channel
+      <> " count="
+      <> showText count
+      <> " error="
+      <> detail
+
+instance ToLogStr SysdbEvent where
+  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
 
 -- | How long to wait between attempts, and what to give up on. The
 -- defaults are Python's and Java's, which agree: one second, doubling to a
@@ -98,7 +144,7 @@ withRetry policy operation tracer nextEntropy work = go policy.retryPolicyInitia
               let delay = jitter bits backoff
                   delayMs = durationAsMillis delay
                   nextAttempt = attempt + 1
-              traceWith tracer (SysdbRetryAttempt operation nextAttempt delayMs (renderError err))
+              runTracer tracer (SysdbRetryAttempt operation nextAttempt delayMs (renderError err))
               threadDelay (fromInteger (delayMs * 1000))
               go (min (double backoff) policy.retryPolicyMaxBackoff) nextAttempt
     double (Duration backoff) = Duration (backoff * 2)

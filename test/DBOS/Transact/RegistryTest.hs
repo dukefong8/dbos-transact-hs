@@ -5,9 +5,12 @@ module DBOS.Transact.RegistryTest (tests) where
 
 import DBOS.Prelude
 import DBOS.Transact
-  ( CodecError,
+  (
+    EngineOnly, CodecError,
     Ctx,
     ErasedWorkflow,
+    Error,
+    Failure (..),
     SerializedWorkflowValue (..),
     decodeWorkflowValue,
     encodeWorkflowValue,
@@ -92,7 +95,7 @@ tests =
       testCase "an erased workflow round-trips through json" $ do
         registry <- newRegistry
         let key = newWorkflowKey "double"
-            double :: Int -> Ctx IO -> IO (Either e Int)
+            double :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             double value _ = pure (Right (value * 2))
         registered <- registerTypedWorkflow registry key double
         case registered of
@@ -109,7 +112,7 @@ tests =
       testCase "a malformed argument is reported rather than panicking" $ do
         registry <- newRegistry
         let key = newWorkflowKey "double"
-            double :: Int -> Ctx IO -> IO (Either e Int)
+            double :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             double value _ = pure (Right (value * 2))
         registered <- registerTypedWorkflow registry key double
         case registered of
@@ -121,12 +124,13 @@ tests =
         ctx <- ctxOver backend nullTracer "wf-1"
         result <- workflow (Just (SerializedWorkflowValue "\"not a number\"" Nothing)) ctx
         case result of
-          Left err -> assertBool "names the argument" ("argument" `Text.isInfixOf` renderTransactError err)
+          Left (FailureRecorded payload) -> assertBool "names the argument" ("argument" `Text.isInfixOf` payload)
+          Left (FailureControl _) -> fail "expected a recorded argument failure"
           Right _ -> fail "expected malformed input to fail decoding",
       testCase "a reference holds the identity it registered under" $ do
         registry <- newRegistry
         let key = instanceWorkflowKey "checkout" "Checkout" "eu"
-            body :: Int -> Ctx IO -> IO (Either e Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value _ = pure (Right (value * 2))
         registered <- registerWorkflowRef registry key body
         case registered of
@@ -137,7 +141,7 @@ tests =
       testCase "a reference to a duplicate identity is refused" $ do
         registry <- newRegistry
         let key = newWorkflowKey "same"
-            body :: Int -> Ctx IO -> IO (Either e Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value _ = pure (Right value)
         first <- registerWorkflowRef registry key body
         case first of
@@ -150,7 +154,7 @@ tests =
       testCase "a zero argument workflow is called with no input at all" $ do
         registry <- newRegistry
         let key = newWorkflowKey "nothing"
-            nothing :: () -> Ctx IO -> IO (Either e Text)
+            nothing :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
             nothing () _ = pure (Right "nothing")
         registered <- registerTypedWorkflow registry key nothing
         case registered of

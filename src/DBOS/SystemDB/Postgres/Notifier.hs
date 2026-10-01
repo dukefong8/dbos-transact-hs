@@ -49,8 +49,9 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Notify (Registry, keyFor, wake)
+import DBOS.SystemDB.Retry (SysdbEvent (..))
 import DBOS.SystemDB.Types (Duration, durationAsMillis, millisDuration)
-import DBOS.Tracer (SomeTracer, SysdbEvent (..), traceWith)
+import DBOS.Tracer (SomeTracer, runTracer)
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Pool qualified as Pool
@@ -151,7 +152,7 @@ signal notifier channel workflowId key = do
   let payload = workflowId <> "::" <> key
   case keyFor channel payload of
     Nothing ->
-      traceWith notifier.log (SysdbUnexpectedChannel channel)
+      runTracer notifier.log (SysdbUnexpectedChannel channel)
     Just registryKey -> do
       wake notifier.registry registryKey
       pushing <- readTVarIO notifier.pushing
@@ -179,7 +180,7 @@ run notifier = do
   -- shutdown wakes readers elsewhere rather than leaving them to their
   -- interval.
   flush notifier
-  traceWith notifier.log SysdbNotifierStopped
+  runTracer notifier.log SysdbNotifierStopped
   where
     loop = do
       stopping <- readTVarIO notifier.stopping
@@ -225,7 +226,7 @@ flush notifier = do
       -- attempt limit, so a channel that cannot be pushed would hold the loop
       -- rather than the queue.
       Left usage ->
-        traceWith
+        runTracer
           notifier.log
           ( SysdbPushFailed channel (length payloads) (Text.pack (show usage))
           )

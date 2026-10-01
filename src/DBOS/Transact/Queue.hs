@@ -44,6 +44,7 @@ import DBOS.SystemDB.Types
     defaultQueueUpdate,
     internalQueueName,
     newQueue,
+    queueIsLegacyPartitioned,
     queueResolvedLimits,
     secondsDuration,
     durationAsMillis,
@@ -196,7 +197,7 @@ queueChangeToUpdate change current =
     maybeChanged (Set value) _ = value
     maybeChanged Leave oldValue = oldValue
 
-validateQueueOptions :: Text -> QueueOptions -> Either TransactError.Error ()
+validateQueueOptions :: Text -> QueueOptions -> Either (TransactError.Error TransactError.EngineOnly) ()
 validateQueueOptions queueName options =
   case firstInvalid of
     Nothing -> Right ()
@@ -213,6 +214,7 @@ validateQueueOptions queueName options =
           ordered "worker_concurrency" "concurrency" options.worker_concurrency options.concurrency,
           nonzeroDuration "polling_interval" options.polling_interval,
           rate "rate_limit" options.rate_limit,
+          rate "partition_rate_limit" options.partition_rate_limit,
           positive "partition_concurrency" options.partition_concurrency,
           positive "partition_worker_concurrency" options.partition_worker_concurrency,
           ordered "partition_worker_concurrency" "partition_concurrency" options.partition_worker_concurrency options.partition_concurrency,
@@ -248,7 +250,7 @@ validateQueueOptions queueName options =
     (<|>) (Just value) _ = Just value
     (<|>) Nothing other = other
 
-registerQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> QueueOptions -> QueueConflict -> m (Either TransactError.Error Queue)
+registerQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> QueueOptions -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
 registerQueue dbos queueName options conflict
   | Just refusal <- reserved queueName = pure (Left refusal)
   | otherwise = case validateQueueOptions queueName options of
@@ -268,7 +270,7 @@ registerQueue dbos queueName options conflict
                 Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
                 Right _ -> queueRecord executor queueName
 
-queue :: (MonadMVar m, Monad m) => DBOS m -> Text -> m (Either TransactError.Error (Maybe Queue))
+queue :: (MonadMVar m, Monad m) => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe Queue))
 queue dbos queueName = do
   required <- requireExecutor dbos "read a queue"
   case required of
@@ -277,7 +279,7 @@ queue dbos queueName = do
       result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getQueue db queueName)
       pure (fmap (fmap queueFromRecord) (either (Left . TransactError.ErrorSystemDatabase) Right result))
 
-listQueues :: (MonadMVar m, Monad m) => DBOS m -> m (Either TransactError.Error [Queue])
+listQueues :: (MonadMVar m, Monad m) => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [Queue])
 listQueues dbos = do
   required <- requireExecutor dbos "list queues"
   case required of
@@ -286,7 +288,7 @@ listQueues dbos = do
       result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.listQueues db (Named [executor.identity.identityAppName]))
       pure (fmap (map queueFromRecord) (either (Left . TransactError.ErrorSystemDatabase) Right result))
 
-updateQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> QueueChange -> m (Either TransactError.Error Queue)
+updateQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> QueueChange -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
 updateQueue dbos queueName change = case reserved queueName of
   Just refusal -> pure (Left refusal)
   Nothing -> do
@@ -299,16 +301,36 @@ updateQueue dbos queueName change = case reserved queueName of
           Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
           Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
           Right (Just record) -> do
-            let currentQueue = queueFromRecord record
-                desired = queueOptionsAfterChange change currentQueue
-            case validateQueueOptions queueName desired of
-              Left err -> pure (Left err)
-              Right () -> do
-                let update = queueChangeToUpdate change currentQueue
-                updated <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.updateQueue db queueName update (\_ _ -> Right ()))
-                pure (queueFromRecord <$> either (Left . TransactError.ErrorSystemDatabase) Right updated)
+            -- A legacy-partitioned row cannot take a per-partition limit:
+            -- its queue-wide limits already are its per-partition ones, so
+            -- adding a second set would leave two answers in one row.
+            -- Asked of the row as stored, not as merged: clearing the last
+            -- partition limit leaves a legacy-looking row, and refusing
+            -- that would make un-partitioning impossible.
+            let touchesPartition =
+                  change.partition_concurrency /= Leave
+                    || change.partition_worker_concurrency /= Leave
+                    || change.partition_rate_limit /= Leave
+            if touchesPartition && queueIsLegacyPartitioned record
+              then
+                pure
+                  ( Left
+                      ( TransactError.ErrorConfig
+                          ( "queue `" <> queueName <> "`: this queue is registered with the deprecated `partition_queue` flag, under which its queue-wide limits already apply per partition; re-register it with the per-partition limits instead"
+                          )
+                      )
+                  )
+              else do
+                let currentQueue = queueFromRecord record
+                    desired = queueOptionsAfterChange change currentQueue
+                case validateQueueOptions queueName desired of
+                  Left err -> pure (Left err)
+                  Right () -> do
+                    let update = queueChangeToUpdate change currentQueue
+                    updated <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.updateQueue db queueName update (\_ _ -> Right ()))
+                    pure (queueFromRecord <$> either (Left . TransactError.ErrorSystemDatabase) Right updated)
 
-deleteQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> m (Either TransactError.Error ())
+deleteQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 deleteQueue dbos queueName = case reserved queueName of
   Just refusal -> pure (Left refusal)
   Nothing -> do
@@ -322,7 +344,7 @@ deleteQueue dbos queueName = case reserved queueName of
 -- | The engine's own queue is not one anybody registers, updates, or
 -- deletes: it has no row and takes no limits. Mirrors the oracle's
 -- reserved-name refusal, checked before anything else, with its message.
-reserved :: Text -> Maybe TransactError.Error
+reserved :: Text -> Maybe (TransactError.Error TransactError.EngineOnly)
 reserved queueName =
   case internalQueueName of
     QueueName internal
@@ -333,7 +355,7 @@ reserved queueName =
             )
       | otherwise -> Nothing
 
-queueRecord :: (MonadMVar m, Monad m) => Executor m -> Text -> m (Either TransactError.Error Queue)
+queueRecord :: (MonadMVar m, Monad m) => Executor m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
 queueRecord executor queueName = do
   result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getQueue db queueName)
   pure $ case result of
@@ -341,7 +363,7 @@ queueRecord executor queueName = do
     Right Nothing -> Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` was not returned after registration"))
     Right (Just record) -> Right (queueFromRecord record)
 
-resolveConflict :: (MonadMVar m, Monad m) => Executor m -> QueueConflict -> m (Either TransactError.Error OnExistingQueue)
+resolveConflict :: (MonadMVar m, Monad m) => Executor m -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) OnExistingQueue)
 resolveConflict _ AlwaysUpdate = pure (Right UpdateExisting)
 resolveConflict _ NeverUpdate = pure (Right LeaveExisting)
 resolveConflict executor UpdateIfLatestVersion = do

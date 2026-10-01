@@ -27,6 +27,7 @@ module DBOS.Prelude
     module MonadTimer,
     module MonadMVar,
     module MonadSTM,
+    showText,
   )
 where
 
@@ -37,4 +38,10 @@ import Control.Monad.Class.MonadFork as MonadFork
 import Control.Monad.Class.MonadThrow as MonadThrow
 import Control.Monad.Class.MonadTime as MonadTime
 import Control.Monad.Class.MonadTimer as MonadTimer
+import Data.Text (Text, pack)
 import Prelude hiding ()
+
+-- | Render any 'Show' value as 'Text'. Shared here so every domain-event
+-- renderer uses one spelling.
+showText :: Show a => a -> Text
+showText = pack . show

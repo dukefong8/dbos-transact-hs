@@ -14,13 +14,18 @@ import DBOS.SystemDB (Timestamp, WorkflowId (..), WorkflowRecord (..), WorkflowS
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-  ( CodecError,
+  (
+    EngineOnly, CodecError,
     Config (..),
     Ctx,
+    DBOS,
     Environment (..),
     Error (..),
     RunOptions (..),
+    SerializedWorkflowValue (..),
     Timeout (..),
+    WorkflowHandle,
+    WorkflowRef,
     WorkflowStatus (..),
     configFromEnv,
     decodeWorkflowValue,
@@ -52,7 +57,7 @@ tests =
             key = newWorkflowKey "quick"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either Error Int)
+            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body () _ = pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowRef dbos key body
@@ -64,7 +69,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           ran <-
-            runDBOSWorkflowRef
+            runWfRef
               dbos
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
@@ -74,11 +79,11 @@ tests =
               let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
               assertEqual "a run inside its budget records its result" (Right 7) decoded
             other -> fail (show other)
-          retrieved <- retrieveWorkflow dbos (WorkflowId workflowText)
+          retrieved <- retrieveWf dbos (WorkflowId workflowText)
           case retrieved of
             Left err -> fail (show err)
             Right handle -> do
-              status <- handleStatus handle
+              status <- statusWf handle
               case status of
                 Right (Just Success) -> pure ()
                 other -> fail ("expected the row SUCCESS, got: " <> show other),
@@ -90,7 +95,7 @@ tests =
             key = newWorkflowKey "runs-forever"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either Error Int)
+            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body () _ = do
               threadDelay 30000000
               pure (Right 1)
@@ -104,7 +109,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           ran <-
-            runDBOSWorkflowRef
+            runWfRef
               dbos
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (millisDuration 100)})
@@ -112,11 +117,11 @@ tests =
           case ran of
             Left (ErrorSystemDatabase (SystemDB.WorkflowCancelled {workflowId})) -> workflowId @?= workflowText
             other -> fail ("expected the cancellation, got: " <> show other)
-          retrieved <- retrieveWorkflow dbos (WorkflowId workflowText)
+          retrieved <- retrieveWf dbos (WorkflowId workflowText)
           case retrieved of
             Left err -> fail (show err)
             Right handle -> do
-              status <- handleStatus handle
+              status <- statusWf handle
               case status of
                 Right (Just Cancelled) -> pure ()
                 other -> fail ("expected the row CANCELLED, got: " <> show other),
@@ -129,7 +134,7 @@ tests =
         gate <- newEmptyMVar
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either Error Int)
+            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body () _ = takeMVar gate >> pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowRef dbos key body
@@ -142,7 +147,7 @@ tests =
             Right () -> pure ()
           worker <-
             async
-              ( runDBOSWorkflowRef
+              ( runWfRef
                   dbos
                   ref
                   (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
@@ -159,7 +164,7 @@ tests =
           second @?= first
           putMVar gate ()
           ran <-
-            runDBOSWorkflowRef
+            runWfRef
               dbos
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
@@ -178,7 +183,7 @@ tests =
         gate <- newEmptyMVar
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either Error Int)
+            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body () _ = takeMVar gate >> pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowRef dbos key body
@@ -191,7 +196,7 @@ tests =
             Right () -> pure ()
           worker <-
             async
-              ( runDBOSWorkflowRef
+              ( runWfRef
                   dbos
                   ref
                   (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
@@ -210,7 +215,7 @@ tests =
             key = newWorkflowKey "quick"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either Error Int)
+            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body () _ = pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowRef dbos key body
@@ -222,7 +227,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           first <-
-            runDBOSWorkflowRef
+            runWfRef
               dbos
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
@@ -233,7 +238,7 @@ tests =
               assertEqual "a run inside its budget records its result" (Right 7) decoded
             other -> fail (show other)
           again <-
-            runDBOSWorkflowRef
+            runWfRef
               dbos
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (millisDuration 1)})
@@ -243,15 +248,28 @@ tests =
               let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
               assertEqual "the recorded outcome beats the expired budget" (Right 7) decoded
             other -> fail (show other)
-          retrieved <- retrieveWorkflow dbos (WorkflowId workflowText)
+          retrieved <- retrieveWf dbos (WorkflowId workflowText)
           case retrieved of
             Left err -> fail (show err)
             Right handle -> do
-              status <- handleStatus handle
+              status <- statusWf handle
               case status of
                 Right (Just Success) -> pure ()
                 other -> fail ("expected the row SUCCESS, got: " <> show other)
     ]
+
+-- * Engine-only driver aliases
+
+-- | The engine-only driver aliases the tree above reads through. Local
+-- copies are deliberate: this module carries only the aliases it uses.
+runWfRef :: DBOS IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfRef = runDBOSWorkflowRef
+
+retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
+retrieveWf = retrieveWorkflow
+
+statusWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe WorkflowStatus))
+statusWf = handleStatus
 
 -- | One backend for the whole group: pools are per-backend, so sharing
 -- bounds connections no matter how many tests run or are interrupted. The

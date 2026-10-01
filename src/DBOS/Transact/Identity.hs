@@ -25,7 +25,7 @@ import DBOS.Prelude
 import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.Transact.Config (Config (..))
-import DBOS.Transact.Error (Error (..))
+import DBOS.Transact.Error (EngineOnly, Error (..))
 import System.Environment (lookupEnv)
 
 -- | The variable holding the application version.
@@ -105,7 +105,7 @@ data Identity = Identity
 -- deployment says: the environment first, then the configuration on top —
 -- except on DBOS Cloud, where the deployment is the authority and the
 -- configuration is not consulted at all.
-resolve :: Config -> Environment -> Either Error Identity
+resolve :: Config -> Environment -> Either (Error EngineOnly) Identity
 resolve config environment = do
   let (appName, appVersion, executorId)
         | environment.environmentCloud =
@@ -156,7 +156,7 @@ resolve config environment = do
 -- letters, digits, dashes and underscores. Checked rather than trusted
 -- because the name is an ownership key: a row stamped with a name no other
 -- executor spells the same way is a row nothing claims.
-validateAppName :: Text -> Either Error ()
+validateAppName :: Text -> Either (Error EngineOnly) ()
 validateAppName name =
   case Text.length name of
     0 -> bad "cannot be empty"

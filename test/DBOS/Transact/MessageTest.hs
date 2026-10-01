@@ -13,7 +13,8 @@ import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), Outcom
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-  ( Ctx,
+  (
+    EngineOnly, Ctx,
     Error (..),
     Forks (..),
     SendOptions (..),
@@ -137,7 +138,7 @@ tests =
         withPair getBackend "topics" $ \backend sender receiver destination -> do
           sent <- send sender destination (Just (Topic "a")) Nothing ("for-a" :: Text)
           sent @?= Right ()
-          missed <- recv receiver (Just (Topic "b")) (millisDuration 100) :: IO (Either Error (Maybe Text))
+          missed <- recv receiver (Just (Topic "b")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
           missed @?= Right Nothing
           found <- recv receiver (Just (Topic "a")) (millisDuration 100)
           case found of
@@ -170,7 +171,7 @@ tests =
       testCase "a step may send but may not receive" $
         withPair getBackend "step-send" $ \backend sender _ destination -> do
           senderContext <- ctxOver backend nullTracer (workflowId sender)
-          outcome <- runWorkflowStep senderContext "probe" (probeSendRecv destination)
+          outcome <- (runWorkflowStep senderContext "probe" (probeSendRecv destination) :: IO (Either (Error EngineOnly) Text))
           outcome @?= Right "sent recv"
     ]
 
@@ -220,7 +221,7 @@ withPair getBackend label action = do
 probeSendRecv :: WorkflowId -> Ctx IO -> IO Text
 probeSendRecv destination ctx = do
   sent <- send ctx destination (Just (Topic "approval")) Nothing ("ping" :: Text)
-  received <- recv ctx (Just (Topic "approval")) (millisDuration 100) :: IO (Either Error (Maybe Text))
+  received <- recv ctx (Just (Topic "approval")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
   pure (render sent received)
   where
     render (Right ()) (Left (InsideStep operation)) = "sent " <> operation

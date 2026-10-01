@@ -74,13 +74,13 @@ sendBulkOptionsDefault = SendBulkOptions {forks = ForksSkip}
 -- | Send a typed message to another workflow. At a workflow boundary the
 -- send is checkpointed under its own operation id; inside a step it is plain
 -- and the enclosing step's checkpoint stands for the send.
-send :: (ToJSON value, MonadSTM m) => Ctx m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> value -> m (Either TransactError.Error ())
+send :: (ToJSON value, MonadSTM m) => Ctx m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 send ctx destination topic idempotencyKey value =
   sendWith ctx destination value (sendOptionsDefault {topic = topic, idempotency_key = idempotencyKey})
 
 -- | 'send' with the options rather than the defaults: a topic, an
 -- idempotency key, or the fork fan-out. Mirrors Rust @send_with@.
-sendWith :: (ToJSON value, MonadSTM m) => Ctx m -> WorkflowId -> value -> SendOptions -> m (Either TransactError.Error ())
+sendWith :: (ToJSON value, MonadSTM m) => Ctx m -> WorkflowId -> value -> SendOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWith ctx destination value options = do
   let workflowText = workflowId ctx
       encoded = encodeWorkflowValue value
@@ -111,12 +111,12 @@ sendWith ctx destination value options = do
 -- step's checkpoint standing for the send. Payloads are encoded before the
 -- step id is taken, so a message that cannot be encoded is a send that never
 -- happened. Mirrors Rust @send_bulk@.
-sendBulk :: (ToJSON value, MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [Message value] -> m (Either TransactError.Error ())
+sendBulk :: (ToJSON value, MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [Message value] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendBulk ctx messages = sendBulkWith ctx messages sendBulkOptionsDefault
 
 -- | 'sendBulk' with the options rather than the defaults: the fork
 -- fan-out. Mirrors Rust @send_bulk_with@.
-sendBulkWith :: (ToJSON value, MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [Message value] -> SendBulkOptions -> m (Either TransactError.Error ())
+sendBulkWith :: (ToJSON value, MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => Ctx m -> [Message value] -> SendBulkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendBulkWith ctx messages options = do
   let encoded = map encodeMessage messages
       serialization = case encoded of
@@ -147,7 +147,7 @@ sendBulkWith ctx messages options = do
 -- message (or absence) instead of consuming another one. Receives from
 -- inside a step are refused because the enclosing step cannot identify the
 -- consumed message on a retry.
-recv :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> Maybe Topic -> Duration -> m (Either TransactError.Error (Maybe value))
+recv :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> Maybe Topic -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
 recv ctx topic timeout =
   case stepId ctx of
     Just _ -> pure (Left (TransactError.InsideStep "recv"))

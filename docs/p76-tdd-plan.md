@@ -1,5 +1,9 @@
 # P7.6 TDD Plan — engine on the SystemDB seam (recorded 2026-09-24)
 
+> Status 2026-10-01: `test/DBOS/StarterTest.hs` is deleted; its scenarios
+> live on in the live trees (`DBOS.Transact.WorkflowTest` and siblings), so
+> references to `StarterTest` below are historical.
+
 Goal: the starter demo (`app/Main.hs`) running on the new engine, with the
 old seam deleted. Traced top-down from the starter; executed bottom-up.
 Every layer's gate — ghcid.txt green on its group AND a full `cabal test`
@@ -104,7 +108,7 @@ Unpark `StarterTest` one group at a time (cabal `other-modules` +
 deferred through L4 (DECIDED Q3: no starter route touches them). Engine duties:
 recovery on launch (`transitionDelayedWorkflows` + `reenqueueForRecovery`),
 the queue sweep (`startQueuedWorkflows`), id-tracked tasks (fixes the
-open-join gap in docs/starter-e2e-gate.md: re-POSTing an id must join, not
+open-join gap in the recorded starter gate: re-POSTing an id must join, not
 duplicate).
 
 Gate L2: parked suites back, `cabal test` green, psql mirror of
@@ -132,7 +136,7 @@ Gate L3: `cabal build exe:dbos-hs-starter` clean, and the repo's
 
 Haskell starter on `:8081` (tmux `Haskell:4`), Rust oracle on `:8080`
 (tmux `Haskell:5`), fresh databases, same W1/W2/Q/E/M flows from
-docs/starter-e2e-gate.md driven with fresh ids through both apps' own
+the recorded starter gate driven with fresh ids through both apps' own
 endpoints. Evidence: chrome-devtools-axi console log in the browser
 (index page, timeline, polls, toasts) and the curl CLI lines in the tmux
 panes, identical behavior both sides. The known gaps stay ledgered until
@@ -230,7 +234,7 @@ dispatch loop, stable identity) is future work.
   `POST /messages/start|respond|respond-all`, `GET /messages/status`.
   Evidence: chrome-devtools-axi console log (page, timeline, polls,
   toasts) and the curl lines in the tmux panes, both sides behaving
-  identically per docs/starter-e2e-gate.md. Ledgered gaps stay open:
+  identically per the recorded starter gate. Ledgered gaps stay open:
   `set_event` checkpoint-row shape and any re-opened open-join case.
 
 ---

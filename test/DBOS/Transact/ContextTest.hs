@@ -7,7 +7,7 @@
 -- constraints and runs over any backend a fixture builds a 'Connection'
 -- on. This module holds the scenarios plus the live tree, which runs
 -- under @main@ on a real 'PostgresSystemDB' with a FastLogger tracer;
--- 'ContextTestSim' holds the same tree over 'IOSimSystemDB' for eval.
+-- 'ContextTestSim' holds the same tree over 'MockSystemDB' for eval.
 --
 -- 'ctxOver' stays exported for the suites that build their own contexts
 -- on top ('EventTest', 'ManagementTest', 'CheckpointTest').
@@ -107,13 +107,15 @@ acquireSuiteBackend = do
 
 -- | A connection over a live backend with an explicit tracer.
 connOver :: PostgresSystemDB -> SomeTracer IO -> IO (Connection IO)
-connOver backend tracer =
+connOver backend tracer = do
+  instanceId <- uuidWorkflowId
   newConnection
     (SomeSystemDB backend)
     RustSerde
     (Just "test-app")
     (secondsDuration 1)
     OwnerApplication
+    instanceId
     uuidWorkflowId
     uuidEntropy
     tracer

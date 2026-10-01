@@ -24,7 +24,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Types (Duration, durationIsZero, secondsDuration)
-import DBOS.Transact.Error (Error (..))
+import DBOS.Transact.Error (EngineOnly, Error (..))
 import System.Environment (lookupEnv)
 
 -- | The one variable @from_env@ reads.
@@ -87,7 +87,7 @@ configFromEnv appName = do
 
 -- | Mirrors @Config::validate@: refuse a configuration that cannot work,
 -- naming the field the deployment set. Launch is the caller.
-validateConfig :: Config -> Either Error ()
+validateConfig :: Config -> Either (Error EngineOnly) ()
 validateConfig config
   | Text.null config.configDatabaseUrl =
       Left

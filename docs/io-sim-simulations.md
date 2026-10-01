@@ -1,5 +1,15 @@
 # io-sim simulations for headless deterministic E2E mirrors
 
+> Status as built (2026-09-30; the body below stays as research history):
+> the engine runs under `IO` and `IOSim` via io-classes as predicted; the
+> sim backend is `test/DBOS/SystemDB/IOSim.hs` (`MockSystemDB` canned,
+> `MemSystemDB` stateful, per-domain mock data in `*SimData`), launched
+> through the src-owned backend-agnostic `launchOn`. Tracing is the
+> `SomeTracer` carrier (ADR-0015/0017): `traceM`-only engine carrier with
+> typed asserts, test-owned say-carrier printing to pane stderr via
+> `printSimTrace` — not stdout, and FastLogger writes stderr too. `say`
+> strictness and POR/QuickCheck exploration below remain unused.
+
 Goal: run the starter-acceptance flows (W1/W2/Q/E/M) without Postgres or
 sockets — deterministic, instantaneous, reproducible — as Tasty tests, with
 `Tasty`-golden snapshots of representative traces.
@@ -156,7 +166,7 @@ pieces our live-DB suite tests with real sleeps (300ms–2s per test) and
   assert outcome + step rows + `steps_event` in the model.
 - **W2 crash-resume**: `throwTo` the runner thread mid-sleep (async
   exception in sim, deterministic), re-run body, assert each step ran once —
-  the exact scenario of `StarterTest`'s crash test, minus wall clock.
+  the same scenario as the live recovery case, minus wall clock.
 - **Q fan-out**: N workflows, limit 3, assert claim counts per sim-tick;
   `IOSimPOR` over the claim éclatement for the take-race class.
 - **E blocking read**: publisher + reader threads; assert the reader wakes

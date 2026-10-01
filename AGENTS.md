@@ -9,6 +9,7 @@ Repo guide for DBOS Haskell.
 - `src/DBOS/Transact/Serialization.hs` (Aeson JSON, mirrors Rust `serialization.rs`) and `src/DBOS/Tracer.hs` (explicit `SomeTracer`, no ambient tracer) are plain-Haskell internals with no Bluefin imports.
 - `src/DBOS/SystemDB/Postgres.hs` holds `[typedSql| ... |]` sessions over an explicit pool via `ihp-typed-sql` (the `hasql-th` dependency is removed).
 - `test/DBOS/<DomainTest>.hs` holds Tasty specs.
+- Sim trees live beside them: `test/DBOS/<Domain>Sim.hs` (eval-only mirrors over simulated data, never in `defaultMain`), `test/DBOS/IOSimTracer.hs` (the `simTracer`/`simTracerSay` carriers, `runSimCase`, stderr `printSimTrace`), `test/DBOS/SystemDB/IOSim.hs` (the `MockSystemDB`/`MemSystemDB` backends), and `test/DBOS/Transact/<Domain>SimData.hs` (per-domain mock constructors, dup'd across domains on purpose).
 - `rust-migrate/` is a standalone Cargo crate driving the public Rust migration runner (`make db-migrate`); it is not part of any workspace.
 - `docs/` holds durable engineering notes, workflow guidance, research context, and ADRs.
 - `docs/adr/` records architectural decisions.
@@ -26,7 +27,8 @@ Repo guide for DBOS Haskell.
 ## TDD Loop
 
 1. Run or watch `make dev` first — it is the single watcher and it owns `ghcid.txt`.
-2. **MUST: after every reload, read `ghcid.txt` immediately — never sleep more than 5 seconds first.** `ghciwatch` reloads in a few seconds and rewrites `ghcid.txt` with that reload's whole result: compile errors and warnings, `All good (N modules)`, and the tasty eval output. While a reload is in flight the file still holds the previous reload, so re-read until the content changes; long waits hide both the compiler error and the tasty result (`tail ghcid.txt` is enough). Do not pipe, redirect, or `tee` the watcher — ghciwatch owns the file and a second writer corrupts it. Read the file, not the tmux pane.
+2. **MUST: after every reload, read `ghcid.txt` immediately — never sleep more than 5 seconds first.** `ghciwatch` reloads in a few seconds and rewrites `ghcid.txt` with that reload's whole result: compile errors and warnings, `All good (N modules)`, and the tasty eval output (progress lines and results — sim announcement traces print to the watcher's stderr via `printSimTrace`, so read the tmux pane, not the file, for those). While a reload is in flight the file still holds the previous reload, so re-read until the content changes; long waits hide both the compiler error and the tasty result (`tail ghcid.txt` is enough). Do not pipe, redirect, or `tee` the watcher — ghciwatch owns the file and a second writer corrupts it. Read the file, not the tmux pane.
+   - Sim trees that `printSimTrace` must use `dependentTestGroup ... AllFinish`: tasty runs cases in parallel by default and parallel stderr writers interleave mid-character on the pane; `AllFinish` keeps every case running on a failure, in order.
 3. **MUST: exactly one test group is enabled before and during every edit**, via the `-- $>` / `--- $>` toggle in `test/Main.hs` — a reload that runs no tests verifies nothing. The watcher's eval must never overlap the live-DB suite: two suite binaries deadlock on the shared fixture rows (reproduced `40P01`).
 4. Use `ghci -e ':hoogle ...'` and `ghci -e ':browse ...'` before adding any new dependency.
 5. Write one public Tasty test at a time.
@@ -57,7 +59,7 @@ order by table_name, id;
 
 Expected rows include the mirrored simple workflow status row (`hs-simple-wf`, `SUCCESS`, `TryConcExec.testConcWorkflow`) and its operation output row (`hs-simple-wf:1`, `TryConcExec.testConcStep`). Adjust the IDs only when the test fixture intentionally changes.
 
-Then check the Rust oracle: `~/dev/dbos-transact-rust` is the behavioral reference. Run matching suites from that directory (e.g. `cargo test -p dbos --test recovery` for crash-and-resume, `--test queues` for the fan-out), read-only, pinned to v0.5.0 semantics — never copy code, never chase main. The starter acceptance mirror lives in `test/DBOS/StarterTest.hs`: steps-once, crash-and-resume, events, messages, queues, all as public-behavior tests against the live database.
+Then check the Rust oracle: `~/dev/dbos-transact-rust` is the behavioral reference. Run matching suites from that directory (e.g. `cargo test -p dbos --test recovery` for crash-and-resume, `--test queues` for the fan-out), read-only, pinned to v0.5.0 semantics — never copy code, never chase main.
 
 ## Three-Leg Port Gate (ADR-0016)
 
@@ -80,7 +82,7 @@ Soft conventions: they apply only where the Rust oracle and the plan rules (`.la
 
 - Two layers (ADR-0006): plain-Haskell internals (no Bluefin imports) hold all logic and tests; thin Bluefin capabilities live only at the external seam. Bluefin may depend inward, never outward.
 - Errors (Rule 3): per-domain `Either` ADTs in the core (`CodecError`, `StepError`, `WorkflowRunError`, the shared `DBOS.SystemDB.Error`); base async exceptions (`AsyncCancelled`) rethrown without recording at the edges. Impure internals constrain effects with `io-classes` where timing must be simulated (ADR-0008: `MonadDelay` in `DBOS.SystemDB.Retry`, IO in production, IOSim in tests); no unified `DbosError`, no `WorkflowCtx` record — the plan §6 records what was predicted vs built.
-- Tracing (Rule 5): explicit `SomeTracer m` (contra-tracer GADT, universal over event types), never ambient; per-domain event ADTs (`EngineEvent`, `SysdbEvent`, `WorkflowEvent`, `QueueEvent`, `ManagementEvent`) with `LogEvent`+`ToLogStr`; FastLogger Rank-N backend on IO, `traceM` on IOSim; co-log is out (ADR-0015).
+- Tracing (Rule 5): explicit `SomeTracer m` (contra-tracer GADT, universal over event types), never ambient; per-domain event ADTs homed with their owners (`EngineEvent` in `Recovery`, `SysdbEvent` in `Retry`, `WorkflowEvent` in `Step`, `QueueEvent` in `Dequeue`, `ManagementEvent` in `Management`) with `LogEvent`+`ToLogStr`; emission only through `runTracer`; `showText` in the Prelude. FastLogger Rank-N backend on IO (stderr — stdout carries results), `traceM` on IOSim; sim trees print via the test-owned say-carrier (`printSimTrace` to pane stderr, never into `ghcid.txt`); co-log is out (ADR-0015).
 - Deriving: every clause carries an explicit `stock`/`newtype` strategy.
 - Records (`NoFieldSelectors` + `OverloadedRecordDot`, both in cabal `default-extensions`):
   - DO read with record-dot: `row.rowWorkflowStatus`, `message.logMessage`.

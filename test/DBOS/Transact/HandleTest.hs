@@ -8,13 +8,17 @@ import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (WorkflowId (..))
+import DBOS.SystemDB (SerializedWorkflowValue (..), WorkflowId (..), WorkflowStatus (..))
 import DBOS.Transact
-  ( CodecError,
+  (
+    EngineOnly, CodecError,
     Config (..),
+    DBOS,
     Environment (..),
     Error (..),
     Ctx,
+    WorkflowHandle,
+    WorkflowKey,
     configFromEnv,
     decodeWorkflowValue,
     deleteWorkflows,
@@ -49,7 +53,7 @@ tests =
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -60,16 +64,16 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          ran <- runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
-          retrieved <- retrieveWorkflow dbos (WorkflowId workflowText)
+          retrieved <- retrieveWf dbos (WorkflowId workflowText)
           case retrieved of
             Left err -> fail (show err)
             Right handle -> do
               handleWorkflowId handle @?= workflowText
-              status <- handleStatus handle
+              status <- statusWf handle
               case status of
                 Right (Just _) -> pure ()
                 other -> fail (show other),
@@ -83,7 +87,7 @@ tests =
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -94,15 +98,15 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          ran <- runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
-          retrieved <- retrieveWorkflow dbos (WorkflowId workflowText)
+          retrieved <- retrieveWf dbos (WorkflowId workflowText)
           case retrieved of
             Left err -> fail (show err)
             Right handle -> do
-              result <- handleResult handle
+              result <- resultWf handle
               case result of
                 Right (Just stored) -> do
                   let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
@@ -116,7 +120,7 @@ tests =
             key = newWorkflowKey "fails"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body _ _ = pure (Left (StepFailed "body" "boom"))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -127,24 +131,23 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          ran <- runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
+          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
           case ran of
             Left _ -> pure ()
             Right other -> fail ("expected the run to fail, got: " <> show other)
-          retrieved <- retrieveWorkflow dbos (WorkflowId workflowText)
+          retrieved <- retrieveWf dbos (WorkflowId workflowText)
           case retrieved of
             Left err -> fail (show err)
             Right handle -> do
-              result <- handleResult handle
+              result <- resultWf handle
               case result of
-                Left (ErrorWorkflowFailed failedId message) -> do
-                  failedId @?= workflowText
-                  -- The polling path decodes the recorded failure with the
-                  -- same fidelity the local run reported: the whole rendered
-                  -- error, not a fragment. (The oracle's typed variant —
-                  -- fields and all — waits on the typed-IO phase; untyped
-                  -- text is the whole channel here.)
-                  message @?= renderTransactError (StepFailed "body" "boom")
+                Left (StepFailed {step, message}) -> do
+                  -- The polling path decodes the recorded envelope back
+                  -- into the caller's channel: the failure comes back as
+                  -- itself, fields and all, as the oracle's serde
+                  -- round-trip pins it.
+                  step @?= "body"
+                  message @?= "boom"
                 other -> fail ("expected the recorded failure, got: " <> show other),
       testCase "a handle over a deleted row reports its absence" $ do
         fresh <- UUID.V4.nextRandom
@@ -154,7 +157,7 @@ tests =
             key = newWorkflowKey "delete-me"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value _ = pure (Right (value + 1))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -165,7 +168,7 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          ran <- runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
+          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -173,11 +176,11 @@ tests =
           case deleted of
             Left err -> fail (show err)
             Right count -> count @?= 1
-          retrieved <- retrieveWorkflow dbos (WorkflowId workflowText)
+          retrieved <- retrieveWf dbos (WorkflowId workflowText)
           case retrieved of
             Left err -> fail (show err)
             Right handle -> do
-              status <- handleStatus handle
+              status <- statusWf handle
               status @?= Right Nothing,
       testCase "dropping a handle does not stop the workflow" $ do
         fresh <- UUID.V4.nextRandom
@@ -187,7 +190,7 @@ tests =
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -198,24 +201,40 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          worker <- async (runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int))))
+          worker <- async (runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int))))
           -- Retrieved and immediately dropped while the run is in flight.
-          _ <- retrieveWorkflow dbos (WorkflowId workflowText)
+          _ <- retrieveWf dbos (WorkflowId workflowText)
           outcome <- wait worker
           case outcome of
             Left err -> fail (show err)
             Right _ -> pure ()
-          retrieved <- retrieveWorkflow dbos (WorkflowId workflowText)
+          retrieved <- retrieveWf dbos (WorkflowId workflowText)
           case retrieved of
             Left err -> fail (show err)
             Right handle -> do
-              result <- handleResult handle
+              result <- resultWf handle
               case result of
                 Right (Just stored) -> do
                   let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
                   assertEqual "a fresh handle reads the completed result" (Right 42) decoded
                 other -> fail (show other)
     ]
+
+-- * Engine-only driver aliases
+
+-- | The engine-only driver aliases the tree above reads through. Local
+-- copies are deliberate: this module carries only the aliases it uses.
+runWf :: DBOS IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf = runDBOSWorkflow
+
+retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
+retrieveWf = retrieveWorkflow
+
+resultWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+resultWf = handleResult
+
+statusWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe WorkflowStatus))
+statusWf = handleStatus
 
 isolatedEnvironment :: Environment
 isolatedEnvironment =

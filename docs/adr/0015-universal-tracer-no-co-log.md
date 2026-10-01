@@ -36,3 +36,7 @@ A throwaway runner in `/tmp/trace-cmp` (path-dependency on the oracle crate + ca
 | `DEBUG` notification-listener lines (3) | — | N/A by architecture: the port is polling-only (`Postgres.hs:3650`), no LISTEN loop |
 
 Remaining delta is fmt-layer only: timestamp shape, Rust `"quoted"` vs Haskell bare field values, span/target decoration. Side note: the comparison registered versions `9.9.9`/`1.0.0` for throwaway app `trace-cmp` (no workflows, recovery scoped to its own executor — no shared rows touched).
+
+## Addendum: event ADTs homed with their domains (2026-09-30)
+
+The consolidated catalog above now lives per domain instead of in `DBOS.Tracer`: `EngineEvent` in `Transact.Recovery`, `SysdbEvent` in `SystemDB.Retry`, `WorkflowEvent` in `Transact.Step`, `QueueEvent` in `Transact.Dequeue`, `ManagementEvent` in `Transact.Management`. Placement follows the import graph, not the names: `Workflow.hs` and `Queue.hs` as owners would cycle (`Step`/`Instance` edges), so the emitter-adjacent leaf owns each type. `DBOS.Tracer` keeps the carrier, backends, and `LogEvent`/`LogSeverity`; `showText` moved to `DBOS.Prelude`. Facade export names are unchanged.

@@ -14,10 +14,12 @@ import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (Fork (..), ForkOptions (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-  ( Client,
+  (
+    EngineOnly, Client,
     ClientConfig (..),
     CodecError,
     Config (..),
+    DBOS,
     DuplicationPolicy (..),
     Enqueue (..),
     EnqueueOptions (..),
@@ -25,6 +27,7 @@ import DBOS.Transact
     Error (..),
     QueueConflict (..),
     Ctx,
+    SerializedWorkflowValue (..),
     SendMessage (..),
     Topic (..),
     clientCancelWorkflows,
@@ -70,7 +73,9 @@ import DBOS.Transact
     storedPriority,
     validateClientConfig,
     validateEnqueue,
+    WorkflowKey,
     workflowStatusClient,
+    WorkflowHandle,
   )
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
@@ -95,7 +100,7 @@ tests =
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -122,7 +127,7 @@ tests =
               Left err -> fail (show err)
               Right handle -> do
                 _ <- dequeueDBOSWorkflows dbos
-                result <- handleResult handle
+                result <- resultWf handle
                 case result of
                   Right (Just stored) -> do
                     let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
@@ -156,7 +161,7 @@ tests =
             options = (enqueueOptionsOn shape) {app_version = Just appVersion}
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -180,7 +185,7 @@ tests =
               (Right holder, Right joiner) -> do
                 handleWorkflowId joiner @?= handleWorkflowId holder
                 _ <- dequeueDBOSWorkflows dbos
-                result <- handleResult joiner
+                result <- resultWf joiner
                 case result of
                   Right (Just stored) -> do
                     let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
@@ -198,7 +203,7 @@ tests =
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -209,7 +214,7 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          ran <- runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -329,7 +334,7 @@ tests =
             executorId = "hs-l2-client-msg-executor-" <> suffix
             queueName = "hs-l2-client-msg-q-" <> Text.take 12 suffix
             key = newWorkflowKey "receiver"
-            body :: () -> Ctx IO -> IO (Either Error Text)
+            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
             body () ctx = do
               received <- recv ctx (Just (Topic "ping")) (millisDuration 5000)
               case received of
@@ -365,7 +370,7 @@ tests =
             sent <- clientSendMessage client (WorkflowId enqueuedId) (Just (Topic "ping")) Nothing (encodeWorkflowValue ("hello" :: Text))
             sent @?= Right ()
             _ <- dequeueDBOSWorkflows dbos
-            result <- handleResult handle
+            result <- resultWf handle
             case result of
               Right (Just stored) -> do
                 let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Text
@@ -379,12 +384,19 @@ tests =
             executorId = "hs-l2-client-batch-executor-" <> suffix
             queueName = "hs-l2-client-batch-q-" <> Text.take 12 suffix
             key = newWorkflowKey "batcher"
-            body :: () -> Ctx IO -> IO (Either Error Text)
+            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
             body () ctx = do
               first <- recv ctx (Just (Topic "ping")) (millisDuration 5000)
               second <- recv ctx (Just (Topic "ping")) (millisDuration 5000)
               pure $ case (first, second) of
-                (Right (Just one), Right (Just two)) -> Right (one <> "+" <> two)
+                -- Arrival order is not promised: one batch insert stamps
+                -- every row with the same millisecond, so the oldest-first
+                -- consume breaks ties arbitrarily. Assert the set that
+                -- landed, as the oracle does (it counts the batch, never
+                -- orders it).
+                (Right (Just one), Right (Just two))
+                  | one <= two -> Right (one <> "+" <> two)
+                  | otherwise -> Right (two <> "+" <> one)
                 (Left err, _) -> Left err
                 (_, Left err) -> Left err
                 _ -> Left (StepFailed "recv" "a message never arrived")
@@ -420,11 +432,11 @@ tests =
                 ]
             sent @?= Right ()
             _ <- dequeueDBOSWorkflows dbos
-            result <- handleResult batch
+            result <- resultWf batch
             case result of
               Right (Just stored) -> do
                 let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Text
-                assertEqual "the batch lands in order" (Right "one+two") decoded
+                assertEqual "the batch lands together" (Right "one+two") decoded
               other -> fail (show other),
       testCase "a client reads a workflow's events" $ do
         fresh <- UUID.V4.nextRandom
@@ -434,7 +446,7 @@ tests =
             key = newWorkflowKey "greeter"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = do
               published <- setEvent ctx "greeting" ("hello" :: Text)
               case published of
@@ -449,7 +461,7 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          ran <- runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -470,7 +482,7 @@ tests =
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -481,7 +493,7 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          ran <- runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -503,7 +515,7 @@ tests =
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -533,7 +545,7 @@ tests =
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -544,7 +556,7 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          ran <- runDBOSWorkflow dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -612,7 +624,7 @@ tests =
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: Int -> Ctx IO -> IO (Either Error Int)
+            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
@@ -623,8 +635,8 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          _ <- runDBOSWorkflow dbos key (WorkflowId firstText) (Just (encodeWorkflowValue (1 :: Int)))
-          _ <- runDBOSWorkflow dbos key (WorkflowId secondText) (Just (encodeWorkflowValue (2 :: Int)))
+          _ <- runWf dbos key (WorkflowId firstText) (Just (encodeWorkflowValue (1 :: Int)))
+          _ <- runWf dbos key (WorkflowId secondText) (Just (encodeWorkflowValue (2 :: Int)))
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
@@ -635,6 +647,16 @@ tests =
                 let ids = [wid | WorkflowRecord {workflowRecordId = wid} <- records]
                 assertBool "both workflows are listed" (all (`elem` ids) [WorkflowId firstText, WorkflowId secondText])
     ]
+
+-- * Engine-only driver aliases
+
+-- | The engine-only driver aliases the tree above reads through. Local
+-- copies are deliberate: this module carries only the aliases it uses.
+runWf :: DBOS IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf = runDBOSWorkflow
+
+resultWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+resultWf = handleResult
 
 -- | Connects or fails the test with the engine error rendered.
 connectOrFail :: ClientConfig -> IO (Client IO)

@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The SystemDB seam mirrored under IOSim against the mock backend: one
--- case per class method, asserting the canned answer 'IOSimSystemDB'
+-- case per class method, asserting the canned answer 'MockSystemDB'
 -- returns. The live SQL semantics stay in 'DBOS.SystemDB.PostgresTest';
 -- this group proves every method is callable under IOSim and that the
 -- engine's backend seam has an @IOSim@ instance.
@@ -64,7 +64,7 @@ import DBOS.SystemDB
     timestampFromEpochMs,
     zeroRowCounts,
   )
-import DBOS.SystemDB.IOSim (IOSimSystemDB (..))
+import DBOS.SystemDB.IOSim (MockSystemDB (..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -85,8 +85,8 @@ tests =
 
 -- * Helpers
 
-backend :: IOSimSystemDB
-backend = IOSimSystemDB
+backend :: MockSystemDB
+backend = MockSystemDB
 
 run :: (forall s. IOSim s a) -> a
 run = runSimOrThrow

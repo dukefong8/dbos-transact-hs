@@ -110,8 +110,8 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word16, Word32)
 import DBOS.SystemDB (SystemDB (..))
-import DBOS.SystemDB.Retry (RetryPolicy (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.Tracer (SomeTracer, SysdbEvent (..), traceWith)
+import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
+import DBOS.Tracer (SomeTracer, runTracer)
 import DBOS.SystemDB.Types (MessageUUID (..), NotificationRow (..), OnExistingQueue (..), QueueName (..), SendMessage (..), Topic (..), WorkflowStatus (..), messageUUIDForSend, nullTopicSentinel, parseWorkflowStatus, recvStepName, workflowStatusText)
 import DBOS.SystemDB.Notify (Registry, Subscription, eventsChannel, eventKey, messageKey, newRegistry, notified, subscribe, subscribeExclusive, unsubscribe)
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
@@ -1528,7 +1528,7 @@ finishInit env new maxRecoveryAttempts claiming ownerXid row =
           Just err -> pure (Left err)
           Nothing -> do
             when (row.queue_name /= new.newWorkflowQueueName) $
-              traceWith
+              runTracer
                 env.psdbLog
                 (SysdbQueueMismatch new.newWorkflowId)
             let ownerDiffers = row.owner_xid /= Just ownerXid

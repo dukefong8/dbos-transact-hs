@@ -5,7 +5,8 @@ module DBOS.Transact.CheckpointTest (tests) where
 
 import DBOS.Prelude
 import DBOS.Transact
-  ( Error (..),
+  (
+    EngineOnly, Error (..),
     PendingStep (..),
     StepDurability (..),
     StepPlacement (..),
@@ -45,14 +46,14 @@ tests =
         let placement = placementHere Nothing 0
         placement @?= Outside
         placementStepId placement @?= Nothing
-        pendingStepId (PendingStep "DBOS.sleep" (Just placement)) @?= Nothing,
+        pendingStepId (PendingStep "DBOS.sleep" (Just placement) (pure () :: IO ())) @?= Nothing,
       testCase "at a step boundary the call records under the allocated id" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
         let placement = placementAt ctx 0
         placement @?= Recorded ctx 0
         placementStepId placement @?= Just 0
-        pendingStepId (PendingStep "checkout" (Just placement)) @?= Just 0,
+        pendingStepId (PendingStep "checkout" (Just placement) (pure () :: IO ())) @?= Just 0,
       testCase "inside a step body the call is plain by the leaf rule" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
@@ -64,14 +65,14 @@ tests =
       testCase "a recorded call polled at its boundary stays durable" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        checkHere (Recorded ctx 0) "checkout" (Just ctx)
+        (checkHere (Recorded ctx 0) "checkout" (Just ctx) :: Either (Error EngineOnly) (StepDurability IO))
           @?= Right (DurabilityRecorded ctx 0),
       testCase "a recorded call carried into a step is refused" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
         marker <- nextStepMarker ctx
         withAttempt ctx marker (firstStepStatus 0) $ \stepped ->
-          checkHere (Recorded ctx 0) "checkout" (Just stepped)
+          (checkHere (Recorded ctx 0) "checkout" (Just stepped) :: Either (Error EngineOnly) (StepDurability IO))
             @?= Left
               ( StepBuiltElsewhere
                   { step = "checkout",
@@ -82,14 +83,14 @@ tests =
       testCase "a client's call stays plain wherever it is driven" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        checkHere ClientConnection "DBOS.cancel" Nothing @?= Right DurabilityPlain
-        checkHere ClientConnection "DBOS.cancel" (Just ctx) @?= Right DurabilityPlain,
+        (checkHere ClientConnection "DBOS.cancel" Nothing :: Either (Error EngineOnly) (StepDurability IO)) @?= Right DurabilityPlain
+        (checkHere ClientConnection "DBOS.cancel" (Just ctx) :: Either (Error EngineOnly) (StepDurability IO)) @?= Right DurabilityPlain,
       testCase "an in-step call polled in its own body stays plain" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
         marker <- nextStepMarker ctx
         withAttempt ctx marker (firstStepStatus 3) $ \stepped ->
-          checkHere (PlacementInsideStep stepped) "checkout" (Just stepped)
+          (checkHere (PlacementInsideStep stepped) "checkout" (Just stepped) :: Either (Error EngineOnly) (StepDurability IO))
             @?= Right DurabilityPlain,
       testCase "an in-step call carried to a sibling body is refused" $ do
         backend <- getBackend
@@ -98,7 +99,7 @@ tests =
         secondMarker <- nextStepMarker ctx
         withAttempt ctx firstMarker (firstStepStatus 3) $ \first ->
           withAttempt ctx secondMarker (firstStepStatus 3) $ \second ->
-            checkHere (PlacementInsideStep first) "checkout" (Just second)
+            (checkHere (PlacementInsideStep first) "checkout" (Just second) :: Either (Error EngineOnly) (StepDurability IO))
               @?= Left
                 ( StepBuiltElsewhere
                     { step = "checkout",

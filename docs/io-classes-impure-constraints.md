@@ -1,5 +1,12 @@
 # io-classes constraints for impure functions in the retry port
 
+> Status as built (2026-09-30; the body below stays as research history):
+> `Store.hs`, `Supervisor.hs`, and `Logger.hs`/`Log.hs` are deleted;
+> logging is the `SomeTracer` carrier, not `LogAction` (ADR-0015/0017);
+> engine modules take io-classes constraints throughout (`MonadDelay`,
+> `MonadFork`, `MonadTime`, …) with `IO` in production and `IOSim` in
+> tests — the "defer" rows below all landed that way.
+
 Question: the Rust retry module (`sysdb/retry.rs`) sleeps, logs, retries, and
 draws entropy from a UUID; which of those effects should be constrained by
 `io-classes` classes in the Haskell port, which by records-of-functions, and

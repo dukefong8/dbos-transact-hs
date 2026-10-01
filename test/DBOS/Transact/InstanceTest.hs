@@ -5,19 +5,29 @@
 module DBOS.Transact.InstanceTest (tests) where
 
 import DBOS.Prelude
+import Control.Monad (forM_)
+import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
+import Hasql.Decoders qualified as Decoders
+import Hasql.Encoders qualified as Encoders
+import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import DBOS.SystemDB (AwaitedOutcome (..), VersionInfo (..), WorkflowRecord (..), getWorkflow, listApplicationVersions)
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-  ( Config (..),
+  (
+    EngineOnly, Config (..),
+    DBOS,
     Environment (..),
     Error (..),
     Serializer (..),
+    SerializedWorkflowValue (..),
     Ctx,
     WorkflowId (..),
+    WorkflowKey,
     cancelWorkflows,
     configFromEnv,
     dbosAppVersion,
@@ -116,7 +126,7 @@ tests =
       testCase "a failed launch leaves registration open" $ do
         base <- configFromEnv "ab"
         let configured = base {configAppVersion = Just "hs-l2-open-v1", configExecutorId = Just "hs-l2-open-exec"}
-            echoWorkflow :: Text -> Ctx IO -> IO (Either e Text)
+            echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         dbos <- newDBOS configured
         started <- launchWithEnvironment dbos isolatedEnvironment
@@ -185,7 +195,7 @@ tests =
             workflowId = WorkflowId ("hs-l2-ids-wf-" <> suffix)
         base <- configFromEnv appName
         let configured = base {configAppVersion = Just appVersion, configExecutorId = Just executorId}
-            echoWorkflow :: Text -> Ctx IO -> IO (Either e Text)
+            echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         dbos <- newDBOS configured
         registered <- registerDBOSWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
@@ -196,7 +206,7 @@ tests =
         case started of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right () -> pure ()
-        ran <- runDBOSWorkflow dbos (newWorkflowKey "greeting") workflowId (Just (encodeWorkflowValue ("hi" :: Text)))
+        ran <- runWf dbos (newWorkflowKey "greeting") workflowId (Just (encodeWorkflowValue ("hi" :: Text)))
         case ran of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right _ -> pure ()
@@ -238,7 +248,7 @@ tests =
         base <- configFromEnv appName
         let configured = base {configAppVersion = Just appVersion, configExecutorId = Just executorId}
         dbos <- newDBOS configured
-        let echoWorkflow :: Text -> Ctx IO -> IO (Either e Text)
+        let echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         beforeLaunch <- registerDBOSWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
         case beforeLaunch of
@@ -270,7 +280,7 @@ tests =
             workflowId = WorkflowId ("hs-l2-cancel-wf-" <> suffix)
         base <- configFromEnv appName
         let configured = base {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just []}
-            echoWorkflow :: Text -> Ctx IO -> IO (Either e Text)
+            echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         bracket (newDBOS configured) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos (newWorkflowKey "queued") echoWorkflow
@@ -294,12 +304,77 @@ tests =
           cancelled <- cancelWorkflows dbos [workflowId] False
           assertEqual "the selected workflow is cancelled" (Right [workflowId]) cancelled
           outcome <- waitForWorkflow dbos workflowId
-          assertEqual "the waiter observes cancellation" (Right AwaitedCancelled) outcome
+          assertEqual "the waiter observes cancellation" (Right AwaitedCancelled) outcome,
+      testCase "a launch that fails after connecting closes the database" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            tag = "dbos-launch-leak-probe-" <> Text.take 12 suffix
+            contested = "contested-v1-" <> suffix
+        holderBase <- configFromEnv ("hs-l2-version-holder-" <> Text.take 12 suffix)
+        let holderConfig =
+              holderBase
+                { configAppVersion = Just contested,
+                  configExecutorId = Just ("hs-l2-executor-" <> suffix)
+                }
+        bracket (newDBOS holderConfig) shutdown $ \holder -> do
+          holderStarted <- launchWithEnvironment holder isolatedEnvironment
+          case holderStarted of
+            Left err -> fail (Text.unpack (renderTransactError err))
+            Right () -> pure ()
+          -- A second application claiming the same version name: version
+          -- registration is refused, which happens after the connect and
+          -- before the executor exists.
+          forM_ [1 .. 3 :: Int] $ \attempt -> do
+            loserBase <- configFromEnv ("hs-l2-version-loser-" <> Text.take 12 suffix)
+            let loserConfig =
+                  loserBase
+                    { configAppVersion = Just contested,
+                      configExecutorId = Just ("hs-l2-executor-" <> suffix),
+                      configDatabaseUrl = withApplicationName loserBase.configDatabaseUrl tag
+                    }
+            bracket (newDBOS loserConfig) shutdown $ \loser -> do
+              loserStarted <- launchWithEnvironment loser isolatedEnvironment
+              case loserStarted of
+                Left (ErrorSystemDatabase _) -> pure ()
+                Left other -> fail ("attempt " <> show attempt <> ": expected a system-database refusal, got: " <> show other)
+                Right () -> fail ("attempt " <> show attempt <> ": a conflicting launch succeeded")
+          -- The server drops a session shortly after its client goes away,
+          -- so this is a bounded wait rather than a single look. A leak
+          -- never converges; a close does, immediately.
+          backend <- getBackend
+          drained <- pollUntil 30000000 $ do
+            open <- countConnections backend tag
+            pure (open == 0)
+          assertBool "connections from three failed launches are still open" drained,
+      testCase "launching resolves an identity" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-lifecycle-app-" <> Text.take 12 suffix
+            appVersion = "hs-l2-lifecycle-v-" <> suffix
+        base <- configFromEnv appName
+        let configured = base {configAppVersion = Just appVersion}
+        bracket (newDBOS configured) shutdown $ \dbos -> do
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (Text.unpack (renderTransactError err))
+            Right () -> pure ()
+          assertEqual "launched" True =<< isLaunched dbos
+          executorId <- dbosExecutorId dbos
+          executorId @?= Right "local"
+          version <- dbosAppVersion dbos
+          version @?= Right appVersion
     ]
 
+-- * Engine-only driver aliases
+
+-- | The engine-only driver aliases the tree above reads through. Local
+-- copies are deliberate: this module carries only the aliases it uses.
+runWf :: DBOS IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf = runDBOSWorkflow
+
 -- | One backend for the whole group: pools are per-backend, so sharing
--- bounds connections no matter how many tests run or are interrupted. The
--- launched instances below keep their own pools: each needs a distinct
+-- bounds connections no matter how many tests run or are interrupted.
+-- The launched instances below keep their own pools: each needs a distinct
 -- application identity.
 acquireSuiteBackend :: IO Postgres.PostgresSystemDB
 acquireSuiteBackend = do
@@ -307,6 +382,37 @@ acquireSuiteBackend = do
   backend <- Postgres.acquirePostgresSystemDB config nullTracer
   Postgres.activatePostgresSystemDB backend
   pure backend
+
+-- | Tags a connection string so its backends can be told from every other
+-- test's on the shared server.
+withApplicationName :: Text -> Text -> Text
+withApplicationName url tag
+  | "?" `Text.isInfixOf` url = url <> "&application_name=" <> tag
+  | otherwise = url <> "?application_name=" <> tag
+
+-- | How many server backends currently carry the tag.
+countConnections :: Postgres.PostgresSystemDB -> Text -> IO Int64
+countConnections backend tag = do
+  result <- Postgres.runSession backend "leak-probe" (Session.statement tag countStatement)
+  case result of
+    Left err -> fail (show err)
+    Right open -> pure open
+  where
+    countStatement =
+      Statement.preparable
+        "select count(*) from pg_stat_activity where application_name = $1"
+        (Encoders.param (Encoders.nonNullable Encoders.text))
+        (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8)))
+
+-- | Polls a condition until it holds or the budget runs out.
+pollUntil :: Int -> IO Bool -> IO Bool
+pollUntil remaining check
+  | remaining <= 0 = check
+  | otherwise = do
+      ok <- check
+      if ok
+        then pure True
+        else threadDelay 100000 >> pollUntil (remaining - 100000) check
 
 -- | The executor id stamped on a workflow row must be the given one: a
 -- reader over the suite backend.

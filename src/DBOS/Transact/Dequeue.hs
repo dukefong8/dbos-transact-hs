@@ -6,7 +6,7 @@
 -- backs off under contention and scales back when clean, local running
 -- tallies that bound worker concurrency without asking the database, and
 -- concurrent dispatch of every claimed row.
-module DBOS.Transact.Dequeue (dequeuePass, superviseForever) where
+module DBOS.Transact.Dequeue (QueueEvent (..), dequeuePass, superviseForever) where
 
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
@@ -22,6 +22,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
+import System.Log.FastLogger (ToLogStr (..))
 import Data.Word (Word32, Word64)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError (..), Error (..))
@@ -46,7 +47,7 @@ import DBOS.SystemDB.Types
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Tracer (QueueEvent (..), SomeTracer, traceWith)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer, showSeverity)
 import DBOS.Transact.Registry (Snapshot, workflowKeyFromRow)
 import DBOS.Transact.Workflow
   ( Tasks,
@@ -54,6 +55,57 @@ import DBOS.Transact.Workflow
     spawnTracked,
     workflowNewWorkflow,
   )
+
+-- | Queue-worker events: the dequeue sweep, worker lifecycle, and
+-- delayed-transition lifecycle. The rendered lines keep the legacy
+-- message bodies, so operators see the same text with the severity now
+-- carried by the event instead of the call site. Mirrors @dequeue.rs@.
+data QueueEvent
+  = QueueWorkerStopping { queueWorkerName :: Text }
+  | DequeueBackoff
+  | DequeueFailed { queueDetail :: Text }
+  | ClaimedWorkflowsUnreadable { queueDetail :: Text }
+  | ClaimedWorkflowsMissing { queueClaimed :: Int, queueFound :: Int }
+  | DequeuedWorkflowFailed { queueDetail :: Text }
+  | DequeuedRowSkipped { queueWorkflowId :: Text }
+  | QueueListFailed { queueDetail :: Text }
+  | InternalQueueLimitsIgnored
+  | DelayedTransitionFailed { queueDetail :: Text }
+  | DelayedWorkflowsEnqueued { queueMoved :: Word64 }
+  deriving stock (Eq, Show)
+
+instance LogEvent QueueEvent where
+  eventSeverity QueueWorkerStopping {}        = SeverityInfo
+  eventSeverity DequeueBackoff                = SeverityDebug
+  eventSeverity DequeueFailed {}              = SeverityWarning
+  eventSeverity ClaimedWorkflowsUnreadable {} = SeverityWarning
+  eventSeverity ClaimedWorkflowsMissing {}    = SeverityWarning
+  eventSeverity DequeuedWorkflowFailed {}     = SeverityWarning
+  eventSeverity DequeuedRowSkipped {}         = SeverityWarning
+  eventSeverity QueueListFailed {}            = SeverityWarning
+  eventSeverity InternalQueueLimitsIgnored    = SeverityWarning
+  eventSeverity DelayedTransitionFailed {}    = SeverityWarning
+  eventSeverity DelayedWorkflowsEnqueued {}   = SeverityDebug
+
+  renderEvent (QueueWorkerStopping queue) = "the queue " <> queue <> " is no longer registered; stopping its worker"
+  renderEvent DequeueBackoff = "a peer is mid-dequeue; backing off"
+  renderEvent (DequeueFailed detail) = "could not dequeue from the queue: " <> detail
+  renderEvent (ClaimedWorkflowsUnreadable detail) =
+    "could not read the claimed workflows; they stay PENDING for recovery: " <> detail
+  renderEvent (ClaimedWorkflowsMissing claimed found) =
+    "some claimed workflows have no row: claimed " <> showText claimed <> ", found " <> showText found
+  renderEvent (DequeuedWorkflowFailed detail) =
+    "could not start the dequeued workflow; it stays PENDING for recovery: " <> detail
+  renderEvent (DequeuedRowSkipped workflowText) =
+    "the dequeued row " <> workflowText <> " names no workflow; skipped"
+  renderEvent (QueueListFailed detail) = "could not list queues; keeping the current set: " <> detail
+  renderEvent InternalQueueLimitsIgnored =
+    "the queues table holds a row for the engine's internal queue; its stored limits are ignored. Delete the row: it can only throttle `resume` and `fork`"
+  renderEvent (DelayedTransitionFailed detail) = "could not transition delayed workflows: " <> detail
+  renderEvent (DelayedWorkflowsEnqueued moved) = "delayed workflows are now enqueued: " <> showText moved
+
+instance ToLogStr QueueEvent where
+  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
 
 -- | How often the supervisor rebuilds the queue set and transitions
 -- delayed workflows.
@@ -140,7 +192,7 @@ workerBudget limits running
 -- | One dequeue and the dispatch of whatever it claimed, reporting the
 -- contended flag the caller backs off on. Announcements go through the
 -- connection's tracer.
-pollOnce :: (MonadSTM m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> m (Bool, [WorkflowId])
+pollOnce :: (MonadSTM m, MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> m (Bool, [WorkflowId])
 pollOnce conn identity workflows tasks running queue = do
   if not (resolvedIsPartitioned limits)
     then do
@@ -244,10 +296,10 @@ pollOnce conn identity workflows tasks running queue = do
 reportDequeueError :: Monad m => SomeTracer m -> SystemDB.Error -> m Bool
 reportDequeueError tracer err
   | isContention err = do
-      traceWith tracer DequeueBackoff
+      runTracer tracer DequeueBackoff
       pure True
   | otherwise = do
-      traceWith tracer (DequeueFailed (SystemDB.renderError err))
+      runTracer tracer (DequeueFailed (SystemDB.renderError err))
       pure False
 
 -- | Whether a failed dequeue means a peer was mid-dequeue rather than
@@ -281,7 +333,7 @@ shuffled seed keys = Map.elems (go (length keys - 1) (seed `xor` 1) initial)
 -- tally before the dispatch so the next iteration's counts include it even
 -- if this one is still starting. Walked in claim order, not in the order
 -- the read came back, because claim order is what priority is for.
-dispatchClaimed :: (MonadSTM m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> m ()
+dispatchClaimed :: (MonadSTM m, MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> m ()
 dispatchClaimed conn identity workflows tasks running queue partition claimed
   | null claimed = pure ()
   | otherwise = do
@@ -298,10 +350,10 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed
         Left err -> do
           -- The rows stay PENDING with this executor's id on them, which
           -- is what recovery is for.
-          traceWith conn.connTracer (ClaimedWorkflowsUnreadable (SystemDB.renderError err))
+          runTracer conn.connTracer (ClaimedWorkflowsUnreadable (SystemDB.renderError err))
         Right rows -> do
           when (length rows /= length claimed) $
-            traceWith conn.connTracer (ClaimedWorkflowsMissing (length claimed) (length rows))
+            runTracer conn.connTracer (ClaimedWorkflowsMissing (length claimed) (length rows))
           let byId = Map.fromList [(text, row) | row <- rows, let WorkflowId text = row.workflowRecordId]
           forM_ claimed $ \workflowId@(WorkflowId workflowText) -> case Map.lookup workflowText byId of
             Nothing -> pure ()
@@ -313,7 +365,7 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed
               case row.workflowRecordName of
                 Nothing -> do
                   releaseSlot slot
-                  traceWith conn.connTracer (DequeuedRowSkipped workflowText)
+                  runTracer conn.connTracer (DequeuedRowSkipped workflowText)
                 Just name -> do
                   let key = workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName
                       input = (\raw -> SerializedWorkflowValue raw (Serialization <$> row.workflowRecordSerialization)) <$> row.workflowRecordInput
@@ -332,7 +384,7 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed
                       new
                   case spawned of
                     Left err ->
-                      traceWith conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError err))
+                      runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError err))
                     Right _ -> pure ()
 
 -- | Rebuilds and publishes the set of queues this process runs workers
@@ -344,7 +396,7 @@ refreshQueueSet conn identity queues warnedInternal listenQueues = do
   listed <- runSystemDB conn.connSysdb (\db -> SystemDB.listQueues db Unset)
   case listed of
     Left err -> do
-      traceWith conn.connTracer (QueueListFailed (SystemDB.renderError err))
+      runTracer conn.connTracer (QueueListFailed (SystemDB.renderError err))
       Map.keys <$> readTVarIO queues
     Right records -> do
       warned <- readTVarIO warnedInternal
@@ -360,7 +412,7 @@ refreshQueueSet conn identity queues warnedInternal listenQueues = do
           storedInternal = any (\record -> record.queueRecordName == internalName) records
       when (storedInternal && not warned) $ do
         atomically (writeTVar warnedInternal True)
-        traceWith conn.connTracer InternalQueueLimitsIgnored
+        runTracer conn.connTracer InternalQueueLimitsIgnored
       atomically (writeTVar queues current)
       pure (Map.keys current)
 
@@ -386,13 +438,13 @@ internalQueueRecord =
 -- aborts the task. The interval is held across iterations, which is the
 -- point: a contended queue stays backed off rather than rediscovering the
 -- contention.
-pollQueue :: (MonadSTM m, MonadDelay m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> m ()
+pollQueue :: (MonadSTM m, MonadDelay m, MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> m ()
 pollQueue tasks conn identity workflows queues running name = go (secondsDuration 1)
   where
     go interval = do
       current <- Map.lookup name <$> readTVarIO queues
       case current of
-        Nothing -> traceWith conn.connTracer (QueueWorkerStopping name)
+        Nothing -> runTracer conn.connTracer (QueueWorkerStopping name)
         Just queue -> do
           -- The queue's own interval is the floor and the ceiling is
           -- derived from it; clamped rather than reset, so a backed-off
@@ -411,7 +463,7 @@ pollQueue tasks conn identity workflows queues running name = go (secondsDuratio
 
 -- | The supervisor: transition, rebuild the set, spawn and reap one worker
 -- per queue, and sleep a second.
-superviseForever :: (MonadSTM m, MonadDelay m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m ()
+superviseForever :: (MonadSTM m, MonadDelay m, MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m ()
 superviseForever tasks conn identity workflows listenQueues = do
   queues <- newTVarIO Map.empty
   workers <- newTVarIO Map.empty
@@ -423,9 +475,9 @@ superviseForever tasks conn identity workflows listenQueues = do
       transitioned <- runSystemDB conn.connSysdb (\db -> SystemDB.transitionDelayedWorkflows db)
       case transitioned of
         Left err ->
-          traceWith conn.connTracer (DelayedTransitionFailed (SystemDB.renderError err))
+          runTracer conn.connTracer (DelayedTransitionFailed (SystemDB.renderError err))
         Right 0 -> pure ()
-        Right moved -> traceWith conn.connTracer (DelayedWorkflowsEnqueued moved)
+        Right moved -> runTracer conn.connTracer (DelayedWorkflowsEnqueued moved)
       names <- refreshQueueSet conn identity queues warnedInternal listenQueues
       current <- readTVarIO workers
       let desired = Set.fromList names
@@ -433,21 +485,26 @@ superviseForever tasks conn identity workflows listenQueues = do
       atomically (writeTVar workers kept)
       forM_ names $ \name ->
         unless (Map.member name kept) $ do
-          tid <-
+          spawned <-
             spawnTracked
               tasks
               ( MThrow.finally
                   (pollQueue tasks conn identity workflows queues running name)
                   (atomically (modifyTVar workers (Map.delete name)))
               )
-          atomically (modifyTVar workers (Map.insert name tid))
+          -- A closed registry refuses the worker without forking, so there
+          -- is nothing to track: the supervisor itself is being aborted,
+          -- and its next loop (or its own kill) ends the supervision.
+          case spawned of
+            Nothing -> pure ()
+            Just tid -> atomically (modifyTVar workers (Map.insert name tid))
       delayDuration supervisorInterval
       loop queues workers running warnedInternal
 
 -- | One pass of the sweep outside the supervisor: a fresh tally, one poll
 -- per queue, and the ids it claimed. Dispatch is concurrent; the caller
 -- only learns what was claimed.
-dequeuePass :: (MonadSTM m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m (Either TransactError.Error [WorkflowId])
+dequeuePass :: (MonadSTM m, MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeuePass tasks conn identity workflows listenQueues = do
   transitioned <- runSystemDB conn.connSysdb (\db -> SystemDB.transitionDelayedWorkflows db)
   case transitioned of

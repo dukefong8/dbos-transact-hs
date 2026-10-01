@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RankNTypes          #-}
 
 -- | The context a durable call runs in, threaded explicitly. Mirrors Rust
 -- @context.rs@: the workflow it belongs to, the step attempt it is inside,
@@ -61,9 +62,10 @@ module DBOS.Transact.Context
 
     -- * The engine's task seam
     TaskSpawner (..),
+    LocalTaskOutcome (..),
     withTaskSpawner,
     taskSpawner,
-    detachTask,
+    spawnLocal,
 
     -- * The engine's tracer seam
     withTracer,
@@ -76,6 +78,7 @@ where
 
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, newTVarIO, readTVar, readTVarIO, writeTVar)
+import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Text (Text)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Timestamp)
@@ -94,6 +97,16 @@ data Ctx m = Ctx
     ctxTracer   :: SomeTracer m
   }
 
+-- | What a locally spawned, tracked task left behind: its value, the
+-- cancellation shutdown performs, or the exception a panicking body threw.
+-- Classifying at the spawn keeps the exception's identity — the one thing
+-- io-classes cannot spell — in the module that already imports it, so a
+-- handle only ever reads the outcome.
+data LocalTaskOutcome a
+  = LocalTaskValue a
+  | LocalTaskCancelled
+  | LocalTaskPanic MThrow.SomeException
+
 -- | How a body reaches the task registry of the executor running it, so a
 -- child it starts is detached, counted, and abortable by shutdown — the
 -- oracle's @Arc&lt;Executor&gt;@ inside @Ctx@, narrowed to the one capability a
@@ -105,15 +118,15 @@ data Ctx m = Ctx
 -- module: the type is the seam, the implementation that fills it is the
 -- engine's.
 data TaskSpawner m = TaskSpawner
-  { spawnDetached :: (TaskSpawner m -> m ()) -> m ()
+  { spawnLocalTask :: forall a. (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
   }
 
--- | Runs an action detached on the spawner's registry, handing the action
--- the spawner to pass down to anything it starts. The one call site for
--- the record's field, so callers never touch record-dot on a
+-- | Spawns an action detached on the spawner's registry and hands back the
+-- box its outcome lands in, filled while the task unwinds. The one call
+-- site for the record's field, so callers never touch record-dot on a
 -- function-typed field.
-detachTask :: TaskSpawner m -> (TaskSpawner m -> m ()) -> m ()
-detachTask (TaskSpawner detach) = detach
+spawnLocal :: TaskSpawner m -> (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
+spawnLocal (TaskSpawner spawn) = spawn
 
 -- | Two contexts are equal when they are the same execution and the same
 -- step body — identity, not structure, because the mutable refs inside

@@ -16,11 +16,10 @@
 module DBOS.Transact.ManagementTestSim (tests) where
 
 import DBOS.Prelude
-import Control.Monad.Class.MonadSay (say)
-import Control.Monad.IOSim (IOSim, SimTrace, printTraceEventsSay, runSim, runSimTrace, selectTraceEventsDynamic, traceM)
+import Control.Monad.IOSim (IOSim, selectTraceEventsDynamic)
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Either (isLeft, isRight)
-import Data.Text (Text, unpack)
-import Data.Typeable (Typeable)
+import Data.Text (Text)
 import DBOS.SystemDB
   ( AwaitedOutcome (..),
     Fork (..),
@@ -34,17 +33,20 @@ import DBOS.SystemDB
   )
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (simDBOSWith, simInstance, simLaunchWith)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracerSay)
+import DBOS.Transact.ManagementSimData (mockOutput, mockSerialization)
 import DBOS.Transact
-  ( CodecError,
+  (
+    EngineOnly,
+    CodecError,
     Ctx,
     DBOS,
     Error (..),
-    LogEvent (..),
     ManagementEvent (..),
     QueueConflict (..),
     Serialization (..),
-    SomeTracer (..),
     StartOptions (..),
+    WorkflowHandle,
     WorkflowKey,
     WorkflowRef,
     cancelWorkflows,
@@ -58,7 +60,6 @@ import DBOS.Transact
     handleResult,
     handleStatus,
     handleWorkflowId,
-    mkTracer,
     newWorkflowKey,
     registerDBOSWorkflow,
     registerDBOSWorkflowRef,
@@ -67,25 +68,28 @@ import DBOS.Transact
     retrieveWorkflow,
     runDBOSWorkflow,
     runWorkflowStep,
-    showSeverity,
     startChildWorkflow,
     startDBOSWorkflowRef,
     startOptionsDefault,
-    traceWith,
+    runTracer,
     waitForWorkflow,
   )
-import Test.Tasty (TestTree, testGroup)
+import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 tests :: TestTree
 tests =
-  testGroup
+  -- Sequential: cases announce through one shared stderr, so parallel
+  -- 'printSimTrace' calls would interleave their lines mid-character.
+  -- 'AllFinish' keeps every case running on a failure, in order.
+  dependentTestGroup
     "Workflow management (Sim)"
+    AllFinish
     [ testCase "the management surface needs a launched instance" $ do
         (refused, tr) <- runSimCase $ do
           dbos <- simInstance
           cancelWorkflows dbos [WorkflowId "never-launched"] False
-        printTraceEventsSay tr
+        printSimTrace tr
         case refused of
           Left ErrorNotLaunched {} -> pure ()
           other -> fail ("expected a not-launched refusal, got: " <> show other),
@@ -93,13 +97,13 @@ tests =
         (cancelled, tr) <- runSimCase $ do
           dbos <- simSayDBOS
           cancelWorkflows dbos [WorkflowId "never-existed"] False
-        printTraceEventsSay tr
+        printSimTrace tr
         cancelled @?= Right [],
       testCase "resuming a workflow that does not exist is an error" $ do
         (resumed, tr) <- runSimCase $ do
           dbos <- simSayDBOS
           resumeWorkflows dbos [WorkflowId "never-existed"] Nothing
-        printTraceEventsSay tr
+        printSimTrace tr
         case resumed of
           Left (ErrorSystemDatabase (SystemDB.NonExistentWorkflow {workflowIds})) ->
             workflowIds @?= ["never-existed"]
@@ -117,26 +121,26 @@ tests =
           ref <- registerIntRef dbos key body
           simLaunchWith simTracerSay dbos
           _ <-
-            startDBOSWorkflowRef
+            startWfRefSim
               dbos
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
               (Just (encodeWorkflowValue (0 :: Int)))
           cancelled <- cancelWorkflows dbos [workflowId] False
-          handle <- orFail =<< retrieveWorkflow dbos workflowId
-          status <- handleStatus handle
+          handle <- orFail =<< retrieveWfSim dbos workflowId
+          status <- statusWfSim handle
           resumed <- resumeWorkflows dbos [workflowId] Nothing
           waited <- waitForWorkflow dbos workflowId
           count <- readTVarIO ran
           pure (cancelled, status, resumed, waited, count)
-        printTraceEventsSay tr
+        printSimTrace tr
         case outcome of
           (cancelled, status, resumed, waited, count) -> do
             cancelled @?= Right [WorkflowId "sim-mgmt-cancel-resume"]
             -- The mock is stateless: the live test reads CANCELLED here.
             status @?= Right (Just Pending)
             resumed @?= Right [WorkflowId "sim-mgmt-cancel-resume"]
-            waited @?= Right (AwaitedSucceeded (Just "mock-output") (Just "rust_serde"))
+            waited @?= Right (AwaitedSucceeded (Just mockOutput) (Just mockSerialization))
             count @?= 0,
       testCase "resuming onto a named queue puts the workflow there" $ do
         (outcome, tr) <- runSimCase $ do
@@ -150,7 +154,7 @@ tests =
           simLaunchWith simTracerSay dbos
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           _ <-
-            startDBOSWorkflowRef
+            startWfRefSim
               dbos
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
@@ -159,12 +163,12 @@ tests =
           resumed <- resumeWorkflows dbos [workflowId] (Just queueName)
           waited <- waitForWorkflow dbos workflowId
           pure (queueRegistered, resumed, waited)
-        printTraceEventsSay tr
+        printSimTrace tr
         case outcome of
           (queueRegistered, resumed, waited) -> do
             assertBool "the queue registered" (isRight queueRegistered)
             resumed @?= Right [WorkflowId "sim-mgmt-resume-queue"]
-            waited @?= Right (AwaitedSucceeded (Just "mock-output") (Just "rust_serde")),
+            waited @?= Right (AwaitedSucceeded (Just mockOutput) (Just mockSerialization)),
       testCase "cancelling a tree reaches the children" $ do
         (outcome, tr) <- runSimCase $ do
           dbos <- simInstance
@@ -179,16 +183,16 @@ tests =
                 pure (fmap handleWorkflowId started)
           _ <- registerTextWorkflow dbos parentKey parentBody
           simLaunchWith simTracerSay dbos
-          ran <- runDBOSWorkflow dbos parentKey parentId (Just (encodeWorkflowValue (0 :: Int)))
+          ran <- runWfSim dbos parentKey parentId (Just (encodeWorkflowValue (0 :: Int)))
           childId <- case ran of
             Left err -> throwIO (userError (show err))
             Right (Just output) -> either (throwIO . userError . show) pure (decodeChildId output)
             Right Nothing -> throwIO (userError "the parent recorded no child")
           cancelled <- cancelWorkflows dbos [parentId] True
-          handle <- orFail =<< retrieveWorkflow dbos childId
-          status <- handleStatus handle
+          handle <- orFail =<< retrieveWfSim dbos childId
+          status <- statusWfSim handle
           pure (cancelled, childId, status)
-        printTraceEventsSay tr
+        printSimTrace tr
         case outcome of
           (cancelled, childId, status) -> do
             -- The mock echoes the named id and does not know the tree.
@@ -204,12 +208,12 @@ tests =
               workflowId = WorkflowId workflowText
           _ <- registerIntWorkflow dbos key body
           simLaunchWith simTracerSay dbos
-          _ <- runDBOSWorkflow dbos key workflowId (Just (encodeWorkflowValue (1 :: Int)))
+          _ <- runWfSim dbos key workflowId (Just (encodeWorkflowValue (1 :: Int)))
           deleted <- deleteWorkflows dbos [workflowId] True
-          handle <- orFail =<< retrieveWorkflow dbos workflowId
-          status <- handleStatus handle
+          handle <- orFail =<< retrieveWfSim dbos workflowId
+          status <- statusWfSim handle
           pure (deleted, status)
-        printTraceEventsSay tr
+        printSimTrace tr
         case outcome of
           (deleted, status) -> do
             deleted @?= Right 1
@@ -224,16 +228,16 @@ tests =
               workflowId = WorkflowId workflowText
           _ <- registerIntWorkflow dbos key body
           simLaunchWith simTracerSay dbos
-          _ <- runDBOSWorkflow dbos key workflowId (Just (encodeWorkflowValue (2 :: Int)))
-          handle <- orFail =<< retrieveWorkflow dbos workflowId
-          status <- handleStatus handle
-          result <- handleResult handle
+          _ <- runWfSim dbos key workflowId (Just (encodeWorkflowValue (2 :: Int)))
+          handle <- orFail =<< retrieveWfSim dbos workflowId
+          status <- statusWfSim handle
+          result <- resultWfSim handle
           pure (status, result)
-        printTraceEventsSay tr
+        printSimTrace tr
         case outcome of
           (status, result) -> do
             status @?= Right (Just Pending)
-            result @?= Right (Just (SerializedWorkflowValue "mock-output" (Just (Serialization "rust_serde")))),
+            result @?= Right (Just (SerializedWorkflowValue mockOutput (Just (Serialization mockSerialization)))),
       testCase "forking from the beginning runs the workflow again under a new id" $ do
         (outcome, tr) <- runSimCase $ do
           dbos <- simInstance
@@ -249,18 +253,18 @@ tests =
               sourceId = WorkflowId sourceText
           _ <- registerIntWorkflow dbos key body
           simLaunchWith simTracerSay dbos
-          first <- runDBOSWorkflow dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+          first <- runWfSim dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           forked <- forkWorkflows dbos [forkNew sourceText] defaultForkOptions
           waited <- waitForWorkflow dbos sourceId
           count <- readTVarIO attempts
           pure (first, forked, waited, count)
-        printTraceEventsSay tr
+        printSimTrace tr
         case outcome of
           (first, forked, waited, count) -> do
             assertBool "the source was supposed to fail" (isLeft first)
             -- The mock echoes each source id as its fork id.
             forked @?= Right [WorkflowId "sim-mgmt-fork-source"]
-            waited @?= Right (AwaitedSucceeded (Just "mock-output") (Just "rust_serde"))
+            waited @?= Right (AwaitedSucceeded (Just mockOutput) (Just mockSerialization))
             count @?= 1,
       testCase "a fork takes the id and queue it is given" $ do
         (outcome, tr) <- runSimCase $ do
@@ -274,7 +278,7 @@ tests =
           _ <- registerIntWorkflow dbos key body
           simLaunchWith simTracerSay dbos
           _ <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
-          _ <- runDBOSWorkflow dbos key sourceId (Just (encodeWorkflowValue (4 :: Int)))
+          _ <- runWfSim dbos key sourceId (Just (encodeWorkflowValue (4 :: Int)))
           forked <-
             forkWorkflows
               dbos
@@ -282,12 +286,12 @@ tests =
               (defaultForkOptions {forkOptionsQueueName = Just queueName})
           waited <- waitForWorkflow dbos sourceId
           pure (forked, waited)
-        printTraceEventsSay tr
+        printSimTrace tr
         case outcome of
           (forked, waited) -> do
             -- The mock echoes source ids and ignores the chosen one.
             forked @?= Right [WorkflowId "sim-mgmt-fork-placed-source"]
-            waited @?= Right (AwaitedSucceeded (Just "mock-output") (Just "rust_serde")),
+            waited @?= Right (AwaitedSucceeded (Just mockOutput) (Just mockSerialization)),
       testCase "forking from a chosen step replays the steps below it" $ do
         (outcome, tr) <- runSimCase $ do
           dbos <- simInstance
@@ -303,22 +307,22 @@ tests =
               sourceId = WorkflowId sourceText
           _ <- registerIntWorkflow dbos key body
           simLaunchWith simTracerSay dbos
-          first <- runDBOSWorkflow dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+          first <- runWfSim dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           forked <- forkFrom dbos [sourceId] (ForkStep 1) defaultForkOptions
           waited <- waitForWorkflow dbos sourceId
           names <- readTVarIO ran
           pure (first, forked, waited, names)
-        printTraceEventsSay tr
+        printSimTrace tr
         case outcome of
           (first, forked, waited, names) -> do
             assertBool "the source ran" (isRight first)
             forked @?= Right [WorkflowId "sim-mgmt-fork-step-source"]
-            waited @?= Right (AwaitedSucceeded (Just "mock-output") (Just "rust_serde"))
+            waited @?= Right (AwaitedSucceeded (Just mockOutput) (Just mockSerialization))
             -- The mock records no history, so nothing replays.
             names @?= ["one", "two", "three"],
       testCase "management announces through its tracer" $ do
         (_, tr) <- runSimCase demoTrace
-        printTraceEventsSay tr
+        printSimTrace tr
         selectTraceEventsDynamic tr
           @?= [ WorkflowsCancelled 2,
                 WorkflowsResumed 3 2,
@@ -334,34 +338,43 @@ tests =
 -- sim half of the live FastLogger lines.
 demoTrace :: forall s. IOSim s ()
 demoTrace = do
-  traceWith simTracerSay (WorkflowsCancelled 2)
-  traceWith simTracerSay (WorkflowsResumed 3 2)
-  traceWith simTracerSay (WorkflowForked "sim-mgmt-fork-1")
-  traceWith simTracerSay (WorkflowsForked 0)
-  traceWith simTracerSay (WorkflowsDeleted 1)
-  traceWith simTracerSay (WorkflowDelayMoveAsked "sim-mgmt-delayed")
-  traceWith simTracerSay (WorkflowAttributesReplaceAsked "sim-mgmt-attributed")
+  runTracer simTracerSay (WorkflowsCancelled 2)
+  runTracer simTracerSay (WorkflowsResumed 3 2)
+  runTracer simTracerSay (WorkflowForked "sim-mgmt-fork-1")
+  runTracer simTracerSay (WorkflowsForked 0)
+  runTracer simTracerSay (WorkflowsDeleted 1)
+  runTracer simTracerSay (WorkflowDelayMoveAsked "sim-mgmt-delayed")
+  runTracer simTracerSay (WorkflowAttributesReplaceAsked "sim-mgmt-attributed")
+
+-- * Engine-only driver aliases
+
+-- | The engine-only driver aliases the tree above reads through. Local
+-- copies are deliberate: this module carries only the aliases it uses.
+runWfSim :: DBOS (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfSim = runDBOSWorkflow
+
+startWfRefSim :: DBOS (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
+startWfRefSim = startDBOSWorkflowRef
+
+retrieveWfSim :: DBOS (IOSim s) -> WorkflowId -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
+retrieveWfSim = retrieveWorkflow
+
+resultWfSim :: WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+resultWfSim = handleResult
+
+statusWfSim :: WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe WorkflowStatus))
+statusWfSim = handleStatus
+
+-- | The sim-side registration aliases: a locally defined body has no
+-- signature, so the channel's @e@ stays ambiguous; these pin it while
+-- leaving @s@ universally quantified.
+registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (a -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
+registerWfSim = registerDBOSWorkflow
+
+registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (a -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
+registerWfRefSim = registerDBOSWorkflowRef
 
 -- * Helpers
-
--- | Run one sim case to a value plus its trace. Deterministic sims make
--- the double execution agree.
-runSimCase :: (forall s. IOSim s a) -> IO (a, SimTrace a)
-runSimCase sim =
-  case runSim sim of
-    Left failure -> fail ("simulation failed: " <> show failure)
-    Right result -> pure (result, runSimTrace sim)
-
--- | Sim carrier that ALSO says each rendered line: typed assertions keep
--- working through 'selectTraceEventsDynamic' while eval runs can print
--- the same events with 'printTraceEventsSay'. Test tooling only — the
--- engine's 'simTracer' stays 'traceM'-only so existing traces are
--- unchanged.
-simTracerSay :: SomeTracer (IOSim s)
-simTracerSay = SomeTracer (mkTracer emit)
-  where
-    emit :: (LogEvent e, Typeable e) => e -> IOSim s ()
-    emit event = traceM event >> say (unpack (showSeverity (eventSeverity event) <> " " <> renderEvent event))
 
 -- | A launched sim instance whose engine calls announce through the
 -- say-carrier: the cases' 'ManagementEvent' lines print inline.
@@ -370,16 +383,16 @@ simSayDBOS = simDBOSWith simTracerSay
 
 -- | Register an @Int -> Int@ body under IOSim, pinning the JSON types the
 -- polymorphic registration cannot infer from a local binding.
-registerIntRef :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either Error Int)) -> IOSim s (WorkflowRef (IOSim s))
-registerIntRef dbos key body = orFail =<< registerDBOSWorkflowRef dbos key body
+registerIntRef :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
+registerIntRef dbos key body = orFail =<< registerWfRefSim dbos key body
 
-registerIntWorkflow :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either Error Int)) -> IOSim s ()
-registerIntWorkflow dbos key body = orFail =<< registerDBOSWorkflow dbos key body
+registerIntWorkflow :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s ()
+registerIntWorkflow dbos key body = orFail =<< registerWfSim dbos key body
 
-registerTextWorkflow :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either Error Text)) -> IOSim s ()
-registerTextWorkflow dbos key body = orFail =<< registerDBOSWorkflow dbos key body
+registerTextWorkflow :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)) -> IOSim s ()
+registerTextWorkflow dbos key body = orFail =<< registerWfSim dbos key body
 
-orFail :: Either Error a -> IOSim s a
+orFail :: Either (Error EngineOnly) a -> IOSim s a
 orFail result = case result of
   Left err -> throwIO (userError (show err))
   Right value -> pure value

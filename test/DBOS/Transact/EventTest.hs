@@ -13,16 +13,21 @@ import DBOS.SystemDB (NewWorkflow (..), StepRecord (..), Submission (..), getEve
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-  ( CodecError,
+  (
+    EngineOnly, CodecError,
     Config (..),
     Ctx,
     DBOS,
     Environment (..),
     Error (..),
+    PendingStep (..),
     RunOptions (..),
+    SerializedWorkflowValue (..),
     WorkflowId (..),
+    WorkflowRef,
     configFromEnv,
     decodeWorkflowValue,
+    encodeWorkflowValue,
     firstStepStatus,
     getEvent,
     getWorkflowEvent,
@@ -32,9 +37,15 @@ import DBOS.Transact
     nextStepId,
     nextStepMarker,
     nullTracer,
+    pendingGetEvent,
+    pendingSetEvent,
+    pendingSleep,
+    pendingStepId,
+    pendingWorkflowStep,
     registerDBOSWorkflowRef,
     runDBOSWorkflowRef,
     runOptionsDefault,
+    runWorkflowStep,
     runWorkflowStepWith,
     setEvent,
     shutdown,
@@ -92,12 +103,12 @@ tests =
           published <- setEvent publisherContext "answer" (42 :: Int)
           published @?= Right ()
           readerContext <- ctxOver backend nullTracer readerText
-          readOutside <- (getEvent readerContext (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either Error (Maybe Int)))
+          readOutside <- (getEvent readerContext (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int)))
           readOutside @?= Right (Just 42)
           outsideSteps <- stepNames backend readerText
           outsideSteps @?= [(0, getEventStepName), (1, sleepStepName)]
           inStepContext <- ctxOver backend nullTracer inStepText
-          readInside <- (runWorkflowStepWith stepOptionsDefault inStepContext "read" (\inner -> getEvent inner (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either Error (Maybe Int)))
+          readInside <- (runWorkflowStepWith stepOptionsDefault inStepContext "read" (\inner -> getEvent inner (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either (Error EngineOnly) (Maybe Int)))
           readInside @?= Right (Just 42)
           insideSteps <- stepNames backend inStepText
           insideSteps @?= [(0, "read")]
@@ -145,7 +156,7 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           readerContext <- ctxOver backend nullTracer readerText
-          readBack <- (getEvent readerContext (WorkflowId workflowText) "progress" (millisDuration 0) :: IO (Either Error (Maybe Text)))
+          readBack <- (getEvent readerContext (WorkflowId workflowText) "progress" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Text)))
           readBack @?= Right (Just "first"),
       testCase "progress events survive recovery without republishing" $ do
         fresh <- UUID.V4.nextRandom
@@ -160,7 +171,7 @@ tests =
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             -- The second execution finds the offer taken: only a replayed
             -- set step keeps the published value at "first".
-            body :: () -> Ctx IO -> IO (Either Error Int)
+            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
             body () ctx = do
               proposal <- tryTakeMVar offer
               published <- setEvent ctx "progress" (maybe "republished" id proposal)
@@ -176,7 +187,7 @@ tests =
           case started of
             Left err -> fail (show err)
             Right () -> pure ()
-          worker <- async (runDBOSWorkflowRef dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing)
+          worker <- async (runWfRef dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing)
           waitForPublish dbos (WorkflowId workflowText)
           shutdown dbos
           cancel worker
@@ -185,7 +196,7 @@ tests =
           case relaunched of
             Left err -> fail (show err)
             Right () -> pure ()
-          ran <- runDBOSWorkflowRef dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing
+          ran <- runWfRef dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing
           case ran of
             Right (Just stored) -> do
               let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
@@ -196,8 +207,119 @@ tests =
             Right (Just stored) -> do
               let decoded = decodeWorkflowValue "event" (Just stored) :: Either CodecError Text
               assertEqual "recovery kept the first published value" (Right "first") decoded
-            other -> fail (show other)
+            other -> fail (show other),
+      testCase "reading through another instance from inside a workflow is refused" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            otherName = "hs-l2-event-other-" <> Text.take 12 suffix
+            ownerName = "hs-l2-event-owner-" <> Text.take 12 suffix
+            readerKey = newWorkflowKey "reads_through_other"
+            inStepKey = newWorkflowKey "reads_in_step"
+        otherConfig0 <- configFromEnv otherName
+        ownerConfig0 <- configFromEnv ownerName
+        let otherConfig = otherConfig0 {configAppVersion = Just ("other-v-" <> suffix), configExecutorId = Just ("other-exec-" <> suffix)}
+            ownerConfig = ownerConfig0 {configAppVersion = Just ("owner-v-" <> suffix), configExecutorId = Just ("owner-exec-" <> suffix)}
+        bracket (newDBOS otherConfig) shutdown $ \other ->
+          bracket (newDBOS ownerConfig) shutdown $ \owner -> do
+            let body :: () -> Ctx IO -> IO (Either (Error EngineOnly) (Maybe Int))
+                body () ctx = do
+                  built <- pendingGetEvent other ctx (WorkflowId "wf-1") "answer" (millisDuration 0)
+                  built.pendingRun
+            ownerRegistered <- registerDBOSWorkflowRef owner readerKey body
+            readerRef <- case ownerRegistered of
+              Left err  -> fail (show err)
+              Right ref -> pure ref
+            -- From inside a step the read is plain: nothing is checkpointed,
+            -- so the two halves are never combined and there is nothing to
+            -- refuse.
+            let inStepBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) (Maybe Int))
+                inStepBody () ctx = do
+                  stepped <- runWorkflowStep ctx "read" $ \inner -> do
+                    built <- pendingGetEvent other inner (WorkflowId "wf-1") "answer" (millisDuration 0)
+                    built.pendingRun
+                  pure $ case stepped of
+                    Left err  -> Left err
+                    Right read -> read
+            inStepRegistered <- registerDBOSWorkflowRef owner inStepKey inStepBody
+            inStepRef <- case inStepRegistered of
+              Left err  -> fail (show err)
+              Right ref -> pure ref
+            launchedOther <- launchWithEnvironment other isolatedEnvironment
+            case launchedOther of
+              Left err -> fail (show err)
+              Right () -> pure ()
+            launchedOwner <- launchWithEnvironment owner isolatedEnvironment
+            case launchedOwner of
+              Left err -> fail (show err)
+              Right () -> pure ()
+            ran <- runDBOSWorkflowRef owner readerRef runOptionsDefault (Just (encodeWorkflowValue ()))
+            case ran of
+              Left (WrongInstance _) -> pure ()
+              other                  -> fail ("expected a wrong-instance refusal, got: " <> show other)
+            ranInStep <- runDBOSWorkflowRef owner inStepRef runOptionsDefault (Just (encodeWorkflowValue ()))
+            case ranInStep of
+              Right (Just stored) -> do
+                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError (Maybe Int)
+                decoded @?= Right Nothing
+              other -> fail ("expected a plain read of nothing, got: " <> show other),
+      testCase "library calls driven out of build order keep the ids they were built with" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-joins-out-of-order-app-" <> Text.take 12 suffix
+            workflowText = "joins-out-of-order-" <> suffix
+            key = newWorkflowKey "joins"
+        base <- configFromEnv appName
+        let config = base {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          let body :: () -> Ctx IO -> IO (Either (Error EngineOnly) ())
+              body () ctx = do
+                -- Built a, b, c, d: the order their ids come from the
+                -- counter in, and the order a replay builds them in again.
+                a <- pendingSleep ctx (millisDuration 1)
+                b <- pendingSetEvent ctx "b" (1 :: Int)
+                c <- (pendingGetEvent dbos ctx (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: IO (PendingStep IO (Either (Error EngineOnly) (Maybe Int))))
+                d <- (pendingWorkflowStep ctx "after" (\_ -> pure (Right (1 :: Int))) :: IO (PendingStep IO (Either (Error EngineOnly) Int)))
+                idsOk <- case (pendingStepId a, pendingStepId b, pendingStepId c, pendingStepId d) of
+                  (Just 0, Just 1, Just 2, Just 4) -> pure True
+                  _                                -> pure False
+                if not idsOk
+                  then pure (Left (StepFailed "joins" "ids were taken out of source order"))
+                  else do
+                    -- ...and driven d, c, b, a.
+                    dResult <- d.pendingRun
+                    cResult <- c.pendingRun
+                    bResult <- b.pendingRun
+                    aResult <- a.pendingRun
+                    pure $ case (dResult, cResult, bResult, aResult) of
+                      (Right _, Right Nothing, Right _, Right _) -> Right ()
+                      _ -> Left (StepFailed "joins" "a branch answered wrong")
+          registered <- registerDBOSWorkflowRef dbos key body
+          ref <- case registered of
+            Left err  -> fail (show err)
+            Right ref -> pure ref
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          ran <- runDBOSWorkflowRef dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) (Just (encodeWorkflowValue ()))
+          case ran of
+            Right _ -> pure ()
+            other   -> fail ("the workflow failed: " <> show other)
+          reader <- getBackend
+          listed <- SystemDB.listWorkflowSteps reader (WorkflowId workflowText) True Nothing Nothing Nothing
+          case listed of
+            Right rows -> do
+              let recorded = map (\row -> (row.stepRecordStepId, row.stepRecordStepName)) rows
+              recorded @?= [(0, "DBOS.sleep"), (1, "DBOS.setEvent"), (2, "DBOS.getEvent"), (3, "DBOS.sleep"), (4, "after")]
+            other -> fail ("expected the recorded steps, got: " <> show other)
     ]
+
+-- * Engine-only driver aliases
+
+-- | The engine-only driver aliases the tree above reads through. Local
+-- copies are deliberate: this module carries only the aliases it uses.
+runWfRef :: DBOS IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfRef = runDBOSWorkflowRef
 
 -- | Wait until a workflow has published its event: the row appears before
 -- a blocked body proceeds, so a bounded poll always terminates.

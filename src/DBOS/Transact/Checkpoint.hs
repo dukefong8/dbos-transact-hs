@@ -13,6 +13,8 @@ module DBOS.Transact.Checkpoint
     PendingStep (..),
     placementAt,
     placementHere,
+    placeCall,
+    takenPlacement,
     placementStepId,
     pendingStepId,
     checkHere,
@@ -24,7 +26,8 @@ where
 
 import DBOS.Prelude
 import Data.Text (Text)
-import DBOS.Transact.Context (Ctx, StepMarker, stepId, stepMarker, workflowId)
+import DBOS.Transact.Context (Ctx, StepMarker, currentConnection, inStep, nextStepId, stepId, stepMarker, workflowId)
+import DBOS.Transact.Connection (Connection (..), Owner (..))
 import DBOS.Transact.Error (Error (..))
 
 -- | Where a durable call stands: which of the execution's step ids it
@@ -54,14 +57,15 @@ data StepDurability m
   deriving stock (Eq, Show)
 
 -- | A durable call that has taken its step id and has not run. The identity
--- is all there is to say here: the run is an action its producer owns.
--- 'Nothing' is a build that failed before it reached the counter and claims
--- no position anywhere.
-data PendingStep m = PendingStep
+-- is what the placement machinery can read — the name a refusal reports and
+-- the id a replay checks — and 'pendingRun' is the deferred call itself,
+-- driven when the pending value is awaited or raced. 'Nothing' is a build
+-- that failed before it reached the counter and claims no position anywhere.
+data PendingStep m a = PendingStep
   { name :: Text,
-    placement :: Maybe (StepPlacement m)
+    placement :: Maybe (StepPlacement m),
+    pendingRun :: m a
   }
-  deriving stock (Eq, Show)
 
 -- | 'here' for a caller already holding the context. Inside a step body the
 -- call is plain; at a step boundary it records under the allocated id.
@@ -70,6 +74,38 @@ placementAt ctx stepId' =
   case stepId ctx of
     Just _ -> PlacementInsideStep ctx
     Nothing -> Recorded ctx stepId'
+
+-- | Where a call served by the given connection stands, with the ambient
+-- context reconciled against it. Mirrors @StepPlacement::taken@: inside a
+-- step the call is plain whoever serves it, so that check comes before the
+-- connection comparison and there is nothing for the halves to disagree
+-- about; a client connection degrades to the undurable call; another
+-- application's connection is refused, because the record would land where
+-- the workflow that allocated the id cannot see it. The comparison is of
+-- instance identities, which is what the two halves would disagree about.
+-- Callers check their own launch first, so a call to an unlaunched
+-- instance moves no counter.
+takenPlacement :: MonadSTM m => Connection m -> Text -> Ctx m -> m (Either (Error e) (StepPlacement m))
+takenPlacement conn operation ctx
+  | inStep ctx = pure (Right (PlacementInsideStep ctx))
+  | conn.connInstanceId == (currentConnection ctx).connInstanceId = do
+      stepId' <- nextStepId ctx
+      pure (Right (Recorded ctx stepId'))
+  | otherwise = pure $ case conn.connOwner of
+      OwnerClient -> Right ClientConnection
+      OwnerApplication -> Left (WrongInstance {operation = operation})
+
+-- | Where a call being *built* stands: the id is claimed here, before
+-- anything the call does can fail, because the position of the call in the
+-- workflow has to be the same on the run as it was on the run. Mirrors
+-- the allocation half of Rust @StepPlacement::here@; 'placementHere' is the
+-- reader for a placement that already knows its id.
+placeCall :: MonadSTM m => Ctx m -> m (StepPlacement m)
+placeCall ctx
+  | inStep ctx = pure (PlacementInsideStep ctx)
+  | otherwise = do
+      stepId' <- nextStepId ctx
+      pure (Recorded ctx stepId')
 
 -- | Where a call stands given the ambient context, with the id its caller
 -- already allocated. Outside a workflow there is no counter to draw from.
@@ -89,7 +125,7 @@ placementStepId placement =
     ClientConnection -> Nothing
 
 -- | The id this pending call claimed when built, or 'Nothing' if none.
-pendingStepId :: PendingStep m -> Maybe Int
+pendingStepId :: PendingStep m a -> Maybe Int
 pendingStepId pending =
   case pending.placement of
     Just placement -> placementStepId placement
@@ -99,7 +135,7 @@ pendingStepId pending =
 -- scope, and what polling it there means. An id is a claim on one position
 -- in one workflow, so a call carried somewhere that cannot honour it is
 -- refused rather than run.
-checkHere :: StepPlacement m -> Text -> Maybe (Ctx m) -> Either Error (StepDurability m)
+checkHere :: StepPlacement m -> Text -> Maybe (Ctx m) -> Either (Error e) (StepDurability m)
 checkHere placement step ambient =
   case (placement, ambient) of
     (Recorded ctx stepId', Just here)

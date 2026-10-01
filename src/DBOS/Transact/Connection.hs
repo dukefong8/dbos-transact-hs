@@ -98,6 +98,11 @@ data Connection m = Connection
     connAppName             :: Maybe Text,
     connOutcomePollInterval :: Duration,
     connOwner               :: Owner,
+    -- | What tells one connection apart from another in this process: the
+    -- analogue of the oracle's @Arc<Connection>@ pointer, which
+    -- @StepPlacement::of@ compares to raise @WrongInstance@. Minted once
+    -- per connection, so two instances over one database are still two.
+    connInstanceId          :: Text,
     connExecutionCounter    :: StrictTVar m Int,
     connGenerateWorkflowId  :: m Text,
     connEntropy             :: m Word32,
@@ -109,8 +114,8 @@ data Connection m = Connection
 -- supplies the @m Text@ workflow-id generator the engine mints ids with
 -- when a caller names none, plus the tracer the connection's workers and
 -- workflow contexts announce resource-lifetime events through.
-newConnection :: MonadSTM m => SomeSystemDB m -> Serializer -> Maybe Text -> Duration -> Owner -> m Text -> m Word32 -> SomeTracer m -> m (Connection m)
-newConnection sysdb serializer appName pollInterval owner generate entropy tracer = do
+newConnection :: MonadSTM m => SomeSystemDB m -> Serializer -> Maybe Text -> Duration -> Owner -> Text -> m Text -> m Word32 -> SomeTracer m -> m (Connection m)
+newConnection sysdb serializer appName pollInterval owner instanceId generate entropy tracer = do
   counter <- newTVarIO 0
   pure
     Connection
@@ -119,6 +124,7 @@ newConnection sysdb serializer appName pollInterval owner generate entropy trace
         connAppName = appName,
         connOutcomePollInterval = pollInterval,
         connOwner = owner,
+        connInstanceId = instanceId,
         connExecutionCounter = counter,
         connGenerateWorkflowId = generate,
         connEntropy = entropy,
@@ -146,12 +152,16 @@ forApplication :: Config -> Identity -> SomeTracer IO -> IO (Connection IO)
 forApplication config identity tracer = do
   backend <- Postgres.acquirePostgresSystemDB (backendConfig config identity) tracer
   Postgres.activatePostgresSystemDB backend
+  -- The workflow-id generator is this connection's only UUID source; one
+  -- draw names the connection itself.
+  instanceId <- uuidWorkflowId
   newConnection
     (SomeSystemDB backend)
     config.configSerializer
     (Just identity.identityAppName)
     (outcomePollInterval config)
     OwnerApplication
+    instanceId
     uuidWorkflowId
     uuidEntropy
     tracer
