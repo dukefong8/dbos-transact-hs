@@ -59,7 +59,7 @@ import DBOS.Transact
     WorkflowHandle,
     WorkflowKey,
     WorkflowRef,
-    acquireFastBackend,
+    acquireLoggerBackend,
     cancelWorkflows,
     cancelWorkflowsInWorkflow,
     clientCancelWorkflows,
@@ -111,7 +111,7 @@ import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 tests :: TestTree
 tests =
   withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
-  withResource acquireFastBackend snd $ \getLogger ->
+  withResource acquireLoggerBackend snd $ \getLogger ->
   testGroup
     "Workflow management"
     [ testCase "the management surface needs a launched instance" $ do

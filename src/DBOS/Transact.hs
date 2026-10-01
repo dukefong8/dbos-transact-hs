@@ -62,11 +62,15 @@ module DBOS.Transact
     runTracer,
     contramap,
     TimedFastLogger,
-    acquireFastBackend,
+    LoggerBackend (..),
+    newLoggerBackend,
+    acquireLoggerBackend,
+    ThreadIdCache,
     fastLoggerTracer,
     ioTracer,
     LogSeverity (..),
     showSeverity,
+    parseSeverity,
     LogEvent (..),
     EngineEvent (..),
     SysdbEvent (..),
@@ -363,7 +367,7 @@ import DBOS.Transact.Identity (Environment (..), Identity (..), appIdEnv, appVer
 import DBOS.Transact.Instance (DBOS, cancelWorkflows, dbosAppId, dbosAppVersion, dbosExecutorId, dequeueDBOSWorkflows, deleteWorkflows, enqueueDBOSWorkflow, fetchWorkflowStatuses, forkFrom, forkWorkflows, getWorkflowEvent, isLaunched, launch, launchOn, launchWithEnvironment, listWorkflowIdsByName, listWorkflows, newDBOS, registerDBOSWorkflow, registerDBOSWorkflowRef, resumeWorkflows, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, sendWorkflowMessage, sendWorkflowMessages, setWorkflowDelay, shutdown, startDBOSWorkflowRef, updateWorkflowAttributes)
 import DBOS.Transact.Management (ManagementEvent (..), cancelWorkflowsInWorkflow, deleteWorkflowsInWorkflow, forkFromInWorkflow, forkWorkflowsInWorkflow, listWorkflowsInWorkflow, resumeWorkflowsInWorkflow)
 import DBOS.Transact.Context (Ctx, StepMarker (..), StepScope, StepStatus (..), cancelToken, cancellationToken, contextTracer, currentConnection, currentIdentity, deadline, executionIdentityOf, firstStepStatus, inStep, isSameExecution, newCtx, newStepScope, newWorkflowState, nextAttempt, nextStepId, nextStepMarker, spawnLocal, stepId, stepMarker, stepStatus, stepStatusCurrentAttempt, stepStatusId, stepStatusMaxAttempts, tokenCancelled, withAttempt, withSystemDB, withTracer, workflowId)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer (..), TimedFastLogger, Tracer, acquireFastBackend, contramap, fastLoggerTracer, ioTracer, mkTracer, nullTracer, showSeverity, runTracer)
+import DBOS.Tracer (LoggerBackend (..), LogEvent (..), LogSeverity (..), SomeTracer (..), ThreadIdCache, TimedFastLogger, Tracer, acquireLoggerBackend, contramap, fastLoggerTracer, ioTracer, mkTracer, newLoggerBackend, nullTracer, parseSeverity, showSeverity, runTracer)
 import DBOS.Transact.Message (Forks (..), Message (..), SendBulkOptions (..), SendOptions (..), recv, send, sendBulk, sendBulkOptionsDefault, sendBulkWith, sendOptionsDefault, sendWith)
 import DBOS.Transact.Registry
   ( WorkflowKey (..),

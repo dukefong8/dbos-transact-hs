@@ -21,7 +21,7 @@ module DBOS.Transact.MessageTestSim (tests) where
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim)
 import Data.Text (Text)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracerSay)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (WorkflowId (..), millisDuration)
 import DBOS.SystemDB.IOSim (simConnectionWith)
 import DBOS.Transact
@@ -52,7 +52,7 @@ simIdentity =
 
 simCtx :: Text -> IOSim s (Ctx (IOSim s))
 simCtx name = do
-  conn <- simConnectionWith simTracerSay
+  conn <- simConnectionWith simTracer
   identity <- nextExecutionIdentity conn
   state <- newWorkflowState name Nothing identity
   newCtx conn simIdentity state

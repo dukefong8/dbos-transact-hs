@@ -23,7 +23,7 @@ import DBOS.Transact
     Ctx,
     Error (..),
     StepOptions (..),
-    acquireFastBackend,
+    acquireLoggerBackend,
     cancellationToken,
     ioTracer,
     runWorkflowStepWith,
@@ -44,7 +44,7 @@ tests =
         attempts <- newIORef (0 :: Int)
         -- Retries announce through FastLogger, so the run proves the
         -- trace seam as well as the attempts it makes.
-        (logger, cleanup) <- acquireFastBackend
+        (logger, cleanup) <- acquireLoggerBackend
         context <- ctxOver backend (ioTracer logger) workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
             body _ = do
@@ -100,7 +100,7 @@ tests =
         readIORef attempts >>= (@?= 2)
         -- The replay announces through FastLogger, so the run proves the
         -- trace seam as well as the checkpoint it reads back.
-        (logger, cleanup) <- acquireFastBackend
+        (logger, cleanup) <- acquireLoggerBackend
         replayContext <- ctxOver backend (ioTracer logger) workflowText
         replayed <- runWorkflowStepWith options replayContext "flaky" body
         cleanup
@@ -108,7 +108,7 @@ tests =
         readIORef attempts >>= (@?= 2),
       testCase "a declined failure stops retrying immediately" $ withWorkflow getBackend "retry-declined" $ \backend workflowText -> do
         attempts <- newIORef (0 :: Int)
-        (logger, cleanup) <- acquireFastBackend
+        (logger, cleanup) <- acquireLoggerBackend
         context <- ctxOver backend (ioTracer logger) workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
             body _ = do
@@ -151,7 +151,7 @@ tests =
           other -> fail ("expected MaxStepRetriesExceeded, got: " <> show other)
         readIORef attempts >>= (@?= 2),
       testCase "a step that hangs is stopped at its timeout" $ withWorkflow getBackend "retry-timeout" $ \backend workflowText -> do
-        (logger, cleanup) <- acquireFastBackend
+        (logger, cleanup) <- acquireLoggerBackend
         context <- ctxOver backend (ioTracer logger) workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
             body _ = threadDelay 50000 >> pure (Right (1 :: Int))
@@ -271,7 +271,7 @@ tests =
       testCase "a preemptible step stops and records no outcome" $ withWorkflow getBackend "retry-preempt" $ \backend workflowText -> do
         gate <- newEmptyMVar
         started <- newEmptyMVar
-        (logger, cleanup) <- acquireFastBackend
+        (logger, cleanup) <- acquireLoggerBackend
         context <- ctxOver backend (ioTracer logger) workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
             body _ = putMVar started () >> takeMVar gate >> pure (Right (7 :: Int))

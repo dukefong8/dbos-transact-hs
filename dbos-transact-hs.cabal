@@ -40,6 +40,7 @@ common commons
     template-haskell,
     text,
     time,
+    unordered-containers,
     uuid,
     vector,
 

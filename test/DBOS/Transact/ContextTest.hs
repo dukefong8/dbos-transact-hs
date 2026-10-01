@@ -58,7 +58,7 @@ import DBOS.Transact
     SomeTracer (..),
     StepStatus (..),
     Timestamp (..),
-    acquireFastBackend,
+    acquireLoggerBackend,
     cancelToken,
     cancellationToken,
     currentConnection,
@@ -382,7 +382,7 @@ waitFor action = do
 tests :: TestTree
 tests =
   withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
-    withResource acquireFastBackend snd $ \getLogger ->
+    withResource acquireLoggerBackend snd $ \getLogger ->
       testGroup
         "Context"
         [ testCase "a context reads its workflow id" $ do

@@ -38,7 +38,7 @@ import DBOS.SystemDB
   )
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (newMemDB, memLaunchOn, simInstance)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracerSay)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.Transact
   ( 
     application,
@@ -120,7 +120,7 @@ tests =
               body :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
               body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
           orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           result <- runWfSim dbos key (WorkflowId "sim-wf-double") (Just (encodeWorkflowValue (21 :: Int)))
           rows <- SystemDB.listWorkflows mem (defaultWorkflowFilter {SystemDB.workflowFilterWorkflowIds = ["sim-wf-double"]}) Nothing
           pure (result, rows)
@@ -172,7 +172,7 @@ tests =
                 takeMVar release
                 pure (Right 7)
           ref <- registerUnitRef dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           first <- startWfRefSim dbos ref startOpts Nothing
           second <- case first of
             Left err -> throwIO (userError (show err))
@@ -213,7 +213,7 @@ tests =
               dbos
               key
               (\() _ -> takeMVar release >> pure (Right 7))
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           let label (WorkflowHandle _ _ provenance') = case provenance' of
                 Local _ -> "local"
                 Polling {} -> "polling"
@@ -263,7 +263,7 @@ tests =
                           Left err -> Left (StepFailed "parent" (Text.pack (show err)))
                       Right Nothing -> Left (StepFailed "parent" "no child output")
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) True Nothing Nothing Nothing
           pure (ran, listed, childText)
@@ -326,7 +326,7 @@ tests =
               (OutcomeOutput (Just "7"))
               Nothing
               Nothing
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           pure (ran, childText)
         printSimTrace tr
@@ -364,7 +364,7 @@ tests =
                             Left err -> Left (StepFailed "collect" (Text.pack (show err)))
                         Right Nothing -> Left (StepFailed "collect" "no child output")
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) True Nothing Nothing Nothing
           pure (ran, listed, childText)
@@ -408,7 +408,7 @@ tests =
                         Left _ -> pure (Left (StepFailed "parent" "bad child output"))
                         Right (numbers :: [Int]) -> pure (Right (sum numbers))
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
           firstChild <- getWorkflow mem (WorkflowId (parentText <> "-0"))
@@ -467,7 +467,7 @@ tests =
                   (Right x, Right y, Right z) -> Right (x + y + z)
                   _ -> Left (StepFailed "parent" "a started child failed")
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
           pure (ran, listed)
@@ -522,7 +522,7 @@ tests =
                             Right Nothing -> Left (StepFailed "parent" "no child output")
                       ]
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
           pure (ran, listed)
@@ -558,7 +558,7 @@ tests =
                     SelectArm "slow" slow (\armOutcome -> pure (armOutcome >>= \value -> Right value))
                   ]
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
           parentRow <- getWorkflow mem (WorkflowId parentText)
@@ -600,7 +600,7 @@ tests =
                     SelectArm "fast" fast (\armOutcome -> pure (armOutcome >>= \value -> Right value))
                   ]
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           fired <- timeout 15000000 (takeMVar released)
           pure (ran, fired)
@@ -640,7 +640,7 @@ tests =
                           Left err -> Left (StepFailed "parent" (Text.pack (show err)))
                       Right Nothing -> Left (StepFailed "parent" "no child output")
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) True Nothing Nothing Nothing
           parentRow <- getWorkflow mem (WorkflowId parentText)
@@ -693,7 +693,7 @@ tests =
                           Left err -> Left (StepFailed "parent" (Text.pack (show err)))
                       Right Nothing -> Left (StepFailed "parent" "no child output")
           parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfRefSim dbos parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 300)}) Nothing
           parentRow <- getWorkflow mem (WorkflowId parentText)
           childRow <- getWorkflow mem (WorkflowId childText)
@@ -738,7 +738,7 @@ tests =
                           Left err -> Left (StepFailed "parent" (Text.pack (show err)))
                       Right Nothing -> Left (StepFailed "parent" "no child output")
           parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfRefSim dbos parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 60)}) Nothing
           parentRow <- getWorkflow mem (WorkflowId parentText)
           childRow <- getWorkflow mem (WorkflowId childText)
@@ -790,7 +790,7 @@ tests =
                   (Right x, Right y) -> Right (x + y)
                   _ -> Left (StepFailed "parent" "a child failed")
           parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfRefSim dbos parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 300)}) Nothing
           parentRow <- getWorkflow mem (WorkflowId parentText)
           inheritedRow <- getWorkflow mem (WorkflowId (parentText <> "-0"))
@@ -838,7 +838,7 @@ tests =
                           Left err -> Left (StepFailed "parent" (Text.pack (show err)))
                       Right Nothing -> Left (StepFailed "parent" "no child output")
           parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfRefSim dbos parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (millisDuration 400)}) Nothing
           childSettled <- waitForWorkflow dbos (WorkflowId childText)
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
@@ -871,7 +871,7 @@ tests =
                 started <- startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
                 pure (handleWorkflowId <$> started)
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           first <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
           childId <- case first of
             Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
@@ -928,7 +928,7 @@ tests =
                   Left err -> Left err
                   Right handle -> Left (ErrorConfig ("started inside a step: " <> handleWorkflowId handle)) :: Either (Error EngineOnly) Text)
           orFail =<< registerWfSim dbos parentKey badBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           result <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
           pure (result, listed)
@@ -972,7 +972,7 @@ tests =
                       Left err -> Left err
                       Right () -> Right False
           billRef <- orFail =<< registerRefOf @GaveUp dbos billKey billBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runDBOSWorkflowRef dbos billRef (runOptionsDefault {runWorkflowId = Just billText}) (Just (encodeWorkflowValue ()))
           childRow <- getWorkflow mem (WorkflowId shipText)
           pure (ran, childRow)
@@ -1010,7 +1010,7 @@ tests =
                   Left err -> pure (Left err)
                   Right _ -> pure (Right ())
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
           -- The child outlives the parent's interest: the start detached
@@ -1061,7 +1061,7 @@ tests =
                         Left _ -> pure (Left (StepFailed "fan" "bad child output"))
                         Right (numbers :: [Int]) -> pure (Right (sum numbers))
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           children <- SystemDB.getWorkflowChildren mem (WorkflowId parentText)
           pure (ran, children)
@@ -1095,7 +1095,7 @@ tests =
                 started <- startChildWorkflow ctx childRef (startOptionsDefault {startWorkflowId = Just chosenText}) (Just (encodeWorkflowValue (21 :: Int)))
                 pure (handleWorkflowId <$> started)
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           first <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
           chosen <- getWorkflow mem (WorkflowId chosenText)
           derived <- getWorkflow mem (WorkflowId derivedText)
@@ -1127,7 +1127,7 @@ tests =
               body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
               body () _ = pure (Right 1)
           orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
           row <- getWorkflow mem (WorkflowId workflowText)
           pure (ran, row)
@@ -1157,7 +1157,7 @@ tests =
                   Left err -> pure (Left err)
                   Right _ -> pure (Right (0 :: Int))
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           -- A plain step planted at the start position before the body
           -- runs: the start finds output where a child link should be.
           orFailSys =<< SystemDB.recordStep mem (WorkflowId parentText) 0 "child" (SystemDB.OutcomeOutput (Just "1")) Nothing Nothing
@@ -1200,8 +1200,8 @@ tests =
                           Left err -> Left (StepFailed "parent" (Text.pack (show err)))
                       Right Nothing -> Left (StepFailed "parent" "no child output")
           orFail =<< registerWfSim owner parentKey parentBody
-          memLaunchOn mem simTracerSay other
-          memLaunchOn mem simTracerSay owner
+          memLaunchOn mem simTracer other
+          memLaunchOn mem simTracer owner
           ran <- runWfSim owner parentKey (WorkflowId parentText) Nothing
           missing <- getWorkflow mem (WorkflowId childText)
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
@@ -1247,7 +1247,7 @@ tests =
                           Left _ -> pure (Left (StepFailed "parent" "bad child output"))
                       Right _ -> pure (Left (StepFailed "parent" "no child output"))
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           -- The holder parks on its queue with the key held; nothing runs
           -- it here, so the test stages what the queue runner would do and
           -- records its completion directly. (Live parks it on a delay
@@ -1302,7 +1302,7 @@ tests =
               body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) ())
               body () _ = pure (Right ())
           orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
           row <- SystemDB.getWorkflow mem (WorkflowId workflowText)
           pure (ran, row)
@@ -1326,7 +1326,7 @@ tests =
                 row <- withSystemDB ctx (\db -> SystemDB.getWorkflow db (WorkflowId (workflowId ctx)))
                 pure (Right (case row of Right (Just _) -> True; _ -> False))
           orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
           pure ran
         printSimTrace tr
@@ -1344,7 +1344,7 @@ tests =
               body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) ())
               body () _ = throwIO (userError "boom")
           orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           outcome <- try (runWfSim dbos key (WorkflowId workflowText) Nothing)
           row <- getWorkflow mem (WorkflowId workflowText)
           pure (outcome, row)
@@ -1380,7 +1380,7 @@ tests =
               body :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
               body _ _ = pure (Left (StepFailed "flaky" "boom"))
           orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           pure ran
         printSimTrace tr
@@ -1406,7 +1406,7 @@ tests =
               body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) ())
               body () _ = pure (Left (ErrorSystemDatabase backendErr))
           orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
           row <- getWorkflow mem (WorkflowId workflowText)
           pure (ran, row)
@@ -1434,7 +1434,7 @@ tests =
                   Left err -> pure (Left err)
                   Right stepped -> runWorkflowStep ctx "two" (const (pure (stepped * 2)))
           orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           listed <- listWorkflowSteps mem (WorkflowId workflowText) False Nothing Nothing Nothing
           pure (ran, listed)
@@ -1459,7 +1459,7 @@ tests =
               workflowText = "sim-shutdown-run-id"
               body () _ = takeMVar gate >> pure (Right 7)
           ref <- registerUnitRef dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           worker <- forkIO (runWfRefSim dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing >> pure ())
           -- The row is written before the body is entered, so its
           -- presence means the run is gated, not merely started.
@@ -1484,7 +1484,7 @@ tests =
               workflowText = "sim-drop-future-id"
               body () _ = takeMVar gate >> pure (Right 7)
           ref <- registerUnitRef dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           -- The start spawns the body and returns at once; dropping its
           -- handle stops nothing. A waiter is forked and killed to mirror
           -- the live cancel, then the run is awaited directly.
@@ -1522,7 +1522,7 @@ tests =
               body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
               body () _ = threadDelay 1000000 >> pure (Right 7)
           ref <- registerUnitRef dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           -- A millisecond budget against a second-long body: the clock
           -- wins on virtual time, deterministically.
           ran <-
@@ -1567,7 +1567,7 @@ tests =
                           Left _ -> pure (Left (StepFailed "parent" "bad child output"))
                       Right _ -> pure (Left (StepFailed "parent" "no child output"))
           parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <-
             runWfRefSim
               dbos
@@ -1600,7 +1600,7 @@ tests =
               body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
               body () ctx = runWorkflowStepWith stepOptionsDefault ctx "charge" (const (pure (Left (StepFailed "charge" "short by 12"))))
           orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracerSay dbos
+          memLaunchOn mem simTracer dbos
           ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
           -- Payloads loaded: the flag gates output AND error together,
           -- as the oracle's @step_payloads@ does (the memory backend
@@ -1641,14 +1641,14 @@ tests =
 -- the say-carrier, asserted by type.
 demoTrace :: forall s. IOSim s ()
 demoTrace = do
-  runTracer simTracerSay (WorkflowEnqueued "sim-wf-enqueued" "sim-queue")
-  runTracer simTracerSay (WorkflowAlreadyOwned "sim-wf-owned")
-  runTracer simTracerSay (WorkflowChildJoined "sim-parent" 0 "sim-child")
-  runTracer simTracerSay (WorkflowDedupJoined "sim-holder" "sim-key")
-  runTracer simTracerSay (WorkflowDeadlineRaced "sim-wf-raced")
-  runTracer simTracerSay (WorkflowOutcomeRecordFailed "sim-detail")
-  runTracer simTracerSay (WorkflowSuperseded "sim-wf-first")
-  runTracer simTracerSay (WorkflowControlEnded "sim-control")
+  runTracer simTracer (WorkflowEnqueued "sim-wf-enqueued" "sim-queue")
+  runTracer simTracer (WorkflowAlreadyOwned "sim-wf-owned")
+  runTracer simTracer (WorkflowChildJoined "sim-parent" 0 "sim-child")
+  runTracer simTracer (WorkflowDedupJoined "sim-holder" "sim-key")
+  runTracer simTracer (WorkflowDeadlineRaced "sim-wf-raced")
+  runTracer simTracer (WorkflowOutcomeRecordFailed "sim-detail")
+  runTracer simTracer (WorkflowSuperseded "sim-wf-first")
+  runTracer simTracer (WorkflowControlEnded "sim-control")
 
 -- * Engine-only driver aliases
 

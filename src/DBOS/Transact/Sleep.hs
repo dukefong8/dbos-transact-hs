@@ -15,7 +15,7 @@ import Data.Int (Int64)
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer, showSeverity)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Context (Ctx, contextTracer, nextStepId, stepId, withSystemDB, workflowId)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Error qualified as TransactError
@@ -39,7 +39,7 @@ instance LogEvent SleepEvent where
     "sleeping until the recorded wake time step_id=" <> showText stepId' <> " remaining_ms=" <> showText remainingMs
 
 instance ToLogStr SleepEvent where
-  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
+  toLogStr = toLogStr . renderLine
 
 sleepWorkflowStep :: (MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sleepWorkflowStep ctx duration = placeCall ctx >>= driveSleep ctx duration

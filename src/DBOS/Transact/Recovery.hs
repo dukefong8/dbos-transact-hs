@@ -10,7 +10,7 @@ import Data.Text (Text)
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (QueueName (..), WorkflowId, internalQueueName)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer, showSeverity)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Error qualified as TransactError
 
@@ -54,7 +54,7 @@ instance LogEvent EngineEvent where
     "cancelled workflows still running; they stay PENDING cancelled=" <> showText count
 
 instance ToLogStr EngineEvent where
-  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
+  toLogStr = toLogStr . renderLine
 
 reenqueueForRecovery :: Monad m => Connection m -> Text -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 reenqueueForRecovery conn executorId applicationVersion = do

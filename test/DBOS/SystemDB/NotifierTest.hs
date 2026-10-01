@@ -29,7 +29,7 @@ import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import DBOS.Transact (LogEvent (..), SomeTracer (..), SysdbEvent (..), mkTracer, nullTracer)
+import DBOS.Transact (LogEvent (..), SomeTracer (..), mkTracer, nullTracer)
 import Hasql.Pool qualified as Pool
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -90,17 +90,19 @@ tests =
 
 -- | One pool for the whole group: pools bound connections, so sharing
 -- bounds them no matter how many tests run or are interrupted. The
--- registry stays fresh per case, so wakes never cross tests.
+-- registry stays fresh per case, so wakes never cross tests. The backend's
+-- retry and notifier warnings go nowhere: nullTracer.
 acquireSuitePool :: IO Pool.Pool
 acquireSuitePool = do
   config <- configFromEnv
-  env <- acquirePostgresSystemDB config nullLogger
+  env <- acquirePostgresSystemDB config nullTracer
   pure env.psdbPool
 
 -- | A notifier over the suite pool. Nothing here flushes, so the pool is
--- only held; the registry is fresh per case so wakes never cross tests.
+-- only held; the registry is fresh per case so wakes never cross tests,
+-- and the notifier's warnings go nowhere: nullTracer.
 withNotifier :: IO Pool.Pool -> (Notifier -> IO a) -> IO a
-withNotifier getPool = withNotifierLogging getPool nullLogger
+withNotifier getPool = withNotifierLogging getPool nullTracer
 
 -- | A notifier whose warnings land in the given carrier, so a test can see
 -- what the flush loop swallowed.
@@ -111,9 +113,6 @@ withNotifierLogging getPool tracer action = do
   notifier <- notifierNew pool registry Nothing tracer
   action notifier
 
--- | A notifier whose rendered event lines land in the given ref. Text, not
--- typed events: a concrete collector cannot fill the carrier's Rank-N
--- hole, so IO tests assert on lines and sim tests on types.
 -- | A carrier collecting rendered event lines: the Rank-N hole needs a
 -- polymorphic emit, so the signature pins it explicitly.
 collectingTracer :: IORef [Text] -> SomeTracer IO
@@ -122,13 +121,12 @@ collectingTracer ref = SomeTracer (mkTracer emit)
     emit :: LogEvent e => e -> IO ()
     emit e = modifyIORef' ref (renderEvent e :)
 
+-- | A notifier whose rendered event lines land in the given ref. Text, not
+-- typed events: a concrete collector cannot fill the carrier's Rank-N
+-- hole, so IO tests assert on lines and sim tests on types.
 withNotifierCollecting :: IO Pool.Pool -> IORef [Text] -> (Notifier -> IO a) -> IO a
 withNotifierCollecting getPool ref =
   withNotifierLogging getPool (collectingTracer ref)
-
--- | The notifier's warnings go nowhere in tests.
-nullLogger :: SomeTracer IO
-nullLogger = nullTracer
 
 -- | Drains what is queued, channels and payloads sorted, exactly as the Rust
 -- test helper does.

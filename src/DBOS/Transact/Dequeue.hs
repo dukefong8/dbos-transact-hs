@@ -47,7 +47,7 @@ import DBOS.SystemDB.Types
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer, showSeverity)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
 import DBOS.Transact.Registry (Snapshot, workflowKeyFromRow)
 import DBOS.Transact.Workflow
   ( Tasks,
@@ -105,7 +105,7 @@ instance LogEvent QueueEvent where
   renderEvent (DelayedWorkflowsEnqueued moved) = "delayed workflows are now enqueued: " <> showText moved
 
 instance ToLogStr QueueEvent where
-  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
+  toLogStr = toLogStr . renderLine
 
 -- | How often the supervisor rebuilds the queue set and transitions
 -- delayed workflows.

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `TRACE_LEVEL` (`debug`/`info`/`warning`/`warn`/`error`, case-insensitive) sets the FastLogger backend's floor: an event below it is dropped before any formatting or thread-id lookup — the null path for a level nobody asked for. Unset, blank or unrecognised keeps logging everything.
+- Tracer lines name their event's constructor (`[Debug] StepRunning: …`); FastLogger lines also carry the emitting `ThreadId`, pre-formatted once per thread in a capped hash-map cache (fast-logger has no thread support to reuse; per-line `show`+`pack` measured ~59 ns against a ~9–11 ns cache hit).
 - Merged `DBOS.SystemDB.{Hasql,Queries}` into `DBOS.SystemDB.Postgres` (typedSql sessions + pool runners, one module).
 - Fixed replayed `sleepStep` waiting out the recorded remainder (`reads` on the bare stored text, not its `show`).
 - Scoped generated message ids per recipient (`fallback::destination`), reusing `messageUUIDForSend` in the batch insert.

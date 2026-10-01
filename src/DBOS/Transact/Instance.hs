@@ -69,7 +69,7 @@ import DBOS.Transact.Dequeue (dequeuePass, superviseForever)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Identity (Environment, Identity (..), readEnvironment, resolve)
-import DBOS.Tracer (SomeTracer, acquireFastBackend, ioTracer, runTracer)
+import DBOS.Tracer (SomeTracer, acquireLoggerBackend, ioTracer, runTracer)
 import DBOS.Transact.Management qualified as Management
 import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
@@ -174,8 +174,8 @@ launchWithEnvironment dbos environment =
           Left err -> pure (Left err)
           Right resolved -> do
             snapshot <- snapshotRegistry dbos.dbos_registry
-            (fastLogger, releaseFastLogger) <- acquireFastBackend
-            let tracer = ioTracer fastLogger
+            (backend, releaseFastLogger) <- acquireLoggerBackend
+            let tracer = ioTracer backend
             started <- startExecutor dbos.dbos_config resolved snapshot tracer releaseFastLogger `onException` (releaseFastLogger >> thawRegistry dbos.dbos_registry)
             case started of
               Left err -> releaseFastLogger >> thawRegistry dbos.dbos_registry >> pure (Left err)

@@ -20,7 +20,7 @@ import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import Data.Text (Text)
 import DBOS.SystemDB (millisDuration)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracerSay)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simConnectionWith)
 import DBOS.Transact
   ( Ctx,
@@ -55,7 +55,7 @@ simIdentity =
 
 simCtx :: Text -> IOSim s (Ctx (IOSim s))
 simCtx name = do
-  conn <- simConnectionWith simTracerSay
+  conn <- simConnectionWith simTracer
   identity <- nextExecutionIdentity conn
   state <- newWorkflowState name Nothing identity
   newCtx conn simIdentity state
@@ -204,7 +204,7 @@ defaultOnce = do
 replayed :: IOSim s (Either (Error EngineOnly) Int, Either (Error EngineOnly) Int, Int)
 replayed = do
   mem <- newMemDB
-  conn <- memConnectionOn mem simTracerSay
+  conn <- memConnectionOn mem simTracer
   attempts <- newTVarIO (0 :: Int)
   let runOnce = do
         identity <- nextExecutionIdentity conn

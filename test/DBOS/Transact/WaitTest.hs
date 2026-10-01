@@ -14,7 +14,7 @@ import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (NewWorkflow (..), Outcome (..), StepRecord (..), Submission (..), WorkflowId (..), newWorkflow, selectWorkflowStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (Error (..), acquireFastBackend, ioTracer, joinWorkflows, nullTracer, selectWorkflow)
+import DBOS.Transact (Error (..), acquireLoggerBackend, ioTracer, joinWorkflows, nullTracer, selectWorkflow)
 import DBOS.Transact.ContextTest (ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -116,7 +116,7 @@ tests =
         first @?= Right (WorkflowId secondText)
         -- The replay announces through FastLogger, so the run proves the
         -- trace seam as well as the winner it reads back.
-        (logger, cleanup) <- acquireFastBackend
+        (logger, cleanup) <- acquireLoggerBackend
         replayContext <- ctxOver backend (ioTracer logger) firstText
         replayed <- selectWorkflow replayContext [WorkflowId firstText, WorkflowId secondText]
         cleanup

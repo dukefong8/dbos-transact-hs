@@ -1,5 +1,7 @@
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -10,7 +12,7 @@ import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (atomically, newTVarIO, readTVarIO, writeTVar)
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.IOSim (runSimOrThrow)
+import Control.Monad.IOSim (IOSim, runSimOrThrow)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object, withObject, (.:), (.=))
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict qualified as Map
@@ -36,7 +38,6 @@ import DBOS.Transact
     StartOptions (..),
     Provenance (..),
     WorkflowHandle (..),
-    Tasks,
     Timeout (..),
     Ctx,
     DBOS,
@@ -98,6 +99,7 @@ import DBOS.Transact
     workflowId,
   )
 import DBOS.Transact.ContextTest (ctxOver)
+import GHC.Conc (ThreadStatus (..), threadStatus)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
@@ -2320,44 +2322,162 @@ tests =
       tasksTests
     ]
 
--- | The oracle's @Tasks@ behavior, driven under @IOSim@ so the
--- scheduling is deterministic and the DB is not involved.
+-- | What every shared task case needs from io-classes: a constraint
+-- synonym, not a class — the bodies stay ordinary functions, and the one
+-- stack-specific operation arrives as an argument.
+type TaskCase m =
+  (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m, MonadDelay m)
+
+-- | Block until a spawned thread has finished. The registry's departure
+-- hook runs before the thread ends, so waiting on the thread turns "has
+-- this task departed?" from a bet on a delay — the bet a fixed sleep lost
+-- under load — into an observation. Bounded like 'waitFor' in
+-- "DBOS.Transact.ContextTest": a waiter that never wakes fails the case
+-- instead of hanging the suite.
+waitFinished :: ThreadId IO -> IO ()
+waitFinished tid = do
+  settled <- timeout 5000000 (pollFinished tid)
+  case settled of
+    Just () -> pure ()
+    Nothing -> fail ("the spawned task never finished: " <> show tid)
+
+-- | Poll a thread's status until it has ended.
+pollFinished :: ThreadId IO -> IO ()
+pollFinished tid = do
+  status <- threadStatus tid
+  case status of
+    ThreadFinished -> pure ()
+    ThreadDied -> pure ()
+    _ -> threadDelay 500 >> pollFinished tid
+
+-- | The IOSim half of the departure wait: nothing to observe, because the
+-- simulator advances time only when no thread is runnable — a parent
+-- parked in a tick cannot resume before a self-terminating child has run
+-- to completion, its departure commit included.
+simWaitDeparture :: forall s. ThreadId (IOSim s) -> IOSim s ()
+simWaitDeparture _ = threadDelay 1000
+
+-- | One case over both stacks: the group carries the case name and its two
+-- children run the same body. The check runs on the value the body
+-- returns, once, so both children are judged by the same assertion —
+-- @?=@ is 'IO'-only and cannot live in a body that is polymorphic in the
+-- stack. Both halves run in-process here (as this group's sim cases always
+-- have), so @main@ still carries no mirror tree.
+bothStacks :: forall a. String -> (a -> IO ()) -> (forall m. TaskCase m => m a) -> TestTree
+bothStacks name check body = dualGroup name check (body @IO) simRun
+  where
+    simRun :: forall s. IOSim s a
+    simRun = body @(IOSim s)
+
+-- | 'bothStacks' for a body that must observe a spawned task's departure:
+-- the one operation the two stacks spell differently (observe the thread
+-- in IO, tick the simulator in IOSim). A capability may only observe —
+-- never stage engine behaviour.
+bothStacksAwaiting ::
+  forall a.
+  String ->
+  (a -> IO ()) ->
+  (forall m. TaskCase m => (ThreadId m -> m ()) -> m a) ->
+  TestTree
+bothStacksAwaiting name check body = dualGroup name check (body @IO waitFinished) simRun
+  where
+    simRun :: forall s. IOSim s a
+    simRun = body @(IOSim s) simWaitDeparture
+
+-- | The two children of a dual-stack case. The sim half runs
+-- 'runSimOrThrow', not 'runSimCase': these bodies emit no tracer events,
+-- so there is no say trace to print and nothing a second run would add.
+dualGroup :: String -> (a -> IO ()) -> IO a -> (forall s. IOSim s a) -> TestTree
+dualGroup name check ioRun simRun =
+  testGroup
+    name
+    [ testCase "io" (ioRun >>= check),
+      testCase "iosim" (check (runSimOrThrow simRun))
+    ]
+
+-- | A case only the IO stack can run — real preemption is its point — with
+-- the reason in the reported name, so the asymmetry is visible in a run
+-- instead of hiding in a comment.
+ioOnly :: String -> String -> IO () -> TestTree
+ioOnly name reason action = testCase (name <> " [IO only: " <> reason <> "]") action
+
+-- | Two parked tasks: the sweep must count both. The parks are never
+-- waited out — the sweep kills the sleepers — but the margin is what keeps
+-- a parent descheduled between the forks and the sweep from finding the
+-- tasks finished on their own. The simulator is immune either way: time
+-- advances only when nothing is runnable.
+taskAbortAllWaits :: TaskCase m => m Int
+taskAbortAllWaits = do
+  tasks <- newTasks
+  _ <- spawnTracked tasks (threadDelay 10000000)
+  _ <- spawnTracked tasks (threadDelay 10000000)
+  abortAll tasks
+
+-- | A trivial body, awaited past its departure, leaves the sweep nothing
+-- to kill.
+taskFinishedNotRegistered ::
+  (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m) =>
+  (ThreadId m -> m ()) ->
+  m Int
+taskFinishedNotRegistered awaitDeparture = do
+  tasks <- newTasks
+  spawned <- spawnTracked tasks (pure ())
+  mapM_ awaitDeparture spawned
+  abortAll tasks
+
+-- | The sweep closes the registry; the arrival that follows is refused and
+-- must never run.
+taskRefusedAfterSweep :: TaskCase m => m Bool
+taskRefusedAfterSweep = do
+  tasks <- newTasks
+  _ <- abortAll tasks
+  ran <- newTVarIO False
+  _ <- spawnTracked tasks (threadDelay 1000 >> atomically (writeTVar ran True))
+  threadDelay 5000
+  readTVarIO ran
+
+taskEmptySweep :: (MonadFork m, MonadSTM m, MonadMVar m) => m Int
+taskEmptySweep = newTasks >>= abortAll
+
+-- | A trivial body can depart between the fork and the parent's
+-- registration on a preemptive scheduler; the registration must consume
+-- that early departure rather than list a dead thread, so a later sweep
+-- finds nothing to kill and counts nothing aborted. Only the IO half can
+-- reach that interleaving — the cooperative simulator never preempts a
+-- forked child (io-sim's @Fork@ appends it to the runqueue and resumes the
+-- parent), so there the case checks the ordinary path.
+taskEarlyFinishNotSwept ::
+  (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m) =>
+  (ThreadId m -> m ()) ->
+  m [Int]
+taskEarlyFinishNotSwept awaitDeparture =
+  mapM
+    ( \_ -> do
+        tasks <- newTasks
+        spawned <- spawnTracked tasks (pure ())
+        mapM_ awaitDeparture spawned
+        abortAll tasks
+    )
+    [1 .. 200 :: Int]
+
+-- | The oracle's @Tasks@ behaviour: one body per case, run on both stacks
+-- — IO with real threads and real preemption (where the fork/registration
+-- race bites) and IOSim with the cooperative scheduler (where the same
+-- engine code path is deterministic). The checks live here, not in the
+-- bodies: @?=@ is 'IO'-only, so a body polymorphic in the stack returns a
+-- value and both children judge it by the same assertion.
 tasksTests :: TestTree
 tasksTests =
   testGroup
     "Tasks"
-    [ testCase "abortAll waits until every task has departed" $ do
-        let aborted = runSimOrThrow $ do
-              tasks <- newTasks
-              _ <- spawnTracked tasks (threadDelay 1000000)
-              _ <- spawnTracked tasks (threadDelay 1000000)
-              abortAll tasks
-        aborted @?= 2,
-      testCase "a task that finished on its own is not left in the registry" $ do
-        let aborted = runSimOrThrow $ do
-              tasks <- newTasks
-              _ <- spawnTracked tasks (pure ())
-              threadDelay 1000
-              abortAll tasks
-        aborted @?= 0,
-      testCase "a task arriving after the sweep is aborted on arrival" $ do
-        let ran = runSimOrThrow $ do
-              tasks <- newTasks
-              _ <- abortAll tasks
-              flag <- newTVarIO False
-              _ <- spawnTracked tasks (threadDelay 1000 >> atomically (writeTVar flag True))
-              threadDelay 5000
-              readTVarIO flag
-        ran @?= False,
-      testCase "an empty sweep returns at once" $ do
-        let aborted = runSimOrThrow (newTasks >>= abortAll)
-        aborted @?= 0,
-      testCase "a spawn refused after abort fills its channel instead of hanging" $ do
-        -- Closed-arrival kill lands before the child ever runs (this is
-        -- IO with real preemption, where the race actually bites — under
-        -- IOSim's cooperative scheduling the child runs anyway). Each
-        -- iteration must fill promptly; the per-iteration bound turns a
-        -- lost fill into a failure instead of a hung suite.
+    [ bothStacks "abortAll waits until every task has departed" (@?= 2) taskAbortAllWaits,
+      bothStacksAwaiting "a task that finished on its own is not left in the registry" (@?= 0) taskFinishedNotRegistered,
+      bothStacks "a task arriving after the sweep is aborted on arrival" (@?= False) taskRefusedAfterSweep,
+      bothStacks "an empty sweep returns at once" (@?= 0) taskEmptySweep,
+      ioOnly "a spawn refused after abort fills its channel instead of hanging" "real preemption, not cooperation" $ do
+        -- Closed-arrival kill lands before the child ever runs; each
+        -- iteration must fill promptly, and the per-iteration bound turns
+        -- a lost fill into a failure instead of a hung suite.
         filled <- mapM (\_ -> do
             tasks <- newTasks
             _ <- abortAll tasks
@@ -2367,23 +2487,12 @@ tasksTests =
         case [() | Nothing <- filled] of
           [] -> pure ()
           missing -> fail ("refused spawns left channels empty: " <> show (length missing)),
-      testCase "a task finishing before registration is not swept as aborted" $ do
-        -- A trivial body on a parallel scheduler can depart between the
-        -- fork and the parent's registration. The registration must
-        -- consume that early departure rather than list a dead thread, so
-        -- a later sweep finds nothing to kill and counts nothing aborted.
-        counts <- mapM (\_ -> do
-            tasks <- newTasks
-            _ <- spawnTracked tasks (pure ())
-            -- Let the trivial body depart first: the sweep must find an
-            -- empty registry, not the dead thread, and count nothing.
-            threadDelay 1000
-            abortAll tasks
-          ) [1 .. 200 :: Int]
-        case [count | count <- counts, count /= 0] of
-          [] -> pure ()
-          miscounts -> fail ("dead tasks swept as aborted: " <> show (length miscounts))
+      bothStacksAwaiting "a task finishing before registration is not swept as aborted" checkNoMiscounts taskEarlyFinishNotSwept
     ]
+  where
+    checkNoMiscounts counts = case [count | count <- counts, count /= 0] of
+      [] -> pure ()
+      miscounts -> fail ("dead tasks swept as aborted: " <> show (length miscounts))
 
 -- * Engine-only driver aliases
 

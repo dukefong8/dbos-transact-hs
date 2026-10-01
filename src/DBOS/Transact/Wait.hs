@@ -25,7 +25,7 @@ import Data.Text qualified as Text
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), selectWorkflowStepName, timestampNow)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer, showSeverity)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (Ctx, contextTracer, currentConnection, nextStepId, withSystemDB, workflowId)
@@ -46,7 +46,7 @@ instance LogEvent WaitEvent where
     "replaying select_workflow; the same workflow wins again workflow_id=" <> winner
 
 instance ToLogStr WaitEvent where
-  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
+  toLogStr = toLogStr . renderLine
 
 -- | Wait for the first of a set of workflows to finish, checkpointed as the
 -- @DBOS.selectWorkflow@ step so a replay reads the same winner back. A set

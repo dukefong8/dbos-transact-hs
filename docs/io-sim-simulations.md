@@ -5,9 +5,10 @@
 > sim backend is `test/DBOS/SystemDB/IOSim.hs` (`MockSystemDB` canned,
 > `MemSystemDB` stateful, per-domain mock data in `*SimData`), launched
 > through the src-owned backend-agnostic `launchOn`. Tracing is the
-> `SomeTracer` carrier (ADR-0015/0017): `traceM`-only engine carrier with
-> typed asserts, test-owned say-carrier printing to pane stderr via
-> `printSimTrace` — not stdout, and FastLogger writes stderr too. `say`
+> `SomeTracer` carrier (ADR-0015/0017): the `simTracer` carrier traces each
+> structured event for typed asserts and says its rendered line, printed
+> to pane stderr via `printSimTrace` — not stdout, and FastLogger writes
+> stderr too. `say`
 > strictness and POR/QuickCheck exploration below remain unused.
 
 Goal: run the starter-acceptance flows (W1/W2/Q/E/M) without Postgres or
@@ -200,7 +201,7 @@ pinned via `withReplay` controls checked into the test.
 - [IOG announcement: io-sim (2023-04)][iog-announce]
 - [IntersectMBO/io-sim repo][io-sim-repo] (features, `IOSimPOR` how-to) and [hackage Control.Monad.IOSim][io-sim-hackage] (API pinned above)
 - [ouroboros-network diffusion sim tests][ouroboros-diffusion] (`diffusionSimulationM` generic-monad + injected-tracer pattern; `exploreSimTrace` + replay)
-- Local: `dbos-transact-hs.cabal` (unused `io-sim`/`io-classes` deps), `docs/starter-e2e-gate.md` (W1/W2/Q/E/M contracts to mirror), `docs/bluefin-research-context.md` §18 (Bluefin seam the sim must respect: plain-Haskell internals, capabilities only at the edge)
+- Local: `dbos-transact-hs.cabal` (unused `io-sim`/`io-classes` deps), the recorded starter gate contracts (W1/W2/Q/E/M to mirror), `docs/bluefin-research-context.md` §18 (Bluefin seam the sim must respect: plain-Haskell internals, capabilities only at the edge)
 
 [wt-blog]: https://well-typed.com/blog/2025/10/an-introduction-to-io-sim/
 [elevator-code]: https://github.com/well-typed/verifying-and-testing-with-iosim

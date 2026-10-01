@@ -33,7 +33,7 @@ import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Duration (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), durationAsMillis, timestampNow)
 import DBOS.SystemDB.Types (secondsDuration)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer, showSeverity)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..))
@@ -154,7 +154,7 @@ instance LogEvent WorkflowEvent where
     "the workflow body panicked: no outcome is recorded, and the row stays PENDING for a later executor to recover workflow_id=" <> workflowId
 
 instance ToLogStr WorkflowEvent where
-  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
+  toLogStr = toLogStr . renderLine
 
 -- | Execute or replay one checkpointed operation through the SystemDB
 -- class. The id is allocated from the execution's counter on the explicit

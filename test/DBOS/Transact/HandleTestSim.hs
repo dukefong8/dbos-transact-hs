@@ -21,7 +21,7 @@ module DBOS.Transact.HandleTestSim (tests) where
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim)
 import Data.Text (Text)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracerSay)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (SerializedWorkflowValue (..), WorkflowId (..), WorkflowStatus (..))
 import DBOS.SystemDB.IOSim (simDBOSWith)
 import DBOS.Transact (
@@ -30,7 +30,7 @@ import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 
 simSayDBOS :: IOSim s (DBOS (IOSim s))
-simSayDBOS = simDBOSWith simTracerSay
+simSayDBOS = simDBOSWith simTracer
 
 tests :: TestTree
 tests =

@@ -115,7 +115,7 @@ import Data.Int (Int64)
 import Data.List (sort)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.Transact (SomeTracer, nullTracer)
+import DBOS.Transact (nullTracer)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Hasql.Decoders qualified as Decoders
@@ -166,7 +166,8 @@ tests =
 -- | One backend for the whole group: pools are per-backend, so sharing
 -- bounds connections no matter how many tests run or are interrupted. No
 -- activation here, exactly as before: each case sees an acquired backend,
--- and settings variants wrap the same pool through 'fromPool'.
+-- and settings variants wrap the same pool through 'fromPool'. The
+-- backend's retry and notifier warnings go nowhere: nullTracer.
 acquireSuiteBackend :: IO PostgresSystemDB
 acquireSuiteBackend = do
   config <- configFromEnv
@@ -189,10 +190,6 @@ withBackendSettings getBackend settings action = do
 -- the group stays safe under tasty's parallel runner.
 withBackend :: IO PostgresSystemDB -> (PostgresSystemDB -> IO a) -> IO a
 withBackend getBackend action = getBackend >>= action
-
--- | The backend's retry warnings go nowhere in tests.
-nullLogger :: SomeTracer IO
-nullLogger = nullTracer
 
 -- | A workflow id no other test can hold.
 freshWorkflowId :: IO Text

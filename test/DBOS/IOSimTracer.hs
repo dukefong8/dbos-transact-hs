@@ -1,14 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes        #-}
 
--- | Sim tracing tooling for test trees (no src counterpart): the engine's
--- @traceM@-only carrier, the say-carrier that also prints, and the case
--- runner. Production code never traces through io-sim — the sim backend
--- takes its tracer as a parameter — so these live in test, with the trees
--- that use them.
+-- | Sim tracing tooling for test trees (no src counterpart): the sim
+-- carrier — the structured event plus its rendered line, one event per
+-- call — and the case runner and printer over it. Production code never
+-- traces through io-sim — the sim backend takes its tracer as a parameter
+-- — so these live in test, with the trees that use them.
 module DBOS.IOSimTracer
   ( simTracer,
-    simTracerSay,
     runSimCase,
     printSimTrace,
   )
@@ -20,23 +19,21 @@ import Control.Tracer (mkTracer)
 import Data.Text (unpack)
 import Data.Typeable (Typeable)
 import DBOS.Prelude
-import DBOS.Transact (LogEvent (..), SomeTracer (..), showSeverity)
+import DBOS.Transact (LogEvent (..), SomeTracer (..))
 import System.IO (hPutStrLn, stderr)
 
--- | The simulation carrier traces the structured event itself through
--- io-sim's @traceM@, so simulation runs recover their traces by type
--- with 'selectTraceEventsDynamic' instead of matching strings.
+-- | The simulation carrier does both halves of a sim run: it traces the
+-- structured event itself through io-sim's @traceM@, so cases assert on
+-- events by type with 'selectTraceEventsDynamic' instead of matching
+-- strings, and it says the rendered line, so 'printSimTrace' can show the
+-- announcement inline while the typed assertions keep working. Tracing
+-- and saying share the one call, which is why there is no quiet variant:
+-- a sim that never prints simply never reads the say half back.
 simTracer :: SomeTracer (IOSim s)
-simTracer = SomeTracer (mkTracer traceM)
-
--- | Sim carrier that ALSO says each rendered line: typed assertions keep
--- working through 'selectTraceEventsDynamic' while eval runs can print
--- the same events with 'printTraceEventsSay'.
-simTracerSay :: SomeTracer (IOSim s)
-simTracerSay = SomeTracer (mkTracer emit)
+simTracer = SomeTracer (mkTracer emit)
   where
     emit :: (LogEvent e, Typeable e) => e -> IOSim s ()
-    emit event = traceM event >> say (unpack (showSeverity (eventSeverity event) <> " " <> renderEvent event))
+    emit event = traceM event >> say (unpack (renderLine event))
 
 -- | Print a sim's 'Say' trace to the console's stderr: stderr bypasses
 -- the 'tasty' stdout capture, so announcement lines show on the watcher

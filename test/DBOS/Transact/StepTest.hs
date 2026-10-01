@@ -22,7 +22,7 @@ import DBOS.Transact
     StepOptions (..),
     StepStatus (..),
     WorkflowId (..),
-    acquireFastBackend,
+    acquireLoggerBackend,
     cancellationToken,
     ioTracer,
     nullTracer,
@@ -92,7 +92,7 @@ tests =
           Right _ -> pure ()
         -- The nested run announces through FastLogger, so the run proves
         -- the trace seam as well as the checkpoint it skips.
-        (logger, cleanup) <- acquireFastBackend
+        (logger, cleanup) <- acquireLoggerBackend
         firstContext <- ctxOver backend (ioTracer logger) workflowText
         let innerBody :: Ctx IO -> IO Int
             innerBody _ = pure 7

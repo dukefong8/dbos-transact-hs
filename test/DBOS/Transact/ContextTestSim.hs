@@ -12,7 +12,7 @@ module DBOS.Transact.ContextTestSim (tests) where
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, selectTraceEventsDynamic)
 import Data.Text (Text)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer, simTracerSay)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB.IOSim (simConnectionWith)
 import DBOS.Transact
   ( Connection,
@@ -185,6 +185,6 @@ tests =
   where
     demoTrace :: forall s. IOSim s ()
     demoTrace = do
-      ctx <- withTracer simTracerSay <$> simFixture.fixtureMkCtx "wf-1"
+      ctx <- withTracer simTracer <$> simFixture.fixtureMkCtx "wf-1"
       runTracer (contextTracer ctx) (StepRunning "demo" 0)
       runTracer (contextTracer ctx) (SysdbRetryAttempt "demo-op" 1 0 "demo")

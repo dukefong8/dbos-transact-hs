@@ -13,7 +13,7 @@ import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (NewWorkflow (..), StepRecord (..), Submission (..), WorkflowId (..), millisDuration, newWorkflow, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (acquireFastBackend, ioTracer, nullTracer, sleepPlain, sleepWorkflowStep)
+import DBOS.Transact (acquireLoggerBackend, ioTracer, nullTracer, sleepPlain, sleepWorkflowStep)
 import DBOS.Transact.ContextTest (ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -52,7 +52,7 @@ tests =
             before <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName
             -- The replay announces through FastLogger, so the run proves
             -- the trace seam as well as the wake it waits until.
-            (logger, cleanup) <- acquireFastBackend
+            (logger, cleanup) <- acquireLoggerBackend
             replayContext <- ctxOver backend (ioTracer logger) workflowText
             -- A much longer request still returns at the recorded wake time.
             replayed <- sleepWorkflowStep replayContext (millisDuration 60000)

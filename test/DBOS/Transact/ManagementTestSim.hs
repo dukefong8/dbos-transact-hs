@@ -33,7 +33,7 @@ import DBOS.SystemDB
   )
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (simDBOSWith, simInstance, simLaunchWith)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracerSay)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.Transact.ManagementSimData (mockOutput, mockSerialization)
 import DBOS.Transact
   (
@@ -119,7 +119,7 @@ tests =
               workflowText = "sim-mgmt-cancel-resume"
               workflowId = WorkflowId workflowText
           ref <- registerIntRef dbos key body
-          simLaunchWith simTracerSay dbos
+          simLaunchWith simTracer dbos
           _ <-
             startWfRefSim
               dbos
@@ -151,7 +151,7 @@ tests =
               workflowId = WorkflowId workflowText
               queueName = "sim-mgmt-queue"
           ref <- registerIntRef dbos key body
-          simLaunchWith simTracerSay dbos
+          simLaunchWith simTracer dbos
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           _ <-
             startWfRefSim
@@ -182,7 +182,7 @@ tests =
                 started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
                 pure (fmap handleWorkflowId started)
           _ <- registerTextWorkflow dbos parentKey parentBody
-          simLaunchWith simTracerSay dbos
+          simLaunchWith simTracer dbos
           ran <- runWfSim dbos parentKey parentId (Just (encodeWorkflowValue (0 :: Int)))
           childId <- case ran of
             Left err -> throwIO (userError (show err))
@@ -207,7 +207,7 @@ tests =
               workflowText = "sim-mgmt-delete"
               workflowId = WorkflowId workflowText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracerSay dbos
+          simLaunchWith simTracer dbos
           _ <- runWfSim dbos key workflowId (Just (encodeWorkflowValue (1 :: Int)))
           deleted <- deleteWorkflows dbos [workflowId] True
           handle <- orFail =<< retrieveWfSim dbos workflowId
@@ -227,7 +227,7 @@ tests =
               workflowText = "sim-mgmt-retrieve"
               workflowId = WorkflowId workflowText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracerSay dbos
+          simLaunchWith simTracer dbos
           _ <- runWfSim dbos key workflowId (Just (encodeWorkflowValue (2 :: Int)))
           handle <- orFail =<< retrieveWfSim dbos workflowId
           status <- statusWfSim handle
@@ -252,7 +252,7 @@ tests =
               sourceText = "sim-mgmt-fork-source"
               sourceId = WorkflowId sourceText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracerSay dbos
+          simLaunchWith simTracer dbos
           first <- runWfSim dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           forked <- forkWorkflows dbos [forkNew sourceText] defaultForkOptions
           waited <- waitForWorkflow dbos sourceId
@@ -276,7 +276,7 @@ tests =
               queueName = "sim-mgmt-fork-queue"
               sourceId = WorkflowId sourceText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracerSay dbos
+          simLaunchWith simTracer dbos
           _ <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           _ <- runWfSim dbos key sourceId (Just (encodeWorkflowValue (4 :: Int)))
           forked <-
@@ -306,7 +306,7 @@ tests =
               sourceText = "sim-mgmt-fork-step-source"
               sourceId = WorkflowId sourceText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracerSay dbos
+          simLaunchWith simTracer dbos
           first <- runWfSim dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           forked <- forkFrom dbos [sourceId] (ForkStep 1) defaultForkOptions
           waited <- waitForWorkflow dbos sourceId
@@ -338,13 +338,13 @@ tests =
 -- sim half of the live FastLogger lines.
 demoTrace :: forall s. IOSim s ()
 demoTrace = do
-  runTracer simTracerSay (WorkflowsCancelled 2)
-  runTracer simTracerSay (WorkflowsResumed 3 2)
-  runTracer simTracerSay (WorkflowForked "sim-mgmt-fork-1")
-  runTracer simTracerSay (WorkflowsForked 0)
-  runTracer simTracerSay (WorkflowsDeleted 1)
-  runTracer simTracerSay (WorkflowDelayMoveAsked "sim-mgmt-delayed")
-  runTracer simTracerSay (WorkflowAttributesReplaceAsked "sim-mgmt-attributed")
+  runTracer simTracer (WorkflowsCancelled 2)
+  runTracer simTracer (WorkflowsResumed 3 2)
+  runTracer simTracer (WorkflowForked "sim-mgmt-fork-1")
+  runTracer simTracer (WorkflowsForked 0)
+  runTracer simTracer (WorkflowsDeleted 1)
+  runTracer simTracer (WorkflowDelayMoveAsked "sim-mgmt-delayed")
+  runTracer simTracer (WorkflowAttributesReplaceAsked "sim-mgmt-attributed")
 
 -- * Engine-only driver aliases
 
@@ -379,7 +379,7 @@ registerWfRefSim = registerDBOSWorkflowRef
 -- | A launched sim instance whose engine calls announce through the
 -- say-carrier: the cases' 'ManagementEvent' lines print inline.
 simSayDBOS :: IOSim s (DBOS (IOSim s))
-simSayDBOS = simDBOSWith simTracerSay
+simSayDBOS = simDBOSWith simTracer
 
 -- | Register an @Int -> Int@ body under IOSim, pinning the JSON types the
 -- polymorphic registration cannot infer from a local binding.

@@ -16,7 +16,7 @@ module DBOS.Transact.WaitTestSim (tests) where
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim)
 import Data.Text (Text)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracerSay)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simConnectionWith)
 import DBOS.Transact
@@ -68,7 +68,7 @@ tests =
       testCase "a replayed first-wait reads its recorded winner back" $ do
         (outcome, tr) <- runSimCase $ do
           mem <- newMemDB
-          conn <- memConnectionOn mem simTracerSay
+          conn <- memConnectionOn mem simTracer
           let runOnce = do
                 identity <- nextExecutionIdentity conn
                 state <- newWorkflowState "sim-wait-replay" Nothing identity
@@ -91,7 +91,7 @@ tests =
   where
     simCtx :: Text -> IOSim s (Ctx (IOSim s))
     simCtx name = do
-      conn <- simConnectionWith simTracerSay
+      conn <- simConnectionWith simTracer
       identity <- nextExecutionIdentity conn
       state <- newWorkflowState name Nothing identity
       newCtx conn simIdentity state

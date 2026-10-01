@@ -33,7 +33,7 @@ import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (Ctx, currentConnection, stepId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runWorkflowStepWith, stepOptionsDefault)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer, showSeverity)
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 
 -- | Operator-action events: the management surface's announcements.
 -- Rendered lines keep the Rust @tracing!@ message bodies with their
@@ -75,7 +75,7 @@ instance LogEvent ManagementEvent where
     "asked to replace the workflow's attributes workflow_id=" <> workflowId
 
 instance ToLogStr ManagementEvent where
-  toLogStr event = toLogStr (showSeverity (eventSeverity event) <> " " <> renderEvent event)
+  toLogStr = toLogStr . renderLine
 
 cancelWorkflows :: Monad m => Connection m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflows conn workflowIds cancelChildren = do
