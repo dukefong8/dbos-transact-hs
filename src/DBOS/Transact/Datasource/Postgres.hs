@@ -9,7 +9,8 @@
 -- sequenced between statements shares the commit (ADR-0021 addendum —
 -- @runTransactionAt@ only accepts closed @Tx.Transaction@ bodies, which
 -- an @IO@ body cannot join). Checkpoint statements are hand-written
--- 'Statement' values over the fixed @dbos@ schema (ADR-0011: typedSql
+-- 'Statement' values over the configured schema (default @dbos@; the demo
+-- runs @widget_store@) (ADR-0011: typedSql
 -- sessions do not compose, and here there is no transaction to compose
 -- into — each statement runs via 'txStatement' on the held connection).
 -- Verify-only: tables are checked, never migrated (ADR-0004).
@@ -177,6 +178,16 @@ recordTxStatement schema =
       <> contramap (\(_, _, _, d) -> d) (Encoders.param (Encoders.nonNullable Encoders.bool)))
     (isJust <$> Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.bool)))
 
+-- | Drop a workflow's checkpoints from a step onward: completion cleanup
+-- and rewind, best effort like the oracle — a leftover row is harmless.
+deleteCheckpointsStatement :: Text -> Statement.Statement (Text, Int32) ()
+deleteCheckpointsStatement schema =
+  Statement.preparable
+    ("DELETE FROM " <> quoteIdent schema <> ".transaction_completion WHERE workflow_id = $1 AND function_num >= $2")
+    (contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
+      <> contramap snd (Encoders.param (Encoders.nonNullable Encoders.int4)))
+    Decoders.noResult
+
 -- | Run one session on the held connection, throwing backend failures so
 -- the bracket rolls the attempt back.
 txRunner :: Connection.Connection -> Statement.Statement params result -> params -> IO result
@@ -203,24 +214,17 @@ toDataSource app =
             Nothing -> case output of
               Just text -> Right (Just (RecordedOutput text))
               Nothing -> Right Nothing,
-      dsWithTransaction = \isolation action ->
-        MThrow.bracket acquireConn Connection.release $ \conn -> do
-          began <- Connection.use conn (Session.script (beginSql isolation))
-          case began of
-            Left se -> pure (Left (sessionErr (Pool.SessionUsageError se)))
-            Right () -> do
-              outcome <- MThrow.try (action (Tx (txRunner conn)))
-              case outcome of
-                Left sysErr -> rollbackQuiet conn >> pure (Left (unwrapBackend sysErr))
-                Right value -> do
-                  done <- Connection.use conn (Session.script "COMMIT")
-                  case done of
-                    Left se -> pure (Left (sessionErr (Pool.SessionUsageError se)))
-                    Right () -> pure (Right value),
+      dsWithTransaction = \isolation action -> do
+        attempted <- MThrow.try (transactionAttempt isolation action)
+        pure $ case attempted of
+          Left err -> Left (unwrapBackend err)
+          Right outcome -> outcome,
       dsRecordOutput = \(Tx run) (WorkflowId widText) step text ->
         run (recordTxStatement app.appSchema) (widText, fromIntegral step, text, False),
       dsRecordError = \(Tx run) (WorkflowId widText) step text ->
-        run (recordTxStatement app.appSchema) (widText, fromIntegral step, text, True)
+        run (recordTxStatement app.appSchema) (widText, fromIntegral step, text, True),
+      dsDeleteCheckpoints = \(WorkflowId widText) step ->
+        runAppSession app (Session.statement (widText, fromIntegral step) (deleteCheckpointsStatement app.appSchema))
     }
   where
     acquireConn :: IO Connection.Connection
@@ -238,6 +242,26 @@ toDataSource app =
                 )
             )
         Right conn -> pure conn
+
+    -- | One attempt on a held connection: BEGIN, the body, COMMIT. An
+    -- @Error@ escaping here — a connection that cannot be acquired, say —
+    -- returns as 'Left' so the runner classifies it; @TxConflict@ is not an
+    -- @Error@ and still passes through to the runner's adopt path.
+    transactionAttempt :: forall a. Maybe IsolationLevel -> (Tx IO -> IO a) -> IO (Either BackendError a)
+    transactionAttempt isolation action =
+      MThrow.bracket acquireConn Connection.release $ \conn -> do
+        began <- Connection.use conn (Session.script (beginSql isolation))
+        case began of
+          Left se -> pure (Left (sessionErr (Pool.SessionUsageError se)))
+          Right () -> do
+            outcome <- MThrow.try (action (Tx (txRunner conn)))
+            case outcome of
+              Left sysErr -> rollbackQuiet conn >> pure (Left (unwrapBackend sysErr))
+              Right value -> do
+                done <- Connection.use conn (Session.script "COMMIT")
+                case done of
+                  Left se -> pure (Left (sessionErr (Pool.SessionUsageError se)))
+                  Right () -> pure (Right value)
     rollbackQuiet :: Connection.Connection -> IO ()
     rollbackQuiet conn = do
       _ <- Connection.use conn (Session.script "ROLLBACK")

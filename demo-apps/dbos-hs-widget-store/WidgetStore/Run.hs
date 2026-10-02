@@ -52,6 +52,8 @@ start = do
             -- database.
             configListenQueues = Just []
           }
+  -- The typedSql statements in Store.hs name widget_store directly; this
+  -- schema must stay in step with them.
   app <- acquireAppDataSourceIn "widget_store" config0.configDatabaseUrl 5
   created <- runAppSession app createSchemaSession
   either (die . showText) pure created

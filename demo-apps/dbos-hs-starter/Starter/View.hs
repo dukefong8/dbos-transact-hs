@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE QuasiQuotes       #-}
 
 -- | The starter page, re-rendered through hsx and driven by htmx. The look
 -- is the Rust starter's page byte-for-byte (CSS and the four code panels are
@@ -44,7 +44,6 @@ import Demo.Htmx (hsx)
 import Demo.Http (pageShell)
 import Lucid
 import Starter.Assets (codePanelEvents, codePanelMessages, codePanelQueues, codePanelWorkflows, starterCss)
-import Starter.Assets (codePanelEvents, codePanelMessages, codePanelQueues, codePanelWorkflows, starterCss)
 
 -- * View models
 
@@ -57,7 +56,7 @@ starterMountPath = "/starter"
 -- | The workflows tab's timeline. @wpTaskId = Nothing@ is a page that has not
 -- started a run yet; @wpFinished@ stops the self-poll.
 data WorkflowProgress = WorkflowProgress
-  { wpTaskId :: Maybe Text,
+  { wpTaskId   :: Maybe Text,
     wpLastStep :: Int,
     wpFinished :: Bool
   }
@@ -65,40 +64,40 @@ data WorkflowProgress = WorkflowProgress
 
 data QueueStatus = QueueStatus
   { qsWorkerConcurrency :: Int,
-    qsCounts :: [(Text, Int)]
+    qsCounts            :: [(Text, Int)]
   }
   deriving stock (Eq, Show)
 
 data EventKey = EventKey
-  { ekKey :: Text,
+  { ekKey   :: Text,
     ekValue :: Maybe Text
   }
   deriving stock (Eq, Show)
 
 data EventsStatus = EventsStatus
   { esWorkflowId :: Maybe Text,
-    esKeys :: [EventKey]
+    esKeys       :: [EventKey]
   }
   deriving stock (Eq, Show)
 
 data ReadResult = ReadResult
-  { rrKey :: Text,
-    rrValue :: Maybe Text,
+  { rrKey      :: Text,
+    rrValue    :: Maybe Text,
     rrWaitedMs :: Int
   }
   deriving stock (Eq, Show)
 
 data ApprovalRow = ApprovalRow
   { arWorkflowId :: Text,
-    arDecision :: Maybe Text
+    arDecision   :: Maybe Text
   }
   deriving stock (Eq, Show)
 
 data PageView = PageView
-  { pvTab :: Text,
-    pvQueue :: QueueStatus,
-    pvEvents :: EventsStatus,
-    pvProgress :: WorkflowProgress,
+  { pvTab       :: Text,
+    pvQueue     :: QueueStatus,
+    pvEvents    :: EventsStatus,
+    pvProgress  :: WorkflowProgress,
     pvApprovals :: [ApprovalRow]
   }
   deriving stock (Eq, Show)
@@ -545,7 +544,7 @@ eventKeysView status =
     badge :: EventKey -> Html ()
     badge key = case key.ekValue of
       Just value -> [hsx|<span class="kv-value">{value}</span>|]
-      Nothing -> [hsx|<span class="wf-count-value waiting">WAITING</span>|]
+      Nothing    -> [hsx|<span class="wf-count-value waiting">WAITING</span>|]
 
 readResultView :: ReadResult -> Html ()
 readResultView result =
@@ -558,7 +557,7 @@ readResultView result =
     seconds = Text.pack (show (fromIntegral result.rrWaitedMs / 1000 :: Double))
     body :: Html ()
     body = case result.rrValue of
-      Nothing -> [hsx|<span class="missing">not published</span> after {seconds}s|]
+      Nothing    -> [hsx|<span class="missing">not published</span> after {seconds}s|]
       Just value -> [hsx|<span class="found">{value}</span> after {seconds}s|]
 
 approvalRowsView :: [ApprovalRow] -> Html ()

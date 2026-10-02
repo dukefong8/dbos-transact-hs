@@ -28,10 +28,10 @@ module WidgetStore.Workflows
   )
 where
 
+import Control.Monad.Except (ExceptT (..), runExceptT)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.Prelude
-import Control.Monad.Except (ExceptT (..), runExceptT)
 import DBOS.Transact (Ctx, DataSource, Duration, EngineOnly, Error, IsolationLevel (..), Topic (..), TransactionConfig (..), Tx (..), WorkflowRef, encodeWorkflowValue, millisDuration, recv, runTransaction, secondsDuration, setEvent, sleepWorkflowStep, startChildWorkflow, startOptionsDefault, workflowId)
 import IHP.TypedSql.Id (Id' (..))
 import WidgetStore.Store
@@ -119,14 +119,14 @@ checkoutWorkflow ds dispatchRef () ctx = runExceptT $ do
   onShelf <- ExceptT (runTransaction ds ctx (namedStep "reserve_inventory") (\tx -> Right <$> reserveInventoryTx tx))
   if not onShelf
     then do
-      _ <- ExceptT (runTransaction ds ctx (namedStep "cancel_order") (\tx -> Right <$> setOrderStatusTx orderStatusCancelled orderId tx))
+      ExceptT (runTransaction ds ctx (namedStep "cancel_order") (\tx -> Right <$> setOrderStatusTx orderStatusCancelled orderId tx))
       -- An empty payment id is how the storefront hears "no": it is waiting
       -- on this key, and leaving it unpublished would only make it wait out
       -- its own timeout for an answer that is already known.
-      _ <- ExceptT (setEvent ctx paymentIdEvent ("" :: Text))
+      ExceptT (setEvent ctx paymentIdEvent ("" :: Text))
       pure ()
     else do
-      _ <- ExceptT (setEvent ctx paymentIdEvent wid)
+      ExceptT (setEvent ctx paymentIdEvent wid)
       ExceptT (recv ctx (Just (Topic paymentStatusTopic)) paymentTimeout) >>= \case
         Just status | status == paidStatus -> do
           _ <- ExceptT (runTransaction ds ctx (namedStep "mark_order_paid") (\tx -> Right <$> setOrderStatusTx orderStatusPaid orderId tx))

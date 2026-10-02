@@ -63,6 +63,7 @@ import DBOS.Transact
     Tx (..),
     WorkflowId (..),
     acquireAppDataSource,
+    acquireAppDataSourceIn,
     application,
     beginSql,
     clearDBOSCheckpoints,
@@ -416,6 +417,21 @@ runProbeTx ds iso body =
   let DataSource {dsWithTransaction = withTx} = ds
    in withTx iso body
 
+-- | A probe pool over a scratch schema this case owns, with the checkpoint
+-- table the live delete path writes to. The suite's own schema never has one
+-- (verify refuses), so the case creates and drops it.
+withProbeCheckpointApp :: forall a. (AppDataSource -> IO a) -> IO a
+withProbeCheckpointApp action = do
+  config <- Postgres.configFromEnv
+  schema <- ("ds_ckpt_" <>) . Text.filter (/= '-') <$> uuidWorkflowId
+  app <- acquireAppDataSourceIn schema config.configUrl 2
+  execProbe app ("CREATE SCHEMA " <> schema)
+  execProbe app ("CREATE TABLE " <> schema <> ".transaction_completion (workflow_id text not null, function_num int not null, output text, error text, primary key (workflow_id, function_num))")
+  outcome <- try (action app) :: IO (Either SomeException a)
+  execProbe app ("DROP SCHEMA " <> schema <> " CASCADE")
+  releaseAppDataSource app
+  either throwIO pure outcome
+
 tests :: TestTree
 tests =
   withResource acquireDsBackend Postgres.releasePostgresSystemDB $ \getBackend ->
@@ -528,6 +544,25 @@ tests =
           (first, second, third, fourth, runs) <- scenarioDeleteCheckpoints fx
           (first, second, third, fourth) @?= (Right "v", Right "v", Right "v", Right "v")
           runs @?= 3,
+        -- IO only: the live binding's delete path, over a scratch schema so
+        -- the case owns its checkpoint table.
+        testCase "deleting from a step drops later checkpoints on the live datasource" $ do
+          backend <- getBackend
+          wfId <- (("ds-live-del-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
+          withProbeCheckpointApp $ \app -> do
+            let ds = toDataSource app
+                expected = RecordedOutput (encodeWorkflowValue ("v" :: Text)).serializedText
+            ctx <- dsCtxOver backend wfId
+            first <- runTransaction ds ctx protoConfig (\_ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
+            second <- runTransaction ds ctx protoConfig (\_ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
+            (first, second) @?= (Right "v", Right "v")
+            ds.dsCheck (WorkflowId wfId) 0 >>= (@?= Right (Just expected))
+            ds.dsCheck (WorkflowId wfId) 1 >>= (@?= Right (Just expected))
+            ds.dsDeleteCheckpoints (WorkflowId wfId) 1 >>= (@?= Right ())
+            ds.dsCheck (WorkflowId wfId) 0 >>= (@?= Right (Just expected))
+            ds.dsCheck (WorkflowId wfId) 1 >>= (@?= Right Nothing)
+            ds.dsDeleteCheckpoints (WorkflowId wfId) 0 >>= (@?= Right ())
+            ds.dsCheck (WorkflowId wfId) 0 >>= (@?= Right Nothing),
         testCase "the datasource registry refuses duplicates and clears checkpoints" $ do
           backend <- getBackend
           dbos <- newDBOS (configNew "ds-registry" "postgres://unused")
