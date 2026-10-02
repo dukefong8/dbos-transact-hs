@@ -155,7 +155,7 @@ createWidgetSchema app tables = do
           [ "CREATE SCHEMA " <> q <> "; ",
             "CREATE TABLE " <> q <> ".orders (order_id SERIAL PRIMARY KEY, order_status INTEGER NOT NULL, progress_remaining INTEGER NOT NULL DEFAULT 3); ",
             "CREATE TABLE " <> q <> ".products (product_id SERIAL PRIMARY KEY, inventory INTEGER NOT NULL); ",
-            "CREATE TABLE " <> q <> ".transaction_completion (workflow_id TEXT NOT NULL, function_num INT NOT NULL, output TEXT, error TEXT, PRIMARY KEY (workflow_id, function_num)); ",
+            "CREATE TABLE " <> q <> ".transaction_completion (workflow_id TEXT NOT NULL, step_name TEXT NOT NULL, function_num INT NOT NULL, output TEXT, error TEXT, PRIMARY KEY (workflow_id, function_num)); ",
             "INSERT INTO " <> q <> ".products (product_id, inventory) VALUES (1, 5);"
           ]
   either (fail . show) pure created

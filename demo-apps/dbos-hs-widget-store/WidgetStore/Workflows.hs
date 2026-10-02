@@ -129,19 +129,17 @@ checkoutWorkflow ds dispatchRef () ctx = runExceptT $ do
       ExceptT (setEvent ctx paymentIdEvent wid)
       ExceptT (recv ctx (Just (Topic paymentStatusTopic)) paymentTimeout) >>= \case
         Just status | status == paidStatus -> do
-          _ <- ExceptT (runTransaction ds ctx (namedStep "mark_order_paid") (\tx -> Right <$> setOrderStatusTx orderStatusPaid orderId tx))
+          ExceptT (runTransaction ds ctx (namedStep "mark_order_paid") (\tx -> Right <$> setOrderStatusTx orderStatusPaid orderId tx))
           -- A child workflow, started and not awaited: dispatching takes ten
           -- seconds and the buyer should not be kept waiting for it.
           _ <- ExceptT (startChildWorkflow ctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
-          _ <- ExceptT (setEvent ctx orderIdEvent (Text.pack (show orderId)))
-          pure ()
+          ExceptT (setEvent ctx orderIdEvent (Text.pack (show orderId)))
         _ -> do
           -- Refused, or nobody answered before the deadline: the widget
           -- goes back on the shelf.
-          _ <- ExceptT (runTransaction ds ctx (namedStep "undo_reserve_inventory") (\tx -> Right <$> undoReserveTx tx))
-          _ <- ExceptT (runTransaction ds ctx (namedStep "cancel_order") (\tx -> Right <$> setOrderStatusTx orderStatusCancelled orderId tx))
-          _ <- ExceptT (setEvent ctx orderIdEvent (Text.pack (show orderId)))
-          pure ()
+          ExceptT (runTransaction ds ctx (namedStep "undo_reserve_inventory") (\tx -> Right <$> undoReserveTx tx))
+          ExceptT (runTransaction ds ctx (namedStep "cancel_order") (\tx -> Right <$> setOrderStatusTx orderStatusCancelled orderId tx))
+          ExceptT (setEvent ctx orderIdEvent (Text.pack (show orderId)))
 
 -- | Walks a paid order to the buyer, one tick a second, and marks it
 -- dispatched at the end. @sleepWorkflowStep@ is durable, so the ticks

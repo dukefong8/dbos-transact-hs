@@ -30,10 +30,13 @@ VALUES (1, 'Premium Quality Widget',
 ON CONFLICT (product_id) DO NOTHING;
 
 -- The transactional-step checkpoint table. Its shape is fixed by the oracles
--- (Python SQLAlchemyDatasource, TypeScript KnexDataSource): the step's output
--- and error are recorded in the same transaction as the application writes.
+-- (Python SQLAlchemyDatasource, TypeScript KnexDataSource): the step's name,
+-- output and error are recorded in the same transaction as the application
+-- writes, and the name is checked on replay so a reordered or renamed
+-- transaction is refused (DBOSUnexpectedStepError) rather than replayed.
 CREATE TABLE IF NOT EXISTS widget_store.transaction_completion (
     workflow_id TEXT NOT NULL,
+    step_name TEXT NOT NULL,
     function_num INT NOT NULL,
     output TEXT,
     error TEXT,

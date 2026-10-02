@@ -98,3 +98,30 @@ test, and correctness (exactly-once must be achievable, not just drawable):
   the interface does not grow.
 
 Recorded 2026-10-02.
+
+## Addendum: the transaction replay name check (2026-10-02)
+
+The `transaction_completion` row originally held only `(workflow_id,
+function_num, output, error)`, so a transaction that moved to another step slot
+(a reordered, inserted, or renamed step between executions) replayed the old
+row silently — the failure mode that made a reordered `checkoutWorkflow`
+return SUCCESS while its paid write never ran.
+
+All three oracles guard this: their transactions go through
+`operation_outputs`, and replay compares the recorded `function_name` against
+the call's name (TS `runInternalStep`, `DBOSUnexpectedStepError`; Rust
+`check_step_on`). The port keeps its separate seam but now matches that guard:
+
+- `transaction_completion` gains `step_name TEXT NOT NULL`; the demo schema
+  and its `createSchemaSession` migration (`ADD COLUMN IF NOT EXISTS`) carry
+  it, along with the test scratch schemas.
+- `DataSource` gains `dsStepName`, and `dsCheck`/`dsRecordOutput`/
+  `dsRecordError` take the step name.
+- `runTransaction` compares the recorded name before replaying a row and
+  raises the same `UnexpectedStep {expected, recorded}` the
+  `operation_outputs` path already raises. A missing name (a row staged by
+  hand) adopts, as the missing-owner rule does.
+
+This is additive to Python's schema (which records transactions as steps and
+so has no such column); the port documents it here rather than diverging
+silently. Recorded 2026-10-02.

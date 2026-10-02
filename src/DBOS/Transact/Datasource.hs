@@ -37,8 +37,6 @@ where
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
 import Control.Monad.Class.MonadThrow qualified as MThrow
-import Control.Monad.Class.MonadTime (MonadTime)
-import Control.Monad.Class.MonadTimer (MonadDelay)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text, pack)
@@ -84,9 +82,10 @@ transactionConfigDefault =
       txIsolation = Nothing
     }
 
--- | A recorded checkpoint: the absence of a row is 'Nothing' at the call
--- site, so this names only the two recorded shapes. Mirrors the oracles'
--- @{output}|{error}@ row.
+-- | A recorded checkpoint. Mirrors the oracles' @{output}|{error}@ row,
+-- plus the step name the oracles keep in @function_name@ so a reordered or
+-- renamed step is refused instead of replayed (their
+-- @DBOSUnexpectedStepError@ / @UnexpectedStep@).
 data RecordedOutcome
   = RecordedOutput Text
   | RecordedError Text
@@ -110,7 +109,7 @@ newtype Tx m = Tx { txStatement :: forall p r. Statement.Statement p r -> p -> m
 data DataSource m = DataSource
   { dsName :: Text,
     dsSchema :: Text,
-    dsCheck :: WorkflowId -> Int -> m (Either BackendError (Maybe RecordedOutcome)),
+    dsCheck :: WorkflowId -> Text -> Int -> m (Either BackendError (Maybe RecordedOutcome)),
     dsWithTransaction :: forall a. Maybe IsolationLevel -> (Tx m -> m a) -> m (Either BackendError a),
     -- | Checkpoint write inside the transaction: 'True' means the row was
     -- written, 'False' means another execution already holds it (adopt
@@ -118,10 +117,13 @@ data DataSource m = DataSource
     -- application's own tables is its failure, not a conflict).
     -- Transport failures throw rather than return 'Left', so a failed
     -- write always aborts the attempt it rode in on.
-    dsRecordOutput :: Tx m -> WorkflowId -> Int -> Text -> m Bool,
+    dsRecordOutput :: Tx m -> WorkflowId -> Text -> Int -> Text -> m Bool,
     -- | Failure checkpoint, same commit as the output write: a body
     -- failure records rather than escapes, so replay returns it as itself.
-    dsRecordError :: Tx m -> WorkflowId -> Int -> Text -> m Bool,
+    dsRecordError :: Tx m -> WorkflowId -> Text -> Int -> Text -> m Bool,
+    -- | The step name a row holds: the replay name check, the transaction
+    -- counterpart of @operation_outputs.function_name@.
+    dsStepName :: WorkflowId -> Int -> m (Either BackendError (Maybe Text)),
     -- | Delete checkpoints from a step onward: completion cleanup and
     -- rewind. Best effort like the oracle — a leftover row is harmless.
     dsDeleteCheckpoints :: WorkflowId -> Int -> m (Either BackendError ())
@@ -149,20 +151,20 @@ instance LogEvent TransactionEvent where
   eventSeverity TransactionConflictAdopted {}    = SeverityDebug
   eventSeverity TransactionOwnershipLost {}     = SeverityWarning
   eventSeverity TransactionSerializationRetry {} = SeverityWarning
-  renderEvent (TransactionRunning workflowId name stepId') =
-    "running transaction step " <> name <> " (" <> showText stepId' <> ") workflow_id=" <> workflowId
-  renderEvent (TransactionReplaying workflowId name stepId') =
-    "replaying recorded transaction step " <> name <> " (" <> showText stepId' <> ") workflow_id=" <> workflowId
-  renderEvent (TransactionOutputRecorded workflowId name stepId') =
-    "the transaction committed; its output is recorded step_name=" <> name <> " step_id=" <> showText stepId' <> " workflow_id=" <> workflowId
-  renderEvent (TransactionErrorRecorded workflowId name stepId') =
-    "the transaction body failed; its error is recorded step_name=" <> name <> " step_id=" <> showText stepId' <> " workflow_id=" <> workflowId
-  renderEvent (TransactionConflictAdopted workflowId name stepId') =
-    "another execution recorded this step first; adopting its outcome step_name=" <> name <> " step_id=" <> showText stepId' <> " workflow_id=" <> workflowId
-  renderEvent (TransactionOwnershipLost workflowId owner) =
-    "the workflow is owned by another executor; stopping without recording workflow_id=" <> workflowId <> " owner=" <> owner
-  renderEvent (TransactionSerializationRetry workflowId name stepId' attempt backoffMs detail) =
-    "the transaction hit a retriable failure and will be retried step_name=" <> name <> " step_id=" <> showText stepId' <> " workflow_id=" <> workflowId <> " attempt=" <> showText attempt <> " backoff_ms=" <> showText backoffMs <> " error=" <> detail
+  renderEvent (TransactionRunning workflowText name stepId') =
+    "running transaction step " <> name <> " (" <> showText stepId' <> ") workflow_id=" <> workflowText
+  renderEvent (TransactionReplaying workflowText name stepId') =
+    "replaying recorded transaction step " <> name <> " (" <> showText stepId' <> ") workflow_id=" <> workflowText
+  renderEvent (TransactionOutputRecorded workflowText name stepId') =
+    "the transaction committed; its output is recorded step_name=" <> name <> " step_id=" <> showText stepId' <> " workflow_id=" <> workflowText
+  renderEvent (TransactionErrorRecorded workflowText name stepId') =
+    "the transaction body failed; its error is recorded step_name=" <> name <> " step_id=" <> showText stepId' <> " workflow_id=" <> workflowText
+  renderEvent (TransactionConflictAdopted workflowText name stepId') =
+    "another execution recorded this step first; adopting its outcome step_name=" <> name <> " step_id=" <> showText stepId' <> " workflow_id=" <> workflowText
+  renderEvent (TransactionOwnershipLost workflowText owner) =
+    "the workflow is owned by another executor; stopping without recording workflow_id=" <> workflowText <> " owner=" <> owner
+  renderEvent (TransactionSerializationRetry workflowText name stepId' attempt backoffMs detail) =
+    "the transaction hit a retriable failure and will be retried step_name=" <> name <> " step_id=" <> showText stepId' <> " workflow_id=" <> workflowText <> " attempt=" <> showText attempt <> " backoff_ms=" <> showText backoffMs <> " error=" <> detail
 
 instance ToLogStr TransactionEvent where
   toLogStr = toLogStr . renderLine
@@ -183,13 +185,22 @@ runTransaction ds ctx config body
       stepId <- nextStepId ctx
       let wid = WorkflowId (workflowId ctx)
           tracer = contextTracer ctx
+          DataSource {dsStepName = nameAt} = ds
       runTracer tracer (TransactionRunning (workflowId ctx) stepName stepId)
       prechecked <- checkWithRetry ds tracer wid stepName stepId
       case prechecked of
         Left err -> pure (Left (controlErr err))
         Right (Just recorded) -> do
-          runTracer tracer (TransactionReplaying (workflowId ctx) stepName stepId)
-          pure (replayRecorded stepName recorded)
+          -- A row can hold a different step: the body's step allocation is
+          -- part of the workflow's durable state, and a reordered or renamed
+          -- transaction must not replay another step's outcome.
+          recordedName <- nameAt wid stepId
+          case recordedName of
+            Left err -> pure (Left (controlErr err))
+            Right (Just other) | other /= stepName -> pure (Left (unexpectedTransaction wid stepName stepId other))
+            _ -> do
+              runTracer tracer (TransactionReplaying (workflowId ctx) stepName stepId)
+              pure (replayRecorded stepName recorded)
         Right Nothing -> attemptTransaction ds ctx config.txIsolation body tracer wid stepName stepId 1 initialBackoffMs
 
 -- | Pre-check with the oracle's retry: a transient read failure backs off
@@ -198,10 +209,10 @@ runTransaction ds ctx config body
 checkWithRetry :: (MonadSTM m, MonadDelay m) => DataSource m -> SomeTracer m -> WorkflowId -> Text -> Int -> m (Either BackendError (Maybe RecordedOutcome))
 checkWithRetry ds tracer wid stepName stepId = loop 1 initialBackoffMs
   where
-    DataSource {dsCheck = check} = ds
+    DataSource {dsCheck = checkStep} = ds
     WorkflowId widText = wid
     loop n waitMs = do
-      found <- check wid stepId
+      found <- checkStep wid stepName stepId
       case found of
         Left err
           | isRetriable err -> do
@@ -214,7 +225,7 @@ checkWithRetry ds tracer wid stepName stepId = loop 1 initialBackoffMs
 -- | One attempt: body plus checkpoint insert in a single transaction. A
 -- held checkpoint throws 'TxConflict' to roll the attempt's application
 -- writes back; transport failures surface as 'Left' through the adapter.
-attemptTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> Maybe IsolationLevel -> (Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
+attemptTransaction :: forall a e m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> Maybe IsolationLevel -> (Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
 attemptTransaction ds ctx isolation body tracer wid stepName stepId n waitMs = do
   let DataSource {dsWithTransaction = withTx} = ds
       DataSource {dsRecordOutput = recordOutput} = ds
@@ -224,10 +235,10 @@ attemptTransaction ds ctx isolation body tracer wid stepName stepId n waitMs = d
       bodyOutcome <- body tx
       case bodyOutcome of
         Left err -> do
-          wrote <- recordError tx wid stepId (encodeErrorText err)
+          wrote <- recordError tx wid stepName stepId (encodeErrorText err)
           if wrote then pure (Left err) else MThrow.throwIO TxConflict
         Right value -> do
-          wrote <- recordOutput tx wid stepId (encodeWorkflowValue value).serializedText
+          wrote <- recordOutput tx wid stepName stepId (encodeWorkflowValue value).serializedText
           if wrote then pure (Right value) else MThrow.throwIO TxConflict)
   case outcome of
     Left TxConflict -> adoptTransaction ds ctx tracer wid stepName stepId
@@ -304,7 +315,21 @@ ownershipMoved (WorkflowId widText) owner =
 data TxConflict = TxConflict
   deriving stock (Eq, Show)
 
-instance Exception TxConflict
+instance MThrow.Exception TxConflict
+
+-- | A registered checkpoint whose step name is not the call's: the
+-- workflow changed shape between executions. Mirrors the oracle's
+-- @UnexpectedStep@ and the name check @operation_outputs@ already applies.
+unexpectedTransaction :: WorkflowId -> Text -> Int -> Text -> Error e
+unexpectedTransaction (WorkflowId widText) expected stepId recorded =
+  ErrorSystemDatabase
+    ( SystemDBError.UnexpectedStep
+        { workflowId = widText
+        , stepId = stepId
+        , expected = expected
+        , recorded = recorded
+        }
+    )
 
 -- | The recorded outcome of a transaction, replayed without entering the
 -- body. Values decode as results; recorded failures decode back to
@@ -358,7 +383,7 @@ maxBackoffMs = 2000.0
 -- (mirrors the oracle running plainly outside workflows). Backend
 -- failures surface as 'Left'; anything else the body throws propagates.
 runTransactionOutside :: (MonadDelay m, MonadCatch m) => DataSource m -> TransactionConfig -> (Tx m -> m a) -> m (Either BackendError a)
-runTransactionOutside ds config body = loop 1 initialBackoffMs
+runTransactionOutside ds config body = loop (1 :: Int) initialBackoffMs
   where
     DataSource {dsWithTransaction = withTx} = ds
     loop n waitMs = do

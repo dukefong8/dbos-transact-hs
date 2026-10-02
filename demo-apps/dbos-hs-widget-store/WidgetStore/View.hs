@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE QuasiQuotes       #-}
 
 -- | The storefront's views, rendered with hsx and driven by htmx v4
 -- (the Playground/hs stack). The markup keeps the Rust port's
@@ -26,12 +26,12 @@ module WidgetStore.View
   )
 where
 
-import DBOS.Prelude
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Lucid
+import DBOS.Prelude
 import Demo.Htmx (hsx)
 import Demo.Http (pageShell)
+import Lucid
 import WidgetStore.Store
 
 -- | Where 'Starter.Route'-style mounting puts this app's routes and where
@@ -43,15 +43,15 @@ widgetMountPath = "/widget-store"
 -- | What the index page renders: the product, the orders list, and the fresh
 -- idempotency key the Buy button posts under.
 data StorePage = StorePage
-  { storePageKey :: Text,
+  { storePageKey     :: Text,
     storePageProduct :: Product,
-    storePageOrders :: [Order]
+    storePageOrders  :: [Order]
   }
   deriving stock (Eq, Show)
 
 -- | The middle panel's store view.
 data StorePanel = StorePanel
-  { storePanelKey :: Text,
+  { storePanelKey     :: Text,
     storePanelProduct :: Product
   }
   deriving stock (Eq, Show)

@@ -109,6 +109,7 @@ data DsFixture m = DsFixture
 data FakeDs m = FakeDs
   { fakeSource :: DataSource m,
     fakeRows :: StrictTVar m (Map (Text, Int) RecordedOutcome),
+    fakeNames :: StrictTVar m (Map (Text, Int) Text),
     fakeRuns :: StrictTVar m Int,
     fakeTransients :: StrictTVar m Int,
     fakeConflictOnce :: StrictTVar m Bool
@@ -128,6 +129,7 @@ transientError =
 mkFakeDs :: MonadSTM m => m (FakeDs m)
 mkFakeDs = do
   rows <- newTVarIO Map.empty
+  names <- newTVarIO Map.empty
   runs <- newTVarIO 0
   transients <- newTVarIO 0
   conflict <- newTVarIO False
@@ -136,7 +138,7 @@ mkFakeDs = do
         DataSource
           { dsName = "test-app-db",
             dsSchema = "dbos",
-            dsCheck = \wid step -> do
+            dsCheck = \wid _name step -> do
               pending <- readTVarIO transients
               if pending > 0
                 then atomically (modifyTVar transients (subtract 1)) >> pure (Left transientError)
@@ -146,8 +148,9 @@ mkFakeDs = do
               if pending > 0
                 then atomically (modifyTVar transients (subtract 1)) >> pure (Left transientError)
                 else Right <$> action fakeTx,
-            dsRecordOutput = \_tx wid step output -> atomically $ do
+            dsRecordOutput = \_tx wid name step output -> atomically $ do
               existing <- readTVar rows
+              priorNames <- readTVar names
               winner <- readTVar conflict
               case Map.lookup (widText wid, step) existing of
                 Just _ -> pure False
@@ -155,21 +158,28 @@ mkFakeDs = do
                   | winner -> do
                       writeTVar conflict False
                       writeTVar rows (Map.insert (widText wid, step) (RecordedOutput (encodeWorkflowValue ("winner" :: Text)).serializedText) existing)
+                      writeTVar names (Map.insert (widText wid, step) name priorNames)
                       pure False
                   | otherwise -> do
                       writeTVar rows (Map.insert (widText wid, step) (RecordedOutput output) existing)
+                      writeTVar names (Map.insert (widText wid, step) name priorNames)
                       pure True,
-            dsRecordError = \_tx wid step message -> atomically $ do
+            dsRecordError = \_tx wid name step message -> atomically $ do
               existing <- readTVar rows
+              priorNames <- readTVar names
               case Map.lookup (widText wid, step) existing of
                 Just _ -> pure False
-                Nothing -> writeTVar rows (Map.insert (widText wid, step) (RecordedError message) existing) >> pure True,
+                Nothing -> do
+                  writeTVar rows (Map.insert (widText wid, step) (RecordedError message) existing)
+                  writeTVar names (Map.insert (widText wid, step) name priorNames)
+                  pure True,
+            dsStepName = \wid step -> Right . Map.lookup (widText wid, step) <$> readTVarIO names,
             dsDeleteCheckpoints = \wid step -> atomically $ do
               existing <- readTVar rows
               writeTVar rows (Map.filterWithKey (\(w, s) _ -> not (w == widText wid && s >= step)) existing)
               pure (Right ())
           }
-  pure (FakeDs source rows runs transients conflict)
+  pure (FakeDs source rows names runs transients conflict)
 
 protoConfig :: TransactionConfig
 protoConfig = TransactionConfig {txName = Just "proto_step", txIsolation = Just ReadCommitted}
@@ -426,7 +436,7 @@ withProbeCheckpointApp action = do
   schema <- ("ds_ckpt_" <>) . Text.filter (/= '-') <$> uuidWorkflowId
   app <- acquireAppDataSourceIn schema config.configUrl 2
   execProbe app ("CREATE SCHEMA " <> schema)
-  execProbe app ("CREATE TABLE " <> schema <> ".transaction_completion (workflow_id text not null, function_num int not null, output text, error text, primary key (workflow_id, function_num))")
+  execProbe app ("CREATE TABLE " <> schema <> ".transaction_completion (workflow_id text not null, step_name text not null, function_num int not null, output text, error text, primary key (workflow_id, function_num))")
   outcome <- try (action app) :: IO (Either SomeException a)
   execProbe app ("DROP SCHEMA " <> schema <> " CASCADE")
   releaseAppDataSource app
@@ -556,13 +566,34 @@ tests =
             first <- runTransaction ds ctx protoConfig (\_ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
             second <- runTransaction ds ctx protoConfig (\_ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
             (first, second) @?= (Right "v", Right "v")
-            ds.dsCheck (WorkflowId wfId) 0 >>= (@?= Right (Just expected))
-            ds.dsCheck (WorkflowId wfId) 1 >>= (@?= Right (Just expected))
+            ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right (Just expected))
+            ds.dsCheck (WorkflowId wfId) "proto_step" 1 >>= (@?= Right (Just expected))
             ds.dsDeleteCheckpoints (WorkflowId wfId) 1 >>= (@?= Right ())
-            ds.dsCheck (WorkflowId wfId) 0 >>= (@?= Right (Just expected))
-            ds.dsCheck (WorkflowId wfId) 1 >>= (@?= Right Nothing)
+            ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right (Just expected))
+            ds.dsCheck (WorkflowId wfId) "proto_step" 1 >>= (@?= Right Nothing)
             ds.dsDeleteCheckpoints (WorkflowId wfId) 0 >>= (@?= Right ())
-            ds.dsCheck (WorkflowId wfId) 0 >>= (@?= Right Nothing),
+            ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right Nothing),
+        -- IO only: the live binding, over a scratch checkpoint table.
+        testCase "a transaction recorded under another name at the same step is refused" $ do
+          backend <- getBackend
+          wfId <- (("ds-live-name-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
+          withProbeCheckpointApp $ \app -> do
+            let ds = toDataSource app
+                first = TransactionConfig {txName = Just "first_step", txIsolation = Just ReadCommitted}
+                second = TransactionConfig {txName = Just "second_step", txIsolation = Just ReadCommitted}
+            ctx1 <- dsCtxOver backend wfId
+            written <- runTransaction ds ctx1 first (\_ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
+            written @?= Right "v"
+            -- A reordered or renamed body reaches the same step slot under a
+            -- different name: replay must refuse instead of returning "v".
+            ctx2 <- dsCtxOver backend wfId
+            replayed <- runTransaction ds ctx2 second (\_ -> pure (Right ("changed" :: Text))) :: IO (Either (Error EngineOnly) Text)
+            case replayed of
+              Left (ErrorSystemDatabase (SysDB.UnexpectedStep {stepId = recordedStep, expected = want, recorded = got})) -> do
+                recordedStep @?= 0
+                want @?= "second_step"
+                got @?= "first_step"
+              other -> assertFailure ("expected the recorded name to be refused, got: " <> show other),
         testCase "the datasource registry refuses duplicates and clears checkpoints" $ do
           backend <- getBackend
           dbos <- newDBOS (configNew "ds-registry" "postgres://unused")

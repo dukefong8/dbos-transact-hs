@@ -84,10 +84,11 @@ mkWidgetDs =
   DataSource
     { dsName = "widget-db",
       dsSchema = "dbos",
-      dsCheck = \_ _ -> pure (Right Nothing),
+      dsCheck = \_ _ _ -> pure (Right Nothing),
       dsWithTransaction = \_ action -> Right <$> action (Tx (\_ _ -> error "widget fake: statements unsupported")),
-      dsRecordOutput = \_ _ _ _ -> pure True,
-      dsRecordError = \_ _ _ _ -> pure True,
+      dsRecordOutput = \_ _ _ _ _ -> pure True,
+      dsRecordError = \_ _ _ _ _ -> pure True,
+      dsStepName = \_ _ -> pure (Right Nothing),
       dsDeleteCheckpoints = \_ _ -> pure (Right ())
     }
 

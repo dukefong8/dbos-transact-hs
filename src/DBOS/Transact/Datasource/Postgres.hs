@@ -165,17 +165,27 @@ checkTxStatement schema =
       <> contramap snd (Encoders.param (Encoders.nonNullable Encoders.int4)))
     (Decoders.rowMaybe ((,) <$> Decoders.column (Decoders.nullable Decoders.text) <*> Decoders.column (Decoders.nullable Decoders.text)))
 
+-- | The step name a row holds, without its output: the replay name check.
+nameTxStatement :: Text -> Statement.Statement (Text, Int32) (Maybe Text)
+nameTxStatement schema =
+  Statement.preparable
+    ("SELECT step_name FROM " <> quoteIdent schema <> ".transaction_completion WHERE workflow_id = $1 AND function_num = $2")
+    (contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
+      <> contramap snd (Encoders.param (Encoders.nonNullable Encoders.int4)))
+    (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.text)))
+
 -- | The checkpoint write: a held row reports absence (adopt it), never a
 -- unique violation (a violation from the application's own tables is its
 -- failure, not a conflict).
-recordTxStatement :: Text -> Statement.Statement (Text, Int32, Text, Bool) Bool
+recordTxStatement :: Text -> Statement.Statement (Text, Text, Int32, Text, Bool) Bool
 recordTxStatement schema =
   Statement.preparable
-    ("INSERT INTO " <> quoteIdent schema <> ".transaction_completion (workflow_id, function_num, output, error) VALUES ($1, $2, CASE WHEN $4 THEN NULL ELSE $3 END, CASE WHEN $4 THEN $3 ELSE NULL END) ON CONFLICT (workflow_id, function_num) DO NOTHING RETURNING TRUE")
-    (contramap (\(a, _, _, _) -> a) (Encoders.param (Encoders.nonNullable Encoders.text))
-      <> contramap (\(_, b, _, _) -> b) (Encoders.param (Encoders.nonNullable Encoders.int4))
-      <> contramap (\(_, _, c, _) -> c) (Encoders.param (Encoders.nonNullable Encoders.text))
-      <> contramap (\(_, _, _, d) -> d) (Encoders.param (Encoders.nonNullable Encoders.bool)))
+    ("INSERT INTO " <> quoteIdent schema <> ".transaction_completion (workflow_id, step_name, function_num, output, error) VALUES ($1, $2, $3, CASE WHEN $5 THEN NULL ELSE $4 END, CASE WHEN $5 THEN $4 ELSE NULL END) ON CONFLICT (workflow_id, function_num) DO NOTHING RETURNING TRUE")
+    (contramap (\(a, _, _, _, _) -> a) (Encoders.param (Encoders.nonNullable Encoders.text))
+      <> contramap (\(_, b, _, _, _) -> b) (Encoders.param (Encoders.nonNullable Encoders.text))
+      <> contramap (\(_, _, c, _, _) -> c) (Encoders.param (Encoders.nonNullable Encoders.int4))
+      <> contramap (\(_, _, _, d, _) -> d) (Encoders.param (Encoders.nonNullable Encoders.text))
+      <> contramap (\(_, _, _, _, e) -> e) (Encoders.param (Encoders.nonNullable Encoders.bool)))
     (isJust <$> Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.bool)))
 
 -- | Drop a workflow's checkpoints from a step onward: completion cleanup
@@ -204,7 +214,7 @@ toDataSource app =
   DataSource
     { dsName = "app-db",
       dsSchema = app.appSchema,
-      dsCheck = \(WorkflowId widText) step -> do
+      dsCheck = \(WorkflowId widText) _name step -> do
         found <- runAppSession app (Session.statement (widText, fromIntegral step) (checkTxStatement app.appSchema))
         pure $ case found of
           Left err -> Left err
@@ -219,10 +229,12 @@ toDataSource app =
         pure $ case attempted of
           Left err -> Left (unwrapBackend err)
           Right outcome -> outcome,
-      dsRecordOutput = \(Tx run) (WorkflowId widText) step text ->
-        run (recordTxStatement app.appSchema) (widText, fromIntegral step, text, False),
-      dsRecordError = \(Tx run) (WorkflowId widText) step text ->
-        run (recordTxStatement app.appSchema) (widText, fromIntegral step, text, True),
+      dsStepName = \(WorkflowId widText) step ->
+        runAppSession app (Session.statement (widText, fromIntegral step) (nameTxStatement app.appSchema)),
+      dsRecordOutput = \(Tx run) (WorkflowId widText) name step text ->
+        run (recordTxStatement app.appSchema) (widText, name, fromIntegral step, text, False),
+      dsRecordError = \(Tx run) (WorkflowId widText) name step text ->
+        run (recordTxStatement app.appSchema) (widText, name, fromIntegral step, text, True),
       dsDeleteCheckpoints = \(WorkflowId widText) step ->
         runAppSession app (Session.statement (widText, fromIntegral step) (deleteCheckpointsStatement app.appSchema))
     }

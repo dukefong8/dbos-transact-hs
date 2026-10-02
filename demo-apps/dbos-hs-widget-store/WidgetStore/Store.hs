@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE QuasiQuotes       #-}
+{-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE TypeFamilies      #-}
 
 -- Orphans by design: the PrimaryKey instances for the app's own tables
 -- belong beside those tables, not in the type family's module.
@@ -60,12 +60,12 @@ module WidgetStore.Store
 where
 
 import Control.Monad (void)
-import DBOS.Prelude
 import Data.Aeson (ToJSON (..), object, (.=))
 import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import DBOS.Prelude
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import IHP.TypedSql.Hasql (sqlExecTypedStatement, sqlQueryTypedStatement, typedSql)
@@ -128,19 +128,19 @@ type OrderRow =
 
 -- | The product, as the storefront displays it (store.rs @Product@).
 data Product = Product
-  { productId :: Int,
-    productName :: Text,
+  { productId          :: Int,
+    productName        :: Text,
     productDescription :: Text,
-    productInventory :: Int,
-    productPrice :: Double
+    productInventory   :: Int,
+    productPrice       :: Double
   }
   deriving stock (Eq, Show)
 
 -- | An order, as the orders list displays it (store.rs @Order@).
 data Order = Order
-  { orderId :: Int,
-    orderStatus :: Int,
-    orderLastUpdateTime :: Text,
+  { orderId                :: Int,
+    orderStatus            :: Int,
+    orderLastUpdateTime    :: Text,
     orderProgressRemaining :: Int
   }
   deriving stock (Eq, Show)
@@ -198,7 +198,14 @@ schemaSql = Text.pack $(do
 
 -- | Create the demo schema idempotently. Run once at startup, before launch.
 createSchemaSession :: Session.Session ()
-createSchemaSession = Session.script schemaSql
+createSchemaSession = Session.script (schemaSql <> migrationSql)
+
+-- | Bring a table created before @step_name@ existed up to date. Additive and
+-- idempotent, the way the oracles' data-source migrations are.
+migrationSql :: Text
+migrationSql =
+  "ALTER TABLE IF EXISTS widget_store.transaction_completion "
+    <> "ADD COLUMN IF NOT EXISTS step_name TEXT NOT NULL DEFAULT '';"
 
 -- * Statements (store.rs queries)
 
