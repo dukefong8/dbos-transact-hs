@@ -15,13 +15,16 @@ import Data.Text (Text)
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
+    Change (..),
     Debounce (..),
+    Error (..),
     DebounceRequest (..),
     EncodedValue (..),
     EventRecord (..),
     Fork (..),
     ForkOptions (..),
     ForkPoint (..),
+    NewQueue (..),
     NewSchedule (..),
     NewWorkflow (..),
     NotificationRecord (..),
@@ -41,7 +44,8 @@ import DBOS.SystemDB
     StreamRecord (..),
     Submission (..),
     SystemDB (..),
-    Timestamp,
+    Timestamp (..),
+    Topic (..),
     VersionInfo (..),
     WorkflowDelay (..),
     WorkflowFilter (..),
@@ -57,6 +61,7 @@ import DBOS.SystemDB
     defaultWorkflowFilter,
     forkNew,
     message,
+    millisDuration,
     newQueue,
     newSchedule,
     newWorkflow,
@@ -64,7 +69,7 @@ import DBOS.SystemDB
     timestampFromEpochMs,
     zeroRowCounts,
   )
-import DBOS.SystemDB.IOSim (MockSystemDB (..))
+import DBOS.SystemDB.IOSim (MockSystemDB (..), MemSystemDB, newMemDB)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -80,7 +85,8 @@ tests =
       versionTests,
       queueTests,
       scheduleTests,
-      lifecycleTests
+      lifecycleTests,
+      memTests
     ]
 
 -- * Helpers
@@ -90,6 +96,10 @@ backend = MockSystemDB
 
 run :: (forall s. IOSim s a) -> a
 run = runSimOrThrow
+
+-- | The same runner for test bodies written as IO do-blocks.
+runMem :: (forall s. IOSim s a) -> IO a
+runMem action = pure (runSimOrThrow action)
 
 at :: Timestamp
 at = timestampFromEpochMs 1000
@@ -363,3 +373,120 @@ lifecycleTests =
       testCase "close runs under IOSim" $ do
         run (close backend) @?= ()
     ]
+
+-- * MemSystemDB: the stateful sim backend's own subsystems
+
+-- | The stateful 'MemSystemDB' is what the shared workflow scenarios run
+-- over; these cases pin the subsystems step 4 implemented — queue claims
+-- and their budgets, the delayed and recovery transitions, message
+-- wakeups, events, schedules, and versions — so the sim semantics the
+-- engine relies on are asserted here rather than assumed.
+memTests :: TestTree
+memTests =
+  testGroup
+    "MemSystemDB (stateful)"
+    [ testCase "a queue claim flips an enqueued row and honors worker concurrency" $ do
+        (first, second, row) <- runMem $ do
+          mem <- newMemDB
+          _ <- upsertQueue mem (newQueue "q") {newQueueWorkerConcurrency = Just 1} UpdateExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-q") {newWorkflowQueueName = Just "q"}) Nothing Fresh Nothing
+          queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "q"
+          first <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0
+          second <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0
+          row <- orJustSim "the claimed row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-q")
+          pure (first, second, row)
+        first @?= [WorkflowId "wf-q"]
+        second @?= []
+        row.workflowRecordStatus @?= Pending,
+      testCase "a delayed row whose instant passed transitions to enqueued" $ do
+        (before, moved, after) <- runMem $ do
+          mem <- newMemDB
+          _ <- initWorkflow mem ((newWorkflow "wf-d") {newWorkflowQueueName = Just "q", newWorkflowDelay = Just (millisDuration 1)}) Nothing Fresh Nothing
+          _ <- setWorkflowDelay mem (WorkflowId "wf-d") (DelayUntil (Timestamp 0)) Nothing
+          before <- orJustSim "the delayed row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-d")
+          moved <- orFailSim =<< transitionDelayedWorkflows mem
+          after <- orJustSim "the transitioned row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-d")
+          pure (before, moved, after)
+        before.workflowRecordStatus @?= Delayed
+        moved @?= 1
+        after.workflowRecordStatus @?= Enqueued,
+      testCase "recovery re-enqueues the named executor's pending rows" $ do
+        (recovered, row) <- runMem $ do
+          mem <- newMemDB
+          _ <- initWorkflow mem ((newWorkflow "wf-r") {newWorkflowExecutorId = Just "exec-1", newWorkflowApplicationVersion = Just "v1"}) Nothing Fresh Nothing
+          recovered <- orFailSim =<< reenqueueForRecovery mem ["exec-1"] "v1" "recovery-q"
+          row <- orJustSim "the recovered row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-r")
+          pure (recovered, row)
+        recovered @?= [WorkflowId "wf-r"]
+        row.workflowRecordStatus @?= Enqueued
+        row.workflowRecordQueueName @?= Just "recovery-q",
+      testCase "a send wakes a parked recv" $ do
+        result <- runMem $ do
+          mem <- newMemDB
+          received <- newEmptyMVar
+          _ <- forkIO (recv mem (WorkflowId "wf-m") 0 0 (Just "topic") (secondsDuration 10) >>= putMVar received)
+          threadDelay 1000
+          _ <- sendMessage mem (message (WorkflowId "wf-m") (SerializedWorkflowValue "\"v\"" Nothing)) {sendTopic = Just (Topic "topic")} (Just "rust_serde") Nothing False
+          takeMVar received
+        result @?= Right (Just (EncodedValue "\"v\"" (Just "rust_serde"))),
+      testCase "a recv with nothing parked records the timeout as absence" $ do
+        result <- runMem $ do
+          mem <- newMemDB
+          recv mem (WorkflowId "wf-m") 0 0 (Just "quiet") (millisDuration 5)
+        result @?= Right Nothing,
+      testCase "an event published after a getEvent parks is delivered" $ do
+        result <- runMem $ do
+          mem <- newMemDB
+          received <- newEmptyMVar
+          _ <- forkIO (getEvent mem (WorkflowId "wf-e") "key" (secondsDuration 10) Nothing >>= putMVar received)
+          threadDelay 1000
+          _ <- setEvent mem (WorkflowId "wf-e") 0 "key" "\"v\"" (Just "rust_serde")
+          takeMVar received
+        result @?= Right (Just (EncodedValue "\"v\"" (Just "rust_serde"))),
+      testCase "a schedule round-trips through create, update, and delete" $ do
+        (created, found, paused, gone) <- runMem $ do
+          mem <- newMemDB
+          created <- createSchedule mem (newSchedule "s" "wf" "* * * * *") Nothing
+          _ <- updateSchedule mem "s" defaultScheduleUpdate {scheduleUpdateExpression = Set "0 * * * *"} Nothing
+          found <- orFailSim =<< getSchedule mem "s" Nothing
+          _ <- setScheduleStatus mem "s" Paused Nothing
+          paused <- orFailSim =<< getSchedule mem "s" Nothing
+          _ <- deleteSchedule mem "s" Nothing
+          gone <- orFailSim =<< getSchedule mem "s" Nothing
+          pure (created, found, paused, gone)
+        created @?= Right ()
+        case found of
+          Just record -> record.scheduleRecordExpression @?= "0 * * * *"
+          Nothing -> fail "the schedule was not stored"
+        case paused of
+          Just record -> record.scheduleRecordStatus @?= Paused
+          Nothing -> fail "the paused schedule vanished"
+        gone @?= Nothing,
+      testCase "the latest version is the newest registered" $ do
+        result <- runMem $ do
+          mem <- newMemDB
+          _ <- createApplicationVersion mem "v1" Nothing
+          _ <- updateApplicationVersionTimestamp mem "v1" (Timestamp 0) Nothing
+          _ <- createApplicationVersion mem "v2" Nothing
+          orFailSim =<< getLatestApplicationVersion mem Nothing
+        case result of
+          Just version -> version.versionInfoName @?= "v2"
+          Nothing -> fail "no version was reported",
+      testCase "awaitFirstWorkflowId settles on a recorded outcome" $ do
+        result <- runMem $ do
+          mem <- newMemDB
+          _ <- initWorkflow mem (newWorkflow "wf-a") Nothing Fresh Nothing
+          _ <- recordWorkflowOutcome mem (WorkflowId "wf-a") (OutcomeOutput (Just "\"v\""))
+          awaitFirstWorkflowId mem [WorkflowId "wf-a"] (secondsDuration 1)
+        result @?= Right (WorkflowId "wf-a")
+    ]
+
+-- | Unwrap a backend answer inside the simulation, failing the case with
+-- the error's rendering.
+orFailSim :: Show e => Either e a -> IOSim s a
+orFailSim = either (throwIO . userError . show) pure
+
+-- | Unwrap an optional value inside the simulation, failing the case with
+-- the given description when it is absent.
+orJustSim :: String -> Maybe a -> IOSim s a
+orJustSim what = maybe (throwIO (userError ("missing: " <> what))) pure

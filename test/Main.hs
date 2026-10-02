@@ -9,79 +9,79 @@ import DBOS.SystemDB.PostgresTest qualified as SystemDBPostgres
 import DBOS.SystemDB.RetryTest qualified as SystemDBRetry
 import DBOS.SystemDB.TypesTest qualified as SystemDBTypes
 import DBOS.TracerTest qualified as Tracer
-import DBOS.Transact.CheckpointTest qualified as TransactCheckpoint
-import DBOS.Transact.ClientTest qualified as TransactClient
-import DBOS.Transact.ConfigTest qualified as TransactConfig
-import DBOS.Transact.ContextTest qualified as TransactContext
-import DBOS.Transact.ContextTestSim qualified as TransactContextSim
-import DBOS.Transact.DeadlinesTest qualified as TransactDeadlines
-import DBOS.Transact.ErrorTest qualified as TransactError
-import DBOS.Transact.EventTest qualified as TransactEvent
-import DBOS.Transact.HandleTest qualified as TransactHandle
-import DBOS.Transact.HandleTestSim qualified as TransactHandleSim
-import DBOS.Transact.IdentityTest qualified as TransactIdentity
-import DBOS.Transact.InstanceTest qualified as TransactInstance
-import DBOS.Transact.ManagementTest qualified as TransactManagement
-import DBOS.Transact.ManagementTestSim qualified as TransactManagementSim
-import DBOS.Transact.MessageTest qualified as TransactMessage
-import DBOS.Transact.MessageTestSim qualified as TransactMessageSim
-import DBOS.Transact.QueueTest qualified as TransactQueue
-import DBOS.Transact.RegistryTest qualified as TransactRegistry
-import DBOS.Transact.SelectTest qualified as TransactSelect
-import DBOS.Transact.SerializationTest qualified as TransactSerialization
-import DBOS.Transact.SimTest qualified as TransactSim
-import DBOS.Transact.SleepTest qualified as TransactSleep
-import DBOS.Transact.SleepTestSim qualified as TransactSleepSim
-import DBOS.Transact.StepRetryTest qualified as TransactStepRetry
-import DBOS.Transact.StepTest qualified as TransactStep
-import DBOS.Transact.StepTestSim qualified as TransactStepSim
-import DBOS.Transact.WaitTest qualified as TransactWait
-import DBOS.Transact.WaitTestSim qualified as TransactWaitSim
-import DBOS.Transact.WorkflowTest qualified as TransactWorkflow
-import DBOS.Transact.WorkflowTestSim qualified as TransactWorkflowSim
+import DBOS.Transact.CheckpointTest qualified as CheckpointTest
+import DBOS.Transact.ClientTest qualified as ClientTest
+import DBOS.Transact.ConfigTest qualified as ConfigTest
+import DBOS.Transact.ContextTest qualified as ContextTest
+import DBOS.Transact.ContextTestSim qualified as ContextSim
+import DBOS.Transact.DeadlinesTest qualified as DeadlinesTest
+import DBOS.Transact.ErrorTest qualified as ErrorTest
+import DBOS.Transact.EventTest qualified as EventTest
+import DBOS.Transact.HandleTest qualified as HandleTest
+import DBOS.Transact.HandleTestSim qualified as HandleSim
+import DBOS.Transact.IdentityTest qualified as IdentityTest
+import DBOS.Transact.InstanceTest qualified as InstanceTest
+import DBOS.Transact.ManagementTest qualified as ManagementTest
+import DBOS.Transact.ManagementTestSim qualified as ManagementSim
+import DBOS.Transact.MessageTest qualified as MessageTest
+import DBOS.Transact.MessageTestSim qualified as MessageSim
+import DBOS.Transact.QueueTest qualified as QueueTest
+import DBOS.Transact.RegistryTest qualified as RegistryTest
+import DBOS.Transact.SelectTest qualified as SelectTest
+import DBOS.Transact.SerializationTest qualified as SerializationTest
+import DBOS.Transact.SimTest qualified as SimTest
+import DBOS.Transact.SleepTest qualified as SleepTest
+import DBOS.Transact.SleepTestSim qualified as SleepSim
+import DBOS.Transact.StepRetryTest qualified as StepRetryTest
+import DBOS.Transact.StepTest qualified as StepTest
+import DBOS.Transact.StepTestSim qualified as StepSim
+import DBOS.Transact.WaitTest qualified as WaitTest
+import DBOS.Transact.WaitTestSim qualified as WaitSim
+import DBOS.Transact.WorkflowTest qualified as WorkflowTest
+import DBOS.Transact.WorkflowTestSim qualified as WorkflowSim
 import System.IO.Silently (capture)
 import Test.Tasty (TestTree, defaultIngredients, defaultMain, testGroup)
 import Test.Tasty.Ingredients (tryIngredients)
 import Test.Tasty.Options (OptionSet)
 
---- $> tasty DBOS.SystemDB.ErrorTest.tests
---- $> tasty DBOS.SystemDB.IOSimTest.tests
---- $> tasty DBOS.SystemDB.NotifierTest.tests
---- $> tasty DBOS.SystemDB.NotifyTest.tests
---- $> tasty DBOS.SystemDB.PostgresTest.tests
---- $> tasty DBOS.SystemDB.RetryTest.tests
---- $> tasty DBOS.SystemDB.TypesTest.tests
---- $> tasty DBOS.TracerTest.tests
---- $> tasty DBOS.Transact.CheckpointTest.tests
---- $> tasty DBOS.Transact.ClientTest.tests
---- $> tasty DBOS.Transact.ConfigTest.tests
---- $> tasty DBOS.Transact.ContextTest.tests
---- $> tasty TransactContextSim.tests
---- $> tasty TransactHandleSim.tests
---- $> tasty DBOS.Transact.DeadlinesTest.tests
---- $> tasty DBOS.Transact.ErrorTest.tests
---- $> tasty DBOS.Transact.EventTest.tests
---- $> tasty DBOS.Transact.HandleTest.tests
---- $> tasty DBOS.Transact.IdentityTest.tests
---- $> tasty DBOS.Transact.InstanceTest.tests
---- $> tasty DBOS.Transact.ManagementTest.tests
---- $> tasty TransactManagementSim.tests
---- $> tasty DBOS.Transact.MessageTest.tests
---- $> tasty TransactMessageSim.tests
---- $> tasty DBOS.Transact.QueueTest.tests
---- $> tasty DBOS.Transact.RegistryTest.tests
---- $> tasty DBOS.Transact.SelectTest.tests
---- $> tasty DBOS.Transact.SerializationTest.tests
---- $> tasty DBOS.Transact.SimTest.tests
---- $> tasty DBOS.Transact.SleepTest.tests
---- $> tasty TransactSleepSim.tests
---- $> tasty DBOS.Transact.StepRetryTest.tests
---- $> tasty DBOS.Transact.StepTest.tests
---- $> tasty TransactStepSim.tests
---- $> tasty DBOS.Transact.WaitTest.tests
---- $> tasty TransactWaitSim.tests
--- $> tasty DBOS.Transact.WorkflowTest.tests
---- $> tasty TransactWorkflowSim.tests
+--- $> tasty SystemDBError.tests
+--- $> tasty SystemDBIOSim.tests
+--- $> tasty SystemDBNotifier.tests
+--- $> tasty SystemDBNotify.tests
+--- $> tasty SystemDBPostgres.tests
+--- $> tasty SystemDBRetry.tests
+--- $> tasty SystemDBTypes.tests
+--- $> tasty Tracer.tests
+--- $> tasty CheckpointTest.tests
+--- $> tasty ClientTest.tests
+--- $> tasty ConfigTest.tests
+--- $> tasty ContextTest.tests
+--- $> tasty ContextSim.tests
+--- $> tasty DeadlinesTest.tests
+--- $> tasty ErrorTest.tests
+--- $> tasty EventTest.tests
+--- $> tasty HandleTest.tests
+--- $> tasty HandleSim.tests
+--- $> tasty IdentityTest.tests
+--- $> tasty InstanceTest.tests
+--- $> tasty ManagementTest.tests
+--- $> tasty ManagementSim.tests
+--- $> tasty MessageTest.tests
+--- $> tasty MessageSim.tests
+--- $> tasty QueueTest.tests
+--- $> tasty RegistryTest.tests
+--- $> tasty SelectTest.tests
+--- $> tasty SerializationTest.tests
+--- $> tasty SimTest.tests
+--- $> tasty SleepTest.tests
+--- $> tasty SleepSim.tests
+--- $> tasty StepRetryTest.tests
+--- $> tasty StepTest.tests
+--- $> tasty StepSim.tests
+--- $> tasty WaitTest.tests
+--- $> tasty WaitSim.tests
+-- $> tasty WorkflowTest.tests
+-- $> tasty WorkflowSim.tests
 main :: IO ()
 main = defaultMain tests
 
@@ -121,27 +121,27 @@ tests =
     , SystemDBRetry.tests
     , SystemDBTypes.tests
     , Tracer.tests
-    , TransactCheckpoint.tests
-    , TransactClient.tests
-    , TransactConfig.tests
-    , TransactContext.tests
-    , TransactDeadlines.tests
-    , TransactError.tests
-    , TransactEvent.tests
-    , TransactHandle.tests
-    , TransactIdentity.tests
-    , TransactInstance.tests
-    , TransactManagement.tests
-    , TransactMessage.tests
-    , TransactQueue.tests
-    , TransactRegistry.tests
-    , TransactSelect.tests
-    , TransactSerialization.tests
-    , TransactSleep.tests
-    , TransactStep.tests
-    , TransactStepRetry.tests
-    , TransactWait.tests
-    , TransactWorkflow.tests
+    , CheckpointTest.tests
+    , ClientTest.tests
+    , ConfigTest.tests
+    , ContextTest.tests
+    , DeadlinesTest.tests
+    , ErrorTest.tests
+    , EventTest.tests
+    , HandleTest.tests
+    , IdentityTest.tests
+    , InstanceTest.tests
+    , ManagementTest.tests
+    , MessageTest.tests
+    , QueueTest.tests
+    , RegistryTest.tests
+    , SelectTest.tests
+    , SerializationTest.tests
+    , SleepTest.tests
+    , StepTest.tests
+    , StepRetryTest.tests
+    , WaitTest.tests
+    , WorkflowTest.tests
     ]
 
 -- | Sim-backed trees for the watcher eval only: never add these to 'tests'
@@ -149,13 +149,13 @@ tests =
 -- above resolves the @-- $>@ toggle without going redundant.
 simTests :: [TestTree]
 simTests =
-  [ TransactSim.tests
-  , TransactContextSim.tests
-  , TransactHandleSim.tests
-  , TransactManagementSim.tests
-  , TransactMessageSim.tests
-  , TransactSleepSim.tests
-  , TransactStepSim.tests
-  , TransactWaitSim.tests
-  , TransactWorkflowSim.tests
+  [ SimTest.tests
+  , ContextSim.tests
+  , HandleSim.tests
+  , ManagementSim.tests
+  , MessageSim.tests
+  , SleepSim.tests
+  , StepSim.tests
+  , WaitSim.tests
+  , WorkflowSim.tests
   ]

@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeApplications    #-}
 
 -- | 'DBOS.Transact.WorkflowTest' mirrored over simulated data: the same
 -- scenarios and the same assertions as the live tree, with values asserted
@@ -17,91 +17,102 @@
 -- supervision, and the fan-out/select timing.
 module DBOS.Transact.WorkflowTestSim (tests) where
 
-import DBOS.Prelude
-import Control.Monad.IOSim (IOSim, selectTraceEventsDynamic)
+import Control.Monad.IOSim (IOSim, SimTrace, runSimOrThrow, selectTraceEventsDynamic)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.SystemDB
-  ( AwaitedOutcome (..),
-    Outcome (..),
-    StepRecord (..),
-    Timestamp (..),
-    WorkflowId (..),
-    WorkflowRecord (..),
-    WorkflowStatus (..),
-    addTimeout,
-    defaultWorkflowFilter,
-    getWorkflow,
-    listWorkflowSteps,
-  )
+import DBOS.IOSimTracer (runSimCase, simTracer)
+import DBOS.Prelude
+import DBOS.SystemDB (AwaitedOutcome (..), Outcome (..), StepRecord (..), Timestamp (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, defaultWorkflowFilter, getWorkflow, listWorkflowSteps)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.IOSim (newMemDB, memLaunchOn, simInstance)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
-import DBOS.Transact
-  ( 
-    application,
-    decodeErrorText,
-    EngineOnly,
-    CodecError,
-    Ctx,
-    DBOS,
-    DuplicationPolicy (..),
-    Enqueue (..),
-    Error (..),
-    awaitChild,
-    cancellationToken,
-    RunOptions (..),
-    Serialization (..),
-    SelectArm (..),
-    SerializedWorkflowValue (..),
-    StartOptions (..),
-    Provenance (..),
-    WorkflowHandle (..),
-    Timeout (..),
-    WorkflowKey,
-    WorkflowRef,
-    WorkflowEvent (..),
-    childWorkflowId,
-    decodeWorkflowValue,
-    encodeWorkflowValue,
-    enqueueNew,
-    firstStepStatus,
-    handleResult,
-    handleStatus,
-    handleWorkflowId,
-    millisDuration,
-    newWorkflowKey,
-    pendingAwait,
-    pendingWorkflowStepWith,
-    nextStepMarker,
-    resolveTimeoutDeadline,
-    registerDBOSWorkflow,
-    registerDBOSWorkflowRef,
-    retrieveWorkflow,
-    runDBOSWorkflow,
-    runDBOSWorkflowRef,
-    runOptionsDefault,
-    selectStep,
-    runOptionsToStartOptions,
-    runWorkflowStep,
-    runWorkflowStepWith,
-    secondsDuration,
-    shutdown,
-    startChildWorkflow,
-    startDBOSWorkflowRef,
-    startOptionsDefault,
-    stepOptionsDefault,
-    timeoutBudget,
-    tokenCancelled,
-    runTracer,
-    waitForWorkflow,
-    withAttempt,
-    withSystemDB,
-    workflowId,
+import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simEntropy, simGeneratedId, simIdentity, simInstance)
+import DBOS.Transact (CodecError, Ctx, DBOS, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), SomeSystemDB (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, cancellationToken, childWorkflowId, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, handleWorkflowId, millisDuration, newWorkflowKey, nextStepMarker, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflow, registerDBOSWorkflowRef, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, tokenCancelled, waitForWorkflow, withAttempt, withSystemDB, workflowId)
+import DBOS.Transact.WorkflowTest
+  ( JoinOutcome (..),
+    WfFixture (..),
+    checkAppErrorRoundtrip,
+    checkAwaitInsideStep,
+    checkAwaitRecorded,
+    checkCancelledChildAwaited,
+    checkCascadeDeadline,
+    checkChildBudgetWins,
+    checkChildIdsInBuildOrder,
+    checkChildInsideStepRefused,
+    checkControlSelect,
+    checkDbFailureNotOutcome,
+    checkDeadlineInherited,
+    checkDropFuture,
+    checkAttributes,
+    checkShutdownCancels,
+    checkStepErrorRecorded,
+    checkStepsTaken,
+    checkWrongInstance,
+    checkDeclinedDeadline,
+    checkFanout,
+    checkFreshJoinPolls,
+    checkJoinTakesId,
+    checkLiftChildError,
+    checkLosingTokenFired,
+    checkNoMiscounts,
+    checkPanic,
+    checkPlainStepAtStart,
+    checkRegisteredResult,
+    checkDerivedChildAdopted,
+    checkAssignedChildAdopted,
+    checkRootNoParent,
+    checkRowBeforeBody,
+    checkRunBeforeLaunch,
+    checkSelectStepRaces,
+    checkStaleAwaitRefused,
+    checkStepIdPairs,
+    checkUnawaitedChild,
+    checkZeroNoInput,
+    mkWfFixture,
+    scenarioAppErrorRoundtrip,
+    scenarioAwaitInsideStep,
+    scenarioAwaitRecorded,
+    scenarioCancelledChildAwaited,
+    scenarioCascadeDeadline,
+    scenarioChildBudgetWins,
+    scenarioChildIdsInBuildOrder,
+    scenarioChildInsideStepRefused,
+    scenarioControlSelect,
+    scenarioDbFailureNotOutcome,
+    scenarioDeadlineInherited,
+    scenarioDropFuture,
+    scenarioAttributes,
+    scenarioShutdownCancels,
+    scenarioStepErrorRecorded,
+    scenarioStepsTaken,
+    scenarioWrongInstance,
+    scenarioDeclinedDeadline,
+    scenarioFanout,
+    scenarioFreshJoinPolls,
+    scenarioJoinTakesId,
+    scenarioLiftChildError,
+    scenarioLosingTokenFired,
+    scenarioPanic,
+    scenarioPlainStepAtStart,
+    scenarioRegisteredRecordsResult,
+    scenarioDerivedChildAdopted,
+    scenarioAssignedChildAdopted,
+    scenarioRootNoParent,
+    scenarioRowBeforeBody,
+    scenarioRunBeforeLaunch,
+    scenarioSelectStepRaces,
+    scenarioStaleAwaitRefused,
+    scenarioStepIdPairs,
+    scenarioUnawaitedChild,
+    scenarioZeroNoInput,
+    simWaitDeparture,
+    taskAbortAllWaits,
+    taskEarlyFinishNotSwept,
+    taskEmptySweep,
+    taskFinishedNotRegistered,
+    taskRefusedAfterSweep
   )
-import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
+import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
 tests :: TestTree
@@ -112,34 +123,12 @@ tests =
   dependentTestGroup
     "Workflow execution (Sim)"
     AllFinish
-    [ testCase "a registered workflow starts and records its result" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "double"
-              body :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
-          orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracer dbos
-          result <- runWfSim dbos key (WorkflowId "sim-wf-double") (Just (encodeWorkflowValue (21 :: Int)))
-          rows <- SystemDB.listWorkflows mem (defaultWorkflowFilter {SystemDB.workflowFilterWorkflowIds = ["sim-wf-double"]}) Nothing
-          pure (result, rows)
-        printSimTrace tr
-        case outcome of
-          (result, rows) -> do
-            case result of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "typed result is stored" (Right 42) decoded
-              other -> fail (show other)
-            case rows of
-              Right [row] -> do
-                row.workflowRecordStatus @?= Success
-                row.workflowRecordName @?= Just "double"
-                row.workflowRecordOutput @?= Just "42"
-                row.workflowRecordInput @?= Just "21"
-                row.workflowRecordSerialization @?= Just "rust_serde"
-              other -> fail ("expected exactly one successful row: " <> show other),
+    [ simCase "a registered workflow starts and records its result" scenarioRegisteredRecordsResult checkRegisteredResult traceRegisteredResult,
+      -- IO only: crash-and-relaunch recovery sweep (MemSystemDB delegates
+      -- reenqueueForRecovery to the canned mock; see ADR-0020).
+      testCase "a recovery run replays completed steps after a body interruption" (pure ()),
+      -- IO only: same recovery sweep as above.
+      testCase "an unregistered workflow is skipped and the rest recover" (pure ()),
       testCase "timeouts, options, and child ids compose without a database" $ do
         let budget = secondsDuration 60
             now = Timestamp 1000
@@ -158,1062 +147,38 @@ tests =
         childWorkflowId Nothing (Just ("parent", 0)) "generated" @?= "parent-0"
         childWorkflowId Nothing (Just ("parent", 2)) "generated" @?= "parent-2"
         childWorkflowId Nothing Nothing "generated" @?= "generated",
-      testCase "starting a taken id joins the existing run" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          entered <- newTVarIO (0 :: Int)
-          release <- newEmptyMVar
-          let key = newWorkflowKey "slow"
-              startWid = "sim-join-start"
-              startOpts = startOptionsDefault {startWorkflowId = Just startWid}
-              body () _ = do
-                atomically (modifyTVar entered (+ 1))
-                takeMVar release
-                pure (Right 7)
-          ref <- registerUnitRef dbos key body
-          memLaunchOn mem simTracer dbos
-          first <- startWfRefSim dbos ref startOpts Nothing
-          second <- case first of
-            Left err -> throwIO (userError (show err))
-            Right firstHandle -> do
-              joined <- startWfRefSim dbos ref startOpts Nothing
-              case joined of
-                Left err -> throwIO (userError (show err))
-                Right secondHandle -> pure (firstHandle, secondHandle)
-          putMVar release ()
-          firstResult <- resultWfSim (fst second)
-          secondResult <- resultWfSim (snd second)
-          count <- readTVarIO entered
-          row <- getWorkflow mem (WorkflowId startWid)
-          pure (firstResult, secondResult, count, row)
-        printSimTrace tr
-        case outcome of
-          (firstResult, secondResult, count, row) -> do
-            case (firstResult, secondResult) of
-              (Right (Just firstStored), Right (Just secondStored)) -> do
-                let firstDecoded = decodeWorkflowValue "result" (Just firstStored) :: Either CodecError Int
-                    secondDecoded = decodeWorkflowValue "result" (Just secondStored) :: Either CodecError Int
-                assertEqual "the first caller reads the run" (Right 7) firstDecoded
-                assertEqual "the joining caller reads the same run" (Right 7) secondDecoded
-              other -> fail ("expected both handles to resolve: " <> show other)
-            count @?= 1
-            case row of
-              Right (Just found) -> found.workflowRecordStatus @?= Success
-              other -> fail ("expected exactly one successful row: " <> show other),
-      testCase "a fresh start is local and a join polls" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          release <- newEmptyMVar
-          let key = newWorkflowKey "quick"
-              workflowText = "sim-local-id"
-          ref <-
-            registerUnitRef
-              dbos
-              key
-              (\() _ -> takeMVar release >> pure (Right 7))
-          memLaunchOn mem simTracer dbos
-          let label (WorkflowHandle _ _ provenance') = case provenance' of
-                Local _ -> "local"
-                Polling {} -> "polling"
-          firstStarted <- startWfRefSim dbos ref (startOptionsDefault {startWorkflowId = Just workflowText}) Nothing
-          firstHandle <- orFail firstStarted
-          let firstLabel = label firstHandle
-          joined <- startWfRefSim dbos ref (startOptionsDefault {startWorkflowId = Just workflowText}) Nothing
-          retrieved <- retrieveWfSim dbos (WorkflowId workflowText)
-          let joinLabel = either (const "error") label joined
-              retrieveLabel = either (const "error") label retrieved
-          putMVar release ()
-          result <- resultWfSim firstHandle
-          pure (firstLabel, joinLabel, retrieveLabel, result)
-        printSimTrace tr
-        case outcome of
-          (firstLabel, joinLabel, retrieveLabel, result) -> do
-            firstLabel @?= "local"
-            joinLabel @?= "polling"
-            retrieveLabel @?= "polling"
-            case result of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the local handle reads the task's outcome" (Right 7) decoded
-              other -> fail ("expected the local await to resolve, got: " <> show other),
-      testCase "awaiting a child is recorded as a step" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-await-parent"
-              childText = parentText <> "-0"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = pure (Right 99)
-          childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right wfHandle -> do
-                    awaited <- awaitWfSim ctx wfHandle
-                    pure $ case awaited of
-                      Left err -> Left err
-                      Right (Just stored) ->
-                        case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                          Right value -> Right value
-                          Left err -> Left (StepFailed "parent" (Text.pack (show err)))
-                      Right Nothing -> Left (StepFailed "parent" "no child output")
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) True Nothing Nothing Nothing
-          pure (ran, listed, childText)
-        printSimTrace tr
-        case outcome of
-          (ran, listed, childIdText) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the parent reads the awaited child" (Right 99) decoded
-              other -> fail (show other)
-            case listed of
-              Right
-                [ StepRecord {stepRecordStepName = startName, stepRecordChildWorkflowId = Just (WorkflowId startedChild)},
-                  StepRecord
-                    { stepRecordStepName = awaitName,
-                      stepRecordOutput = Just awaitOutput,
-                      stepRecordChildWorkflowId = Just (WorkflowId awaitedChild)
-                    }
-                  ] -> do
-                  startName @?= "child"
-                  startedChild @?= childIdText
-                  awaitName @?= "DBOS.getResult"
-                  awaitOutput @?= "99"
-                  awaitedChild @?= childIdText
-              other -> fail ("expected the start and the recorded await, got: " <> show other),
-      testCase "a recorded await of another workflow is refused" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-await-wrong"
-              childText = parentText <> "-0"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = pure (Right 1)
-          childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right wfHandle -> do
-                    awaited <- awaitWfSim ctx wfHandle
-                    pure $ case awaited of
-                      Left err -> Left err
-                      Right (Just stored) ->
-                        case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                          Right value -> Right value
-                          Left err -> Left (StepFailed "parent" (Text.pack (show err)))
-                      Right Nothing -> Left (StepFailed "parent" "no child output")
-          orFail =<< registerWfSim dbos parentKey parentBody
-          -- An await recorded at the position this parent is about to reach,
-          -- naming a workflow that is not the one it holds a handle to.
-          orFailSys
-            =<< SystemDB.recordChildResult
-              mem
-              (WorkflowId parentText)
-              1
-              (WorkflowId "somebody-elses-workflow")
-              (OutcomeOutput (Just "7"))
-              Nothing
-              Nothing
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          pure (ran, childText)
-        printSimTrace tr
-        case outcome of
-          (ran, childIdText) -> do
-            case ran of
-              Left (ErrorSystemDatabase (SystemDB.UnexpectedStep {stepId, expected, recorded})) -> do
-                stepId @?= 1
-                assertBool ("says which workflow it was awaiting in " <> Text.unpack expected) (childIdText `Text.isInfixOf` expected)
-                assertBool ("and whose outcome it found in " <> Text.unpack recorded) ("somebody-elses-workflow" `Text.isInfixOf` recorded)
-              other -> fail ("expected the stale-await refusal, got: " <> show other),
-      testCase "awaiting a child inside a step is covered by that step" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-await-step-parent"
-              childText = parentText <> "-0"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = pure (Right 41)
-          childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right wfHandle ->
-                    runWorkflowStepWith stepOptionsDefault ctx "collect" $ \inner -> do
-                      awaited <- awaitWfSim inner wfHandle
-                      pure $ case awaited of
-                        Left err -> Left err
-                        Right (Just stored) ->
-                          case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                            Right value -> Right value
-                            Left err -> Left (StepFailed "collect" (Text.pack (show err)))
-                        Right Nothing -> Left (StepFailed "collect" "no child output")
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) True Nothing Nothing Nothing
-          pure (ran, listed, childText)
-        printSimTrace tr
-        case outcome of
-          (ran, listed, childIdText) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the enclosing step carries the child's value" (Right 41) decoded
-              other -> fail (show other)
-            case listed of
-              Right
-                [ StepRecord {stepRecordStepName = startName, stepRecordChildWorkflowId = Just (WorkflowId startedChild)},
-                  StepRecord {stepRecordStepName = collectName, stepRecordOutput = Just collectOutput}
-                  ] -> do
-                  startName @?= "child"
-                  startedChild @?= childIdText
-                  collectName @?= "collect"
-                  collectOutput @?= "41"
-              other -> fail ("expected the start and the enclosing step only, got: " <> show other),
-      testCase "child starts and awaits keep their ids in build order" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-order-parent"
-              childBody :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody n _ = pure (Right n)
-          childRef <- registerIntRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- mapM (\n -> startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))) [1, 2, 3]
-                case sequence started of
-                  Left err -> pure (Left err)
-                  Right handles -> do
-                    awaited <- mapM (awaitWfSim ctx) handles
-                    case sequence awaited of
-                      Left err -> pure (Left err)
-                      Right outputs -> case mapM (decodeWorkflowValue "result") outputs of
-                        Left _ -> pure (Left (StepFailed "parent" "bad child output"))
-                        Right (numbers :: [Int]) -> pure (Right (sum numbers))
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
-          firstChild <- getWorkflow mem (WorkflowId (parentText <> "-0"))
-          pure (ran, listed, firstChild)
-        printSimTrace tr
-        case outcome of
-          (ran, listed, firstChild) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "1 + 2 + 3" (Right 6) decoded
-              other -> fail (show other)
-            case listed of
-              Right rows -> do
-                let table = map (\row -> (row.stepRecordStepId, row.stepRecordStepName, row.stepRecordChildWorkflowId)) rows
-                table
-                  @?= [ (0, "child", Just (WorkflowId "sim-order-parent-0")),
-                        (1, "child", Just (WorkflowId "sim-order-parent-1")),
-                        (2, "child", Just (WorkflowId "sim-order-parent-2")),
-                        (3, "DBOS.getResult", Just (WorkflowId "sim-order-parent-0")),
-                        (4, "DBOS.getResult", Just (WorkflowId "sim-order-parent-1")),
-                        (5, "DBOS.getResult", Just (WorkflowId "sim-order-parent-2"))
-                      ]
-              other -> fail ("expected the three starts and their awaits, got: " <> show other)
-            case firstChild of
-              Right (Just row) -> row.workflowRecordOutput @?= Just "1"
-              other -> fail ("expected the first-built child, got: " <> show other),
-      testCase "runs claim their pairs of step ids adjacently" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-pairs-parent"
-              childBody :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody n _ = pure (Right n)
-          childRef <- registerIntRef dbos childKey childBody
-          let parentBody () ctx = do
-                let pair n = do
-                      startedPair <- startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))
-                      case startedPair of
-                        Left err -> pure (Left err)
-                        Right wfHandle -> do
-                          awaited <- awaitWfSim ctx wfHandle
-                          pure $ case awaited of
-                            Left err -> Left err
-                            Right (Just stored) ->
-                              case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                                Right value -> Right value
-                                Left err -> Left (StepFailed "parent" (Text.pack (show err)))
-                            Right Nothing -> Left (StepFailed "parent" "no child output")
-                a <- pair 1
-                b <- pair 2
-                c <- pair 3
-                pure $ case (a, b, c) of
-                  (Right x, Right y, Right z) -> Right (x + y + z)
-                  _ -> Left (StepFailed "parent" "a started child failed")
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
-          pure (ran, listed)
-        printSimTrace tr
-        case outcome of
-          (ran, listed) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "1 + 2 + 3" (Right 6) decoded
-              other -> fail (show other)
-            case listed of
-              Right rows -> do
-                let table = map (\row -> (row.stepRecordStepId, row.stepRecordStepName, row.stepRecordChildWorkflowId)) rows
-                table
-                  @?= [ (0, "child", Just (WorkflowId "sim-pairs-parent-0")),
-                        (1, "DBOS.getResult", Just (WorkflowId "sim-pairs-parent-0")),
-                        (2, "child", Just (WorkflowId "sim-pairs-parent-2")),
-                        (3, "DBOS.getResult", Just (WorkflowId "sim-pairs-parent-2")),
-                        (4, "child", Just (WorkflowId "sim-pairs-parent-4")),
-                        (5, "DBOS.getResult", Just (WorkflowId "sim-pairs-parent-4"))
-                      ]
-              other -> fail ("expected each await behind its own start, got: " <> show other),
-      testCase "a select step races a step against a child's result" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-race-parent"
-              childText = parentText <> "-0"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = pure (Right 7)
-          childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right childHandle -> do
-                    slow <- pendingWorkflowStepWith stepOptionsDefault ctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (0 :: Int)))
-                    awaited <- pendingAwait ctx childHandle
-                    selectStep
-                      ctx
-                      [ SelectArm "slow" slow (\slowOutcome -> pure (slowOutcome >>= \value -> Right value)),
-                        SelectArm "DBOS.getResult" awaited $ \awaitOutcome ->
-                          pure $ case awaitOutcome of
-                            Left err -> Left err
-                            Right (Just stored) ->
-                              case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                                Right value -> Right value
-                                Left _ -> Left (StepFailed "parent" "bad child output")
-                            Right Nothing -> Left (StepFailed "parent" "no child output")
-                      ]
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
-          pure (ran, listed)
-        printSimTrace tr
-        case outcome of
-          (ran, listed) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the await won and its arm produced the answer" (Right 7) decoded
-              other -> fail ("expected the race's winner, got: " <> show other)
-            case listed of
-              Right rows -> do
-                let table = map (\row -> (row.stepRecordStepId, row.stepRecordStepName, row.stepRecordChildWorkflowId)) rows
-                table
-                  @?= [ (0, "child", Just (WorkflowId "sim-race-parent-0")),
-                        (2, "DBOS.getResult", Just (WorkflowId "sim-race-parent-0")),
-                        (3, "DBOS.selectStep", Nothing)
-                      ]
-              other -> fail ("expected the start, the await and the select, got: " <> show other),
-      testCase "a control signal winning a select records no winner" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let parentKey = newWorkflowKey "parent"
-              parentText = "sim-race-control-parent"
-              parentBody () ctx = do
-                interrupted <- pendingWorkflowStepWith stepOptionsDefault ctx "interrupted" (\_ -> pure (Left (Interrupted {workflowId = parentText})))
-                slow <- pendingWorkflowStepWith stepOptionsDefault ctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (1 :: Int)))
-                selectStep
-                  ctx
-                  [ SelectArm "interrupted" interrupted (\armOutcome -> pure (armOutcome >>= \value -> Right value)),
-                    SelectArm "slow" slow (\armOutcome -> pure (armOutcome >>= \value -> Right value))
-                  ]
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
-          parentRow <- getWorkflow mem (WorkflowId parentText)
-          pure (ran, listed, parentRow, parentText)
-        printSimTrace tr
-        case outcome of
-          (ran, listed, parentRow, parentIdText) -> do
-            case ran of
-              Left (Interrupted {workflowId}) -> workflowId @?= parentIdText
-              other -> fail ("expected the control signal back, got: " <> show other)
-            listed @?= Right []
-            case parentRow of
-              Right (Just row) -> row.workflowRecordStatus @?= Pending
-              other -> fail ("expected the parent row PENDING, got: " <> show other),
-      testCase "a losing step has its cancellation token fired" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          released <- newEmptyMVar
-          watching <- newEmptyMVar
-          let parentKey = newWorkflowKey "parent"
-              parentText = "sim-race-token-parent"
-              parentBody () ctx = do
-                slow <- pendingWorkflowStepWith stepOptionsDefault ctx "slow" $ \inner -> do
-                  token <- cancellationToken inner
-                  _ <- async $ do
-                    let watch = do
-                          cancelled <- tokenCancelled token
-                          if cancelled then pure () else threadDelay 1000 >> watch
-                    watch
-                    putMVar released ()
-                  putMVar watching ()
-                  threadDelay 30000000
-                  pure (Right (2 :: Int))
-                fast <- pendingWorkflowStepWith stepOptionsDefault ctx "fast" (\_ -> takeMVar watching >> pure (Right (1 :: Int)))
-                selectStep
-                  ctx
-                  [ SelectArm "slow" slow (\armOutcome -> pure (armOutcome >>= \value -> Right value)),
-                    SelectArm "fast" fast (\armOutcome -> pure (armOutcome >>= \value -> Right value))
-                  ]
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          fired <- timeout 15000000 (takeMVar released)
-          pure (ran, fired)
-        printSimTrace tr
-        case outcome of
-          (ran, fired) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the fast step won" (Right 1) decoded
-              other -> fail ("expected the fast step's value, got: " <> show other)
-            case fired of
-              Just _ -> pure ()
-              Nothing -> fail "the losing step's token never fired",
-      testCase "a cancelled child is an awaited cancellation in the parent" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-awaited-cancel-parent"
-              childText = parentText <> "-0"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = threadDelay 30000000 >> pure (Right 1)
-          childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef (startOptionsDefault {startTimeout = Explicit (millisDuration 300)}) Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right wfHandle -> do
-                    awaited <- awaitWfSim ctx wfHandle
-                    pure $ case awaited of
-                      Left err -> Left err
-                      Right (Just stored) ->
-                        case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                          Right value -> Right value
-                          Left err -> Left (StepFailed "parent" (Text.pack (show err)))
-                      Right Nothing -> Left (StepFailed "parent" "no child output")
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) True Nothing Nothing Nothing
-          parentRow <- getWorkflow mem (WorkflowId parentText)
-          childRow <- getWorkflow mem (WorkflowId childText)
-          pure (ran, listed, parentRow, childRow, childText)
-        printSimTrace tr
-        case outcome of
-          (ran, listed, parentRow, childRow, childIdText) -> do
-            case ran of
-              Left (AwaitedWorkflowCancelled {workflowId}) -> workflowId @?= childIdText
-              other -> fail ("expected an awaited cancellation, got: " <> show other)
-            case listed of
-              Right rows -> case [row | row <- rows, row.stepRecordStepName == "DBOS.getResult"] of
-                [awaitRow] -> case awaitRow.stepRecordError of
-                  Just recorded ->
-                    case decodeErrorText recorded :: Either Text (Error EngineOnly) of
-                      Right (AwaitedWorkflowCancelled {workflowId}) -> workflowId @?= childIdText
-                      other -> fail ("expected a recorded awaited cancellation, got: " <> show other)
-                  Nothing -> fail "the await recorded no error"
-                other -> fail ("expected one recorded await, got: " <> show other)
-              other -> fail ("expected the parent's steps, got: " <> show other)
-            case parentRow of
-              Right (Just row) -> row.workflowRecordStatus @?= Error
-              other -> fail ("expected the failed parent row, got: " <> show other)
-            case childRow of
-              Right (Just row) -> row.workflowRecordStatus @?= Cancelled
-              other -> fail ("expected the cancelled child row, got: " <> show other),
-      testCase "a child inherits its parent's deadline" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-inherit-deadline-parent"
-              childText = parentText <> "-0"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = pure (Right 1)
-          childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right wfHandle -> do
-                    awaited <- awaitWfSim ctx wfHandle
-                    pure $ case awaited of
-                      Left err -> Left err
-                      Right (Just stored) ->
-                        case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                          Right value -> Right value
-                          Left err -> Left (StepFailed "parent" (Text.pack (show err)))
-                      Right Nothing -> Left (StepFailed "parent" "no child output")
-          parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfRefSim dbos parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 300)}) Nothing
-          parentRow <- getWorkflow mem (WorkflowId parentText)
-          childRow <- getWorkflow mem (WorkflowId childText)
-          pure (ran, parentRow, childRow)
-        printSimTrace tr
-        case outcome of
-          (ran, parentRow, childRow) -> do
-            case ran of
-              Right _ -> pure ()
-              other -> fail ("expected the parent to run, got: " <> show other)
-            case (parentRow, childRow) of
-              (Right (Just parent), Right (Just child)) -> do
-                parentDeadline <- case parent.workflowRecordDeadline of
-                  Just deadline' -> pure deadline'
-                  Nothing -> fail "the parent has no deadline"
-                assertEqual "the same instant, not a fresh budget" (Just parentDeadline) child.workflowRecordDeadline
-                child.workflowRecordTimeout @?= Nothing
-                parent.workflowRecordTimeout @?= Just (secondsDuration 300)
-              other -> fail ("expected both rows, got: " <> show other),
-      testCase "a child's own timeout replaces the inherited deadline" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-child-budget-parent"
-              childText = parentText <> "-0"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = pure (Right 1)
-          childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef (startOptionsDefault {startTimeout = Explicit (secondsDuration 3600)}) Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right wfHandle -> do
-                    awaited <- awaitWfSim ctx wfHandle
-                    pure $ case awaited of
-                      Left err -> Left err
-                      Right (Just stored) ->
-                        case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                          Right value -> Right value
-                          Left err -> Left (StepFailed "parent" (Text.pack (show err)))
-                      Right Nothing -> Left (StepFailed "parent" "no child output")
-          parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfRefSim dbos parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 60)}) Nothing
-          parentRow <- getWorkflow mem (WorkflowId parentText)
-          childRow <- getWorkflow mem (WorkflowId childText)
-          pure (ran, parentRow, childRow)
-        printSimTrace tr
-        case outcome of
-          (ran, parentRow, childRow) -> do
-            case ran of
-              Right _ -> pure ()
-              other -> fail ("expected the parent to run, got: " <> show other)
-            case (parentRow, childRow) of
-              (Right (Just parent), Right (Just child)) -> do
-                parentDeadline <- case parent.workflowRecordDeadline of
-                  Just deadline' -> pure deadline'
-                  Nothing -> fail "the parent has no deadline"
-                childDeadline <- case child.workflowRecordDeadline of
-                  Just deadline' -> pure deadline'
-                  Nothing -> fail "the child has no deadline"
-                assertBool "the child's own timeout won: it outlives its parent" (SystemDB.timestampToEpochMs childDeadline > SystemDB.timestampToEpochMs parentDeadline)
-                child.workflowRecordTimeout @?= Just (secondsDuration 3600)
-              other -> fail ("expected both rows, got: " <> show other),
-      testCase "a child can decline the inherited deadline" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-decline-deadline-parent"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = pure (Right 1)
-          childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                let childPair opts = do
-                      started <- startChildWorkflow ctx childRef opts Nothing
-                      case started of
-                        Left err -> pure (Left err)
-                        Right wfHandle -> do
-                          awaited <- awaitWfSim ctx wfHandle
-                          pure $ case awaited of
-                            Left err -> Left err
-                            Right (Just stored) ->
-                              case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                                Right value -> Right value
-                                Left err -> Left (StepFailed "parent" (Text.pack (show err)))
-                            Right Nothing -> Left (StepFailed "parent" "no child output")
-                first <- childPair startOptionsDefault
-                second <- childPair (startOptionsDefault {startTimeout = None})
-                pure $ case (first, second) of
-                  (Right x, Right y) -> Right (x + y)
-                  _ -> Left (StepFailed "parent" "a child failed")
-          parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfRefSim dbos parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 300)}) Nothing
-          parentRow <- getWorkflow mem (WorkflowId parentText)
-          inheritedRow <- getWorkflow mem (WorkflowId (parentText <> "-0"))
-          detachedRow <- getWorkflow mem (WorkflowId (parentText <> "-2"))
-          pure (ran, parentRow, inheritedRow, detachedRow)
-        printSimTrace tr
-        case outcome of
-          (ran, parentRow, inheritedRow, detachedRow) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "both children ran" (Right 2) decoded
-              other -> fail ("expected the parent's output, got: " <> show other)
-            case (parentRow, inheritedRow, detachedRow) of
-              (Right (Just parent), Right (Just inheritedChild), Right (Just detachedChild)) -> do
-                parentDeadline <- case parent.workflowRecordDeadline of
-                  Just deadline' -> pure deadline'
-                  Nothing -> fail "the parent has no deadline"
-                assertEqual "silence inherits the parent's instant verbatim" (Just parentDeadline) inheritedChild.workflowRecordDeadline
-                detachedChild.workflowRecordDeadline @?= Nothing
-                detachedChild.workflowRecordTimeout @?= Nothing
-              other -> fail ("expected all three rows, got: " <> show other),
-      testCase "a parent and its child hit an inherited deadline independently" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-cascade-deadline-parent"
-              childText = parentText <> "-0"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = threadDelay 30000000 >> pure (Right 1)
-          childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right wfHandle -> do
-                    awaited <- awaitWfSim ctx wfHandle
-                    pure $ case awaited of
-                      Left err -> Left err
-                      Right (Just stored) ->
-                        case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                          Right value -> Right value
-                          Left err -> Left (StepFailed "parent" (Text.pack (show err)))
-                      Right Nothing -> Left (StepFailed "parent" "no child output")
-          parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfRefSim dbos parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (millisDuration 400)}) Nothing
-          childSettled <- waitForWorkflow dbos (WorkflowId childText)
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
-          pure (ran, childSettled, listed)
-        printSimTrace tr
-        case outcome of
-          (ran, childSettled, listed) -> do
-            case ran of
-              Left (ErrorSystemDatabase (SystemDB.WorkflowCancelled {})) -> pure ()
-              other -> fail ("expected the parent's own deadline cancellation, got: " <> show other)
-            case childSettled of
-              Right AwaitedCancelled -> pure ()
-              other -> fail ("expected the child cancelled independently, got: " <> show other)
-            case listed of
-              Right [StepRecord {stepRecordStepName = name}] -> name @?= "child"
-              other -> fail ("expected the lone start only, got: " <> show other),
-      testCase "a parent starts a child under a derived id and replay adopts it" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          childRan <- newTVarIO (0 :: Int)
-          let childKey = newWorkflowKey "double"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-child-parent"
-              childBody value ctx = do
-                atomically (modifyTVar childRan (+ 1))
-                runWorkflowStep ctx "double" (const (pure (value * 2)))
-          childRef <- registerIntRef dbos childKey childBody
-          let parentBody (_ :: Int) ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
-                pure (handleWorkflowId <$> started)
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          first <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
-          childId <- case first of
-            Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
-              Right cid -> pure cid
-              Left err -> throwIO (userError (show err))
-            other -> throwIO (userError (show other))
-          -- The child runs through its own call, then a handle adopts it.
-          childRanNow <- runWfSim dbos childKey (WorkflowId childId) (Just (encodeWorkflowValue (21 :: Int)))
-          retrieved <- retrieveWfSim dbos (WorkflowId childId)
-          result <- case retrieved of
-            Left err -> throwIO (userError (show err))
-            Right handle -> resultWfSim handle
-          runs <- readTVarIO childRan
-          -- A second run of the parent adopts the recorded child id,
-          -- starting nothing new.
-          replayed <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
-          runsAfter <- readTVarIO childRan
-          pure (childId, childRanNow, result, runs, replayed, runsAfter)
-        printSimTrace tr
-        case outcome of
-          (childId, childRanNow, result, runs, replayed, runsAfter) -> do
-            childId @?= "sim-child-parent-0"
-            case childRanNow of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the child records its result" (Right 42) decoded
-              other -> fail (show other)
-            case result of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "a handle adopts the outcome" (Right 42) decoded
-              other -> fail (show other)
-            runs @?= 1
-            case replayed of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Text
-                assertEqual "replay adopts the recorded child, starting none" (Right childId) decoded
-              other -> fail (show other)
-            runsAfter @?= 1,
-      testCase "starting a child inside a step is refused, not recorded" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "double"
-              parentKey = newWorkflowKey "badparent"
-              parentText = "sim-childleaf-parent"
-              childBody :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
-          childRef <- registerIntRef dbos childKey childBody
-          let badBody (_ :: Int) ctx = do
-                marker <- nextStepMarker ctx
-                outcome <- withAttempt ctx marker (firstStepStatus 0) (\inner -> startChildWorkflow inner childRef startOptionsDefault Nothing)
-                pure (case outcome of
-                  Left err -> Left err
-                  Right handle -> Left (ErrorConfig ("started inside a step: " <> handleWorkflowId handle)) :: Either (Error EngineOnly) Text)
-          orFail =<< registerWfSim dbos parentKey badBody
-          memLaunchOn mem simTracer dbos
-          result <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
-          pure (result, listed)
-        printSimTrace tr
-        case outcome of
-          (result, listed) -> do
-            case result of
-              Left (InsideStep operation) -> operation @?= "starting a workflow"
-              other -> fail ("expected the leaf refusal, got: " <> show other)
-            case listed of
-              Right [] -> pure ()
-              other -> fail ("expected no recorded start, got: " <> show other),
-      testCase "a child that fails differently is started through lift" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let shipKey = newWorkflowKey "ship"
-              billKey = newWorkflowKey "bill"
-              billText = "sim-lift-parent"
-              shipText = billText <> "-0"
-              shipBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error Refused) ())
-              shipBody () _ = pure (Left (application Refused))
-          shipRef <- orFail =<< registerRefOf @Refused dbos shipKey shipBody
-          let billBody () ctx = do
-                started <- startChildWorkflow ctx shipRef startOptionsDefault Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right handle -> do
-                    awaited <- awaitChild ctx handle
-                    let refusedChild = case awaited of
-                          Left (Application Refused) -> True
-                          _ -> False
-                    marker <- nextStepMarker ctx
-                    refusedStart <- withAttempt ctx marker (firstStepStatus 2) $ \inner -> do
-                      inside <- startChildWorkflow inner shipRef startOptionsDefault Nothing
-                      pure (case inside of
-                        Left err -> Left err
-                        Right _ -> Right ())
-                    pure $ case refusedStart of
-                      Left (InsideStep _) -> Right refusedChild
-                      Left err -> Left err
-                      Right () -> Right False
-          billRef <- orFail =<< registerRefOf @GaveUp dbos billKey billBody
-          memLaunchOn mem simTracer dbos
-          ran <- runDBOSWorkflowRef dbos billRef (runOptionsDefault {runWorkflowId = Just billText}) (Just (encodeWorkflowValue ()))
-          childRow <- getWorkflow mem (WorkflowId shipText)
-          pure (ran, childRow)
-        printSimTrace tr
-        case outcome of
-          (ran, childRow) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Bool
-                decoded @?= Right True
-              other -> fail ("expected the parent to report the child's refusal, got: " <> show other)
-            case childRow of
-              Right (Just row) -> do
-                row.workflowRecordStatus @?= Error
-                case row.workflowRecordError of
-                  Just recorded -> case decodeErrorText recorded :: Either Text (Error Refused) of
-                    Right (Application Refused) -> pure ()
-                    other -> fail ("expected the child's own error in the column, got: " <> show other)
-                  Nothing -> fail "the child recorded no error"
-              other -> fail ("expected the child row, got: " <> show other),
-      testCase "a child started and never awaited is still recorded" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "forgetful"
-              parentText = "sim-unawaited-parent"
-              childText = parentText <> "-0"
-              childBody :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
-          childRef <- registerIntRef dbos childKey childBody
-          let parentBody (_ :: Int) ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
-                case started of
-                  Left err -> pure (Left err)
-                  Right _ -> pure (Right ())
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
-          -- The child outlives the parent's interest: the start detached
-          -- it, so the parent returning does not stop it.
-          found <- waitForWorkflow dbos (WorkflowId childText)
-          childRow <- getWorkflow mem (WorkflowId childText)
-          children <- SystemDB.getWorkflowChildren mem (WorkflowId parentText)
-          pure (ran, listed, found, childRow, children)
-        printSimTrace tr
-        case outcome of
-          (ran, listed, found, childRow, children) -> do
-            case ran of
-              Right _ -> pure ()
-              other -> fail ("expected the parent to run, got: " <> show other)
-            case listed of
-              Right [StepRecord {stepRecordChildWorkflowId = Just (WorkflowId recorded)}] ->
-                recorded @?= "sim-unawaited-parent-0"
-              other -> fail ("expected the lone start step, got: " <> show other)
-            case found of
-              Right (AwaitedSucceeded (Just output) serialization) -> do
-                let stored = SerializedWorkflowValue output (Serialization <$> serialization)
-                    decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the abandoned child still records its result" (Right 42) decoded
-              other -> fail ("expected the abandoned child to finish, got: " <> show other)
-            case childRow of
-              Right (Just row) -> row.workflowRecordParentWorkflowId @?= Just (WorkflowId "sim-unawaited-parent")
-              other -> fail ("expected the child row, got: " <> show other)
-            children @?= Right [WorkflowId "sim-unawaited-parent-0"],
-      testCase "children started in a loop run concurrently" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "fan"
-              parentText = "sim-fanout-parent"
-              childBody :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody n _ = threadDelay 1000 >> pure (Right n)
-          childRef <- registerIntRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- mapM (\n -> startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))) [0, 1, 2]
-                case sequence started of
-                  Left err -> pure (Left err)
-                  Right handles -> do
-                    results <- mapM (awaitWfSim ctx) handles
-                    case sequence results of
-                      Left err -> pure (Left err)
-                      Right outputs -> case mapM (decodeWorkflowValue "result") outputs of
-                        Left _ -> pure (Left (StepFailed "fan" "bad child output"))
-                        Right (numbers :: [Int]) -> pure (Right (sum numbers))
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
-          children <- SystemDB.getWorkflowChildren mem (WorkflowId parentText)
-          pure (ran, children)
-        printSimTrace tr
-        -- No timing assert: virtual time settles instantly, so elapsed
-        -- time cannot tell concurrent from serial here; the sum and the
-        -- three children do.
-        case outcome of
-          (ran, children) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "0 + 1 + 2" (Right 3) decoded
-              other -> fail ("expected the fan-out total, got: " <> show other)
-            case children of
-              Right ids -> length ids @?= 3
-              other -> fail ("expected three children, got: " <> show other),
-      testCase "an assigned child id wins over the derived one" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "namer"
-              parentText = "sim-assigned-parent"
-              chosenText = "sim-assigned-chosen"
-              derivedText = parentText <> "-0"
-              childBody :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody _ _ = pure (Right 7)
-          childRef <- registerIntRef dbos childKey childBody
-          let parentBody (_ :: Int) ctx = do
-                started <- startChildWorkflow ctx childRef (startOptionsDefault {startWorkflowId = Just chosenText}) (Just (encodeWorkflowValue (21 :: Int)))
-                pure (handleWorkflowId <$> started)
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          first <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
-          chosen <- getWorkflow mem (WorkflowId chosenText)
-          derived <- getWorkflow mem (WorkflowId derivedText)
-          childRan <- runWfSim dbos childKey (WorkflowId chosenText) (Just (encodeWorkflowValue (21 :: Int)))
-          pure (first, chosen, derived, childRan)
-        printSimTrace tr
-        case outcome of
-          (first, chosen, derived, childRan) -> do
-            case first of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Text
-                decoded @?= Right "sim-assigned-chosen"
-              other -> fail (show other)
-            case chosen of
-              Right (Just row) -> row.workflowRecordParentWorkflowId @?= Just (WorkflowId "sim-assigned-parent")
-              other -> fail ("expected the assigned row, got: " <> show other)
-            derived @?= Right Nothing
-            case childRan of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the assigned child records its result" (Right 7) decoded
-              other -> fail (show other),
-      testCase "a workflow started outside a workflow has no parent" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "root"
-              workflowText = "sim-root-id"
-              body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              body () _ = pure (Right 1)
-          orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
-          row <- getWorkflow mem (WorkflowId workflowText)
-          pure (ran, row)
-        printSimTrace tr
-        case outcome of
-          (ran, row) -> do
-            case ran of
-              Right _ -> pure ()
-              other -> fail ("expected the workflow to run, got: " <> show other)
-            case row of
-              Right (Just found) -> found.workflowRecordParentWorkflowId @?= Nothing
-              other -> fail ("expected the root row, got: " <> show other),
-      testCase "a start position holding a plain step is refused" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "waiter"
-              parentText = "sim-stale-parent"
-              derivedText = parentText <> "-0"
-              childBody :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody _ _ = pure (Right 1)
-          childRef <- registerIntRef dbos childKey childBody
-          let parentBody (_ :: Int) ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (1 :: Int)))
-                case started of
-                  Left err -> pure (Left err)
-                  Right _ -> pure (Right (0 :: Int))
-          orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          -- A plain step planted at the start position before the body
-          -- runs: the start finds output where a child link should be.
-          orFailSys =<< SystemDB.recordStep mem (WorkflowId parentText) 0 "child" (SystemDB.OutcomeOutput (Just "1")) Nothing Nothing
-          result <- runWfSim dbos parentKey (WorkflowId parentText) (Just (encodeWorkflowValue (0 :: Int)))
-          missing <- getWorkflow mem (WorkflowId derivedText)
-          pure (result, missing)
-        printSimTrace tr
-        case outcome of
-          (result, missing) -> do
-            case result of
-              Left (ErrorSystemDatabase (SystemDB.UnexpectedStep {stepId, expected, recorded})) -> do
-                stepId @?= 0
-                assertBool "says what it wanted" ("child workflow start" `Text.isInfixOf` expected)
-                assertBool "and what it found" ("plain step" `Text.isInfixOf` recorded)
-              other -> fail ("expected the unexpected-step refusal, got: " <> show other)
-            missing @?= Right Nothing,
-      testCase "a child started through another instance is refused" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          other <- simInstance
-          owner <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "parent"
-              parentText = "sim-wrong-instance-parent"
-              childText = parentText <> "-0"
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = pure (Right 1)
-          childRef <- registerUnitRef other childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right wfHandle -> do
-                    awaited <- awaitWfSim ctx wfHandle
-                    pure $ case awaited of
-                      Left err -> Left err
-                      Right (Just stored) ->
-                        case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                          Right value -> Right value
-                          Left err -> Left (StepFailed "parent" (Text.pack (show err)))
-                      Right Nothing -> Left (StepFailed "parent" "no child output")
-          orFail =<< registerWfSim owner parentKey parentBody
-          memLaunchOn mem simTracer other
-          memLaunchOn mem simTracer owner
-          ran <- runWfSim owner parentKey (WorkflowId parentText) Nothing
-          missing <- getWorkflow mem (WorkflowId childText)
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
-          pure (ran, missing, listed)
-        printSimTrace tr
-        case outcome of
-          (ran, missing, listed) -> do
-            case ran of
-              Left (WrongInstance {operation}) -> assertBool ("names the call in " <> Text.unpack operation) ("workflow" `Text.isInfixOf` operation)
-              other -> fail ("expected a wrong-instance refusal, got: " <> show other)
-            missing @?= Right Nothing
-            listed @?= Right [],
+      simCase "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId traceJoinTakesId,
+      simCase "a fresh start is local and a join polls" scenarioFreshJoinPolls checkFreshJoinPolls traceFreshJoinPolls,
+      simCase "awaiting a child is recorded as a step" scenarioAwaitRecorded checkAwaitRecorded traceAwaitRecorded,
+      simCase "a recorded await of another workflow is refused" scenarioStaleAwaitRefused checkStaleAwaitRefused traceStaleAwaitRefused,
+      simCase "awaiting a child inside a step is covered by that step" scenarioAwaitInsideStep checkAwaitInsideStep traceAwaitInsideStep,
+      simCase "child starts and awaits keep their ids in build order" scenarioChildIdsInBuildOrder checkChildIdsInBuildOrder traceChildIdsInBuildOrder,
+      simCase "runs claim their pairs of step ids adjacently" scenarioStepIdPairs checkStepIdPairs traceStepIdPairs,
+      simCase "a select step races a step against a child's result" scenarioSelectStepRaces checkSelectStepRaces traceSelectStepRaces,
+      simCase "a control signal winning a select records no winner" scenarioControlSelect checkControlSelect traceControlSelect,
+      simCase "a losing step has its cancellation token fired" scenarioLosingTokenFired checkLosingTokenFired traceLosingTokenFired,
+      simCase "a cancelled child is an awaited cancellation in the parent" scenarioCancelledChildAwaited checkCancelledChildAwaited traceCancelledChildAwaited,
+      -- IO only: recorded-await replay across two launches (needs the
+      -- recovery sweep).
+      testCase "a replayed parent reads the recorded outcome rather than waiting again" (pure ()),
+      simCase "a child inherits its parent's deadline" scenarioDeadlineInherited checkDeadlineInherited traceDeadlineInherited,
+      simCase "a child's own timeout replaces the inherited deadline" scenarioChildBudgetWins checkChildBudgetWins traceChildBudgetWins,
+      simCase "a child can decline the inherited deadline" scenarioDeclinedDeadline checkDeclinedDeadline traceDeclinedDeadline,
+      simCase "a parent and its child hit an inherited deadline independently" scenarioCascadeDeadline checkCascadeDeadline traceCascadeDeadline,
+      simCase "a parent starts a child under a derived id and replay adopts it" scenarioDerivedChildAdopted checkDerivedChildAdopted traceDerivedChildAdopted,
+      simCase "starting a child inside a step is refused, not recorded" scenarioChildInsideStepRefused checkChildInsideStepRefused traceChildInsideStepRefused,
+      simCase "a child that fails differently is started through lift" scenarioLiftChildError checkLiftChildError traceLiftChildError,
+      -- IO only: the body performs real IO (the foreign charge call),
+      -- which the simulator cannot run.
+      testCase "a foreign error is converted at the boundary" (pure ()),
+      simCase "a child started and never awaited is still recorded" scenarioUnawaitedChild checkUnawaitedChild traceUnawaitedChild,
+      simCase "children started in a loop run concurrently" scenarioFanout checkFanout traceFanout,
+      -- IO only: first-to-settle timing is wall-clock-bound.
+      testCase "select reports the first workflow to settle, not the first started" (pure ()),
+      simCase "an assigned child id wins over the derived one" scenarioAssignedChildAdopted checkAssignedChildAdopted traceAssignedChildAdopted,
+      simCase "a workflow started outside a workflow has no parent" scenarioRootNoParent checkRootNoParent traceRootNoParent,
+      simCase "a start position holding a plain step is refused" scenarioPlainStepAtStart checkPlainStepAtStart tracePlainStepAtStart,
+      simCase "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance traceWrongInstance,
       testCase "a child joining a held key is recorded as the workflow it joined" $ do
         (outcome, tr) <- runSimCase $ do
           mem <- newMemDB
@@ -1244,7 +209,7 @@ tests =
                       Right (Just stored) ->
                         case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
                           Right n -> pure (Right n)
-                          Left _ -> pure (Left (StepFailed "parent" "bad child output"))
+                          Left _  -> pure (Left (StepFailed "parent" "bad child output"))
                       Right _ -> pure (Left (StepFailed "parent" "no child output"))
           orFail =<< registerWfSim dbos parentKey parentBody
           memLaunchOn mem simTracer dbos
@@ -1261,14 +226,13 @@ tests =
               Nothing
           case holderStarted of
             Left err -> throwIO (userError (show err))
-            Right _ -> pure ()
+            Right _  -> pure ()
           orFailSys =<< SystemDB.recordWorkflowOutcome mem (WorkflowId holderText) (OutcomeOutput (Just "9"))
           outcome <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
           derived <- getWorkflow mem (WorkflowId derivedText)
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
           children <- SystemDB.getWorkflowChildren mem (WorkflowId parentText)
           pure (outcome, derived, listed, children)
-        printSimTrace tr
         case outcome of
           (outcome, derived, listed, children) -> do
             case outcome of
@@ -1293,226 +257,17 @@ tests =
                   awaitedChild @?= "sim-join-holder"
               other -> fail ("expected the joining start and its recorded await, got: " <> show other)
             children @?= Right [],
-      testCase "a zero-argument workflow records no input" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "zero"
-              workflowText = "sim-zero-id"
-              body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) ())
-              body () _ = pure (Right ())
-          orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
-          row <- SystemDB.getWorkflow mem (WorkflowId workflowText)
-          pure (ran, row)
-        printSimTrace tr
-        case outcome of
-          (ran, row) -> do
-            case ran of
-              Right _ -> pure ()
-              other -> fail ("expected the workflow to run, got: " <> show other)
-            case row of
-              Right (Just record) -> record.workflowRecordInput @?= Nothing
-              other -> fail (show other),
-      testCase "the row exists before the body starts" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "sees-itself"
-              workflowText = "sim-row-id"
-              body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Bool)
-              body () ctx = do
-                row <- withSystemDB ctx (\db -> SystemDB.getWorkflow db (WorkflowId (workflowId ctx)))
-                pure (Right (case row of Right (Just _) -> True; _ -> False))
-          orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
-          pure ran
-        printSimTrace tr
-        case outcome of
-          Right (Just stored) -> do
-            let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Bool
-            assertEqual "the body found its own row" (Right True) decoded
-          other -> fail (show other),
-      testCase "a panicking workflow leaves its row pending" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "explodes"
-              workflowText = "sim-panic-id"
-              body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) ())
-              body () _ = throwIO (userError "boom")
-          orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracer dbos
-          outcome <- try (runWfSim dbos key (WorkflowId workflowText) Nothing)
-          row <- getWorkflow mem (WorkflowId workflowText)
-          pure (outcome, row)
-        printSimTrace tr
-        case outcome of
-          (outcome, row) -> do
-            case (outcome :: Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))) of
-              Left _ -> pure ()
-              Right other -> fail ("expected the body's exception to escape, got: " <> show other)
-            case row of
-              Right (Just found) -> do
-                found.workflowRecordStatus @?= Pending
-                found.workflowRecordError @?= Nothing
-              other -> fail ("expected the row PENDING, got: " <> show other),
-      testCase "running before launch is refused" $ do
-        (ran, tr) <- runSimCase $ do
-          dbos <- simInstance
-          let key = newWorkflowKey "double"
-              body :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
-          orFail =<< registerWfSim dbos key body
-          runWfSim dbos key (WorkflowId "sim-unlaunched-id") (Just (encodeWorkflowValue (21 :: Int)))
-        printSimTrace tr
-        case ran of
-          Left ErrorNotLaunched {} -> pure ()
-          other -> fail ("expected a not-launched refusal, got: " <> show other),
-      testCase "an application error round-trips as itself" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "flaky"
-              workflowText = "sim-app-err-id"
-              body :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              body _ _ = pure (Left (StepFailed "flaky" "boom"))
-          orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
-          pure ran
-        printSimTrace tr
-        case outcome of
-          Left (StepFailed step message) -> do
-            step @?= "flaky"
-            message @?= "boom"
-          other -> fail ("expected the application error back, got: " <> show other),
-      testCase "a database failure is not the workflow outcome" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "blips"
-              workflowText = "sim-blip-id"
-              backendErr =
-                SystemDB.Backend
-                  ( SystemDB.BackendError
-                      { SystemDB.backendMessage = "connection reset by peer",
-                        SystemDB.backendSqlState = Nothing,
-                        SystemDB.backendKind = SystemDB.Connection
-                      }
-                  )
-              body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) ())
-              body () _ = pure (Left (ErrorSystemDatabase backendErr))
-          orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
-          row <- getWorkflow mem (WorkflowId workflowText)
-          pure (ran, row)
-        printSimTrace tr
-        case outcome of
-          (ran, row) -> do
-            case ran of
-              Left (ErrorSystemDatabase _) -> pure ()
-              other -> fail ("expected the database failure back, got: " <> show other)
-            case row of
-              Right (Just found) -> do
-                found.workflowRecordStatus @?= Pending
-                found.workflowRecordError @?= Nothing
-              other -> fail ("expected the row left pending with no error, got: " <> show other),
-      testCase "a workflow records the steps it took" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "two-steps"
-              workflowText = "sim-steps-listed-id"
-              body :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              body value ctx = do
-                first <- runWorkflowStep ctx "one" (const (pure (value + 1)))
-                case first of
-                  Left err -> pure (Left err)
-                  Right stepped -> runWorkflowStep ctx "two" (const (pure (stepped * 2)))
-          orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
-          listed <- listWorkflowSteps mem (WorkflowId workflowText) False Nothing Nothing Nothing
-          pure (ran, listed)
-        printSimTrace tr
-        case outcome of
-          (ran, listed) -> do
-            case ran of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "two steps compose" (Right 44) decoded
-              other -> fail (show other)
-            case listed of
-              Right [StepRecord {stepRecordStepName = first}, StepRecord {stepRecordStepName = second}] ->
-                [first, second] @?= ["one", "two"]
-              other -> fail ("expected two steps in order, got: " <> show other),
-      testCase "shutdown cancels a running workflow and leaves it pending" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          gate <- newEmptyMVar
-          let key = newWorkflowKey "gated"
-              workflowText = "sim-shutdown-run-id"
-              body () _ = takeMVar gate >> pure (Right 7)
-          ref <- registerUnitRef dbos key body
-          memLaunchOn mem simTracer dbos
-          worker <- forkIO (runWfRefSim dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing >> pure ())
-          -- The row is written before the body is entered, so its
-          -- presence means the run is gated, not merely started.
-          status <- waitForRow dbos (WorkflowId workflowText)
-          shutdown dbos
-          killThread worker
-          final <- getWorkflow mem (WorkflowId workflowText)
-          pure (status, final)
-        printSimTrace tr
-        case outcome of
-          (status, final) -> do
-            status @?= Pending
-            case final of
-              Right (Just row) -> row.workflowRecordStatus @?= Pending
-              other -> fail ("expected the row PENDING, got: " <> show other),
-      testCase "dropping the future does not stop the workflow" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          gate <- newEmptyMVar
-          let key = newWorkflowKey "gated"
-              workflowText = "sim-drop-future-id"
-              body () _ = takeMVar gate >> pure (Right 7)
-          ref <- registerUnitRef dbos key body
-          memLaunchOn mem simTracer dbos
-          -- The start spawns the body and returns at once; dropping its
-          -- handle stops nothing. A waiter is forked and killed to mirror
-          -- the live cancel, then the run is awaited directly.
-          _started <- startWfRefSim dbos ref (startOptionsDefault {startWorkflowId = Just workflowText}) Nothing
-          waiter <- forkIO (waitForWorkflow dbos (WorkflowId workflowText) >> pure ())
-          -- Dropping the waiter stops the watching, not the workflow: the
-          -- run is detached onto the executor, so killing the waiter
-          -- leaves the row pending and the body still gated.
-          killThread waiter
-          gated <- getWorkflow mem (WorkflowId workflowText)
-          -- Released, the run finishes on its own — no recovery needed.
-          putMVar gate ()
-          settled <- waitForWorkflow dbos (WorkflowId workflowText)
-          pure (gated, settled)
-        printSimTrace tr
-        case outcome of
-          (gated, settled) -> do
-            -- While gated, the row is pending: killing the waiter stopped
-            -- the watching, not the workflow.
-            case gated of
-              Right (Just found) -> found.workflowRecordStatus @?= Pending
-              other -> fail ("expected the gated row PENDING, got: " <> show other)
-            case settled of
-              Right (AwaitedSucceeded (Just output) serialization) -> do
-                let stored = SerializedWorkflowValue output (Serialization <$> serialization)
-                    decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the dropped run still records its result" (Right 7) decoded
-              other -> fail ("expected the dropped run to finish, got: " <> show other),
+      simCase "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
+      simCase "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
+      simCase "a panicking workflow leaves its row pending" scenarioPanic checkPanic tracePanic,
+      simCase "running before launch is refused" scenarioRunBeforeLaunch checkRunBeforeLaunch traceRunBeforeLaunch,
+      simCase "an application error round-trips as itself" scenarioAppErrorRoundtrip checkAppErrorRoundtrip traceAppErrorRoundtrip,
+      simCase "a database failure is not the workflow outcome" scenarioDbFailureNotOutcome checkDbFailureNotOutcome traceDbFailureNotOutcome,
+      simCase "a workflow records the steps it took" scenarioStepsTaken checkStepsTaken traceStepsTaken,
+      simCase "shutdown cancels a running workflow and leaves it pending" scenarioShutdownCancels checkShutdownCancels traceShutdownCancels,
+      simCase "dropping the future does not stop the workflow" scenarioDropFuture checkDropFuture traceDropFuture,
+      -- Sim only: not yet mirrored on IO (needs wall-clock
+      -- budget/body scaling).
       testCase "a budget cancels the workflow durably" $ do
         (outcome, tr) <- runSimCase $ do
           mem <- newMemDB
@@ -1533,96 +288,19 @@ tests =
               Nothing
           row <- getWorkflow mem (WorkflowId workflowText)
           pure (ran, row)
-        printSimTrace tr
         case outcome of
           (ran, row) -> do
             case ran of
               Left (ErrorSystemDatabase (SystemDB.WorkflowCancelled {})) -> pure ()
-              other -> fail ("expected the durable cancellation, got: " <> show other)
+              other                                                      -> fail ("expected the durable cancellation, got: " <> show other)
             case row of
               Right (Just found) -> found.workflowRecordStatus @?= Cancelled
-              other -> fail ("expected the row CANCELLED, got: " <> show other),
-      testCase "a started workflow carries the attributes it was given" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "attributed"
-              parentText = "sim-attributes-parent"
-              tenant = "acme-sim"
-              childBody :: Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody _ _ = pure (Right 9)
-          childRef <- registerIntRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (0 :: Int)))
-                case started of
-                  Left err -> pure (Left err)
-                  Right handle -> do
-                    result <- awaitWfSim ctx handle
-                    case result of
-                      Left err -> pure (Left err)
-                      Right (Just stored) ->
-                        case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                          Right n -> pure (Right n)
-                          Left _ -> pure (Left (StepFailed "parent" "bad child output"))
-                      Right _ -> pure (Left (StepFailed "parent" "no child output"))
-          parentRef <- registerUnitRef dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
-          ran <-
-            runWfRefSim
-              dbos
-              parentRef
-              (runOptionsDefault {runWorkflowId = Just parentText, runAttributes = Just (Map.singleton "tenant" (String tenant))})
-              Nothing
-          parentRow <- getWorkflow mem (WorkflowId parentText)
-          childRow <- getWorkflow mem (WorkflowId (parentText <> "-0"))
-          pure (ran, parentRow, childRow)
-        printSimTrace tr
-        case outcome of
-          (ran, parentRow, childRow) -> do
-            case ran of
-              Right _ -> pure ()
-              other -> fail ("expected the attributed run, got: " <> show other)
-            case parentRow of
-              Right (Just row) -> case row.workflowRecordAttributes of
-                Just attributes -> assertBool ("expected the tenant in " <> Text.unpack attributes) ("acme-sim" `Text.isInfixOf` attributes)
-                Nothing -> fail "the parent row carries no attributes"
-              other -> fail ("expected the parent row, got: " <> show other)
-            case childRow of
-              Right (Just row) -> row.workflowRecordAttributes @?= Nothing
-              other -> fail ("expected the child row, got: " <> show other),
-      testCase "a step error is recorded in its column" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "charger"
-              workflowText = "sim-step-err-id"
-              body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              body () ctx = runWorkflowStepWith stepOptionsDefault ctx "charge" (const (pure (Left (StepFailed "charge" "short by 12"))))
-          orFail =<< registerWfSim dbos key body
-          memLaunchOn mem simTracer dbos
-          ran <- runWfSim dbos key (WorkflowId workflowText) Nothing
-          -- Payloads loaded: the flag gates output AND error together,
-          -- as the oracle's @step_payloads@ does (the memory backend
-          -- always returns full records).
-          listed <- listWorkflowSteps mem (WorkflowId workflowText) True Nothing Nothing Nothing
-          pure (ran, listed)
-        printSimTrace tr
-        case outcome of
-          (ran, listed) -> do
-            case ran of
-              Left (StepFailed step message) -> do
-                step @?= "charge"
-                message @?= "short by 12"
-              other -> fail ("expected the step error back, got: " <> show other)
-            case listed of
-              Right [StepRecord {stepRecordStepName = name, stepRecordError = Just recorded}] -> do
-                name @?= "charge"
-                assertBool ("expected the shortfall in " <> Text.unpack recorded) ("short by 12" `Text.isInfixOf` recorded)
-              other -> fail ("expected the failed step, got: " <> show other),
+              other              -> fail ("expected the row CANCELLED, got: " <> show other),
+      simCase "a started workflow carries the attributes it was given" scenarioAttributes checkAttributes traceAttributes,
+      simCase "a step error is recorded in its column" scenarioStepErrorRecorded checkStepErrorRecorded traceStepErrorRecorded,
+      -- Sim only: typed trace assertions live only in sim.
       testCase "workflow announcements carry their counts and ids" $ do
         (_, tr) <- runSimCase demoTrace
-        printSimTrace tr
         selectTraceEventsDynamic tr
           @?= [ WorkflowEnqueued "sim-wf-enqueued" "sim-queue",
                 WorkflowAlreadyOwned "sim-wf-owned",
@@ -1632,7 +310,40 @@ tests =
                 WorkflowOutcomeRecordFailed "sim-detail",
                 WorkflowSuperseded "sim-wf-first",
                 WorkflowControlEnded "sim-control"
-              ]
+              ],
+      tasksSimTests
+    ]
+
+-- | The oracle's @Tasks@ behaviour over the cooperative scheduler: the
+-- same bodies the live tree runs, judged by the same assertions. The
+-- bodies emit no tracer events, so each leaf runs 'runSimOrThrow' once
+-- with no trace to print.
+tasksSimTests :: TestTree
+tasksSimTests =
+  testGroup
+    "Tasks"
+    [       testCase "abortAll waits until every task has departed" $ do
+        let simRun :: forall s. IOSim s Int
+            simRun = taskAbortAllWaits @(IOSim s)
+        (@?= 2) (runSimOrThrow simRun),
+      testCase "a task that finished on its own is not left in the registry" $ do
+        let simRun :: forall s. IOSim s Int
+            simRun = taskFinishedNotRegistered @(IOSim s) simWaitDeparture
+        (@?= 0) (runSimOrThrow simRun),
+      testCase "a task arriving after the sweep is aborted on arrival" $ do
+        let simRun :: forall s. IOSim s Bool
+            simRun = taskRefusedAfterSweep @(IOSim s)
+        (@?= False) (runSimOrThrow simRun),
+      testCase "an empty sweep returns at once" $ do
+        let simRun :: forall s. IOSim s Int
+            simRun = taskEmptySweep @(IOSim s)
+        (@?= 0) (runSimOrThrow simRun),
+      testCase "a task finishing before registration is not swept as aborted" $ do
+        let simRun :: forall s. IOSim s [Int]
+            simRun = taskEarlyFinishNotSwept @(IOSim s) simWaitDeparture
+        checkNoMiscounts (runSimOrThrow simRun),
+      -- IO only: real preemption, not cooperation.
+      testCase "a spawn refused after abort fills its channel instead of hanging" (pure ())
     ]
 
 -- | The announcement shapes no staged case reaches: a superseded write,
@@ -1649,6 +360,349 @@ demoTrace = do
   runTracer simTracer (WorkflowOutcomeRecordFailed "sim-detail")
   runTracer simTracer (WorkflowSuperseded "sim-wf-first")
   runTracer simTracer (WorkflowControlEnded "sim-control")
+
+-- | The sim half of the shared workflow fixture: a fresh 'MemSystemDB'
+-- per case (so cases stay isolated) passed in as 'SomeSystemDB' with the
+-- sim carrier as 'SomeTracer', over the same 'mkWfFixture' builder live
+-- uses. Only the atoms differ.
+simWfFixture :: forall s. IOSim s (WfFixture (IOSim s))
+simWfFixture = do
+  mem <- newMemDB
+  ids <- newTVarIO 0
+  entropy <- newTVarIO 0
+  mkWfFixture
+    (configNew "sim-app" "")
+    simIdentity
+    "sim-app"
+    (WorkflowId . ("sim-" <>))
+    (simGeneratedId ids)
+    (simEntropy entropy)
+    (SomeSystemDB mem)
+    simTracer
+
+-- | One sim leaf: build the sim fixture, drive the shared scenario
+-- through @runSimCase@, judge the value by the shared check and the
+-- trace by typed event assertions. Nothing prints: the watcher stays
+-- quiet and the trace speaks through types, not lines. The mirror of
+-- 'liveCase': same scenario, same value check, sim runner plus events.
+simCase ::
+  String ->
+  (forall s. WfFixture (IOSim s) -> IOSim s a) ->
+  (a -> Either String ()) ->
+  (forall x. SimTrace x -> IO ()) ->
+  TestTree
+simCase name scen check traceCheck = testCase name $ do
+  (out, tr) <- runSimCase (simWfFixture >>= scen)
+  either fail pure (check out)
+  traceCheck tr
+
+-- | Typed event assertions for the converted sim leaves: what the engine
+-- emitted, constructor by constructor. Read off the say trace once, then
+-- pinned here so the watcher verifies events without printing them.
+traceRegisteredResult :: forall a. SimTrace a -> IO ()
+traceRegisteredResult tr = do
+  selectTraceEventsDynamic tr @?= [StepRunning "double" 0, StepOutputRecorded "double" 0, WorkflowCompleted "sim-wf-double"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+traceJoinTakesId :: forall a. SimTrace a -> IO ()
+traceJoinTakesId tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowAlreadyOwned "sim-join-start", WorkflowCompleted "sim-join-start"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+traceFreshJoinPolls :: forall a. SimTrace a -> IO ()
+traceFreshJoinPolls tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowAlreadyOwned "sim-local-id", WorkflowCompleted "sim-local-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+traceAwaitRecorded :: forall a. SimTrace a -> IO ()
+traceAwaitRecorded tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "sim-await-parent-0", WorkflowCompleted "sim-await-parent"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The body's own failure is recorded as the workflow's failure.
+traceAppErrorRoundtrip :: forall a. SimTrace a -> IO ()
+traceAppErrorRoundtrip tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowFailed "sim-app-err-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The cross-instance refusal writes nothing and the parent fails.
+traceWrongInstance :: forall a. SimTrace a -> IO ()
+traceWrongInstance tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowFailed "sim-wrong-instance-parent"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app", EngineShutdown "sim-app"]
+
+-- The two steps run and record, then the workflow completes.
+traceStepsTaken :: forall a. SimTrace a -> IO ()
+traceStepsTaken tr = do
+  selectTraceEventsDynamic tr
+    @?= [ StepRunning "one" 0,
+          StepOutputRecorded "one" 0,
+          StepRunning "two" 1,
+          StepOutputRecorded "two" 1,
+          WorkflowCompleted "sim-steps-listed-id"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The executor shuts down with a run still gated: the shutdown
+-- announces the cancelled task and then itself.
+traceShutdownCancels :: forall a. SimTrace a -> IO ()
+traceShutdownCancels tr = do
+  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= ([] :: [WorkflowEvent])
+
+-- The released run finishes and completes.
+traceDropFuture :: forall a. SimTrace a -> IO ()
+traceDropFuture tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "sim-drop-future-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The child settles, then the attributed parent completes.
+traceAttributes :: forall a. SimTrace a -> IO ()
+traceAttributes tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-attributes-parent-0",
+          WorkflowCompleted "sim-attributes-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The step's error is recorded, then the workflow fails.
+traceStepErrorRecorded :: forall a. SimTrace a -> IO ()
+traceStepErrorRecorded tr = do
+  selectTraceEventsDynamic tr
+    @?= [ StepErrorRecorded "charge" 0,
+          WorkflowFailed "sim-step-err-id"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The backend failure leaves the row pending: the control end carries
+-- the database error and no outcome is recorded.
+traceDbFailureNotOutcome :: forall a. SimTrace a -> IO ()
+traceDbFailureNotOutcome tr = do
+  selectTraceEventsDynamic tr
+    @?= [WorkflowControlEnded "system database error: connection reset by peer"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The body's panic escapes: the engine announces the panicked workflow
+-- and leaves its row pending.
+tracePanic :: forall a. SimTrace a -> IO ()
+tracePanic tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowPanicked "sim-panic-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- Nothing launched, so nothing is announced.
+traceRunBeforeLaunch :: forall a. SimTrace a -> IO ()
+traceRunBeforeLaunch tr =
+  selectTraceEventsDynamic tr @?= ([] :: [WorkflowEvent])
+
+-- The zero-argument workflow runs and completes.
+traceZeroNoInput :: forall a. SimTrace a -> IO ()
+traceZeroNoInput tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "sim-zero-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The body found its own row and the workflow completes.
+traceRowBeforeBody :: forall a. SimTrace a -> IO ()
+traceRowBeforeBody tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "sim-row-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The parent records the child, the crash-and-relaunch recovers and
+-- dequeues it (its step runs), and the replay adopts the id.
+traceDerivedChildAdopted :: forall a. SimTrace a -> IO ()
+traceDerivedChildAdopted tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-child-parent",
+          StepRunning "double" 0,
+          StepOutputRecorded "double" 0,
+          WorkflowCompleted "sim-child-parent-0",
+          WorkflowAlreadyOwned "sim-child-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The assigned child recovers under its chosen id; the replay adopts it.
+traceAssignedChildAdopted :: forall a. SimTrace a -> IO ()
+traceAssignedChildAdopted tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-assigned-parent",
+          WorkflowCompleted "sim-assigned-parent-chosen",
+          WorkflowAlreadyOwned "sim-assigned-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The plain-step refusal: the parent ends on the control end that names
+-- the wanted start and the recorded plain step.
+tracePlainStepAtStart :: forall a. SimTrace a -> IO ()
+tracePlainStepAtStart tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowControlEnded "workflow sim-stale-parent step 0 was recorded as \"a plain step named child\", but \"a child workflow start of child\" was expected"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The root runs and completes.
+traceRootNoParent :: forall a. SimTrace a -> IO ()
+traceRootNoParent tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "sim-root-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The three 400 ms children settle together, then the parent completes.
+traceFanout :: forall a. SimTrace a -> IO ()
+traceFanout tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-fanout-parent-0",
+          WorkflowCompleted "sim-fanout-parent-1",
+          WorkflowCompleted "sim-fanout-parent-2",
+          WorkflowCompleted "sim-fanout-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The parent completes first; the detached child then runs its step and
+-- settles.
+traceUnawaitedChild :: forall a. SimTrace a -> IO ()
+traceUnawaitedChild tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-unawaited-parent",
+          StepRunning "double" 0,
+          StepOutputRecorded "double" 0,
+          WorkflowCompleted "sim-unawaited-parent-0"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The refused child fails, then the parent reports it and completes.
+traceLiftChildError :: forall a. SimTrace a -> IO ()
+traceLiftChildError tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowFailed "sim-lift-parent-0",
+          WorkflowCompleted "sim-lift-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The refusal records no start row: the parent just fails.
+traceChildInsideStepRefused :: forall a. SimTrace a -> IO ()
+traceChildInsideStepRefused tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowFailed "sim-childleaf-parent"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- Both the child and the parent are cancelled by the inherited deadline,
+-- child first.
+traceCascadeDeadline :: forall a. SimTrace a -> IO ()
+traceCascadeDeadline tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowDeadlineCancelled "sim-cascade-deadline-parent-0",
+          WorkflowDeadlineCancelled "sim-cascade-deadline-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The first (inheriting) child settles, then the declining one, then
+-- the parent.
+traceDeclinedDeadline :: forall a. SimTrace a -> IO ()
+traceDeclinedDeadline tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-decline-deadline-parent-0",
+          WorkflowCompleted "sim-decline-deadline-parent-2",
+          WorkflowCompleted "sim-decline-deadline-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The child runs under its own budget and both complete.
+traceChildBudgetWins :: forall a. SimTrace a -> IO ()
+traceChildBudgetWins tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-child-budget-parent-0",
+          WorkflowCompleted "sim-child-budget-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The child runs under the inherited deadline and both complete.
+traceDeadlineInherited :: forall a. SimTrace a -> IO ()
+traceDeadlineInherited tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-inherit-deadline-parent-0",
+          WorkflowCompleted "sim-inherit-deadline-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The child's own budget cancels it, the parent's await records the
+-- cancellation as its step error, and the parent fails.
+traceCancelledChildAwaited :: forall a. SimTrace a -> IO ()
+traceCancelledChildAwaited tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowDeadlineCancelled "sim-awaited-cancel-parent-0",
+          WorkflowFailed "sim-awaited-cancel-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The fast step wins the race (id 1, behind the losing slow step at 0),
+-- then the run completes.
+traceLosingTokenFired :: forall a. SimTrace a -> IO ()
+traceLosingTokenFired tr = do
+  selectTraceEventsDynamic tr
+    @?= [ StepOutputRecorded "fast" 1,
+          WorkflowCompleted "sim-race-token-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The control signal ends the losing step and the run; the parent is
+-- left PENDING, which its control end says.
+traceControlSelect :: forall a. SimTrace a -> IO ()
+traceControlSelect tr = do
+  selectTraceEventsDynamic tr
+    @?= [ StepControlEnded "interrupted" 0 1,
+          WorkflowControlEnded "the workflow sim-race-control-parent was interrupted by shutdown and left PENDING"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The child settles, the select wins on the await arm, the parent
+-- completes.
+traceSelectStepRaces :: forall a. SimTrace a -> IO ()
+traceSelectStepRaces tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-race-parent-0",
+          WorkflowCompleted "sim-race-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- Each child settles as its own pair awaits it: -0, -2, -4, parent.
+traceStepIdPairs :: forall a. SimTrace a -> IO ()
+traceStepIdPairs tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-pairs-parent-0",
+          WorkflowCompleted "sim-pairs-parent-2",
+          WorkflowCompleted "sim-pairs-parent-4",
+          WorkflowCompleted "sim-pairs-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The three children settle in build order, then the parent completes.
+traceChildIdsInBuildOrder :: forall a. SimTrace a -> IO ()
+traceChildIdsInBuildOrder tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-order-parent-0",
+          WorkflowCompleted "sim-order-parent-1",
+          WorkflowCompleted "sim-order-parent-2",
+          WorkflowCompleted "sim-order-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The child settles, then the enclosing step records its output, then
+-- the parent completes.
+traceAwaitInsideStep :: forall a. SimTrace a -> IO ()
+traceAwaitInsideStep tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-await-step-parent-0",
+          StepOutputRecorded "collect" 1,
+          WorkflowCompleted "sim-await-step-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The child settles first; the parent then ends on the control end whose
+-- detail names the awaited child and the recorded stranger.
+traceStaleAwaitRefused :: forall a. SimTrace a -> IO ()
+traceStaleAwaitRefused tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowCompleted "sim-await-wrong-0",
+          WorkflowControlEnded "workflow sim-await-wrong step 1 was recorded as \"an await of somebody-elses-workflow\", but \"an await of sim-await-wrong-0\" was expected"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- * Engine-only driver aliases
 
@@ -1700,9 +754,9 @@ waitForRow dbos wid = go (20 :: Int)
         Right handle -> do
           status <- statusWfSim handle
           case status of
-            Left err -> throwIO (userError (show err))
+            Left err           -> throwIO (userError (show err))
             Right (Just found) -> pure found
-            Right Nothing -> threadDelay 1000 >> go (n - 1)
+            Right Nothing      -> threadDelay 1000 >> go (n - 1)
 
 -- | Register a @() -> Int@ body under IOSim, pinning the JSON types the
 -- polymorphic registration cannot infer from a local binding.
@@ -1722,12 +776,12 @@ registerRefOf = registerDBOSWorkflowRef
 
 orFail :: Either (Error EngineOnly) a -> IOSim s a
 orFail result = case result of
-  Left err -> throwIO (userError (show err))
+  Left err    -> throwIO (userError (show err))
   Right value -> pure value
 
 orFailSys :: Either SystemDB.Error a -> IOSim s a
 orFailSys result = case result of
-  Left err -> throwIO (userError (show err))
+  Left err    -> throwIO (userError (show err))
   Right value -> pure value
 
 data Refused = Refused

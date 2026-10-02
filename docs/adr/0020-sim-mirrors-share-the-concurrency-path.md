@@ -24,7 +24,7 @@ The rule is not theoretical. The case that motivated it (the `Tasks` group's "a 
 
 ## The mark rule
 
-Some cases the simulator genuinely cannot run. io-sim's `Fork` inserts the child into the thread map, appends its id to the **runqueue**, and reschedules the *parent* (`Control/Monad/IOSim/Internal.hs:473-490`), so nothing preempts a forked child before its parent's next commit — preemption-dependent cases (e.g. the fork→registration window in `spawnTracked`, `src/DBOS/Transact/Workflow.hs:796-833`) are unreachable in sim. Such cases run IO-only, declared with the reason in the reported case name (`ioOnly`), and listed below.
+Some cases the simulator genuinely cannot run. io-sim's `Fork` inserts the child into the thread map, appends its id to the **runqueue**, and reschedules the *parent* (`Control/Monad/IOSim/Internal.hs:473-490`), so nothing preempts a forked child before its parent's next commit — preemption-dependent cases (e.g. the fork→registration window in `spawnTracked`, `src/DBOS/Transact/Workflow.hs:796-833`) are unreachable in sim. Such cases run IO-only, with the reason in a comment above the case and in the lists below — case names stay plain so the IO↔Sim pair diffs name-for-name.
 
 ## The acceptance criterion
 
@@ -34,7 +34,7 @@ Deleting a case's sim half must remove **no engine function call** from the suit
 
 - `test/DBOS/Transact/WorkflowTestSim.hs:1251-1255`: "nothing runs it here, so the test stages what the queue runner would do and records its completion directly" — the runner's concurrency is untested in sim.
 - `test/DBOS/Transact/WorkflowTestSim.hs:1638-1651`: announcement shapes are hand-emitted through the say-carrier because "races and faults the sim does not stage" — the producing engine paths are untested in sim.
-- `MemSystemDB` delegates about forty methods — queues, schedules, streams, messages, versions — to `MockSystemDB`'s canned answers (`test/DBOS/SystemDB/IOSim.hs:574-613`), so those subsystems have no sim concurrency coverage at all.
+- `MemSystemDB` delegates about forty methods — queues, schedules, streams, messages, versions — to `MockSystemDB`'s canned answers (`test/DBOS/SystemDB/IOSim.hs:574-613`), so those subsystems have no sim concurrency coverage at all. **Closed 2026-10-01 (step 4):** queues, recovery, delayed transitions, message/event wakeups, schedules, and versions are implemented over real Mem state with Postgres semantics; streams stay delegated because Postgres itself holds them `undefined` (P7.4). `SystemDB.IOSimTest` pins the new semantics in a `MemSystemDB (stateful)` group.
 - Where the path *is* shared it works, and is the model to copy: `ContextTest`'s `Fixture m` plus `scenario*` bodies (`test/DBOS/Transact/ContextTest.hs:156,165+`) and the `Tasks` group's in-process `runSimOrThrow` bodies (`test/DBOS/Transact/WorkflowTest.hs:2338-2404`).
 
 ## Escape hatch, not adopted
@@ -50,5 +50,41 @@ Deleting a case's sim half must remove **no engine function call** from the suit
 IO-only cases (running list):
 
 - "a spawn refused after abort fills its channel instead of hanging" — real preemption, not cooperation (`test/DBOS/Transact/WorkflowTest.hs:2368`).
+- "a recovery run replays completed steps after a body interruption" — crash-and-relaunch recovery sweep; `MemSystemDB` delegates `reenqueueForRecovery` to the canned mock.
+- "an unregistered workflow is skipped and the rest recover" — same recovery sweep.
+- "a replayed parent reads the recorded outcome rather than waiting again" — recorded-await replay across two launches; needs the recovery sweep.
+- "a foreign error is converted at the boundary" — the body performs real IO (the foreign charge call), which the simulator cannot run.
+- "select reports the first workflow to settle, not the first started" — first-to-settle timing is wall-clock-bound.
 
-Recorded 2026-10-01.
+Recorded 2026-10-01; extended 2026-10-01 (same-tree marking).
+
+Sim-only cases (running list):
+
+- "a budget cancels the workflow durably" — not yet mirrored on IO; needs wall-clock budget/body scaling.
+- "workflow announcements carry their counts and ids" — typed trace assertions live only in sim (structural, per ADR-0016).
+
+## Addendum: the recovery interlude that ran nothing (2026-10-01)
+
+Two cases ("a parent starts a child under a derived id and replay adopts
+it", "an assigned child id wins over the derived one") carried a live
+crash-and-relaunch interlude whose stated premise was "the child is
+recorded but nothing runs it here". Converting them showed the premise
+was wrong: a child start detaches the child onto the executor and the
+child runs inline on both stacks, so the interlude waited ~46 s per case
+on a settle that was already terminal. The shared cases now assert what
+their names say — the child runs under its derived/assigned id and a
+replay adopts the recorded id — with no relaunch. The lesson matches the
+observation rule's: state what the engine actually did, not what the
+harness assumed it would not do.
+
+## Addendum: Tasks runners split (2026-10-01)
+
+The `Tasks` group no longer runs both halves in-process in the live tree.
+Bodies and checks are still shared (one body per case, `checkNoMiscounts`
+judging both), but IO leaves run in `tasksTests` (live tree, IO backend
+verified by `cabal test`) and IOSim leaves in `tasksSimTests`
+(`WorkflowTestSim`, Sim backend verified by the tasty watcher). The
+acceptance criterion is unchanged — deleting a sim leaf still removes no
+engine function call — and the printing contract is untouched (these
+bodies emit no events, so the sim leaves run `runSimOrThrow` with nothing
+to print).
