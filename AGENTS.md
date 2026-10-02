@@ -10,7 +10,7 @@ Repo guide for DBOS Haskell.
 - `src/DBOS/SystemDB/Postgres.hs` holds `[typedSql| ... |]` sessions over an explicit pool via `ihp-typed-sql` (the `hasql-th` dependency is removed).
 - `test/DBOS/<DomainTest>.hs` holds Tasty specs.
 - Sim trees live beside them: `test/DBOS/<Domain>Sim.hs` (eval-only mirrors over simulated data, never in `defaultMain`), `test/DBOS/IOSimTracer.hs` (the `simTracer` carrier — structured event plus its said line — `runSimCase`, stderr `printSimTrace`), `test/DBOS/SystemDB/IOSim.hs` (the `MockSystemDB`/`MemSystemDB` backends), and `test/DBOS/Transact/<Domain>SimData.hs` (per-domain mock constructors, dup'd across domains on purpose).
-- `rust-migrate/` is a standalone Cargo crate driving the public Rust migration runner (`make db-migrate`); it is not part of any workspace.
+- `rust-migrate/` is a standalone Cargo crate driving the Rust migration runner (`make db-migrate`); it is not part of any workspace, and it vendors the corpus (`migrations/*.sql` + `src/migrations/{mod,runner}.rs`, copied from `dbos-transact-rust/crates/dbos`) so the only path deps are its own files.
 - `docs/` holds durable engineering notes, workflow guidance, research context, and ADRs.
 - `docs/adr/` records architectural decisions.
 - `.lavish/rust-port-plan.html` is the living port plan; fold each phase's delta back into it (self-recursive loop) and mark edits with dated notes.
