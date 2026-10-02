@@ -45,6 +45,25 @@ module DBOS.Transact
     sendBulkWith,
     recv,
 
+    -- * Transactional steps (datasource.rs — port's own seam, ADR-0021)
+    IsolationLevel (..),
+    TransactionConfig (..),
+    transactionConfigDefault,
+    RecordedOutcome (..),
+    Tx (..),
+    DataSource (..),
+    runTransaction,
+    registerTransaction,
+    runTransactionOutside,
+    AppDataSource,
+    acquireAppDataSource,
+    acquireAppDataSourceIn,
+    releaseAppDataSource,
+    verifyAppDataSource,
+    runAppSession,
+    toDataSource,
+    beginSql,
+
     -- * Durable value codec
     CodecError (..),
     Serialization (..),
@@ -79,6 +98,7 @@ module DBOS.Transact
     ManagementEvent (..),
     WaitEvent (..),
     SleepEvent (..),
+    TransactionEvent (..),
     withTracer,
     contextTracer,
 
@@ -117,6 +137,8 @@ module DBOS.Transact
     shutdown,
     registerDBOSWorkflow,
     registerDBOSWorkflowRef,
+    registerDBOSDataSource,
+    clearDBOSCheckpoints,
     runDBOSWorkflow,
     startDBOSWorkflowRef,
     runDBOSWorkflowRef,
@@ -347,6 +369,8 @@ import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlac
 import DBOS.SystemDB.Retry (SysdbEvent (..), uuidEntropy)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity (..), Owner (..), SomeSystemDB (..), closeConnection, forApplication, generatedWorkflowId, newConnection, nextExecutionIdentity, runSystemDB, uuidWorkflowId)
 import DBOS.Transact.Dequeue (QueueEvent (..))
+import DBOS.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), TransactionConfig (..), TransactionEvent (..), Tx (..), registerTransaction, runTransaction, runTransactionOutside, transactionConfigDefault)
+import DBOS.Transact.Datasource.Postgres (AppDataSource, acquireAppDataSource, acquireAppDataSourceIn, beginSql, releaseAppDataSource, runAppSession, toDataSource, verifyAppDataSource)
 import DBOS.Transact.Client (Client (..), ClientConfig (..), EnqueueOptions (..), clientAppName, clientCancelWorkflows, clientConfigFromEnv, clientConfigNew, clientDeleteWorkflows, clientForkWorkflows, clientGetEvent, clientLatestApplicationVersion, clientListApplicationVersions, clientListWorkflows, clientOutcomePollInterval, clientPromoteVersion, clientResumeWorkflows, clientSendMessage, clientSendMessages, closeClient, connectClient, enqueueClientWorkflow, enqueueClientWorkflowWith, enqueueOptionsNew, enqueueOptionsOn, retrieveClientWorkflow, validateClientConfig, workflowStatusClient)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeUnit, encodeWorkflowValue)
 import DBOS.Transact.Config
@@ -364,7 +388,7 @@ import DBOS.Transact.Error (DurableError, EngineOnly, Error (..), Error, Failure
 import DBOS.Transact.Event (getEvent, pendingGetEvent, pendingSetEvent, setEvent)
 import DBOS.Transact.Handle (Provenance (..), WorkflowHandle (..), awaitChild, handleResult, handleStatus, handleWorkflowId, pendingAwait, pollingHandle)
 import DBOS.Transact.Identity (Environment (..), Identity (..), appIdEnv, appVersionEnv, cloudAppNameEnv, cloudEnv, defaultExecutorId, executorIdEnv, readEnvironment, resolve, validateAppName)
-import DBOS.Transact.Instance (DBOS, cancelWorkflows, dbosAppId, dbosAppVersion, dbosExecutorId, dequeueDBOSWorkflows, deleteWorkflows, enqueueDBOSWorkflow, fetchWorkflowStatuses, forkFrom, forkWorkflows, getWorkflowEvent, isLaunched, launch, launchOn, launchWithEnvironment, listWorkflowIdsByName, listWorkflows, newDBOS, registerDBOSWorkflow, registerDBOSWorkflowRef, resumeWorkflows, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, sendWorkflowMessage, sendWorkflowMessages, setWorkflowDelay, shutdown, startDBOSWorkflowRef, updateWorkflowAttributes)
+import DBOS.Transact.Instance (DBOS, cancelWorkflows, clearDBOSCheckpoints, dbosAppId, dbosAppVersion, dbosExecutorId, dequeueDBOSWorkflows, deleteWorkflows, enqueueDBOSWorkflow, fetchWorkflowStatuses, forkFrom, forkWorkflows, getWorkflowEvent, isLaunched, launch, launchOn, launchWithEnvironment, listWorkflowIdsByName, listWorkflows, newDBOS, registerDBOSDataSource, registerDBOSWorkflow, registerDBOSWorkflowRef, resumeWorkflows, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, sendWorkflowMessage, sendWorkflowMessages, setWorkflowDelay, shutdown, startDBOSWorkflowRef, updateWorkflowAttributes)
 import DBOS.Transact.Management (ManagementEvent (..), cancelWorkflowsInWorkflow, deleteWorkflowsInWorkflow, forkFromInWorkflow, forkWorkflowsInWorkflow, listWorkflowsInWorkflow, resumeWorkflowsInWorkflow)
 import DBOS.Transact.Context (Ctx, StepMarker (..), StepScope, StepStatus (..), cancelToken, cancellationToken, contextTracer, currentConnection, currentIdentity, deadline, executionIdentityOf, firstStepStatus, inStep, isSameExecution, newCtx, newStepScope, newWorkflowState, nextAttempt, nextStepId, nextStepMarker, spawnLocal, stepId, stepMarker, stepStatus, stepStatusCurrentAttempt, stepStatusId, stepStatusMaxAttempts, tokenCancelled, withAttempt, withSystemDB, withTracer, workflowId)
 import DBOS.Tracer (LoggerBackend (..), LogEvent (..), LogSeverity (..), SomeTracer (..), ThreadIdCache, TimedFastLogger, Tracer, acquireLoggerBackend, contramap, fastLoggerTracer, ioTracer, mkTracer, newLoggerBackend, nullTracer, parseSeverity, showSeverity, runTracer)

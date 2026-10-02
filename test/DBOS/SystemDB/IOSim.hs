@@ -13,6 +13,8 @@ module DBOS.SystemDB.IOSim
   ( MockSystemDB (..),
     MemSystemDB (..),
     newMemDB,
+    newMemDBWithApplication,
+    memSetApplication,
     memConnectionOn,
     memLaunchOn,
     memDBOSOn,
@@ -252,6 +254,15 @@ simInstanceId counter = do
     pure current
   pure (Text.pack ("sim-instance-" <> show n))
 
+-- | Fresh owner tokens, mirroring live init stamping one UUID per attempt.
+-- Shares the instance counter (formats keep them distinct); runs inside
+-- the caller's 'atomically', like every other Mem write.
+simOwnerText :: MemSystemDB s -> STM (IOSim s) Text
+simOwnerText db = do
+  current <- readTVar db.memInstanceCounter
+  writeTVar db.memInstanceCounter (current + 1)
+  pure (Text.pack ("sim-owner-" <> show current))
+
 -- | Deterministic ids for sim: @sim-1@, @sim-2@, ...
 simGeneratedId :: StrictTVar (IOSim s) Int -> IOSim s Text
 simGeneratedId ids = do
@@ -331,13 +342,23 @@ data MemSystemDB s = MemSystemDB
     -- | Names each connection launched over this data, so two instances
     -- sharing one database are still two — the distinction the
     -- cross-instance refusal reads.
-    memInstanceCounter :: StrictTVar (IOSim s) Int
+    memInstanceCounter :: StrictTVar (IOSim s) Int,
+    -- | The application this listener claims queues for. Mirrors the
+    -- Postgres backend's @psdbApplicationName@: a claim sees the
+    -- listener's own application's rows and unclaimed rows; 'Nothing'
+    -- sees everything. Settable so one database can model several
+    -- applications' executors.
+    memApplicationName :: StrictTVar (IOSim s) (Maybe Text)
   }
 
 -- | Fresh simulated data: empty rows, steps, dedup holds, queues,
 -- messages, events, schedules, versions, and a fresh instance counter.
 newMemDB :: IOSim s (MemSystemDB s)
-newMemDB =
+newMemDB = newMemDBWithApplication Nothing
+
+-- | Fresh simulated data for a listener of the given application.
+newMemDBWithApplication :: Maybe Text -> IOSim s (MemSystemDB s)
+newMemDBWithApplication application =
   MemSystemDB
     <$> newTVarIO Map.empty
     <*> newTVarIO Map.empty
@@ -349,6 +370,20 @@ newMemDB =
     <*> newTVarIO Map.empty
     <*> newTVarIO []
     <*> newTVarIO 0
+    <*> newTVarIO application
+
+-- | Re-points the listener's application between sweeps, so one database
+-- can model several applications' executors.
+memSetApplication :: Maybe Text -> MemSystemDB s -> IOSim s ()
+memSetApplication application db = atomically (writeTVar db.memApplicationName application)
+
+-- | The Postgres application filter: the listener sees its own
+-- application's rows and unclaimed rows; a listener with no application
+-- sees everything.
+visibleToApplication :: Maybe Text -> WorkflowRecord -> Bool
+visibleToApplication application row = case application of
+  Nothing -> True
+  Just name -> row.workflowRecordApplicationName == Just name || isNothing row.workflowRecordApplicationName
 
 -- | A connection over simulated data carrying the given tracer.
 memConnectionOn :: MemSystemDB s -> SomeTracer (IOSim s) -> IOSim s (Connection (IOSim s))
@@ -384,8 +419,8 @@ memDBOSOn mem tracer = do
 -- (from queue and delay, never the caller's choice) and the clock; the
 -- parent link rides the init caller, which is how a child start records
 -- its own start step in the same breath.
-memFreshRow :: NewWorkflow -> Maybe InitWorkflowCaller -> WorkflowRecord
-memFreshRow new caller =
+memFreshRow :: NewWorkflow -> Maybe InitWorkflowCaller -> Text -> WorkflowRecord
+memFreshRow new caller owner =
   WorkflowRecord
     { workflowRecordId = WorkflowId new.newWorkflowId,
       workflowRecordStatus = initialStatus new,
@@ -407,7 +442,7 @@ memFreshRow new caller =
       workflowRecordForkedFrom = Nothing,
       workflowRecordParentWorkflowId = (.initCallerParentWorkflowId) <$> caller,
       workflowRecordWasForkedFrom = False,
-      workflowRecordOwnerXid = Nothing,
+      workflowRecordOwnerXid = Just owner,
       workflowRecordApplicationId = new.newWorkflowApplicationId,
       workflowRecordAuthenticatedUser = new.newWorkflowAuthenticatedUser,
       workflowRecordAuthenticatedRoles = new.newWorkflowAuthenticatedRoles,
@@ -471,7 +506,8 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
         _ -> insertFresh rows
     where
       insertFresh rows = do
-        let row = memFreshRow new caller
+        owner <- simOwnerText db
+        let row = memFreshRow new caller owner
         writeTVar db.memRows (Map.insert new.newWorkflowId row rows)
         case caller of
           -- The init caller records the parent's start step in the same
@@ -764,6 +800,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     now <- timestampNow
     atomically $ do
       rows <- readTVar db.memRows
+      application <- readTVar db.memApplicationName
       let queueName = queue.queueRecordName
           workerBudget = case queue.queueRecordWorkerConcurrency of
             Just cap -> Just (max 0 (fromIntegral cap - localRunning))
@@ -773,13 +810,13 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
             _ -> Nothing
           narrow current available = Just (maybe available (min available) current)
           budget = foldr (\available current -> narrow current available) Nothing [b | Just b <- [workerBudget, partitionWorkerBudget]]
-          running = length [() | row <- Map.elems rows, row.workflowRecordStatus == Pending, row.workflowRecordQueueName == Just queueName]
+          running = length [() | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordStatus == Pending, row.workflowRecordQueueName == Just queueName]
           concurrencyBudget = case queue.queueRecordConcurrency of
             Just cap -> Just (max 0 (fromIntegral cap - fromIntegral running))
             Nothing -> Nothing
           partitionConcurrencyBudget = case (queue.queueRecordPartitionConcurrency, partitionKey) of
             (Just cap, Just key) ->
-              Just (max 0 (fromIntegral cap - fromIntegral (length [() | row <- Map.elems rows, row.workflowRecordStatus == Pending, row.workflowRecordQueueName == Just queueName, row.workflowRecordQueuePartitionKey == Just key])))
+              Just (max 0 (fromIntegral cap - fromIntegral (length [() | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordStatus == Pending, row.workflowRecordQueueName == Just queueName, row.workflowRecordQueuePartitionKey == Just key])))
             _ -> Nothing
           budget' = foldr (\available current -> narrow current available) budget [b | Just b <- [concurrencyBudget, partitionConcurrencyBudget]]
       case budget' of
@@ -792,6 +829,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 [ widText
                   | (widText, row) <- sortOn (\(_, row) -> (row.workflowRecordPriority, row.workflowRecordCreatedAt)) (Map.toList rows),
                     row.workflowRecordQueueName == Just queueName,
+                    visibleToApplication application row,
                     row.workflowRecordStatus == Enqueued,
                     row.workflowRecordApplicationVersion == Just applicationVersion || (isLatest && isNothing row.workflowRecordApplicationVersion),
                     case partitionKey of
@@ -803,20 +841,22 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           pure (Right (map WorkflowId claimed))
   getQueuePartitions db queueName = do
     rows <- readTVarIO db.memRows
+    application <- readTVarIO db.memApplicationName
     pure
-      ( Right (sort (Set.toList (Set.fromList [key | row <- Map.elems rows, row.workflowRecordQueueName == Just queueName, row.workflowRecordStatus == Enqueued, Just key <- [row.workflowRecordQueuePartitionKey]])))
+      ( Right (sort (Set.toList (Set.fromList [key | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordQueueName == Just queueName, row.workflowRecordStatus == Enqueued, Just key <- [row.workflowRecordQueuePartitionKey]])))
       )
   -- One head per partition with no pending work, in key order.
   startQueuedPartitionedWorkflows db queue executorId applicationVersion maxTasks = do
     now <- timestampNow
     atomically $ do
       rows <- readTVar db.memRows
+      application <- readTVar db.memApplicationName
       let queueName = queue.queueRecordName
           cap = fromIntegral dequeueSweepCap
           limit = maybe cap (min cap) (fromIntegral <$> maxTasks)
           keys =
             [ key
-              | key <- sort (Set.toList (Set.fromList [key | row <- Map.elems rows, row.workflowRecordQueueName == Just queueName, row.workflowRecordStatus == Enqueued, Just key <- [row.workflowRecordQueuePartitionKey]])),
+              | key <- sort (Set.toList (Set.fromList [key | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordQueueName == Just queueName, row.workflowRecordStatus == Enqueued, Just key <- [row.workflowRecordQueuePartitionKey]])),
                 not (any (\row -> row.workflowRecordQueueName == Just queueName && row.workflowRecordQueuePartitionKey == Just key && row.workflowRecordStatus == Pending) (Map.elems rows))
             ]
           heads =
@@ -828,8 +868,8 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                         [ (widText, row)
                           | (widText, row) <- Map.toList rows,
                             row.workflowRecordQueueName == Just queueName,
-                            row.workflowRecordQueuePartitionKey == Just key,
-                            row.workflowRecordStatus == Enqueued
+                            visibleToApplication application row,
+                            row.workflowRecordQueuePartitionKey == Just key
                         ]
                     ]
               ]
@@ -953,12 +993,13 @@ memFork :: MemSystemDB s -> [(Text, Maybe Text, Int)] -> ForkOptions -> IOSim s 
 memFork db forks options = atomically $ do
   rows <- readTVar db.memRows
   steps <- readTVar db.memSteps
-  let (ids, rows', steps') = foldr (memForkOne options) ([], rows, steps) forks
+  owner <- simOwnerText db
+  let (ids, rows', steps') = foldr (memForkOne options owner) ([], rows, steps) forks
   writeTVar db.memRows rows'
   writeTVar db.memSteps steps'
   pure (Right ids)
   where
-    memForkOne options' (source, chosen, startStep) (ids, rows, steps) =
+    memForkOne options' owner' (source, chosen, startStep) (ids, rows, steps) =
       let forkedText = fromMaybe (source <> "-fork") chosen
           status = case options'.forkOptionsQueueName of
             Just _ -> Enqueued
@@ -976,7 +1017,7 @@ memFork db forks options = atomically $ do
                   workflowRecordRecoveryAttempts = 0
                 }
             Nothing ->
-              (memFreshRow (newWorkflow forkedText) Nothing)
+              (memFreshRow (newWorkflow forkedText) Nothing owner')
                 { workflowRecordStatus = status,
                   workflowRecordQueueName = options'.forkOptionsQueueName,
                   workflowRecordForkedFrom = Just (WorkflowId source),

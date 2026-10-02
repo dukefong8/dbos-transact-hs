@@ -5,7 +5,7 @@ SHELL := bash
 GHC  ?= 9.12
 PACKAGE ?= dbos-transact-hs
 
-.PHONY: build dev env hie pg test db-migrate
+.PHONY: build dev env hie pg test db-migrate widget-db
 
 dev:
 	ghciwatch --no-interrupt-reloads \
@@ -17,7 +17,8 @@ dev:
 		--reload-glob  '!dist-newstyle/**/*.hs' \
 		--enable-eval \
 		--watch src \
-		--watch test
+		--watch test \
+		--watch demo-apps
 
 
 build:
@@ -31,6 +32,13 @@ test:
 db-migrate:
 	cargo run --quiet --manifest-path rust-migrate/Cargo.toml
 
+
+# Bootstrap the widget store's app schema before the first typedSql build.
+# The demo app also creates it at startup; this is only what the compile-time
+# describe needs.
+widget-db:
+	psql "$${DATABASE_URL:-$${DBOS_DATABASE_URL}}" -v ON_ERROR_STOP=1 -f demo-apps/dbos-hs-widget-store/schema.sql
+
 env:
 	rm .ghc.environment.*$(GHC)* || true
 	cabal install -w ghc-$(GHC) --enable-documentation \
@@ -39,4 +47,5 @@ env:
 		aeson bytestring text safe-wild-cards strict-wrapper time uuid \
 		bluefin contra-tracer contravariant fast-logger io-sim io-classes mtl \
 		hasql ihp-typed-sql hasql-pool hasql-transaction hasql-postgresql-types postgresql-types \
+		ihp-hsx ihp-router lucid2 wai warp http-types unix \
 		breakpoint nothunks rapid silently tasty tasty-hunit tasty-golden

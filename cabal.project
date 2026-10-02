@@ -1,4 +1,5 @@
 packages:
   .
-  ../ihp/ihp-typed-sql
-  ../ihp/ihp-router
+  ../ihp/ihp-hsx/
+  ../ihp/ihp-router/
+  ../ihp/ihp-typed-sql/

@@ -395,6 +395,26 @@ the statements:
   partition), `getQueue`, `listQueues`, `updateQueue` (validated),
   `deleteQueue`. Rate limits are not modelled — Mem keeps no dequeue
   history — and `debounceDelayedWorkflow` still delegates to the mock.
+  **Application scoping added 2026-10-02** (`visibleToApplication`,
+  `memApplicationName`, `newMemDBWithApplication`, `memSetApplication`):
+  the claim's candidates, the concurrency and partition counts, the
+  partition list, and the partitioned sweep now mirror the Postgres
+  filter (`$1 is null or application_name = $1 or application_name is
+  null`) instead of claiming across applications. The live suite's queue
+  flakes motivated it: an unclaimed queued fixture belongs to every
+  application, and any launched instance draining all queues (the
+  default) could claim a `PostgresTest` fixture before the test's own
+  sweep, leaving it PENDING under a foreign executor. `QueueTestSim`
+  reproduces the race deterministically (two forked listener sweeps, the
+  first claims; `SimEventType` asserts the fork order and that no timer
+  events are involved) and pins the fix (an application-scoped row is
+  invisible to a foreign listener). Live side: the queue fixtures are
+  inserted through `ownedFixture`, which stamps
+  `application_name = fixture-<uuid>`; the suite's own sweeps run with no
+  application and still see every row, and the `Postgres.Queues` case
+  "a claim only sees its own application's rows" mirrors the sim case
+  over `withBackendSettings` (a foreign-app handle skips the row, the
+  app the row names claims it).
 - Recovery: `reenqueueForRecovery` (pending rows of the named executors
   at the named version → ENQUEUED on the recovery queue) and
   `transitionDelayedWorkflows` (due DELAYED rows → ENQUEUED, debounced

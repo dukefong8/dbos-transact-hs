@@ -244,6 +244,14 @@ defaultFixture wid =
       fixtureDelayUntil = Nothing
     }
 
+-- | A fixture that owns its rows: the application stamp keeps another
+-- application's listener from claiming it. An unclaimed row belongs to
+-- every application (the claim's filter), so a raw queued fixture can be
+-- taken by any instance in the suite draining all queues; the suite's
+-- own sweeps run with no application and still see every row.
+ownedFixture :: Text -> FixtureRow
+ownedFixture unique = (defaultFixture unique) {fixtureApplication = Just ("fixture-" <> unique)}
+
 -- | Inserts a fixture row. The tests own their ids, so this never collides
 -- with another test's rows.
 insertFixture :: FixtureRow -> Session.Session ()
@@ -1030,8 +1038,8 @@ queueTests getBackend =
         unique <- freshWorkflowId
         let queueName = "q-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
-          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureQueue = Just queueName, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "p1"}
-          _ <- insertFixtureChecked env (defaultFixture (unique <> "-2")) {fixtureQueue = Just queueName, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "p2"}
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureQueue = Just queueName, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "p1"}
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-2")) {fixtureQueue = Just queueName, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "p2"}
           _ <- insertFixtureChecked env (defaultFixture (unique <> "-3")) {fixtureQueue = Just queueName, fixtureStatus = "SUCCESS", fixturePartitionKey = Just "p3"}
           partitions <- getQueuePartitions env queueName
           partitions @?= Right ["p1", "p2"],
@@ -1081,8 +1089,8 @@ queueTests getBackend =
         let name = "q-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
           _ <- upsertQueue env (newQueue name) {newQueueWorkerConcurrency = Just 1} UpdateExisting
-          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED"}
-          _ <- insertFixtureChecked env (defaultFixture (unique <> "-2")) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED"}
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED"}
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-2")) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED"}
           record <- registeredQueue env name
           version <- latestVersion env
           claimed <- startQueuedWorkflows env record "exec" version Nothing 0 0
@@ -1104,7 +1112,7 @@ queueTests getBackend =
         let name = "q-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
           _ <- upsertQueue env (newQueue name) UpdateExisting
-          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED"}
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED"}
           record <- registeredQueue env name
           version <- latestVersion env
           claimed <- startQueuedWorkflows env record "exec" version Nothing 0 0
@@ -1113,13 +1121,33 @@ queueTests getBackend =
           case readBack of
             Right (Just row) -> row.workflowRecordStatus @?= Pending
             other -> fail ("expected the workflow, got: " <> show other),
+      testCase "a claim only sees its own application's rows" $ do
+        unique <- freshWorkflowId
+        let name = "q-" <> Text.take 8 unique
+            foreignApp = "foreign-" <> Text.take 8 unique
+        withBackend getBackend $ \env -> do
+          _ <- upsertQueue env (newQueue name) UpdateExisting
+          version <- latestVersion env
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED", fixtureVersion = Just version}
+          -- A listener of another application skips the scoped row: the
+          -- claim's filter admits its own application's rows and
+          -- unclaimed ones only.
+          withBackendSettings getBackend (defaultSettings {settingsApplicationName = Just foreignApp}) $ \foreignEnv -> do
+            foreignRecord <- registeredQueue foreignEnv name
+            foreignClaim <- startQueuedWorkflows foreignEnv foreignRecord "foreign-exec" version Nothing 0 0
+            foreignClaim @?= Right []
+          -- The application the row names claims it.
+          withBackendSettings getBackend (defaultSettings {settingsApplicationName = Just ("fixture-" <> unique)}) $ \ownerEnv -> do
+            ownerRecord <- registeredQueue ownerEnv name
+            ownerClaim <- startQueuedWorkflows ownerEnv ownerRecord "owner-exec" version Nothing 0 0
+            ownerClaim @?= Right [WorkflowId unique],
       testCase "a partition sweep takes one head per partition" $ do
         unique <- freshWorkflowId
         let name = "q-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
           _ <- upsertQueue env (newQueue name) {newQueuePartitionConcurrency = Just 1} UpdateExisting
-          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "p1"}
-          _ <- insertFixtureChecked env (defaultFixture (unique <> "-2")) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "p2"}
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "p1"}
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-2")) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "p2"}
           record <- registeredQueue env name
           version <- latestVersion env
           swept <- startQueuedPartitionedWorkflows env record "exec" version Nothing
@@ -1131,7 +1159,7 @@ queueTests getBackend =
         let name = "q-" <> Text.take 8 unique
             key = "dedup-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
-          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureName = Just "bouncer", fixtureQueue = Just name, fixtureDeduplicationId = Just key, fixtureStatus = "DELAYED", fixtureIsDebounced = True, fixtureDelayUntil = Just 1000}
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureName = Just "bouncer", fixtureQueue = Just name, fixtureDeduplicationId = Just key, fixtureStatus = "DELAYED", fixtureIsDebounced = True, fixtureDelayUntil = Just 1000}
           bounced <- debounceDelayedWorkflow env (bounceRequest name key) Nothing
           bounced @?= Right (Debounced {debounceWorkflowId = unique})
           unheld <- debounceDelayedWorkflow env (bounceRequest name (key <> "-absent")) Nothing
@@ -1213,7 +1241,7 @@ queueTests getBackend =
             key = "dedup-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture parent)
-          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureName = Just "bouncer", fixtureQueue = Just name, fixtureDeduplicationId = Just key, fixtureStatus = "DELAYED", fixtureIsDebounced = True, fixtureDelayUntil = Just 1000}
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureName = Just "bouncer", fixtureQueue = Just name, fixtureDeduplicationId = Just key, fixtureStatus = "DELAYED", fixtureIsDebounced = True, fixtureDelayUntil = Just 1000}
           first <- debounceDelayedWorkflow env (bounceRequest name key) (Just (WorkflowId parent, 7))
           first @?= Right (Debounced {debounceWorkflowId = unique})
           -- The row is gone, so a second run can only answer from the step.

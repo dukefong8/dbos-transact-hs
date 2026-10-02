@@ -14,6 +14,11 @@ import DBOS.Transact.ClientTest qualified as ClientTest
 import DBOS.Transact.ConfigTest qualified as ConfigTest
 import DBOS.Transact.ContextTest qualified as ContextTest
 import DBOS.Transact.ContextTestSim qualified as ContextSim
+import DBOS.Transact.DatasourceTest qualified as DatasourceTest
+import DBOS.Transact.DatasourceTestSim qualified as DatasourceSim
+import DBOS.Transact.QueueTestSim qualified as QueueSim
+import DBOS.Transact.WidgetSim qualified as WidgetSim
+import DBOS.Transact.WidgetTest qualified as WidgetTest
 import DBOS.Transact.DeadlinesTest qualified as DeadlinesTest
 import DBOS.Transact.ErrorTest qualified as ErrorTest
 import DBOS.Transact.EventTest qualified as EventTest
@@ -57,6 +62,11 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty ConfigTest.tests
 --- $> tasty ContextTest.tests
 --- $> tasty ContextSim.tests
+--- $> tasty DatasourceTest.tests
+--- $> tasty DatasourceSim.tests
+--- $> tasty QueueSim.tests
+-- $> tasty WidgetSim.tests
+-- $> tasty WidgetTest.tests
 --- $> tasty DeadlinesTest.tests
 --- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests
@@ -80,8 +90,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty StepSim.tests
 --- $> tasty WaitTest.tests
 --- $> tasty WaitSim.tests
--- $> tasty WorkflowTest.tests
--- $> tasty WorkflowSim.tests
+--- $> tasty WorkflowTest.tests
+--- $> tasty WorkflowSim.tests
 main :: IO ()
 main = defaultMain tests
 
@@ -125,6 +135,8 @@ tests =
     , ClientTest.tests
     , ConfigTest.tests
     , ContextTest.tests
+    , DatasourceTest.tests
+    , WidgetTest.tests
     , DeadlinesTest.tests
     , ErrorTest.tests
     , EventTest.tests
@@ -157,5 +169,8 @@ simTests =
   , SleepSim.tests
   , StepSim.tests
   , WaitSim.tests
+  , DatasourceSim.tests
+  , QueueSim.tests
+  , WidgetSim.tests
   , WorkflowSim.tests
   ]
