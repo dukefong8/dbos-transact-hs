@@ -37,6 +37,8 @@ module DBOS.Transact.ContextTest
     scenarioTokenOutsideStep,
     scenarioConcurrentIsolation,
     scenarioExecCounters,
+    scenarioRaceCancelled,
+    scenarioRaceCompletes,
     scenarioStepView,
     checkScopeStatus,
     checkThrowEscape,
@@ -80,6 +82,7 @@ import DBOS.Transact
     nextStepId,
     nextStepMarker,
     nextWorkflowMarker,
+    raceCancel,
     nextWorkflowStepId,
     nullTracer,
     secondsDuration,
@@ -355,6 +358,21 @@ scenarioExecCounters fx = do
     nextWorkflowStepId wctx
   pure (first, second)
 
+scenarioRaceCompletes :: (MonadSTM m, MonadAsync m) => Fixture m -> m (Maybe Text)
+scenarioRaceCompletes fx = do
+  ctx <- fx.fixtureMkCtx "wf-race"
+  raceCancel ctx (pure "done")
+
+scenarioRaceCancelled :: (MonadSTM m, MonadAsync m, MonadMVar m, MonadCatch m) => Fixture m -> m (Maybe Text)
+scenarioRaceCancelled fx = do
+  ctx <- fx.fixtureMkCtx "wf-race-cancel"
+  marker <- nextStepMarker ctx
+  withAttempt ctx marker (firstStepStatus 0) $ \inner -> do
+    token <- cancellationToken inner
+    cancelToken token
+    -- The action never completes; the already-fired token decides it.
+    raceCancel inner (takeMVar =<< newEmptyMVar)
+
 scenarioStepView :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Text, Maybe StepStatus)
 scenarioStepView fx = do
   conn <- fx.fixtureMkConn
@@ -506,5 +524,13 @@ tests =
           testCase "a step view reads its status with the workflow id" $ do
             fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
             res <- scenarioStepView fx
-            res @?= ("wf-9", Just (firstStepStatus 7))
+            res @?= ("wf-9", Just (firstStepStatus 7)),
+          testCase "raceCancel returns the value when the token stays quiet" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioRaceCompletes fx
+            res @?= Just "done",
+          testCase "raceCancel reports cancellation when the token has fired" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioRaceCancelled fx
+            res @?= Nothing
         ]

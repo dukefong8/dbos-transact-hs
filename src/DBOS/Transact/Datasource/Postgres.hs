@@ -130,6 +130,14 @@ beginSql isolation =
 -- verification probes, and reads the tests own. Checkpoint writes never
 -- go through here — they ride the held connection inside
 -- 'dsWithTransaction'.
+--
+-- Never call this from a workflow body or a step body: a write here runs
+-- outside the execution's checkpoint, so replay re-runs it (double
+-- effects) and recovery cannot adopt it. Bodies that touch the
+-- application database go through 'runTransaction', whose
+-- transaction-completion row makes the body exactly-once. This stays
+-- exported for setup, verification, and handler reads — the same reason
+-- the TypeScript datasources keep their raw clients usable.
 runAppSession :: AppDataSource -> Session.Session a -> IO (Either BackendError a)
 runAppSession app session = do
   result <- Pool.use app.appSessionPool session

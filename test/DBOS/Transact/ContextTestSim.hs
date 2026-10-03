@@ -39,6 +39,8 @@ import DBOS.Transact.ContextTest
     scenarioDeadline,
     scenarioDenseIds,
     scenarioExecCounters,
+    scenarioRaceCancelled,
+    scenarioRaceCompletes,
     scenarioFirstAttempt,
     scenarioForkCounter,
     scenarioNestedRunners,
@@ -188,6 +190,14 @@ tests =
         (res, tr) <- runSimCase (scenarioStepView simFixture)
         printSimTrace tr
         res @?= ("wf-9", Just (firstStepStatus 7)),
+      testCase "raceCancel returns the value when the token stays quiet" $ do
+        (res, tr) <- runSimCase (scenarioRaceCompletes simFixture)
+        printSimTrace tr
+        res @?= Just "done",
+      testCase "raceCancel reports cancellation when the token has fired" $ do
+        (res, tr) <- runSimCase (scenarioRaceCancelled simFixture)
+        printSimTrace tr
+        res @?= Nothing,
       testCase "a context announces through its tracer" $ do
         (_, tr) <- runSimCase demoTrace
         printSimTrace tr

@@ -61,6 +61,7 @@ module DBOS.Transact.Context
     cancellationToken,
     cancelToken,
     tokenCancelled,
+    raceCancel,
 
     -- * The engine's task seam
     TaskSpawner (..),
@@ -398,6 +399,21 @@ cancellationToken :: MonadSTM m => Ctx m -> m (StrictTVar m Bool)
 cancellationToken ctx = case ctx.ctxStep of
   Just scope -> pure scope.scopeCancellation
   Nothing    -> newTVarIO False
+
+-- | Run an action until it completes or this execution's token fires,
+-- whichever comes first: 'Just' the value on completion, 'Nothing' on
+-- cancellation. Outside a step the token never fires, so this is just the
+-- action. Cooperative cancellation in one call — a step body that awaits
+-- 'raceCancel' honors workflow cancellation and attempt timeouts without a
+-- hand-polling loop, mirroring the skill's timeout-plus-abort-signal rule
+-- ('step-timeouts.md') in polled-token form.
+raceCancel :: (MonadSTM m, MonadAsync m) => Ctx m -> m a -> m (Maybe a)
+raceCancel ctx action = do
+  token <- cancellationToken ctx
+  outcome <- race action (atomically (readTVar token >>= check))
+  pure $ case outcome of
+    Left value -> Just value
+    Right () -> Nothing
 
 -- | Fires a token: work watching it should stop.
 cancelToken :: MonadSTM m => StrictTVar m Bool -> m ()
