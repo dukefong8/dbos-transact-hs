@@ -56,6 +56,7 @@ module DBOS.Transact.Context
     stepMarker,
     stepStatus,
     inStep,
+    insideAStep,
     withAttempt,
     cancellationToken,
     cancelToken,
@@ -358,6 +359,16 @@ inStep :: Ctx m -> Bool
 inStep ctx = case ctx.ctxStep of
   Nothing -> False
   Just _  -> True
+
+-- | Whether this execution is inside a step body right now — through the
+-- context in hand ('inStep') or through a captured parent while a body
+-- runs (the shared depth counter). Every guard that refuses or degrades
+-- inside a step reads this, never the scope field alone, so the
+-- captured-parent shape gets the same verdict as the handed view.
+insideAStep :: MonadSTM m => Ctx m -> m Bool
+insideAStep ctx
+  | inStep ctx = pure True
+  | otherwise = (> 0) <$> stepDepth ctx
 
 -- | Runs a body under a context that is 'inStep': this attempt's marker
 -- and status, and a fresh cancellation flag. Rebinding rather than

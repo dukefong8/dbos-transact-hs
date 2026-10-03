@@ -20,12 +20,16 @@ import DBOS.Transact
     SendOptions (..),
     Topic (..),
     WorkflowId (..),
+    firstStepStatus,
+    nextStepId,
+    nextStepMarker,
     nullTracer,
     recv,
     runWorkflowStep,
     send,
     sendOptionsDefault,
     sendWith,
+    withAttempt,
     workflowId,
   )
 import DBOS.Transact.ContextTest (ctxOver)
@@ -172,7 +176,21 @@ tests =
         withPair getBackend "step-send" $ \backend sender _ destination -> do
           senderContext <- ctxOver backend nullTracer (workflowId sender)
           outcome <- (runWorkflowStep senderContext "probe" (probeSendRecv destination) :: IO (Either (Error EngineOnly) Text))
-          outcome @?= Right "sent recv"
+          outcome @?= Right "sent recv",
+      testCase "a send through a captured parent is plain and moves no id" $
+        withPair getBackend "captured-send" $ \_backend sender _ destination -> do
+          marker <- nextStepMarker sender
+          sent <- withAttempt sender marker (firstStepStatus 0) $ \_stepped ->
+            send sender destination (Just (Topic "approval")) Nothing ("ping" :: Text)
+          sent @?= Right ()
+          counter <- nextStepId sender
+          counter @?= 0,
+      testCase "a recv through a captured parent is refused" $
+        withPair getBackend "captured-recv" $ \_backend sender _ _ -> do
+          marker <- nextStepMarker sender
+          received <- withAttempt sender marker (firstStepStatus 0) $ \_stepped ->
+            recv sender (Just (Topic "approval")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
+          received @?= Left (InsideStep "recv")
     ]
 
 notificationCount :: Postgres.PostgresSystemDB -> WorkflowId -> IO Int

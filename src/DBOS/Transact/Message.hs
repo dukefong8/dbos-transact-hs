@@ -28,7 +28,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Context (Ctx, nextStepId, stepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (Ctx, insideAStep, nextStepId, stepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runWorkflowStepWith, stepOptionsDefault)
 
@@ -95,11 +95,15 @@ sendWith ctx destination value options = do
             sendIdempotencyKey = options.idempotency_key
           }
       sendToForks = options.forks == ForksInclude
-  caller <- case stepId ctx of
-    Just _ -> pure Nothing
-    Nothing -> do
-      stepId' <- nextStepId ctx
-      pure (Just (WorkflowId workflowText, stepId'))
+  -- Inside a step the enclosing checkpoint stands for the send — through
+  -- the handed context or a captured parent, read together.
+  stepped <- insideAStep ctx
+  caller <-
+    if stepped
+      then pure Nothing
+      else do
+        stepId' <- nextStepId ctx
+        pure (Just (WorkflowId workflowText, stepId'))
   written <- withSystemDB ctx (\db -> SystemDB.sendMessage db message serialization caller sendToForks)
   pure $ case written of
     Left err -> Left (TransactError.ErrorSystemDatabase err)
@@ -148,10 +152,13 @@ sendBulkWith ctx messages options = do
 -- inside a step are refused because the enclosing step cannot identify the
 -- consumed message on a retry.
 recv :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> Maybe Topic -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
-recv ctx topic timeout =
-  case stepId ctx of
-    Just _ -> pure (Left (TransactError.InsideStep "recv"))
-    Nothing -> do
+recv ctx topic timeout = do
+  -- Refused through the handed context or a captured parent alike: the
+  -- enclosing step cannot identify the consumed message on a retry.
+  stepped <- insideAStep ctx
+  if stepped
+    then pure (Left (TransactError.InsideStep "recv"))
+    else do
       let workflowText = workflowId ctx
       stepId' <- nextStepId ctx
       timeoutStepId <- nextStepId ctx

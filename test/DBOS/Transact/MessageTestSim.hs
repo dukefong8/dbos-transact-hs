@@ -31,12 +31,16 @@ import DBOS.Transact
     Identity (..),
     Message (..),
     Topic (..),
+    firstStepStatus,
     newCtx,
     newWorkflowState,
     nextExecutionIdentity,
+    nextStepId,
+    nextStepMarker,
     recv,
     send,
     sendBulk,
+    withAttempt,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -97,5 +101,23 @@ tests =
           context <- simCtx "sim-bulk-empty"
           sendBulk context ([] :: [Message Int])
         printSimTrace tr
-        outcome @?= Right ()
+        outcome @?= Right (),
+      testCase "a send through a captured parent is plain and moves no id" $ do
+        (outcome, tr) <- runSimCase $ do
+          context <- simCtx "sim-captured-send"
+          marker <- nextStepMarker context
+          sent <- withAttempt context marker (firstStepStatus 0) $ \_ ->
+            send context (WorkflowId "sim-message-destination") (Just (Topic "approval")) Nothing ("ping" :: Text)
+          counter <- nextStepId context
+          pure (sent, counter)
+        printSimTrace tr
+        outcome @?= (Right (), 0),
+      testCase "a recv through a captured parent is refused" $ do
+        (received :: Either (Error EngineOnly) (Maybe Text), tr) <- runSimCase $ do
+          context <- simCtx "sim-captured-recv"
+          marker <- nextStepMarker context
+          withAttempt context marker (firstStepStatus 0) $ \_ ->
+            recv context (Just (Topic "approval")) (millisDuration 100)
+        printSimTrace tr
+        received @?= Left (InsideStep "recv")
     ]
