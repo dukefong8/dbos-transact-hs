@@ -74,6 +74,16 @@ module DBOS.Transact.Context
 
     -- * Backend access
     withSystemDB,
+    -- * Scoped workflow contexts
+    WorkflowCtx,
+    StepCtx,
+    withWorkflow,
+    withStep,
+    nextWorkflowStepId,
+    nextWorkflowMarker,
+    workflowCtxId,
+    stepCtxId,
+    stepCtxStatus,
   )
 where
 
@@ -84,7 +94,7 @@ import Data.Text (Text)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Timestamp)
 import DBOS.Tracer (SomeTracer)
-import DBOS.Transact.Connection (Connection (..), ExecutionIdentity, runSystemDB)
+import DBOS.Transact.Connection (Connection (..), ExecutionIdentity, nextExecutionIdentity, runSystemDB)
 import DBOS.Transact.Identity (Identity)
 
 -- | What a durable call knows about where it runs. The constructor is
@@ -390,3 +400,73 @@ tokenCancelled = readTVarIO
 -- explicitly. The one place the connection's existential is unpacked.
 withSystemDB :: Monad m => Ctx m -> (forall db. SystemDB.SystemDB db m => db -> m a) -> m a
 withSystemDB ctx action = runSystemDB ctx.ctxConn.connSysdb action
+
+-- * Scoped workflow contexts: one execution's view and one attempt's view.
+--
+-- 'WorkflowCtx' owns its counters (step, marker, depth) through the shared
+-- 'WorkflowState'; 'StepCtx' narrows it to a single attempt. Both are
+-- built only by the runners below — constructors stay private — and both
+-- are branded by execution, so a value from one run cannot be driven in
+-- another. Readers expose ids, statuses, and counters; nothing exposes
+-- the inner 'Ctx', so allocation stays on 'WorkflowCtx'.
+
+-- | One execution's workflow context: the connection, identity, and fresh
+-- workflow state a body runs with. Built only by 'withWorkflow', which
+-- mints the state new — the inner context always starts outside any step.
+data WorkflowCtx exec m = WorkflowCtx
+  { workflowCtx :: Ctx m
+  }
+
+-- | One attempt's narrowed view: the execution it belongs to and the
+-- attempt's scope. Built only by 'withStep'. Readers expose the id and
+-- the status — never a counter and never the inner context, so only
+-- 'WorkflowCtx' allocates.
+data StepCtx exec m = StepCtx
+  { stepCtxWorkflow :: WorkflowCtx exec m,
+    stepCtxInner :: Ctx m
+  }
+
+-- | Run an execution's body under a fresh workflow context: a new
+-- execution identity, fresh counters, and no step scope. The rank-2
+-- continuation binds the execution scope — values built inside cannot
+-- escape it, so one run's counters never leak into another's.
+withWorkflow :: MonadSTM m => Connection m -> Identity -> Text -> Maybe Timestamp -> (forall exec. WorkflowCtx exec m -> m a) -> m a
+withWorkflow conn identity wid deadline run = do
+  execution <- nextExecutionIdentity conn
+  state <- newWorkflowState wid deadline execution
+  inner <- newCtx conn identity state
+  run (WorkflowCtx inner)
+
+-- | Run one attempt under the narrowed view. Delegates bump, restore, and
+-- cancel to 'withAttempt', so the depth semantics stay in one place; what
+-- differs is the handoff — a 'StepCtx', never a bare 'Ctx' another
+-- allocator could spend.
+withStep :: (MonadSTM m, MonadCatch m) => WorkflowCtx exec m -> StepMarker -> StepStatus -> (StepCtx exec m -> m a) -> m a
+withStep wctx marker status body =
+  withAttempt wctx.workflowCtx marker status $ \stepped ->
+    body (StepCtx wctx stepped)
+
+-- | Allocate the next step id in this execution. Only 'WorkflowCtx' can
+-- spend the counter — the narrowed view exposes no allocator.
+nextWorkflowStepId :: MonadSTM m => WorkflowCtx exec m -> m Int
+nextWorkflowStepId wctx = nextStepId wctx.workflowCtx
+
+-- | Mint the next attempt marker in this execution. Markers spend their
+-- own sequence beside the step ids, as in the oracle.
+nextWorkflowMarker :: MonadSTM m => WorkflowCtx exec m -> m StepMarker
+nextWorkflowMarker wctx = nextStepMarker wctx.workflowCtx
+
+-- | The id of the workflow this execution runs.
+workflowCtxId :: WorkflowCtx exec m -> Text
+workflowCtxId wctx = workflowId wctx.workflowCtx
+
+-- | The id of the workflow this attempt belongs to.
+stepCtxId :: StepCtx exec m -> Text
+stepCtxId sctx = workflowId sctx.stepCtxInner
+
+-- | What this attempt may read about itself, or 'Nothing' outside any
+-- attempt — which a handed 'StepCtx' never is. Kept 'Maybe' like the
+-- reader it projects; the narrowed view's guarantee is which values
+-- exist, not totality.
+stepCtxStatus :: StepCtx exec m -> Maybe StepStatus
+stepCtxStatus sctx = stepStatus sctx.stepCtxInner

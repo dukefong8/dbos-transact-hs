@@ -60,8 +60,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty CheckpointTest.tests
 --- $> tasty ClientTest.tests
 --- $> tasty ConfigTest.tests
---- $> tasty ContextTest.tests
---- $> tasty ContextSim.tests
+-- $> tasty ContextTest.tests
+-- $> tasty ContextSim.tests
 --- $> tasty DatasourceTest.tests
 --- $> tasty DatasourceSim.tests
 --- $> tasty QueueSim.tests

@@ -40,7 +40,7 @@ tests =
   withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
   testGroup
     "Step retries"
-    [ testCase "a step that fails twice succeeds on the third attempt" $ withWorkflow getBackend "retry-third" $ \backend workflowText -> do
+    [ testCase "a step that fails twice succeeds on the third attempt" $ withBackendWorkflow getBackend "retry-third" $ \backend workflowText -> do
         attempts <- newIORef (0 :: Int)
         -- Retries announce through FastLogger, so the run proves the
         -- trace seam as well as the attempts it makes.
@@ -58,7 +58,7 @@ tests =
         cleanup
         outcome @?= Right 42
         readIORef attempts >>= (@?= 3),
-      testCase "exhausted retries carry every attempt's failure" $ withWorkflow getBackend "retry-exhausted" $ \backend workflowText -> do
+      testCase "exhausted retries carry every attempt's failure" $ withBackendWorkflow getBackend "retry-exhausted" $ \backend workflowText -> do
         attempts <- newIORef (0 :: Int)
         context <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
@@ -74,7 +74,7 @@ tests =
             length errors @?= 2
           other -> fail ("expected MaxStepRetriesExceeded, got: " <> show other)
         readIORef attempts >>= (@?= 2),
-      testCase "the default does not retry and does not wrap" $ withWorkflow getBackend "retry-default" $ \backend workflowText -> do
+      testCase "the default does not retry and does not wrap" $ withBackendWorkflow getBackend "retry-default" $ \backend workflowText -> do
         attempts <- newIORef (0 :: Int)
         context <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
@@ -84,7 +84,7 @@ tests =
         outcome <- runWorkflowStepWith stepOptionsDefault context "plain" body
         outcome @?= Left (StepFailed "plain" "boom")
         readIORef attempts >>= (@?= 1),
-      testCase "a retried step replays from its single checkpoint" $ withWorkflow getBackend "retry-replay" $ \backend workflowText -> do
+      testCase "a retried step replays from its single checkpoint" $ withBackendWorkflow getBackend "retry-replay" $ \backend workflowText -> do
         attempts <- newIORef (0 :: Int)
         firstContext <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
@@ -106,7 +106,7 @@ tests =
         cleanup
         replayed @?= Right 7
         readIORef attempts >>= (@?= 2),
-      testCase "a declined failure stops retrying immediately" $ withWorkflow getBackend "retry-declined" $ \backend workflowText -> do
+      testCase "a declined failure stops retrying immediately" $ withBackendWorkflow getBackend "retry-declined" $ \backend workflowText -> do
         attempts <- newIORef (0 :: Int)
         (logger, cleanup) <- acquireLoggerBackend
         context <- ctxOver backend (ioTracer logger) workflowText
@@ -124,7 +124,7 @@ tests =
         cleanup
         outcome @?= Left (StepFailed "declined" "boom")
         readIORef attempts >>= (@?= 1),
-      testCase "declining mid-policy keeps the earlier failures" $ withWorkflow getBackend "retry-mid-decline" $ \backend workflowText -> do
+      testCase "declining mid-policy keeps the earlier failures" $ withBackendWorkflow getBackend "retry-mid-decline" $ \backend workflowText -> do
         attempts <- newIORef (0 :: Int)
         context <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
@@ -150,7 +150,7 @@ tests =
             assertBool "the declining failure is kept" (any (== StepFailed "pick" "second") errors)
           other -> fail ("expected MaxStepRetriesExceeded, got: " <> show other)
         readIORef attempts >>= (@?= 2),
-      testCase "a step that hangs is stopped at its timeout" $ withWorkflow getBackend "retry-timeout" $ \backend workflowText -> do
+      testCase "a step that hangs is stopped at its timeout" $ withBackendWorkflow getBackend "retry-timeout" $ \backend workflowText -> do
         (logger, cleanup) <- acquireLoggerBackend
         context <- ctxOver backend (ioTracer logger) workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
@@ -161,14 +161,14 @@ tests =
         case outcome of
           Left StepTimeout {step} -> step @?= "slow"
           other -> fail ("expected StepTimeout, got: " <> show other),
-      testCase "a step within its timeout is unaffected" $ withWorkflow getBackend "retry-within" $ \backend workflowText -> do
+      testCase "a step within its timeout is unaffected" $ withBackendWorkflow getBackend "retry-within" $ \backend workflowText -> do
         context <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
             body _ = pure (Right (9 :: Int))
             options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 500)}
         outcome <- runWorkflowStepWith options context "quick" body
         outcome @?= Right 9,
-      testCase "a timed-out body stops rather than continuing" $ withWorkflow getBackend "retry-stops" $ \backend workflowText -> do
+      testCase "a timed-out body stops rather than continuing" $ withBackendWorkflow getBackend "retry-stops" $ \backend workflowText -> do
         ran <- newIORef False
         context <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
@@ -180,7 +180,7 @@ tests =
           other -> fail ("expected StepTimeout, got: " <> show other)
         threadDelay 150000
         readIORef ran >>= (@?= False),
-      testCase "a timed-out attempt is retried with a fresh timeout" $ withWorkflow getBackend "retry-fresh" $ \backend workflowText -> do
+      testCase "a timed-out attempt is retried with a fresh timeout" $ withBackendWorkflow getBackend "retry-fresh" $ \backend workflowText -> do
         attempts <- newIORef (0 :: Int)
         context <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
@@ -194,7 +194,7 @@ tests =
         outcome <- runWorkflowStepWith options context "flaky" body
         outcome @?= Right 42
         readIORef attempts >>= (@?= 3),
-      testCase "every attempt timing out reports each timeout" $ withWorkflow getBackend "retry-all-timeout" $ \backend workflowText -> do
+      testCase "every attempt timing out reports each timeout" $ withBackendWorkflow getBackend "retry-all-timeout" $ \backend workflowText -> do
         context <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
             body _ = threadDelay 100000 >> pure (Right (1 :: Int))
@@ -208,7 +208,7 @@ tests =
             length errors @?= 2
             assertBool "every error is a timeout" (all isTimeout errors)
           other -> fail ("expected MaxStepRetriesExceeded, got: " <> show other),
-      testCase "a plain step is not preemptible" $ withWorkflow getBackend "retry-plain" $ \backend workflowText -> do
+      testCase "a plain step is not preemptible" $ withBackendWorkflow getBackend "retry-plain" $ \backend workflowText -> do
         gate <- newEmptyMVar
         context <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
@@ -222,7 +222,7 @@ tests =
         putMVar gate ()
         outcome <- wait worker
         outcome @?= Right 7,
-      testCase "a completed step leaves its token alone" $ withWorkflow getBackend "retry-quiet-token" $ \backend workflowText -> do
+      testCase "a completed step leaves its token alone" $ withBackendWorkflow getBackend "retry-quiet-token" $ \backend workflowText -> do
         seen <- newIORef True
         context <- ctxOver backend nullTracer workflowText
         let body :: Ctx IO -> IO (Either (Error EngineOnly) Int)
@@ -234,7 +234,7 @@ tests =
         outcome <- runWorkflowStepWith stepOptionsDefault context "quiet" body
         outcome @?= Right 1
         readIORef seen >>= (@?= False),
-      testCase "the cancellation token fires before the body is dropped" $ withWorkflow getBackend "retry-token-first" $ \backend workflowText -> do
+      testCase "the cancellation token fires before the body is dropped" $ withBackendWorkflow getBackend "retry-token-first" $ \backend workflowText -> do
         gate <- newEmptyMVar
         probe <- newIORef (pure False)
         context <- ctxOver backend nullTracer workflowText
@@ -251,7 +251,7 @@ tests =
         probeAction <- readIORef probe
         fired <- probeAction
         fired @?= True,
-      testCase "a dropped step fires its cancellation token" $ withWorkflow getBackend "retry-token-drop" $ \backend workflowText -> do
+      testCase "a dropped step fires its cancellation token" $ withBackendWorkflow getBackend "retry-token-drop" $ \backend workflowText -> do
         gate <- newEmptyMVar
         started <- newEmptyMVar
         probe <- newIORef (pure False)
@@ -268,7 +268,7 @@ tests =
         probeAction <- readIORef probe
         fired <- probeAction
         fired @?= True,
-      testCase "a preemptible step stops and records no outcome" $ withWorkflow getBackend "retry-preempt" $ \backend workflowText -> do
+      testCase "a preemptible step stops and records no outcome" $ withBackendWorkflow getBackend "retry-preempt" $ \backend workflowText -> do
         gate <- newEmptyMVar
         started <- newEmptyMVar
         (logger, cleanup) <- acquireLoggerBackend
@@ -304,8 +304,8 @@ acquireSuiteBackend = do
   Postgres.activatePostgresSystemDB backend
   pure backend
 
-withWorkflow :: IO Postgres.PostgresSystemDB -> Text -> (Postgres.PostgresSystemDB -> Text -> IO a) -> IO a
-withWorkflow getBackend label action = do
+withBackendWorkflow :: IO Postgres.PostgresSystemDB -> Text -> (Postgres.PostgresSystemDB -> Text -> IO a) -> IO a
+withBackendWorkflow getBackend label action = do
   backend <- getBackend
   freshId <- UUID.V4.nextRandom
   let workflowText = "hs-l2-" <> label <> "-" <> Text.pack (UUID.toString freshId)

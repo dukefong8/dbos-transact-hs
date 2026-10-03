@@ -36,6 +36,8 @@ module DBOS.Transact.ContextTest
     scenarioNestedScope,
     scenarioTokenOutsideStep,
     scenarioConcurrentIsolation,
+    scenarioExecCounters,
+    scenarioStepView,
     checkScopeStatus,
     checkThrowEscape,
   )
@@ -56,8 +58,10 @@ import DBOS.Transact
     Serializer (..),
     SomeSystemDB (..),
     SomeTracer (..),
+    StepCtx,
     StepStatus (..),
     Timestamp (..),
+    WorkflowCtx,
     acquireLoggerBackend,
     cancelToken,
     cancellationToken,
@@ -75,8 +79,12 @@ import DBOS.Transact
     nextExecutionIdentity,
     nextStepId,
     nextStepMarker,
+    nextWorkflowMarker,
+    nextWorkflowStepId,
     nullTracer,
     secondsDuration,
+    stepCtxId,
+    stepCtxStatus,
     stepId,
     stepMarker,
     stepStatus,
@@ -87,6 +95,8 @@ import DBOS.Transact
     uuidEntropy,
     uuidWorkflowId,
     withAttempt,
+    withStep,
+    withWorkflow,
     workflowId,
   )
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -333,6 +343,27 @@ scenarioConcurrentIsolation fx = do
   wait b
   (,) <$> takeMVar first <*> takeMVar second
 
+scenarioExecCounters :: MonadSTM m => Fixture m -> m ((Int, Int), Int)
+scenarioExecCounters fx = do
+  conn <- fx.fixtureMkConn
+  let ident = fx.fixtureIdentity
+  first <- withWorkflow conn ident "wf-1" Nothing $ \wctx -> do
+    a <- nextWorkflowStepId wctx
+    b <- nextWorkflowStepId wctx
+    pure (a, b)
+  second <- withWorkflow conn ident "wf-1" Nothing $ \wctx ->
+    nextWorkflowStepId wctx
+  pure (first, second)
+
+scenarioStepView :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Text, Maybe StepStatus)
+scenarioStepView fx = do
+  conn <- fx.fixtureMkConn
+  let ident = fx.fixtureIdentity
+  withWorkflow conn ident "wf-9" Nothing $ \wctx -> do
+    marker <- nextWorkflowMarker wctx
+    withStep wctx marker (firstStepStatus 7) $ \sctx ->
+      pure (stepCtxId sctx, stepCtxStatus sctx)
+
 -- * Shared checks: pure verdicts; both trees turn them into assertions,
 -- so the IOSim typed assertions live alongside the same checks here.
 
@@ -467,5 +498,13 @@ tests =
           testCase "concurrent contexts are isolated from each other" $ do
             fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
             res <- scenarioConcurrentIsolation fx
-            res @?= ("a", "b")
+            res @?= ("a", "b"),
+          testCase "separate executions own independent step counters" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioExecCounters fx
+            res @?= ((0, 1), 0),
+          testCase "a step view reads its status with the workflow id" $ do
+            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
+            res <- scenarioStepView fx
+            res @?= ("wf-9", Just (firstStepStatus 7))
         ]

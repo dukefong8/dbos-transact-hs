@@ -20,6 +20,8 @@ import DBOS.Transact
     SysdbEvent (..),
     WorkflowEvent (..),
     contextTracer,
+    firstStepStatus,
+    newCtx,
     newCtx,
     newWorkflowState,
     nextExecutionIdentity,
@@ -36,6 +38,7 @@ import DBOS.Transact.ContextTest
     scenarioCoopFlag,
     scenarioDeadline,
     scenarioDenseIds,
+    scenarioExecCounters,
     scenarioFirstAttempt,
     scenarioForkCounter,
     scenarioNestedRunners,
@@ -46,6 +49,7 @@ import DBOS.Transact.ContextTest
     scenarioSharedCounter,
     scenarioStateInterop,
     scenarioStepIds,
+    scenarioStepView,
     scenarioThrowEscape,
     scenarioTokenFire,
     scenarioTokenOutsideStep,
@@ -176,6 +180,14 @@ tests =
         (res, tr) <- runSimCase (scenarioConcurrentIsolation simFixture)
         printSimTrace tr
         res @?= ("a", "b"),
+      testCase "separate executions own independent step counters" $ do
+        (res, tr) <- runSimCase (scenarioExecCounters simFixture)
+        printSimTrace tr
+        res @?= ((0, 1), 0),
+      testCase "a step view reads its status with the workflow id" $ do
+        (res, tr) <- runSimCase (scenarioStepView simFixture)
+        printSimTrace tr
+        res @?= ("wf-9", Just (firstStepStatus 7)),
       testCase "a context announces through its tracer" $ do
         (_, tr) <- runSimCase demoTrace
         printSimTrace tr
