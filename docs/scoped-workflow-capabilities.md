@@ -197,3 +197,19 @@ throughout; only phases 2–3 are red, each sized for one sitting.
 Deliberately unchanged: SystemDB seam and both backends, wire format and
 codecs, traces, the `Owner` flag (oracle-decided), `P`/`R` erasure,
 must-use discipline, `Tasks` branding.
+
+## 9. Oracle cross-reference (by §8 row)
+
+R-numbers refer to the `ownership-lifetimes-isomorphism.md` §10 matrix;
+Rust citations are `crates/dbos/src/...` at the pinned corpus.
+
+| §8 row | Oracle mechanism | R# | Standing after plan |
+|---|---|---|---|
+| 1 (dropped) | `StepPlacement::of`: `Arc::ptr_eq` connection compare + `Owner` downgrade (`checkpoint.rs`); `WrongInstance` (`error.rs`) | R9 | **parity, deliberately** — both sides runtime; the oracle's "nearly always a wiring error" rationale holds here too |
+| 2 | Ambient `Ctx::current()` + `StepPlacement` (`checkpoint.rs`); `PendingStep<'a>` borrow + per-poll recheck (`checkpoint.rs:128,333-359`); `StepBuiltElsewhere` (`error.rs:381`) | R3, R9-half | **exceeds**: borrow→`exec` param (no moves-within-lifetime); per-poll checks kept as the token backstop |
+| 3 | `in_step_scope` task-local rebind (`context.rs:358`); leaf rule + `InsideStep` runtime; `StepScope` marker/status/token (`context.rs:65-88`) | R7 | **exceeds for the natural shape** (compile error); capture still runtime, as the oracle |
+| 4 | Per-poll placement recheck; drop-guard/`onException` cancellation; attempts share one step id with fresh marker + token (`context.rs:70-88`) | R3, R7 | **parity by new mechanism**: depth counter covers what rechecking covers; `finally`-restore mirrors drop-guard semantics; per-attempt freshness matches the oracle docs verbatim |
+| 5 | `WorkflowHandle::polling` from caller-held ids (`handle.rs`: `fail_if_missing` — "an id taken on faith") | R6-half | **parity**: named gates, same faith-based semantics |
+| 6 | Free functions + `Ctx::scope`/`in_step_scope` vocabulary (`context.rs`) | — (naming) | **exceeds slightly**: scope info moves from prose into names |
+| 7 | `step_id`/`step_status`/`cancellation_token` readers + `StepStatus` accessors (`context.rs:100-150`) | R7 | **parity**: same reads, split by nesting level |
+| 8 | No Rust counterpart — oracle is Python `dbos/_datasource.py` (`SQLAlchemyDatasource`); pool mechanics are Haskell-side (hasql) | — (cf. `transactional-step-parity.md`) | **N/A**: the pinning discipline (`checkout`/`releasePin`/`useIn`) has no oracle shape to match or beat |
