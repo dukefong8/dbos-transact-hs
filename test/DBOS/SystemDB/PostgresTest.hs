@@ -476,7 +476,7 @@ lifecycleTests getBackend =
             _ -> fail "expected InvalidInput",
       testCase "reports a dead database instead of hanging" $ do
         let offline =
-              (configNew "postgresql://postgres:pgpasswd@127.0.0.1:1/none")
+              (configNew "postgresql://127.0.0.1:1/none")
                 { configSettings = defaultSettings {settingsRetry = defaultRetryPolicy {retryPolicyRetryConnectionErrors = False}}
                 }
         outcome <- try (acquirePostgresSystemDB offline nullTracer)

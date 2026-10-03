@@ -6,8 +6,14 @@
 -- and no other variable — the identity variables are launch's to read, so a
 -- hand-written config and one from here resolve to the same identity),
 -- @validate@, and @outcome_poll_interval@.
+--
+-- The system database comes from @DBOS_DATABASE_URL@; the application's own
+-- datasource reads @DATABASE_URL@ (see 'appDatabaseUrlFromEnv'), so the two
+-- may point at different servers.
 module DBOS.Transact.Config
   ( databaseUrlEnv,
+    appDatabaseUrlEnv,
+    appDatabaseUrlFromEnv,
     Serializer (..),
     serializerName,
     Config (..),
@@ -27,9 +33,23 @@ import DBOS.SystemDB.Types (Duration, durationIsZero, secondsDuration)
 import DBOS.Transact.Error (EngineOnly, Error (..))
 import System.Environment (lookupEnv)
 
--- | The one variable @from_env@ reads.
+-- | The one variable @from_env@ reads: the system database.
 databaseUrlEnv :: Text
 databaseUrlEnv = "DBOS_DATABASE_URL"
+
+-- | The variable the *application* datasource reads: the app's own database,
+-- which may be a different server than the system database. @DATABASE_URL@ is
+-- the deploy convention libpq tooling and the compile-time typedSql describe
+-- already use; a single-database deployment sets both to the same URL.
+appDatabaseUrlEnv :: Text
+appDatabaseUrlEnv = "DATABASE_URL"
+
+-- | The application datasource URL from the environment, or 'Nothing' when
+-- unset or empty. The caller decides the fallback (usually the system URL).
+appDatabaseUrlFromEnv :: IO (Maybe Text)
+appDatabaseUrlFromEnv = do
+  url <- lookupEnv (Text.unpack appDatabaseUrlEnv)
+  pure (Text.pack <$> url >>= \t -> if Text.null t then Nothing else Just t)
 
 -- | How payloads are encoded.
 data Serializer = RustSerde

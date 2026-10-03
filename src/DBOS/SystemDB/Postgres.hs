@@ -1113,8 +1113,8 @@ configNew url =
     }
 
 -- | A configuration from the environment: @DBOS_DATABASE_URL@, falling back
--- to the @PG*@ variables with the long-standing local defaults. What the
--- tests and the starter app build on.
+-- to the @PG*@ variables (the standard libpq variables — no credentials are
+-- invented when they are unset). What the tests and the starter app build on.
 configFromEnv :: IO Config
 configFromEnv = do
   databaseURL <- lookupEnv "DBOS_DATABASE_URL"
@@ -1126,12 +1126,14 @@ configFromEnv = do
       dbname <- lookupEnv "PGDATABASE"
       user <- lookupEnv "PGUSER"
       password <- lookupEnv "PGPASSWORD"
+      -- Userinfo carries a password only when PGPASSWORD set one; otherwise
+      -- libpq's own pgpass/PGPASSWORD resolution applies, as it would for any
+      -- other client. No credential is invented here.
+      let userinfo = maybe "postgres" Text.pack user <> maybe "" ((":" <>) . Text.pack) password
       pure
         ( configNew
             ( "postgresql://"
-                <> maybe "postgres" Text.pack user
-                <> ":"
-                <> maybe "pgpasswd" Text.pack password
+                <> userinfo
                 <> "@"
                 <> maybe "127.0.0.1" Text.pack host
                 <> ":"
@@ -3850,6 +3852,8 @@ getConnectionSettingsFromPGEnv = do
   port <- lookupEnv "PGPORT"
   dbname <- lookupEnv "PGDATABASE"
   user <- lookupEnv "PGUSER"
+  -- Only pass a password when PGPASSWORD names one; otherwise the connection
+  -- uses libpq's own pgpass/service resolution. No credential is invented.
   password <- lookupEnv "PGPASSWORD"
   pure $
     mconcat
@@ -3858,7 +3862,7 @@ getConnectionSettingsFromPGEnv = do
           (maybe 5432 parsePort port),
         Connection.dbname (maybe "dbos" toText dbname),
         Connection.user (maybe "postgres" toText user),
-        Connection.password (maybe "pgpasswd" toText password)
+        maybe mempty (Connection.password . toText) password
       ]
 
 parsePort :: String -> Word16

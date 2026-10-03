@@ -58,6 +58,7 @@ module DBOS.Transact
     AppDataSource,
     acquireAppDataSource,
     acquireAppDataSourceIn,
+    acquireAppDataSourceInFromEnv,
     releaseAppDataSource,
     verifyAppDataSource,
     runAppSession,
@@ -370,7 +371,7 @@ import DBOS.SystemDB.Retry (SysdbEvent (..), uuidEntropy)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity (..), Owner (..), SomeSystemDB (..), closeConnection, forApplication, generatedWorkflowId, newConnection, nextExecutionIdentity, runSystemDB, uuidWorkflowId)
 import DBOS.Transact.Dequeue (QueueEvent (..))
 import DBOS.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), TransactionConfig (..), TransactionEvent (..), Tx (..), registerTransaction, runTransaction, runTransactionOutside, transactionConfigDefault)
-import DBOS.Transact.Datasource.Postgres (AppDataSource, acquireAppDataSource, acquireAppDataSourceIn, beginSql, releaseAppDataSource, runAppSession, toDataSource, verifyAppDataSource)
+import DBOS.Transact.Datasource.Postgres (AppDataSource, acquireAppDataSource, acquireAppDataSourceIn, acquireAppDataSourceInFromEnv, beginSql, releaseAppDataSource, runAppSession, toDataSource, verifyAppDataSource)
 import DBOS.Transact.Client (Client (..), ClientConfig (..), EnqueueOptions (..), clientAppName, clientCancelWorkflows, clientConfigFromEnv, clientConfigNew, clientDeleteWorkflows, clientForkWorkflows, clientGetEvent, clientLatestApplicationVersion, clientListApplicationVersions, clientListWorkflows, clientOutcomePollInterval, clientPromoteVersion, clientResumeWorkflows, clientSendMessage, clientSendMessages, closeClient, connectClient, enqueueClientWorkflow, enqueueClientWorkflowWith, enqueueOptionsNew, enqueueOptionsOn, retrieveClientWorkflow, validateClientConfig, workflowStatusClient)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeUnit, encodeWorkflowValue)
 import DBOS.Transact.Config

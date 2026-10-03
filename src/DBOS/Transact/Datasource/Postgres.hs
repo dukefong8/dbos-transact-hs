@@ -18,6 +18,7 @@ module DBOS.Transact.Datasource.Postgres
   ( AppDataSource,
     acquireAppDataSource,
     acquireAppDataSourceIn,
+    acquireAppDataSourceInFromEnv,
     releaseAppDataSource,
     verifyAppDataSource,
     runAppSession,
@@ -44,6 +45,7 @@ import Hasql.Statement qualified as Statement
 import Data.Functor.Contravariant (contramap)
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput, renderError)
 import DBOS.SystemDB.Postgres qualified as SystemPostgres (classifyUsageError)
+import DBOS.Transact.Config qualified as Config
 import DBOS.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), Tx (..))
 import DBOS.SystemDB.Types (WorkflowId (..))
 
@@ -62,6 +64,15 @@ data AppDataSource = AppDataSource
 -- migrates; 'verifyAppDataSource' gates serving.
 acquireAppDataSource :: Text -> Int -> IO AppDataSource
 acquireAppDataSource = acquireAppDataSourceIn "dbos"
+
+-- | Open the pool taking the URL from the environment: @DATABASE_URL@ (the
+-- deployment convention for an application's own database), falling back to
+-- the system URL the caller passes for single-database setups. The schema is
+-- the checkpoint schema, as in 'acquireAppDataSourceIn'.
+acquireAppDataSourceInFromEnv :: Text -> Text -> Int -> IO AppDataSource
+acquireAppDataSourceInFromEnv schema systemUrl maxConnections = do
+  appUrl <- Config.appDatabaseUrlFromEnv
+  acquireAppDataSourceIn schema (maybe systemUrl id appUrl) maxConnections
 
 -- | Open the pool over a named checkpoint schema, the oracle's
 -- @schemaName@ parameter. The name is validated and quoted before it

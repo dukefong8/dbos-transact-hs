@@ -69,6 +69,7 @@ The database must always be migrated with the Rust runner first: run `make db-mi
 
 ## Guardrails
 
+- **Database URLs: `DBOS_DATABASE_URL` is the system database, `DATABASE_URL` is the application's own datasource.** The two are read separately (`DBOS.SystemDB.Postgres.configFromEnv` vs `DBOS.Transact.Config.appDatabaseUrlFromEnv`); a single-database deployment sets both to the same URL, and the app pool falls back to the system URL when `DATABASE_URL` is unset.
 - **MUST: NEVER store e2e or other ad-hoc harness scripts in the project folder.** Throwaway runners, crash/restart loops, Chrome/E2E drivers, live side-by-side comparison scripts, fuzz drivers, and snoop harnesses live outside the repo. Keep them under the operator's own scratch space (for example `~/.local/share/…` or a `scratch/` directory outside the workspace) and check them in only when a script is a durable, reviewed part of the build or test story (e.g. `Makefile` targets and the in-repo test suite). A `.sh`/`.py` file that exists only to poke a running demo or drive a one-off investigation does not belong in the tree.
 - Keep tests on public behavior, not implementation details.
 - Do not refactor while red.

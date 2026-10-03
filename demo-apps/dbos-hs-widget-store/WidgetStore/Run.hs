@@ -10,7 +10,7 @@ module WidgetStore.Run (start) where
 import DBOS.Prelude
 import DBOS.Transact
   ( Config (..),
-    acquireAppDataSourceIn,
+    acquireAppDataSourceInFromEnv,
     configFromEnv,
     launch,
     newDBOS,
@@ -52,9 +52,10 @@ start = do
             -- database.
             configListenQueues = Just []
           }
-  -- The typedSql statements in Store.hs name widget_store directly; this
-  -- schema must stay in step with them.
-  app <- acquireAppDataSourceIn "widget_store" config0.configDatabaseUrl 5
+  -- The app datasource reads the app's own database: @DATABASE_URL@ when set,
+  -- else the system URL. The typedSql statements in Store.hs name widget_store
+  -- directly; this schema must stay in step with them.
+  app <- acquireAppDataSourceInFromEnv "widget_store" config0.configDatabaseUrl 5
   created <- runAppSession app createSchemaSession
   either (die . showText) pure created
   verified <- verifyAppDataSource app

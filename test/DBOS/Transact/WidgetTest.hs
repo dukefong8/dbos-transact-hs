@@ -39,6 +39,7 @@ import DBOS.Transact
     WorkflowId (..),
     WorkflowRef,
     acquireAppDataSourceIn,
+    acquireAppDataSourceInFromEnv,
     configFromEnv,
     encodeWorkflowValue,
     getWorkflowEvent,
@@ -264,7 +265,9 @@ acquireWidgetFixture = do
             -- default) would sweep other tests' queue fixtures.
             configListenQueues = Just []
           }
-  app <- acquireAppDataSourceIn schema config0.configDatabaseUrl 2
+  -- The app datasource reads the app's own database: @DATABASE_URL@ when
+  -- set, else the system URL.
+  app <- acquireAppDataSourceInFromEnv schema config0.configDatabaseUrl 2
   tables <- pure (widgetTables schema)
   createWidgetSchema app tables
   dbos <- newDBOS config
