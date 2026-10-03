@@ -84,9 +84,14 @@ nothing but the validated decision. Findings consolidated in
   blocking waits and hand replayed steps a connection they must not
   touch. The model enforces nothing here — it is a policy note for the
   real migration (pin in the transactional runner, inside the attempt).
-- Whether hasql-pool exposes single-connection checkout was not
-  established (the API survey timed out); the prototype models pool
-  semantics abstractly. If it doesn't, the fallback is today's raw
-  `Connection.acquire` + exec-branded handle — same escape safety, pool
-  limits unenforced (the B9 contrast quantifies exactly what that gives
-  up).
+- hasql-pool 1.4.2.3 (pinned) exposes only pool-level ops —
+  `acquire` builds the pool, `use` borrows briefly per session,
+  `release` drains; there is **no single-connection checkout**
+  (verified against Hackage docs). So "pin from the pool" cannot mean
+  hasql-pool: the live options are (a) raw `Connection.acquire` per
+  attempt as today + exec-branded handle (same escape safety, pool
+  limits unenforced — exactly the B9 contrast), or (b) a
+  checkout-capable pool under the `DataSource` seam, e.g.
+  `resource-pool` (`takeResource`/`putResource` exist there) over raw
+  connections, or a small bespoke pool — new dependency vs more code,
+  both behind the seam so sims keep stubbing `Tx`.
