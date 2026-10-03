@@ -41,8 +41,10 @@ Design record: `.lavish/rust-port-plan.html` (Phase 10, Rule 9, TODO 12–16),
 
 - [x] A1: fold deltas (plan HTML Phase 10 / Rule 9 / TODO 12–16 / sidebar).
 - [x] A2: record decisions 1–11 (this section).
-- [ ] A3: per-domain table sketch for widget (checkout vs restock fields,
-      shared-field convention: repeat or embed, no inheritance).
+- [x] A3: widget table sketch (`docs/widget-step-tables.md`):
+      `CheckoutOps`/`DispatchOps` (the actual workflow pair), `setStatus`
+      repeated per the ≤2 rule, STM handlers with split-race fixes,
+      failing variant, live contract specified for C-phase.
 
 ## Phase B — Executor runner slice
 
@@ -77,13 +79,21 @@ the last module flips.
       `currentConnection` hole); typed start wrapper lands here.
 - [ ] C5 Management/Datasource/rest; final `Ctx` removal; full gate.
 
-## Phase D — StepOps widget pilot
+## Phase D — StepOps widget pilot (`docs/widget-step-tables.md`)
 
-- [ ] D1 `CheckoutOps`/`RestockOps` tables (StepCtx-keyed fields).
-- [ ] D2 Postgres handler behind the held connection; STM handler in sim.
-- [ ] D3 retire `WidgetSim` statement-unsupported stubs; race/rollback/
-      refusal teeth + one mixed live+canned test.
-- [ ] D4 follow-up domains after the pilot proves the pattern.
+- [x] D0 sketch: `CheckoutOps`/`DispatchOps` (StepCtx-keyed, `OrderId`
+      boundary, `setStatus` repeated per the ≤2 rule), STM handlers
+      (single-`atomically`, split-race fixes), failing variant, status
+      codes, live contract specified for C-phase.
+- [ ] D1 tables + STM handlers + failing variant land, with direct
+      handler tests (no engine needed): mint sequence, oversell race,
+      bomb rollback, failing stops-before-dispatch, status codes vs
+      `WidgetTest` assertions.
+- [ ] D2 engine integration, post-C Step slice (bodies have no `StepCtx`
+      until runners accept it): flip `WidgetSim` call sites, retire the
+      `Tx`-ignoring fakes, PG tables behind the held connection, one
+      mixed live+canned test.
+- [ ] D3 follow-up domains after the pilot proves the pattern.
 
 ## Standing gates (every slice)
 
