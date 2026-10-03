@@ -183,33 +183,31 @@ throughout; only phases 2–3 are red, each sized for one sitting.
 
 ## 8. Planned-change summary (real-tree migration)
 
-| # | Current API | Issue | New API | What it fixes (prototype evidence) |
-|---|---|---|---|---|
-| 1 | `newDBOS :: m (DBOS m)`; unscoped everything; cross-instance refused at runtime (`WrongInstance`, ADR-0018) | R9 cross-instance (singleton-like process; wiring-error class) | **DROPPED** — stays exactly as today (oracle parity); B0 asserts the refusal | — |
-| 2 | No execution scope in types; `ExecutionIdentity` compared at runtime; placed values flow across executions; `StepBuiltElsewhere` runtime-only | R9/checkHere cross-execution half runtime-only | `withWorkflow` binding `exec`; `PendingStep` carries `exec`; drive demands same `exec`, token backstop kept | cross-execution driving ill-typed (N5); smuggled values refused at runtime |
-| 3 | Single `Ctx m`; `nextStepId`/`startChildWorkflow` take any `Ctx`; leaf rule is runtime `inStep` → `InsideStep` | step bodies can allocate ids and start children — the natural shape compiles | `WorkflowCtx` (owns counter) + `StepCtx` (narrowed view); allocators and child-start take `WorkflowCtx`; bodies receive `StepCtx` | natural misuse rejected at compile time (N2/N4) |
-| 4 | No depth tracking; `withAttempt` only rebinds | captured parent context bypasses the leaf rule silently (proven by exhibit) | depth counter in shared per-execution state; `placeCall` refuses at depth > 0; `withStep` restores under `finally`; fresh marker + token per attempt | capture refused at runtime (B1/B2); no lockout on success/throw (B3/B4); per-attempt freshness (B5/B6) |
-| 5 | `retrieveWorkflow` mints handles from bare ids, unscoped→unscoped | the membrane between durable names and live capabilities is unnamed | named introduction gates (`DBOS m -> Text -> WorkflowHandle m e`) | all unscoped→scoped conversions flow through named functions |
-| 6 | `newDBOS` / `newCtx`-style builders / `withAttempt` | names say neither what's provided nor what's scoped | value-named binders `withWorkflow` / `withStep` (`withDBOS` dropped with #1) | scope introduction visible at every call site |
-| 7 | One reader set on `Ctx` (`workflowId`, `stepId`, `stepStatus`, …) | one type serves two nesting levels | readers split per context type | level confusion visible in signatures |
-| 8 | Transactional steps bypass the pool (raw per-attempt `Connection.acquire`) for connection affinity | pool limits unenforced on the tx path; leaks/overuse are runtime behavior | pin in step scope: `checkout` (depth-checked, exec-branded, generation-counted) + `releasePin`/`useIn`; pool cap + blocking take + high-water observability | cap respected under contention, nested pins refused, cross-exec and use-after-release refused (B7–B11, N7); raw contrast quantified (B9). Resolved: hasql-pool 1.4.2.3 has no checkout (`acquire`/`use`/`release` only, per Hackage) — live options are raw acquire + branded handle, or a checkout-capable pool (`resource-pool`, or bespoke) under the `DataSource` seam. Composed single-`Session` via `Pool.use` rejected despite `Session`'s `MonadIO`: one session is one connection, but bodies are `m`-polymorphic (IOSim must run them) with `m`-level tracer/retry, and `Session` is IO+hasql-concrete |
+| # | Current API | Issue | New API | What it fixes (prototype evidence) | Oracle counterpart | Standing |
+|---|---|---|---|---|---|---|
+| 1 | `newDBOS :: m (DBOS m)`; unscoped everything; cross-instance refused at runtime (`WrongInstance`, ADR-0018) | R9 cross-instance (singleton-like process; wiring-error class) | **DROPPED** — stays exactly as today (oracle parity); B0 asserts the refusal | — | `StepPlacement::of` `Arc::ptr_eq` + `Owner` downgrade; `WrongInstance` (R9) | parity, deliberately |
+| 2 | No execution scope in types; `ExecutionIdentity` compared at runtime; placed values flow across executions; `StepBuiltElsewhere` runtime-only | R9/checkHere cross-execution half runtime-only | `withWorkflow` binding `exec`; `PendingStep` carries `exec`; drive demands same `exec`, token backstop kept | cross-execution driving ill-typed (N5); smuggled values refused at runtime | ambient ctx + `PendingStep<'a>` + per-poll recheck (R3) | exceeds (no moves-within-lifetime; backstop kept) |
+| 3 | Single `Ctx m`; `nextStepId`/`startChildWorkflow` take any `Ctx`; leaf rule is runtime `inStep` | step bodies can allocate ids and start children — the natural shape compiles | `WorkflowCtx` (owns counter) + `StepCtx` (narrowed view); allocators and child-start take `WorkflowCtx`; bodies receive `StepCtx` | natural misuse rejected at compile time (N2/N4) | `in_step_scope` rebind; leaf rule runtime (R7) | exceeds, natural shape; capture runtime as oracle |
+| 4 | No depth tracking; `withAttempt` only rebinds | captured parent context bypasses the leaf rule silently (proven by exhibit) | depth counter in shared per-execution state; `placeCall` refuses at depth > 0; `withStep` restores under `finally`; fresh marker + token per attempt | capture refused at runtime (B1/B2); no lockout on success/throw (B3/B4); per-attempt freshness (B5/B6) | per-poll recheck; drop-guard cancel; shared step id + fresh marker/token (R3/R7) | parity by new mechanism |
+| 5 | `retrieveWorkflow` mints handles from bare ids, unscoped→unscoped | the membrane between durable names and live capabilities is unnamed | named introduction gates (`DBOS m -> Text -> WorkflowHandle m e`) | all unscoped→scoped conversions flow through named functions | `polling` handles from ids "taken on faith" (R6-half) | parity |
+| 6 | `newDBOS` / `newCtx`-style builders / `withAttempt` | names say neither what's provided nor what's scoped | value-named binders `withWorkflow` / `withStep` (`withDBOS` dropped with #1) | scope introduction visible at every call site | free-function + scope vocabulary (naming) | exceeds slightly |
+| 7 | One reader set on `Ctx` (`workflowId`, `stepId`, `stepStatus`, …) | one type serves two nesting levels | readers split per context type | level confusion visible in signatures | `step_id`/`step_status`/`cancellation_token` readers (R7) | parity |
+| 8 | Transactional steps bypass the pool (raw per-attempt `Connection.acquire`) for connection affinity | pool limits unenforced on the tx path; leaks/overuse are runtime behavior | pin in step scope: `checkout` (depth-checked, exec-branded, generation-counted) + `releasePin`/`useIn`; pool cap + blocking take + high-water observability | cap respected under contention, nested pins refused, cross-exec and use-after-release refused (B7–B11, N7); raw contrast quantified (B9). Resolved: hasql-pool 1.4.2.3 has no checkout (`acquire`/`use`/`release` only, per Hackage) — live options are raw acquire + branded handle, or a checkout-capable pool (`resource-pool`, or bespoke) under the `DataSource` seam. Composed single-`Session` via `Pool.use` rejected despite `Session`'s `MonadIO`: one session is one connection, but bodies are `m`-polymorphic (IOSim must run them) with `m`-level tracer/retry, and `Session` is IO+hasql-concrete | no Rust counterpart (Python `SQLAlchemyDatasource`) | N/A (Haskell-side) |
 
 Deliberately unchanged: SystemDB seam and both backends, wire format and
 codecs, traces, the `Owner` flag (oracle-decided), `P`/`R` erasure,
 must-use discipline, `Tasks` branding.
 
-## 9. Oracle cross-reference (by §8 row)
+## 9. Oracle evidence appendix (citations behind §8's Oracle/Standing columns)
 
-R-numbers refer to the `ownership-lifetimes-isomorphism.md` §10 matrix;
-Rust citations are `crates/dbos/src/...` at the pinned corpus.
+R-numbers refer to the `ownership-lifetimes-isomorphism.md` §10 matrix.
+Rust paths are `crates/dbos/src/...` at the pinned corpus.
 
-| §8 row | Oracle mechanism | R# | Standing after plan |
-|---|---|---|---|
-| 1 (dropped) | `StepPlacement::of`: `Arc::ptr_eq` connection compare + `Owner` downgrade (`checkpoint.rs`); `WrongInstance` (`error.rs`) | R9 | **parity, deliberately** — both sides runtime; the oracle's "nearly always a wiring error" rationale holds here too |
-| 2 | Ambient `Ctx::current()` + `StepPlacement` (`checkpoint.rs`); `PendingStep<'a>` borrow + per-poll recheck (`checkpoint.rs:128,333-359`); `StepBuiltElsewhere` (`error.rs:381`) | R3, R9-half | **exceeds**: borrow→`exec` param (no moves-within-lifetime); per-poll checks kept as the token backstop |
-| 3 | `in_step_scope` task-local rebind (`context.rs:358`); leaf rule + `InsideStep` runtime; `StepScope` marker/status/token (`context.rs:65-88`) | R7 | **exceeds for the natural shape** (compile error); capture still runtime, as the oracle |
-| 4 | Per-poll placement recheck; drop-guard/`onException` cancellation; attempts share one step id with fresh marker + token (`context.rs:70-88`) | R3, R7 | **parity by new mechanism**: depth counter covers what rechecking covers; `finally`-restore mirrors drop-guard semantics; per-attempt freshness matches the oracle docs verbatim |
-| 5 | `WorkflowHandle::polling` from caller-held ids (`handle.rs`: `fail_if_missing` — "an id taken on faith") | R6-half | **parity**: named gates, same faith-based semantics |
-| 6 | Free functions + `Ctx::scope`/`in_step_scope` vocabulary (`context.rs`) | — (naming) | **exceeds slightly**: scope info moves from prose into names |
-| 7 | `step_id`/`step_status`/`cancellation_token` readers + `StepStatus` accessors (`context.rs:100-150`) | R7 | **parity**: same reads, split by nesting level |
-| 8 | No Rust counterpart — oracle is Python `dbos/_datasource.py` (`SQLAlchemyDatasource`); pool mechanics are Haskell-side (hasql) | — (cf. `transactional-step-parity.md`) | **N/A**: the pinning discipline (`checkout`/`releasePin`/`useIn`) has no oracle shape to match or beat |
+- Row 1: `StepPlacement::of` (`checkpoint.rs`), `WrongInstance` (`error.rs`), `Owner` rationale (`connection.rs:65-67`).
+- Row 2: `PendingStep<'a>` (`checkpoint.rs:128`), per-poll recheck (`checkpoint.rs:333-359`), `StepBuiltElsewhere` (`error.rs:381`), ambient `Ctx::current()` (`context.rs:19-22`).
+- Row 3: `in_step_scope` (`context.rs:358`), `StepScope` marker/status/token (`context.rs:65-88`), leaf-rule rationale (`context.rs:40-50`).
+- Row 4: per-attempt marker/token/cancellation docs (`context.rs:70-88`), `StepStatus` accessors (`context.rs:100-150`).
+- Row 5: `WorkflowHandle::polling` + `fail_if_missing` (`handle.rs`), `WorkflowRef<P, R, E>` phantoms (`registry.rs:204`).
+- Row 6: free-function API + `Ctx::scope` vocabulary (`context.rs:30-33`).
+- Row 7: `step_id`/`step_status`/`cancellation_token` readers (`context.rs`), `StepStatus` snapshot rationale (`context.rs:100-105`).
+- Row 8: Python `dbos/_datasource.py` (`SQLAlchemyDatasource`); hasql-pool 1.4.2.3 `acquire`/`use`/`release` (Hackage) vs `Session` single-connection guarantee + `MonadIO` (hasql 1.10.3.7 docs).
