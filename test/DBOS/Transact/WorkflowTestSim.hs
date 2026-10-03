@@ -36,6 +36,7 @@ import DBOS.Transact.WorkflowTest
     checkAwaitRecorded,
     checkCancelledChildAwaited,
     checkCascadeDeadline,
+    checkCaptureChildRefused,
     checkChildBudgetWins,
     checkChildIdsInBuildOrder,
     checkChildInsideStepRefused,
@@ -74,6 +75,7 @@ import DBOS.Transact.WorkflowTest
     scenarioAwaitRecorded,
     scenarioCancelledChildAwaited,
     scenarioCascadeDeadline,
+    scenarioCaptureChildRefused,
     scenarioChildBudgetWins,
     scenarioChildIdsInBuildOrder,
     scenarioChildInsideStepRefused,
@@ -167,6 +169,7 @@ tests =
       simCase "a parent and its child hit an inherited deadline independently" scenarioCascadeDeadline checkCascadeDeadline traceCascadeDeadline,
       simCase "a parent starts a child under a derived id and replay adopts it" scenarioDerivedChildAdopted checkDerivedChildAdopted traceDerivedChildAdopted,
       simCase "starting a child inside a step is refused, not recorded" scenarioChildInsideStepRefused checkChildInsideStepRefused traceChildInsideStepRefused,
+      simCase "starting a child through a captured parent is refused, not recorded" scenarioCaptureChildRefused checkCaptureChildRefused traceCaptureChildRefused,
       simCase "a child that fails differently is started through lift" scenarioLiftChildError checkLiftChildError traceLiftChildError,
       -- IO only: the body performs real IO (the foreign charge call),
       -- which the simulator cannot run.
@@ -580,6 +583,13 @@ traceLiftChildError tr = do
 traceChildInsideStepRefused :: forall a. SimTrace a -> IO ()
 traceChildInsideStepRefused tr = do
   selectTraceEventsDynamic tr @?= [WorkflowFailed "sim-childleaf-parent"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The refusal records no start row: the parent just fails (through the
+-- captured parent rather than the stepped context — same events).
+traceCaptureChildRefused :: forall a. SimTrace a -> IO ()
+traceCaptureChildRefused tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowFailed "sim-childleaf-captured-parent"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- Both the child and the parent are cancelled by the inherited deadline,

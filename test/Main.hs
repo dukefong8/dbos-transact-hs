@@ -57,7 +57,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SystemDBRetry.tests
 --- $> tasty SystemDBTypes.tests
 --- $> tasty Tracer.tests
--- $> tasty CheckpointTest.tests
+--- $> tasty CheckpointTest.tests
 --- $> tasty ClientTest.tests
 --- $> tasty ConfigTest.tests
 --- $> tasty ContextTest.tests
@@ -90,8 +90,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty StepSim.tests
 --- $> tasty WaitTest.tests
 --- $> tasty WaitSim.tests
---- $> tasty WorkflowTest.tests
---- $> tasty WorkflowSim.tests
+-- $> tasty WorkflowTest.tests
+-- $> tasty WorkflowSim.tests
 main :: IO ()
 main = defaultMain tests
 

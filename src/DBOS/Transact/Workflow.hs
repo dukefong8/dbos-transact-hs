@@ -72,7 +72,7 @@ import DBOS.SystemDB.Types (ApplicationVersion, AwaitedOutcome (..), Duration, E
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeWorkflowValue)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, nextExecutionIdentity, runSystemDB)
-import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..), TaskSpawner (..), currentConnection, currentIdentity, deadline, inStep, newCtx, newWorkflowState, nextStepId, spawnLocal, taskSpawner, withTaskSpawner, workflowId)
+import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..), TaskSpawner (..), currentConnection, currentIdentity, deadline, inStep, newCtx, newWorkflowState, nextStepId, spawnLocal, stepDepth, taskSpawner, withTaskSpawner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
@@ -637,8 +637,14 @@ runWorkflowRef tasks conn identity snapshot ref options input = do
 -- leaf, and an id-allocating call inside one would shift every later step
 -- onto the wrong replay slot.
 startChildWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => Ctx m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
-startChildWorkflow ctx ref options input =
-  if inStep ctx
+startChildWorkflow ctx ref options input = do
+  depth <- stepDepth ctx
+  -- A start inside a step body is refused — and a start through a captured
+  -- parent while a step body runs is the same leaf violation with a scope
+  -- field predating the body, which the shared depth counter reports. Read
+  -- together, as the oracle reads its ambient scope: refused before
+  -- anything is written and before the counter moves.
+  if inStep ctx || depth > 0
     then pure (Left (TransactError.InsideStep "starting a workflow"))
     else do
       -- A reference from another instance would take its id from this

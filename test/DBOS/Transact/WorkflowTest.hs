@@ -27,6 +27,7 @@ module DBOS.Transact.WorkflowTest
     scenarioChildBudgetWins,
     scenarioDeclinedDeadline,
     scenarioCascadeDeadline,
+    scenarioCaptureChildRefused,
     scenarioChildInsideStepRefused,
     scenarioLiftChildError,
     scenarioUnawaitedChild,
@@ -64,6 +65,7 @@ module DBOS.Transact.WorkflowTest
     checkChildBudgetWins,
     checkDeclinedDeadline,
     checkCascadeDeadline,
+    checkCaptureChildRefused,
     checkChildInsideStepRefused,
     checkLiftChildError,
     checkUnawaitedChild,
@@ -475,6 +477,7 @@ tests =
       liveCase getBackend (ioTracer . fst <$> getLogger) "a parent and its child hit an inherited deadline independently" scenarioCascadeDeadline checkCascadeDeadline,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a parent starts a child under a derived id and replay adopts it" scenarioDerivedChildAdopted checkDerivedChildAdopted,
       liveCase getBackend (ioTracer . fst <$> getLogger) "starting a child inside a step is refused, not recorded" scenarioChildInsideStepRefused checkChildInsideStepRefused,
+      liveCase getBackend (ioTracer . fst <$> getLogger) "starting a child through a captured parent is refused, not recorded" scenarioCaptureChildRefused checkCaptureChildRefused,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a child that fails differently is started through lift" scenarioLiftChildError checkLiftChildError,
       -- IO only: the body performs real IO (the foreign charge call),
       -- which the simulator cannot run.
@@ -1805,6 +1808,42 @@ scenarioLiftChildError fx = do
     childRow <- fx.wfReadRow (WorkflowId shipText)
     pure (ran, childRow)
 
+-- | Starting a child through a captured parent while a step body runs is
+-- refused, not recorded: the depth says what the context cannot, so the
+-- engine refuses it with @InsideStep@ before anything is written and no
+-- start row appears. Returns the run and the parent's steps.
+scenarioCaptureChildRefused ::
+  forall m.
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
+  WfFixture m ->
+  m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
+scenarioCaptureChildRefused fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    let childKey = newWorkflowKey "double"
+        parentKey = newWorkflowKey "badparent"
+        childBody :: Int -> Ctx m -> m (Either (Error EngineOnly) Int)
+        childBody value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
+    childRefE <- registerDBOSWorkflowRef dbos childKey childBody
+    childRef <- case childRefE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    let badBody :: Int -> Ctx m -> m (Either (Error EngineOnly) Text)
+        badBody _ ctx = do
+          marker <- nextStepMarker ctx
+          outcome <- withAttempt ctx marker (firstStepStatus 0) (\_ -> startChildWorkflow ctx childRef startOptionsDefault Nothing)
+          pure $ case outcome of
+            Left err -> Left err
+            Right handle -> Left (ErrorConfig ("started through a captured parent: " <> handleWorkflowId handle))
+    parentReg <- registerDBOSWorkflow dbos parentKey badBody
+    case parentReg of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    fx.wfLaunch dbos
+    wid <- fx.wfFreshId "childleaf-captured-parent"
+    (result :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runDBOSWorkflow dbos parentKey wid (Just (encodeWorkflowValue (0 :: Int)))
+    steps <- fx.wfListSteps wid
+    pure (result, steps)
+
 -- | Starting a child inside a step is refused, not recorded: the leaf
 -- start is attempted inside a step scope, so the engine refuses it with
 -- @InsideStep@ and no start row appears. Returns the run and the
@@ -2804,6 +2843,18 @@ checkLiftChildError (ran, childRow)
 -- | The engine refused the in-step start and nothing was recorded.
 checkChildInsideStepRefused :: (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord]) -> Either String ()
 checkChildInsideStepRefused (result, steps)
+  | Left (InsideStep operation) <- result = if operation == "starting a workflow"
+      then if null steps
+        then Right ()
+        else Left ("expected no recorded start, got: " <> show steps)
+      else Left ("expected the leaf refusal, got: " <> show operation)
+  | otherwise = Left ("expected the leaf refusal, got: " <> show result)
+
+-- | The captured-parent start is refused with the leaf error and records
+-- nothing: same verdict as the in-step start, through the depth rather
+-- than the scope field.
+checkCaptureChildRefused :: (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord]) -> Either String ()
+checkCaptureChildRefused (result, steps)
   | Left (InsideStep operation) <- result = if operation == "starting a workflow"
       then if null steps
         then Right ()
