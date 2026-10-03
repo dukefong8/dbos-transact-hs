@@ -1,0 +1,109 @@
+cabal-version:      3.0
+name:               dbos-scope-proto
+version:            0.1.0.0
+synopsis:
+  THROWAWAY prototype for the §11 phantom-brand direction. NOT FOR PRODUCTION.
+description:
+  Throwaway prototype validating the decided phantom-brand direction
+  (docs/ownership-lifetimes-isomorphism.md §11): @inst@-scoped
+  connections\/registries\/refs\/handles, per-execution @exec@-scoped
+  workflow\/step contexts, rank-2 region binders. Lives on the
+  proto/phantom-brands throwaway branch only; main keeps nothing but
+  the validated decision. Findings are consolidated in
+  docs/scoped-workflow-capabilities.md (same branch).
+license:            NONE
+build-type:         Simple
+
+library
+  hs-source-dirs:   src
+  exposed-modules:  Scope.Model
+  build-depends:
+      base
+    , containers
+    , io-classes
+    , io-classes:strict-mvar
+    , io-classes:strict-stm
+    , text
+  default-language: Haskell2010
+  ghc-options:      -Wall
+
+executable proto-io
+  main-is:          Main.hs
+  hs-source-dirs:   app-io
+  build-depends:
+      base
+    , dbos-scope-proto
+    , io-classes
+    , io-classes:strict-mvar
+    , io-classes:strict-stm
+    , text
+  default-language: Haskell2010
+  ghc-options:      -Wall
+
+executable proto-sim
+  main-is:          Main.hs
+  hs-source-dirs:   app-sim
+  build-depends:
+      base
+    , dbos-scope-proto
+    , io-classes
+    , io-classes:strict-mvar
+    , io-classes:strict-stm
+    , io-sim
+    , text
+  default-language: Haskell2010
+  ghc-options:      -Wall
+
+-- Negative compile tests: each MUST FAIL to build. Built one by one by
+-- run.sh (never as part of `cabal build all` succeeding). -fno-code:
+-- typecheck only, no linking.
+executable neg-n1-mix-instances
+  main-is:          N1_MixInstances.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable neg-n2-step-start
+  main-is:          N2_StepStart.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable neg-n3-escape-handle
+  main-is:          N3_EscapeHandle.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable neg-n4-nextid-on-step
+  main-is:          N4_NextIdOnStep.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable neg-n5-cross-exec-drive
+  main-is:          N5_CrossExecDrive.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable neg-n6-cross-run
+  main-is:          N6_CrossRun.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, io-sim, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+-- Documents the residual hole: a step body capturing the PARENT context
+-- can still start children. MUST BUILD (the hole is real). See README.
+executable residual-capture
+  main-is:          Residual_Capture.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w

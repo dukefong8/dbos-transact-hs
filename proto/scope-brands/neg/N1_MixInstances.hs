@@ -1,0 +1,19 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+-- | MUST FAIL: a ref from instance A used with a context from instance B.
+-- The analogue of the runtime WrongInstance refusal, as a type error.
+module Main (main) where
+
+import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
+import Scope.Model
+
+startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (WHandle i m ())
+startIt ctx ref = startChild ctx ref "opts"
+
+main :: IO ()
+main = withInstance "a" $ \dba ->
+  withInstance "b" $ \dbb -> do
+    ref <- register dba "worker"
+    withExecution dbb "wf" $ \ctxb -> do
+      _ <- startIt ctxb ref
+      pure ()
