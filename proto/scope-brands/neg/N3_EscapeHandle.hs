@@ -12,5 +12,5 @@ mintIt dbos wid = mintHandle dbos wid
 
 main :: IO ()
 main = do
-  h <- withInstance "a" $ \dbos -> mintIt dbos "wf-1"
+  h <- withDBOS "a" $ \dbos -> mintIt dbos "wf-1"
   print (handleId h)

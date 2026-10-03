@@ -6,8 +6,8 @@
 -- | THROWAWAY prototype model (not production code).
 --
 -- Phase 2 adds the scope-depth backstop behind the 'WorkflowCtx'/'StepCtx' split:
--- 'inst' is the instance scope (one per 'withInstance' region), 'exec'
--- the execution scope (one per 'withExecution' region), and a depth
+-- 'inst' is the instance scope (one per 'withDBOS' region), 'exec'
+-- the execution scope (one per 'withWorkflow' region), and a depth
 -- counter in the shared per-execution state refuses allocations that
 -- arrive while a step body is running — including through a captured
 -- parent context. Constructors are hidden; the export list is the privacy
@@ -31,14 +31,14 @@ module Scope.Model
   , StepStatus (..)
   , StepScope
     -- * Region binders (the only place a scope variable is introduced)
-  , withInstance
-  , withExecution
+  , withDBOS
+  , withWorkflow
     -- * Operations
   , register
   , mintHandle
   , nextStepId
   , placeCall
-  , withAttempt
+  , withStep
   , startChild
   , awaitChild
   , placeAwait
@@ -86,7 +86,7 @@ data Registry inst m = MkReg
   { regBodies :: StrictMVar m (Map Text Text)
   }
 
--- | The launched-instance bundle. One 'inst' per 'withInstance' region.
+-- | The launched-instance bundle. One 'inst' per 'withDBOS' region.
 data DBOS inst m = MkDBOS
   { dbConn :: Connection inst m
   , dbReg :: Registry inst m
@@ -132,7 +132,7 @@ data StepStatus = MkStatus
 
 -- | One attempt's scope: marker (per attempt, never persisted), status,
 -- and a fresh cancellation token. Constructor hidden: attempts are minted
--- only by 'withAttempt'.
+-- only by 'withStep'.
 data StepScope m = MkScope
   { scopeMarker :: Int
   , scopeStatus :: StepStatus
@@ -157,13 +157,13 @@ data Pending inst exec m a = MkPending
   , pRun :: m a
   }
 
--- | Bind the instance scope. The analogue of the §11 @withInstance@: every
+-- | Bind the instance scope. The analogue of the §11 @withDBOS@: every
 -- value inside shares one rigid @inst@, and none of it can be named
 -- outside (the continuation's result cannot mention @inst@).
-withInstance
+withDBOS
   :: (MonadSTM m, MonadMVar m)
   => Text -> (forall inst. DBOS inst m -> m a) -> m a
-withInstance name use = do
+withDBOS name use = do
   st <- newTVarIO 0
   bodies <- newMVar Map.empty
   count <- newTVarIO 0
@@ -172,10 +172,10 @@ withInstance name use = do
 -- | Bind the execution scope inside an instance region. Mints the
 -- per-execution step counter, marker counter, scope depth, and the
 -- runtime token the 'Pending' backstop compares.
-withExecution
+withWorkflow
   :: MonadSTM m
   => DBOS inst m -> Text -> (forall exec. WorkflowCtx inst exec m -> m a) -> m a
-withExecution dbos wid use = do
+withWorkflow dbos wid use = do
   token <- atomically $ do
     n <- readTVar (dbExecCount dbos)
     writeTVar (dbExecCount dbos) (n + 1)
@@ -222,10 +222,10 @@ placeCall wctx op = do
 -- 'finally' restores the depth however the body ends (value, refusal, or
 -- thrown exception), so a dead attempt never locks its workflow out of
 -- allocating again. The engine hands the body only the 'StepCtx'.
-withAttempt
+withStep
   :: (MonadSTM m, MThrow.MonadMask m)
   => WorkflowCtx inst exec m -> Text -> (StepCtx inst exec m -> m a) -> m a
-withAttempt wctx _label body = do
+withStep wctx _label body = do
   marker <- atomically $ do
     n <- readTVar (wNextMarker wctx)
     writeTVar (wNextMarker wctx) (n + 1)

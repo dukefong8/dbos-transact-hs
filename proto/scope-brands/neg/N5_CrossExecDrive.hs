@@ -16,11 +16,11 @@ driveIt :: WorkflowCtx inst exec IO -> Pending inst exec IO Text -> IO (Either T
 driveIt ctx p = drive ctx p
 
 main :: IO ()
-main = withInstance "a" $ \dbos -> do
+main = withDBOS "a" $ \dbos -> do
   ref <- register dbos "worker"
-  withExecution dbos "p1" $ \w1 -> do
+  withWorkflow dbos "p1" $ \w1 -> do
     Right h <- startIt w1 ref
     p <- placeAwait w1 h
-    withExecution dbos "p2" $ \w2 -> do
+    withWorkflow dbos "p2" $ \w2 -> do
       _ <- driveIt w2 p
       pure ()

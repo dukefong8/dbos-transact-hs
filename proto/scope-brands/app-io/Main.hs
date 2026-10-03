@@ -22,23 +22,23 @@ tpack :: Show a => a -> Text
 tpack = Text.pack . show
 
 main :: IO ()
-main = withInstance "a" $ \dba ->
-  withInstance "b" $ \dbb -> do
+main = withDBOS "a" $ \dba ->
+  withDBOS "b" $ \dbb -> do
     ra <- register dba "worker"
     rb <- register dbb "worker"
-    withExecution dba "wf-a" $ \ctxa -> do
+    withWorkflow dba "wf-a" $ \ctxa -> do
       TIO.putStrLn ("a: workflow " <> ctxWorkflowId ctxa)
       s0 <- nextStepId ctxa
       TIO.putStrLn ("a: first step id " <> tpack s0)
       ha <- expectRight =<< startIt ctxa ra
       TIO.putStrLn ("a: child " <> handleId ha)
-      withAttempt ctxa "charge" $ \step -> do
+      withStep ctxa "charge" $ \step -> do
         TIO.putStrLn ("a: in step, workflow " <> sctxWorkflowId step)
         p <- placeAwait ctxa ha
         driven <- drive ctxa p
         TIO.putStrLn ("a: drive " <> tpack driven)
       hb <- mintHandle dba "legacy-id"
       TIO.putStrLn ("a: minted " <> handleId hb)
-    withExecution dbb "wf-b" $ \ctxb -> do
+    withWorkflow dbb "wf-b" $ \ctxb -> do
       hb <- expectRight =<< startIt ctxb rb
       TIO.putStrLn ("b: child " <> handleId hb <> " (own counter: also -0)")

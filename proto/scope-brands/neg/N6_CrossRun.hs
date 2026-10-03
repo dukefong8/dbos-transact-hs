@@ -14,5 +14,5 @@ mintIt dbos wid = mintHandle dbos wid
 
 main :: IO ()
 main = do
-  let Right h1 = runSim (withInstance "a" $ \dbos -> mintIt dbos "wf-1")
-  print (runSim (withInstance "b" $ \_ -> pure (handleId h1)))
+  let Right h1 = runSim (withDBOS "a" $ \dbos -> mintIt dbos "wf-1")
+  print (runSim (withDBOS "b" $ \_ -> pure (handleId h1)))

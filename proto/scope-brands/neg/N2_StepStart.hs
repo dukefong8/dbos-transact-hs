@@ -13,9 +13,9 @@ startIt :: MonadSTM m => WorkflowCtx inst exec m -> WRef inst m () -> m (Either 
 startIt ctx ref = startChild ctx ref "opts"
 
 main :: IO ()
-main = withInstance "a" $ \dbos ->
-  withExecution dbos "wf" $ \ctx ->
-    withAttempt ctx "s" $ \step -> do
+main = withDBOS "a" $ \dbos ->
+  withWorkflow dbos "wf" $ \ctx ->
+    withStep ctx "s" $ \step -> do
       ref <- register dbos "worker"
       _ <- startIt ctx ref -- pins the error channel, valid use
       _ <- startChild step ref "sneaky"

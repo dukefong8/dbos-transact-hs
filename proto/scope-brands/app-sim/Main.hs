@@ -27,15 +27,15 @@ main :: IO ()
 main = print (runSim scenario)
 
 scenario :: IOSim s (Text, Text, Text)
-scenario = withInstance "a" $ \dba ->
-  withInstance "b" $ \dbb -> do
+scenario = withDBOS "a" $ \dba ->
+  withDBOS "b" $ \dbb -> do
     ra <- register dba "w"
     rb <- register dbb "w"
     box <- newEmptyMVar
-    _ <- forkIO (withExecution dba "wf-a" $ \ctx -> do
+    _ <- forkIO (withWorkflow dba "wf-a" $ \ctx -> do
       h <- expectRight =<< startIt ctx ra
       putMVar box (handleId h))
-    withExecution dbb "wf-b" $ \ctx -> do
+    withWorkflow dbb "wf-b" $ \ctx -> do
       h <- expectRight =<< startIt ctx rb
       a <- takeMVar box
       pure (a, handleId h, ctxWorkflowId ctx)

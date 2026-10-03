@@ -12,9 +12,9 @@ startIt :: MonadSTM m => WorkflowCtx inst exec m -> WRef inst m () -> m (Either 
 startIt ctx ref = startChild ctx ref "opts"
 
 main :: IO ()
-main = withInstance "a" $ \dba ->
-  withInstance "b" $ \dbb -> do
+main = withDBOS "a" $ \dba ->
+  withDBOS "b" $ \dbb -> do
     ref <- register dba "worker"
-    withExecution dbb "wf" $ \ctxb -> do
+    withWorkflow dbb "wf" $ \ctxb -> do
       _ <- startIt ctxb ref
       pure ()

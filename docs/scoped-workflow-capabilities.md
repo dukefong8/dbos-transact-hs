@@ -30,7 +30,7 @@ Primary sources: `~/dev/Bluefin` `bluefin-examples/.../MonadError.hs`
 Mechanisms that transfer, dependency-free:
 
 - **Rank-2 scope discipline.** `runX :: (forall e. H e -> Eff (e :& es) r) -> …`
-  becomes `withInstance :: … -> (forall inst. DBOS inst m -> m a) -> m a`.
+  becomes `withDBOS :: … -> (forall inst. DBOS inst m -> m a) -> m a`.
   The ST-region trick; no `Eff` required.
 - **Scoped capabilities vs unscoped names.** `DB.hs` scopes `DbEff e`
   while `DbHandle` (a `String` newtype) travels bare. Same split:
@@ -85,7 +85,7 @@ parent doc §10:
   through `m` (`MemSystemDB s`, `StrictTVar (IOSim s)`); cross-*run*
   confusion is ill-typed today. `inst` adds cross-*instance*-within-a-run,
   exactly the staged-sim-test scenario. N6 proves they nest: a handle
-  carrying both tags escapes neither `runSim`'s nor `withInstance`'s
+  carrying both tags escapes neither `runSim`'s nor `withDBOS`'s
   `forall`.
 - **Zero backend churn.** `SystemDB` class, Postgres sessions, both sim
   fakes, the existential, `runSystemDB` — untouched; scope lives above
@@ -95,7 +95,7 @@ parent doc §10:
   (erasure): traces, goldens, determinism, and the ADR-0020 mirror are
   unaffected.
 - **The price is CPS.** `newDBOS :: m (DBOS m)` must become region-bound
-  (`withInstance`), since per-execution scoping breaks parent→child
+  (`withDBOS`), since per-execution scoping breaks parent→child
   handle flow. Every `bracket (newDBOS …)` site converts; existential
   unpacking was rejected (fresh skolem per match = silent identity
   forks). `inst` prevents *confusion*, not *use-after-close* (threads
@@ -119,8 +119,8 @@ parent doc §10:
 
 - **Model** (`src/Scope/Model.hs`, ~200 lines, real io-classes
   constraints): `DBOS`/`Connection`/`Registry`/`WRef`/`WHandle` over
-  `inst`; `WorkflowCtx`/`StepCtx`/`Pending` over `inst`+`exec`; `withInstance` /
-  `withExecution` binders; `nextStepId` on `WorkflowCtx` only; `startChild`
+  `inst`; `WorkflowCtx`/`StepCtx`/`Pending` over `inst`+`exec`; `withDBOS` /
+  `withWorkflow` binders; `nextStepId` on `WorkflowCtx` only; `startChild`
   derives `parent-step` ids; `mintHandle` as the bare-id introduction
   gate; `drive` with the token backstop. Private constructors, explicit
   exports = the privacy boundary.
@@ -134,14 +134,14 @@ parent doc §10:
   region escape ("would escape its scope", textbook skolem text); N4
   counter on the narrowed view; N5 cross-execution drive (`exec1` vs
   `exec`); N6 cross-run escape (both tags refuse).
-- **Phase 2: scope-depth backstop.** `WorkflowCtx` owns a depth counter in shared per-execution state alongside the step/marker counters; `placeCall` refuses while depth > 0; `withAttempt` bumps/restores depth under `finally` (the real tree's `MThrow.finally` pattern) with a fresh marker and token per attempt; `startChild` routes through `placeCall`. `proto-backstop` asserts all six: capture-start refused, capture-place refused, depth restored after success (`wf-0` — refused attempts spend no counter positions), depth restored after a throw, markers distinct across attempts, tokens per-attempt and initially unfired.
+- **Phase 2: scope-depth backstop.** `WorkflowCtx` owns a depth counter in shared per-execution state alongside the step/marker counters; `placeCall` refuses while depth > 0; `withStep` bumps/restores depth under `finally` (the real tree's `MThrow.finally` pattern) with a fresh marker and token per attempt; `startChild` routes through `placeCall`. `proto-backstop` asserts all six: capture-start refused, capture-place refused, depth restored after success (`wf-0` — refused attempts spend no counter positions), depth restored after a throw, markers distinct across attempts, tokens per-attempt and initially unfired.
   closures capture, so the split alone cannot remove a value from lexical scope — which is why the backstop above exists. The former `Residual_Capture` exhibit retired into `proto-backstop` B1/B2.
 - **Incidental findings.** Pure constructors need `Applicative m` (invisible in the real tree's full constraint tuples); io-sim's `runSim` returns `Either Failure a` (N6 first drafted against the old pure shape); fork is `Control.Monad.Class.MonadFork`, not `Control.Concurrent.Class.MonadFork`; scratch projects need `ImportQualifiedPost`/`DerivingStrategies` stated (the real tree inherits both from cabal defaults).
 
 ## 6. Recommendation and migration order
 
 Land phantoms per layer, compiler-guided (every error is local): (1)
-`inst` on core types + `withInstance` beside `newDBOS`, engine
+`inst` on core types + `withDBOS` beside `newDBOS`, engine
 internals signatures-only (tree stays green); (2) `exec` + `WorkflowCtx`/`StepCtx`
 split, engine entry points flipped; (3) facade + tests + demo-apps;
 (4) remove `newDBOS`, rework the two refusal-test families. The
@@ -151,8 +151,6 @@ sized for one sitting.
 ## 7. Open decisions
 
 1. **`InsideStep`: type-error, runtime, or both? RESOLVED by phase 2 — both, with evidence.** The split rejects the natural shape at compile time (N2/N4); the depth counter refuses the capture shape at runtime (B1/B2) and restores under `finally` on success and on throw (B3/B4). §11's "keep runtime" is reinterpreted as "keep as backstop" with a strictly smaller reachable surface; the residual exhibit retired into `proto-backstop`.
-2. **Binder naming/placement.** Prototype uses `withInstance` (per §11)
-   at the `DBOS` level and `withExecution` at `executeRegisteredWorkflow`.
-   Confirm against the facade naming pass.
+2. **Binder naming: value-named, decided.** `withDBOS` / `withWorkflow` / `withStep` — each named after what the continuation receives (instance bundle, workflow context, step view), superseding §11's `withInstance`/`withExecution` vocabulary. Scope params (`inst`/`exec`) unchanged; placement (`DBOS` level, `executeRegisteredWorkflow`, step bodies) unchanged.
 3. **`Tasks` stays unbranded** (per §11: ownership semantics already
    right). No prototype coverage; no change proposed.
