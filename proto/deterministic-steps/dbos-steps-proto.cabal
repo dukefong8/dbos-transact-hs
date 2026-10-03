@@ -1,0 +1,83 @@
+cabal-version:      3.0
+name:               dbos-steps-proto
+version:            0.1.0.0
+synopsis:
+  THROWAWAY prototype for deterministic workflows via record-of-functions steps. NOT FOR PRODUCTION.
+description:
+  Throwaway probe: non-deterministic operations live in steps behind an
+  @Ops@ record (operations), with one handler per interpreter (IO vs
+  IOSim). Every op demands the narrowed step view, so calling one from a
+  workflow body is a compile error; bodies polymorphic over @m@ stay off
+  ambient IO, proven by instantiating the same workflow under IOSim.
+  Lives on the proto/phantom-brands throwaway branch only. Findings in
+  README.md (same directory).
+license:            NONE
+build-type:         Simple
+
+library
+  hs-source-dirs:   src
+  exposed-modules:  Ops.Model
+  build-depends:
+      base
+    , containers
+    , io-classes
+    , io-classes:strict-mvar
+    , io-classes:strict-stm
+    , text
+  default-language: Haskell2010
+  default-extensions: OverloadedStrings, RankNTypes, ScopedTypeVariables, DerivingStrategies
+  ghc-options:      -Wall
+
+executable proto-io
+  main-is:          Main.hs
+  hs-source-dirs:   app-io
+  build-depends:
+      base
+    , dbos-steps-proto
+    , io-classes
+    , io-classes:strict-mvar
+    , io-classes:strict-stm
+    , text
+    , time
+  default-language: Haskell2010
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
+
+executable proto-sim
+  main-is:          Main.hs
+  hs-source-dirs:   app-sim
+  build-depends:
+      base
+    , dbos-steps-proto
+    , io-classes
+    , io-classes:strict-mvar
+    , io-classes:strict-stm
+    , io-sim
+    , text
+  default-language: Haskell2010
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
+
+-- Negative compile tests: each MUST FAIL to build. Built one by one by
+-- run.sh (never as part of `cabal build all` succeeding). -fno-code:
+-- typecheck only, no linking.
+executable neg-op-in-workflow
+  main-is:          NegOpInWorkflow.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-steps-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable neg-raw-io
+  main-is:          NegRawIO.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-steps-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, io-sim, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable neg-cross-exec
+  main-is:          NegCrossExec.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-steps-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w

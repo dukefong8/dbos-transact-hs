@@ -1,0 +1,4 @@
+-- THROWAWAY prototype project (proto/phantom-brands branch only).
+-- Nearest project file wins, so this shadows the repo-root
+-- cabal.project inside this directory. Main tree builds are unaffected.
+packages: .
