@@ -1,0 +1,13 @@
+cradle:
+  cabal:
+    - path: ./src
+      component: lib:dbos-transact-hs
+    - path: ./test
+      component: dbos-transact-hs:test:test
+    - path: ./demo-apps
+      component: dbos-transact-hs:exe:demo-apps
+    # Catch-all: longest-prefix match keeps the three entries above;
+    # this only handles files outside them (e.g. dist-newstyle autogen),
+    # which otherwise fail with "No prefixes matched" and abort startup.
+    - path: ./
+      component: lib:dbos-transact-hs
