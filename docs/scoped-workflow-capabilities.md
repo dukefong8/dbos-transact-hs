@@ -211,3 +211,30 @@ Rust paths are `crates/dbos/src/...` at the pinned corpus.
 - Row 6: free-function API + `Ctx::scope` vocabulary (`context.rs:30-33`).
 - Row 7: `step_id`/`step_status`/`cancellation_token` readers (`context.rs`), `StepStatus` snapshot rationale (`context.rs:100-105`).
 - Row 8: Python `dbos/_datasource.py` (`SQLAlchemyDatasource`); hasql-pool 1.4.2.3 `acquire`/`use`/`release` (Hackage) vs `Session` single-connection guarantee + `MonadIO` (hasql 1.10.3.7 docs).
+
+## 10. Execution deviations (slices 1–3, 2026-10-03)
+
+Where the branch implementation differs from the prototype or the plan,
+deliberately:
+
+1. **Mechanism before surface.** §6 ordered split-then-depth; executed
+   depth-then-split (slices 1–2 before slice 3). The depth counter is
+   independently testable on the existing `Ctx` and unblocks everything
+   downstream; the split reuses it untouched.
+2. **Degradation, not refusal, in `placeCall`/`takenPlacement`.** The
+   prototype refused with `Either`; the tree degrades to plain, matching
+   what the oracle does for whatever its ambient reports as in-step.
+   Refusal survives only where the oracle refuses (`startChildWorkflow`
+   → `InsideStep`). §4's "backstop" language now means degradation for
+   calls, refusal for starts.
+3. **`onException` + explicit restore, not `finally`.** `finally` needs
+   `MonadMask`, which would cascade through the public step API
+   (`runWorkflowStep`, `driveWorkflowStepWith`, bodies, sim trees).
+   `onException` + explicit success-path restore keeps `MonadCatch`;
+   the residual window (async kill between body return and restore)
+   leaks safe (degrade-to-plain, never corrupt).
+4. **StepRetryTest helper renamed** (`withWorkflow` →
+   `withBackendWorkflow`) for the new facade export. Test-local,
+   behavior-neutral.
+5. **`stepCtxStatus` stays `Maybe`.** A total reader would be partial;
+   the narrowed view's guarantee is which values exist, not totality.
