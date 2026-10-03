@@ -16,7 +16,7 @@ import qualified Data.Text.IO as TIO
 import Scope.Model
 import System.IO.Error (userError)
 
-startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
+startIt :: MonadSTM m => WorkflowCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
 isInsideRefusal :: Either Text a -> Bool
@@ -29,18 +29,18 @@ main = withInstance "a" $ \dbos -> do
   withExecution dbos "wf" $ \wctx -> do
     -- B1: a child start through the captured parent, inside a step body:
     -- compiles, but the depth counter refuses it.
-    r1 <- withAttempt wctx "s" $ \_sctx -> startIt wctx ref
+    r1 <- withAttempt wctx "s" $ \_step -> startIt wctx ref
     TIO.putStrLn $
       if isInsideRefusal r1 then "backstop: capture-start refused"
       else "backstop: capture-start NOT refused (HOLE)"
     -- B2: same for a bare position claim.
-    r2 <- withAttempt wctx "s" $ \_sctx -> placeCall wctx "test-call"
+    r2 <- withAttempt wctx "s" $ \_step -> placeCall wctx "test-call"
     TIO.putStrLn $
       if isInsideRefusal r2 then "backstop: capture-place refused"
       else "backstop: capture-place NOT refused (HOLE)"
     -- B3: the success path restores depth: allocating after a step works,
     -- and the counter did not move under the refused attempts above.
-    _ <- withAttempt wctx "s" $ \sctx -> pure (sctxWorkflowId sctx)
+    _ <- withAttempt wctx "s" $ \step -> pure (stepCtxWorkflowId step)
     r3 <- startIt wctx ref
     case r3 of
       Right h -> TIO.putStrLn ("backstop: depth restored after success (" <> handleId h <> ")")

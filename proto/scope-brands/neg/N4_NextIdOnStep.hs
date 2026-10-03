@@ -9,6 +9,6 @@ import Scope.Model
 main :: IO ()
 main = withInstance "a" $ \dbos ->
   withExecution dbos "wf" $ \ctx ->
-    withAttempt ctx "s" $ \sctx -> do
-      _ <- nextStepId sctx
+    withAttempt ctx "s" $ \step -> do
+      _ <- nextStepId step
       pure ()

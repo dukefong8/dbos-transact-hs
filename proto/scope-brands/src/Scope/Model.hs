@@ -5,7 +5,7 @@
 
 -- | THROWAWAY prototype model (not production code).
 --
--- Phase 2 adds the scope-depth backstop behind the 'WCtx'/'SCtx' split:
+-- Phase 2 adds the scope-depth backstop behind the 'WorkflowCtx'/'StepCtx' split:
 -- 'inst' is the instance scope (one per 'withInstance' region), 'exec'
 -- the execution scope (one per 'withExecution' region), and a depth
 -- counter in the shared per-execution state refuses allocations that
@@ -25,8 +25,8 @@ module Scope.Model
   , Registry
   , WRef
   , WHandle
-  , WCtx
-  , SCtx
+  , WorkflowCtx
+  , StepCtx
   , Pending
   , StepStatus (..)
   , StepScope
@@ -45,7 +45,7 @@ module Scope.Model
   , drive
     -- * Readers (note the split spellings: no overloaded-field games)
   , ctxWorkflowId
-  , sctxWorkflowId
+  , stepCtxWorkflowId
   , handleId
   , stepStatusOf
   , stepMarkerOf
@@ -113,7 +113,7 @@ data WHandle inst m e = MkHandle
 -- this type and no other, so id allocation belongs to the workflow — and
 -- the depth counter lets allocation refuse while a step body runs, even
 -- through a captured parent value.
-data WCtx inst exec m = MkWCtx
+data WorkflowCtx inst exec m = MkWorkflowCtx
   { wConn :: Connection inst m
   , wId :: Text
   , wNextStep :: StrictTVar m Int
@@ -143,8 +143,8 @@ data StepScope m = MkScope
 -- placement: the only allocation-adjacent accessor the export list offers
 -- reads the id. (Deliberate: the capture shape still compiles — see the
 -- backstop exe — but the handed shape cannot allocate.)
-data SCtx inst exec m = MkSCtx
-  { sCtx :: WCtx inst exec m
+data StepCtx inst exec m = MkStepCtx
+  { stepParent :: WorkflowCtx inst exec m
   , sScope :: StepScope m
   }
 
@@ -174,7 +174,7 @@ withInstance name use = do
 -- runtime token the 'Pending' backstop compares.
 withExecution
   :: MonadSTM m
-  => DBOS inst m -> Text -> (forall exec. WCtx inst exec m -> m a) -> m a
+  => DBOS inst m -> Text -> (forall exec. WorkflowCtx inst exec m -> m a) -> m a
 withExecution dbos wid use = do
   token <- atomically $ do
     n <- readTVar (dbExecCount dbos)
@@ -183,7 +183,7 @@ withExecution dbos wid use = do
   counter <- newTVarIO 0
   markers <- newTVarIO 0
   depth <- newTVarIO 0
-  use (MkWCtx (dbConn dbos) wid counter markers depth token)
+  use (MkWorkflowCtx (dbConn dbos) wid counter markers depth token)
 
 -- | Register under this instance's registry.
 register :: MonadMVar m => DBOS inst m -> Text -> m (WRef inst m e)
@@ -196,11 +196,11 @@ register dbos key = do
 mintHandle :: Applicative m => DBOS inst m -> Text -> m (WHandle inst m e)
 mintHandle dbos wid = pure (MkHandle (dbConn dbos) wid)
 
--- | Allocate the next step id. Takes 'WCtx' and no other type: the
+-- | Allocate the next step id. Takes 'WorkflowCtx' and no other type: the
 -- workflow owns its counter. (Depth is checked by 'placeCall', the only
 -- engine path that allocates positions; this is the raw counter beneath
 -- it, the way the real tree's counter sits beneath placement.)
-nextStepId :: MonadSTM m => WCtx inst exec m -> m Int
+nextStepId :: MonadSTM m => WorkflowCtx inst exec m -> m Int
 nextStepId wctx = atomically $ do
   n <- readTVar (wNextStep wctx)
   writeTVar (wNextStep wctx) (n + 1)
@@ -211,7 +211,7 @@ nextStepId wctx = atomically $ do
 -- captured parent value sees the bumped depth exactly like the handed
 -- view does: this is the runtime backstop behind the type split, and the
 -- analogue of the real tree's @InsideStep@ refusal.
-placeCall :: MonadSTM m => WCtx inst exec m -> Text -> m (Either Text Int)
+placeCall :: MonadSTM m => WorkflowCtx inst exec m -> Text -> m (Either Text Int)
 placeCall wctx op = do
   depth <- readTVarIO (wDepth wctx)
   if depth > 0
@@ -221,10 +221,10 @@ placeCall wctx op = do
 -- | Run one attempt under a bumped depth with a fresh marker and token.
 -- 'finally' restores the depth however the body ends (value, refusal, or
 -- thrown exception), so a dead attempt never locks its workflow out of
--- allocating again. The engine hands the body only the 'SCtx'.
+-- allocating again. The engine hands the body only the 'StepCtx'.
 withAttempt
   :: (MonadSTM m, MThrow.MonadMask m)
-  => WCtx inst exec m -> Text -> (SCtx inst exec m -> m a) -> m a
+  => WorkflowCtx inst exec m -> Text -> (StepCtx inst exec m -> m a) -> m a
 withAttempt wctx _label body = do
   marker <- atomically $ do
     n <- readTVar (wNextMarker wctx)
@@ -238,14 +238,14 @@ withAttempt wctx _label body = do
         d <- readTVar (wDepth wctx)
         writeTVar (wDepth wctx) (d - 1)
       scope = MkScope marker (MkStatus 0 1) token
-  MThrow.finally (enter >> body (MkSCtx wctx scope)) leave
+  MThrow.finally (enter >> body (MkStepCtx wctx scope)) leave
 
 -- | Start a child: same instance (by type), position claimed through the
 -- depth-checked 'placeCall' (so capture-shape starts are refused at
 -- runtime), id derived parent-step (recovery-stable).
 startChild
   :: MonadSTM m
-  => WCtx inst exec m -> WRef inst m e -> Text -> m (Either Text (WHandle inst m e))
+  => WorkflowCtx inst exec m -> WRef inst m e -> Text -> m (Either Text (WHandle inst m e))
 startChild wctx _ref _opts = do
   placed <- placeCall wctx "startChild"
   case placed of
@@ -255,19 +255,19 @@ startChild wctx _ref _opts = do
       pure (Right (MkHandle (wConn wctx) child))
 
 -- | Stub outcome read (the DB is not what this prototype is testing).
-awaitChild :: MonadSTM m => WCtx inst exec m -> WHandle inst m e -> m Text
+awaitChild :: MonadSTM m => WorkflowCtx inst exec m -> WHandle inst m e -> m Text
 awaitChild _wctx h = pure ("outcome:" <> hId h)
 
 -- | Claim the await's position now; drive it later.
 placeAwait
-  :: MonadSTM m => WCtx inst exec m -> WHandle inst m e -> m (Pending inst exec m Text)
+  :: MonadSTM m => WorkflowCtx inst exec m -> WHandle inst m e -> m (Pending inst exec m Text)
 placeAwait wctx h =
   pure (MkPending (wExecToken wctx) ("await:" <> hId h) (awaitChild wctx h))
 
 -- | Drive a placed await. The type already demands the building
 -- execution; the token backstop refuses a smuggled one at runtime
 -- (the analogue of per-poll placement checks).
-drive :: MonadSTM m => WCtx inst exec m -> Pending inst exec m a -> m (Either Text a)
+drive :: MonadSTM m => WorkflowCtx inst exec m -> Pending inst exec m a -> m (Either Text a)
 drive wctx p
   | wExecToken wctx == pToken p = Right <$> pRun p
   | otherwise = pure (Left "StepBuiltElsewhere: pending driven in another execution")
@@ -275,28 +275,28 @@ drive wctx p
 -- Readers. Split spellings on purpose (the tree's collision-deviation
 -- practice): one overloaded name for two ctx types is exactly the
 -- ambiguity this design removes.
-ctxWorkflowId :: WCtx inst exec m -> Text
+ctxWorkflowId :: WorkflowCtx inst exec m -> Text
 ctxWorkflowId = wId
 
-sctxWorkflowId :: SCtx inst exec m -> Text
-sctxWorkflowId = wId . sCtx
+stepCtxWorkflowId :: StepCtx inst exec m -> Text
+stepCtxWorkflowId = wId . stepParent
 
 handleId :: WHandle inst m e -> Text
 handleId = hId
 
 -- | What the attempt may read about itself.
-stepStatusOf :: SCtx inst exec m -> StepStatus
+stepStatusOf :: StepCtx inst exec m -> StepStatus
 stepStatusOf = scopeStatus . sScope
 
 -- | Which attempt-body this is (per attempt, never persisted).
-stepMarkerOf :: SCtx inst exec m -> Int
+stepMarkerOf :: StepCtx inst exec m -> Int
 stepMarkerOf = scopeMarker . sScope
 
 -- | Fire this attempt's own token. It starts unfired per attempt; nothing
 -- here touches any other attempt's.
-cancelStep :: MonadSTM m => SCtx inst exec m -> m ()
-cancelStep sctx = atomically (writeTVar (scopeToken (sScope sctx)) True)
+cancelStep :: MonadSTM m => StepCtx inst exec m -> m ()
+cancelStep step = atomically (writeTVar (scopeToken (sScope step)) True)
 
 -- | Whether this attempt's token has fired.
-stepCancelled :: MonadSTM m => SCtx inst exec m -> m Bool
-stepCancelled sctx = readTVarIO (scopeToken (sScope sctx))
+stepCancelled :: MonadSTM m => StepCtx inst exec m -> m Bool
+stepCancelled step = readTVarIO (scopeToken (sScope step))

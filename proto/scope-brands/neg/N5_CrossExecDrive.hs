@@ -9,10 +9,10 @@ import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
 import Data.Text (Text)
 import Scope.Model
 
-startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
+startIt :: MonadSTM m => WorkflowCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
-driveIt :: WCtx i x IO -> Pending i x IO Text -> IO (Either Text Text)
+driveIt :: WorkflowCtx i x IO -> Pending i x IO Text -> IO (Either Text Text)
 driveIt ctx p = drive ctx p
 
 main :: IO ()

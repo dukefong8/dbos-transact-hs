@@ -17,7 +17,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Scope.Model
 
-startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
+startIt :: MonadSTM m => WorkflowCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
 expectRight :: Either Text a -> IOSim s a

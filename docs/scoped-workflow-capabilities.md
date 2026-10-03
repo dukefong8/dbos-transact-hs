@@ -37,7 +37,7 @@ Mechanisms that transfer, dependency-free:
   `Connection`/`Ref`/`Handle`/`Ctx` branded; `Text` ids bare (durable
   names must escape every scope by design — dequeue claims, crash
   recovery, cross-SDK rows).
-- **Narrowing.** `useImplWithin` becomes the `WorkflowCtx` → `SCtx` handoff
+- **Narrowing.** `useImplWithin` becomes the `WorkflowCtx` → `StepCtx` handoff
   in `runStep`-equivalents: the step body receives the narrowed view.
 - **`DslBuilderEff` as the only sanctioned Bluefin touch:** prototyping an
   `Eff` flavor at the outer edge without rewriting internals. Not used;
@@ -119,8 +119,8 @@ parent doc §10:
 
 - **Model** (`src/Scope/Model.hs`, ~200 lines, real io-classes
   constraints): `DBOS`/`Connection`/`Registry`/`WRef`/`WHandle` over
-  `inst`; `WCtx`/`SCtx`/`Pending` over `inst`+`exec`; `withInstance` /
-  `withExecution` binders; `nextStepId` on `WCtx` only; `startChild`
+  `inst`; `WorkflowCtx`/`StepCtx`/`Pending` over `inst`+`exec`; `withInstance` /
+  `withExecution` binders; `nextStepId` on `WorkflowCtx` only; `startChild`
   derives `parent-step` ids; `mintHandle` as the bare-id introduction
   gate; `drive` with the token backstop. Private constructors, explicit
   exports = the privacy boundary.
@@ -130,11 +130,11 @@ parent doc §10:
   (`wf-b-0`). `proto-sim`: two instances + virtual-thread rendezvous in
   one `runSim` — `("wf-a-0","wf-b-0","wf-b")`, deterministic.
 - **Negatives (all rejected with the intended error).** N1 cross-instance
-  (`inst1` vs `inst`); N2 step-body child-start (`SCtx` vs `WCtx`); N3
+  (`inst1` vs `inst`); N2 step-body child-start (`StepCtx` vs `WorkflowCtx`); N3
   region escape ("would escape its scope", textbook skolem text); N4
   counter on the narrowed view; N5 cross-execution drive (`exec1` vs
   `exec`); N6 cross-run escape (both tags refuse).
-- **Phase 2: scope-depth backstop.** `WCtx` owns a depth counter in shared per-execution state alongside the step/marker counters; `placeCall` refuses while depth > 0; `withAttempt` bumps/restores depth under `finally` (the real tree's `MThrow.finally` pattern) with a fresh marker and token per attempt; `startChild` routes through `placeCall`. `proto-backstop` asserts all six: capture-start refused, capture-place refused, depth restored after success (`wf-0` — refused attempts spend no counter positions), depth restored after a throw, markers distinct across attempts, tokens per-attempt and initially unfired.
+- **Phase 2: scope-depth backstop.** `WorkflowCtx` owns a depth counter in shared per-execution state alongside the step/marker counters; `placeCall` refuses while depth > 0; `withAttempt` bumps/restores depth under `finally` (the real tree's `MThrow.finally` pattern) with a fresh marker and token per attempt; `startChild` routes through `placeCall`. `proto-backstop` asserts all six: capture-start refused, capture-place refused, depth restored after success (`wf-0` — refused attempts spend no counter positions), depth restored after a throw, markers distinct across attempts, tokens per-attempt and initially unfired.
   closures capture, so the split alone cannot remove a value from lexical scope — which is why the backstop above exists. The former `Residual_Capture` exhibit retired into `proto-backstop` B1/B2.
 - **Incidental findings.** Pure constructors need `Applicative m` (invisible in the real tree's full constraint tuples); io-sim's `runSim` returns `Either Failure a` (N6 first drafted against the old pure shape); fork is `Control.Monad.Class.MonadFork`, not `Control.Concurrent.Class.MonadFork`; scratch projects need `ImportQualifiedPost`/`DerivingStrategies` stated (the real tree inherits both from cabal defaults).
 
@@ -142,7 +142,7 @@ parent doc §10:
 
 Land phantoms per layer, compiler-guided (every error is local): (1)
 `inst` on core types + `withInstance` beside `newDBOS`, engine
-internals signatures-only (tree stays green); (2) `exec` + `WCtx`/`SCtx`
+internals signatures-only (tree stays green); (2) `exec` + `WorkflowCtx`/`StepCtx`
 split, engine entry points flipped; (3) facade + tests + demo-apps;
 (4) remove `newDBOS`, rework the two refusal-test families. The
 `ghciwatch` loop holds throughout; only phases 2–3 are red, each

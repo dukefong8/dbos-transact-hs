@@ -39,8 +39,8 @@ compile time?
 ## Layout
 
 - `src/Scope/Model.hs` — the analogues (private constructors, explicit
-  exports = the privacy boundary). `WCtx` owns the step/marker counters
-  plus the scope-depth counter; `SCtx` is the narrowed per-attempt view
+  exports = the privacy boundary). `WorkflowCtx` owns the step/marker counters
+  plus the scope-depth counter; `StepCtx` is the narrowed per-attempt view
   (marker, status, fresh token); `placeCall` depth-checks allocation;
   `withAttempt` bumps/restores depth under `finally`; `drive` keeps the
   execution-token backstop.
