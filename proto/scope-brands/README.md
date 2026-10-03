@@ -18,34 +18,47 @@ Does instance-scope (`inst`) + execution-scope (`exec`) branding:
 4. compose with `m` polymorphic over `IO` and `IOSim s` (two tags nesting),
 5. infer without annotation burden?
 
+Phase 2 adds the depth question: can a scope-depth counter in shared
+per-execution state refuse allocations that arrive while a step body is
+running — including through a captured parent context — so the residual
+capture hole is closed at runtime while the natural shape is closed at
+compile time?
+
 ## Run
 
 ```sh
 ./run.sh
 ```
 
-- builds the model + the two positive flows, runs them;
+- builds the model + the three positive flows, runs them;
 - typechecks each `neg/N*.hs` expecting **failure** (the enforcement);
-- typechecks `neg/Residual_Capture.hs` expecting **success** (the
-  documented residual hole: a step body capturing the *parent* context
-  still compiles — closures capture; the type split only rejects the
-  natural shape that uses the handed `SCtx`).
+- runs `proto-backstop`, asserting the capture shape is **refused** at
+  runtime, depth restores after success and after a throw, markers are
+  per-attempt, and tokens are per-attempt.
 
 ## Layout
 
 - `src/Scope/Model.hs` — the analogues (private constructors, explicit
-  exports = the privacy boundary).
+  exports = the privacy boundary). `WCtx` owns the step/marker counters
+  plus the scope-depth counter; `SCtx` is the narrowed per-attempt view
+  (marker, status, fresh token); `placeCall` depth-checks allocation;
+  `withAttempt` bumps/restores depth under `finally`; `drive` keeps the
+  execution-token backstop.
 - `app-io/Main.hs` — positive flow under `IO`, incl. two nested
   instances proving counter independence.
 - `app-sim/Main.hs` — positive flow under `runSim`: two instances in one
   simulation + virtual-thread rendezvous (tags nest, determinism kept).
-- `neg/` — negative compile tests + the residual-hole exhibit.
+- `app-backstop/Main.hs` — runtime refusal + restoration checks (B1–B6).
+- `neg/` — negative compile tests (N1–N6).
 
 ## Notes
 
 - The real tree's HLS config may flag these files (no component owns
   them); cosmetic, branch-local. `cabal build` at the repo root ignores
-  this directory (not in any `hs-source-dirs`).
+  this directory (own `cabal.project`, not in any root `hs-source-dirs`).
 - `Text` ids stay bare on purpose: names must escape scopes; only the
   capabilities interpreting them are branded (the `DbEff e` vs `DbHandle`
   split from the Bluefin research).
+- `placeAwait` does not degrade inside steps here; the real `awaitChild`
+  degrades to unrecorded via the leaf rule — out of focus for this
+  prototype, which tests allocation refusal.

@@ -5,9 +5,10 @@
 module Main (main) where
 
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
+import Data.Text (Text)
 import Scope.Model
 
-startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (WHandle i m ())
+startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
 main :: IO ()

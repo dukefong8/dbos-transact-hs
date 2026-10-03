@@ -12,8 +12,11 @@ import qualified Data.Text.IO as TIO
 import Scope.Model
 
 -- Pins the phantom error channel once, so call sites never annotate it.
-startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (WHandle i m ())
+startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
 startIt ctx ref = startChild ctx ref "opts"
+
+expectRight :: Either Text a -> IO a
+expectRight = either (error . Text.unpack) pure
 
 tpack :: Show a => a -> Text
 tpack = Text.pack . show
@@ -27,9 +30,9 @@ main = withInstance "a" $ \dba ->
       TIO.putStrLn ("a: workflow " <> ctxWorkflowId ctxa)
       s0 <- nextStepId ctxa
       TIO.putStrLn ("a: first step id " <> tpack s0)
-      ha <- startIt ctxa ra
+      ha <- expectRight =<< startIt ctxa ra
       TIO.putStrLn ("a: child " <> handleId ha)
-      runStep ctxa "charge" $ \sctx -> do
+      withAttempt ctxa "charge" $ \sctx -> do
         TIO.putStrLn ("a: in step, workflow " <> sctxWorkflowId sctx)
         p <- placeAwait ctxa ha
         driven <- drive ctxa p
@@ -37,5 +40,5 @@ main = withInstance "a" $ \dba ->
       hb <- mintHandle dba "legacy-id"
       TIO.putStrLn ("a: minted " <> handleId hb)
     withExecution dbb "wf-b" $ \ctxb -> do
-      hb <- startIt ctxb rb
+      hb <- expectRight =<< startIt ctxb rb
       TIO.putStrLn ("b: child " <> handleId hb <> " (own counter: also -0)")

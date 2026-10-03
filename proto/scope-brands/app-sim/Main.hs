@@ -14,10 +14,14 @@ import Control.Concurrent.Class.MonadMVar.Strict
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
 import Control.Monad.IOSim (IOSim, runSim)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Scope.Model
 
-startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (WHandle i m ())
+startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
 startIt ctx ref = startChild ctx ref "opts"
+
+expectRight :: Either Text a -> IOSim s a
+expectRight = either (error . Text.unpack) pure
 
 main :: IO ()
 main = print (runSim scenario)
@@ -29,9 +33,9 @@ scenario = withInstance "a" $ \dba ->
     rb <- register dbb "w"
     box <- newEmptyMVar
     _ <- forkIO (withExecution dba "wf-a" $ \ctx -> do
-      h <- startIt ctx ra
+      h <- expectRight =<< startIt ctx ra
       putMVar box (handleId h))
     withExecution dbb "wf-b" $ \ctx -> do
-      h <- startIt ctx rb
+      h <- expectRight =<< startIt ctx rb
       a <- takeMVar box
       pure (a, handleId h, ctxWorkflowId ctx)

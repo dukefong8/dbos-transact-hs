@@ -115,7 +115,7 @@ parent doc §10:
 | `State`/`Ask`/`Throw`/streams | Nominal | `Eff` + lost STM virtues | No — STM wins |
 | `DslBuilderEff` bridge | Contained ergonomics probe | Days, scratch-only | Prototype-only |
 
-## 5. Prototype report (`proto/scope-brands/`, 9/9 green)
+## 5. Prototype report (`proto/scope-brands/`, 14/14 green)
 
 - **Model** (`src/Scope/Model.hs`, ~200 lines, real io-classes
   constraints): `DBOS`/`Connection`/`Registry`/`WRef`/`WHandle` over
@@ -134,17 +134,9 @@ parent doc §10:
   region escape ("would escape its scope", textbook skolem text); N4
   counter on the narrowed view; N5 cross-execution drive (`exec1` vs
   `exec`); N6 cross-run escape (both tags refuse).
-- **Residual hole (exhibit builds, as designed).** `Residual_Capture`:
-  a step body capturing the *parent* `WCtx` starts children fine —
-  closures capture; no type split removes a value from lexical scope.
-  The split rejects the natural shape (use the handed `SCtx`); the
-  capture shape needs the runtime `InsideStep` backstop. This is the
-  finding that forces §7's decision.
-- **Incidental findings.** Pure constructors need `Applicative m`
-  (invisible in the real tree's full constraint tuples); io-sim's
-  `runSim` returns `Either Failure a` (N6 first drafted against the old
-  pure shape); fork is `Control.Monad.Class.MonadFork`, not
-  `Control.Concurrent.Class.MonadFork`.
+- **Phase 2: scope-depth backstop.** `WCtx` owns a depth counter in shared per-execution state alongside the step/marker counters; `placeCall` refuses while depth > 0; `withAttempt` bumps/restores depth under `finally` (the real tree's `MThrow.finally` pattern) with a fresh marker and token per attempt; `startChild` routes through `placeCall`. `proto-backstop` asserts all six: capture-start refused, capture-place refused, depth restored after success (`wf-0` — refused attempts spend no counter positions), depth restored after a throw, markers distinct across attempts, tokens per-attempt and initially unfired.
+  closures capture, so the split alone cannot remove a value from lexical scope — which is why the backstop above exists. The former `Residual_Capture` exhibit retired into `proto-backstop` B1/B2.
+- **Incidental findings.** Pure constructors need `Applicative m` (invisible in the real tree's full constraint tuples); io-sim's `runSim` returns `Either Failure a` (N6 first drafted against the old pure shape); fork is `Control.Monad.Class.MonadFork`, not `Control.Concurrent.Class.MonadFork`; scratch projects need `ImportQualifiedPost`/`DerivingStrategies` stated (the real tree inherits both from cabal defaults).
 
 ## 6. Recommendation and migration order
 
@@ -158,12 +150,7 @@ sized for one sitting.
 
 ## 7. Open decisions
 
-1. **`InsideStep`: type-error, runtime, or both?** §11 says keep it
-   runtime; the split makes the natural shape a compile error while
-   `Residual_Capture` proves capture still compiles. Recommendation:
-   both — types for the natural shape, runtime backstop for capture
-   (reconciles §11 with the prototype; needs explicit sign-off because
-   it reinterprets "keep runtime" as "keep as backstop").
+1. **`InsideStep`: type-error, runtime, or both? RESOLVED by phase 2 — both, with evidence.** The split rejects the natural shape at compile time (N2/N4); the depth counter refuses the capture shape at runtime (B1/B2) and restores under `finally` on success and on throw (B3/B4). §11's "keep runtime" is reinterpreted as "keep as backstop" with a strictly smaller reachable surface; the residual exhibit retired into `proto-backstop`.
 2. **Binder naming/placement.** Prototype uses `withInstance` (per §11)
    at the `DBOS` level and `withExecution` at `executeRegisteredWorkflow`.
    Confirm against the facade naming pass.

@@ -6,15 +6,16 @@
 module Main (main) where
 
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
+import Data.Text (Text)
 import Scope.Model
 
-startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (WHandle i m ())
+startIt :: MonadSTM m => WCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
 main :: IO ()
 main = withInstance "a" $ \dbos ->
   withExecution dbos "wf" $ \ctx ->
-    runStep ctx "s" $ \sctx -> do
+    withAttempt ctx "s" $ \sctx -> do
       ref <- register dbos "worker"
       _ <- startIt ctx ref -- pins the error channel, valid use
       _ <- startChild sctx ref "sneaky"

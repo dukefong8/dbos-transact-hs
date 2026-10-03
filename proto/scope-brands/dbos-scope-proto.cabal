@@ -99,11 +99,12 @@ executable neg-n6-cross-run
   default-language: Haskell2010
   ghc-options:      -fno-code -w
 
--- Documents the residual hole: a step body capturing the PARENT context
--- can still start children. MUST BUILD (the hole is real). See README.
-executable residual-capture
-  main-is:          Residual_Capture.hs
-  hs-source-dirs:   neg
-  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+-- Runtime-backstop checks: the capture shape compiles, so this asserts
+-- it is refused at runtime, plus depth restoration and per-attempt scope.
+executable proto-backstop
+  main-is:          Main.hs
+  hs-source-dirs:   app-backstop
+  build-depends:
+      base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
   default-language: Haskell2010
-  ghc-options:      -fno-code -w
+  ghc-options:      -Wall

@@ -8,7 +8,7 @@ ok()   { pass=$((pass+1)); echo "PASS: $1"; }
 bad()  { fail=$((fail+1)); echo "FAIL: $1"; }
 
 echo "=== build model + positive flows ==="
-cabal build lib:dbos-scope-proto exe:proto-io exe:proto-sim 2>&1 | tail -2
+cabal build lib:dbos-scope-proto exe:proto-io exe:proto-sim exe:proto-backstop 2>&1 | tail -2
 
 echo "=== positive flow under IO ==="
 if cabal run proto-io 2>/dev/null; then ok "proto-io runs"; else bad "proto-io runs"; fi
@@ -28,12 +28,15 @@ for t in neg-n1-mix-instances neg-n2-step-start neg-n3-escape-handle \
   fi
 done
 
-echo "=== residual hole exhibit (MUST build: the hole is real) ==="
-if cabal build exe:residual-capture >/dev/null 2>&1; then
-  ok "residual-capture builds (parent-capture bypasses the split)"
-else
-  bad "residual-capture builds"
-fi
+echo "=== runtime backstop (capture compiles; refusal must fire) ==="
+out=$(cabal run proto-backstop 2>/dev/null)
+echo "$out"
+for mark in "capture-start refused" "capture-place refused" \
+            "depth restored after success" "depth restored after throw" \
+            "markers distinct" "tokens per-attempt"; do
+  if echo "$out" | grep -q "backstop: $mark"; then ok "backstop: $mark";
+  else bad "backstop: $mark"; fi
+done
 
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0
