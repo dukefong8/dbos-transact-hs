@@ -47,7 +47,7 @@ import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderErro
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..))
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Context (Ctx, contextTracer, currentIdentity, inStep, nextStepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (Ctx, contextTracer, currentIdentity, insideAStep, nextStepId, withSystemDB, workflowId)
 import DBOS.Transact.Error (Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
@@ -178,9 +178,13 @@ instance ToLogStr TransactionEvent where
 -- failure as a value (like 'runWorkflowStepWith'); a body panic propagates
 -- unrecorded.
 runTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> TransactionConfig -> (Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
-runTransaction ds ctx config body
-  | inStep ctx = pure (Left (InsideStep "transaction"))
-  | otherwise = do
+runTransaction ds ctx config body = do
+  -- Refused through the handed context or a captured parent alike: a
+  -- transaction inside a step would checkpoint under the wrong id.
+  stepped <- insideAStep ctx
+  if stepped
+    then pure (Left (InsideStep "transaction"))
+    else do
       let stepName = fromMaybe "transaction" config.txName
       stepId <- nextStepId ctx
       let wid = WorkflowId (workflowId ctx)

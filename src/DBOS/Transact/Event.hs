@@ -25,7 +25,7 @@ import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Se
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (Ctx, nextStepId, stepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (Ctx, insideAStep, nextStepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 
@@ -83,19 +83,23 @@ driveSetEvent ctx key value placement =
 getEvent :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
 getEvent ctx destination key timeout = do
   let workflowText = workflowId ctx
-  caller <- case stepId ctx of
-    Just _ -> pure Nothing
-    Nothing -> do
-      readStep <- nextStepId ctx
-      timeoutStep <- nextStepId ctx
-      pure
-        ( Just
-            GetEventCaller
-              { getEventCallerWorkflowId = WorkflowId workflowText,
-                getEventCallerStepId = readStep,
-                getEventCallerTimeoutStepId = timeoutStep
-              }
-        )
+  -- Inside a step the enclosing checkpoint stands for the read — through
+  -- the handed context or a captured parent, read together.
+  stepped <- insideAStep ctx
+  caller <-
+    if stepped
+      then pure Nothing
+      else do
+        readStep <- nextStepId ctx
+        timeoutStep <- nextStepId ctx
+        pure
+          ( Just
+              GetEventCaller
+                { getEventCallerWorkflowId = WorkflowId workflowText,
+                  getEventCallerStepId = readStep,
+                  getEventCallerTimeoutStepId = timeoutStep
+                }
+          )
   found <- withSystemDB ctx (\db -> SystemDB.getEvent db destination key timeout caller)
   pure (adoptEventValue found)
 

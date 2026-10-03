@@ -31,6 +31,7 @@ import DBOS.Transact.DatasourceTest
     scenarioConflictAdopts,
     scenarioDeleteCheckpoints,
     scenarioErrorReplays,
+    scenarioCaptureRefused,
     scenarioInStepRefused,
     scenarioOwnershipMoved,
     scenarioPrecheckRetry,
@@ -136,6 +137,11 @@ tests =
               ],
       testCase "a call inside a step is refused and records nothing" $ do
         (res, tr) <- runSimCase (scenarioInStepRefused simDsFixture)
+        printSimTrace tr
+        res @?= (Left (InsideStep "transaction"), 0)
+        (selectTraceEventsDynamic tr :: [TransactionEvent]) @?= [],
+      testCase "a call through a captured parent is refused and records nothing" $ do
+        (res, tr) <- runSimCase (scenarioCaptureRefused simDsFixture)
         printSimTrace tr
         res @?= (Left (InsideStep "transaction"), 0)
         (selectTraceEventsDynamic tr :: [TransactionEvent]) @?= [],

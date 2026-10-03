@@ -133,6 +133,32 @@ tests =
             pure (refused, before, after)
           refused @?= Left (InsideStep "set_event")
           after @?= before + 1,
+      testCase "a getEvent through a captured parent is plain and moves no ids" $ do
+        withSuiteBackend getBackend $ \backend -> do
+          freshId <- UUID.V4.nextRandom
+          let prefix = "hs-l2-event-captured-" <> Text.pack (UUID.toString freshId)
+              publisherText = prefix <> "-publisher"
+              readerText = prefix <> "-reader"
+              create workflowText workflowName =
+                let row = (newWorkflow workflowText) {newWorkflowName = Just workflowName}
+                 in SystemDB.initWorkflow backend row Nothing Fresh Nothing
+          created <- sequence [create publisherText "L2EventPublisher", create readerText "L2EventReader"]
+          case created of
+            [Right _, Right _] -> pure ()
+            other -> fail (show other)
+          publisherContext <- ctxOver backend nullTracer publisherText
+          published <- setEvent publisherContext "answer" (42 :: Int)
+          published @?= Right ()
+          readerContext <- ctxOver backend nullTracer readerText
+          marker <- nextStepMarker readerContext
+          (readCaptured, before, after) <- withAttempt readerContext marker (firstStepStatus 0) $ \_stepped -> do
+            before <- nextStepId readerContext
+            readCaptured <- getEvent readerContext (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int))
+            after <- nextStepId readerContext
+            pure (readCaptured, before, after)
+          readCaptured @?= Right (Just 42)
+          -- The probe's own counter read moves one; the plain read moves none.
+          after @?= before + 1,
       testCase "a replayed set event does not republish" $ do
         withSuiteBackend getBackend $ \backend -> do
           freshId <- UUID.V4.nextRandom

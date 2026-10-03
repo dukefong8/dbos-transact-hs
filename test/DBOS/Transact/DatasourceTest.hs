@@ -23,6 +23,7 @@ module DBOS.Transact.DatasourceTest
     scenarioRetryThenSuccess,
     scenarioConflictAdopts,
     scenarioInStepRefused,
+    scenarioCaptureRefused,
   )
 where
 
@@ -236,6 +237,20 @@ scenarioInStepRefused fx = do
   marker <- nextStepMarker ctx
   result <- withAttempt ctx marker (firstStepStatus 0) $ \inner ->
     runTransaction fake.fakeSource inner protoConfig (\_ -> pure (Right "x"))
+  rows <- readTVarIO fake.fakeRows
+  pure (result, Map.size rows)
+
+-- | The captured-parent shape of the same leaf violation: the call reaches
+-- through a context whose scope field predates the running body, so the
+-- shared depth counter reports it. Refused with 'InsideStep' before
+-- anything is written.
+scenarioCaptureRefused :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
+scenarioCaptureRefused fx = do
+  fake <- fx.dsFixtureMkDs
+  ctx <- fx.dsFixtureMkCtx "ds-wf-5-captured"
+  marker <- nextStepMarker ctx
+  result <- withAttempt ctx marker (firstStepStatus 0) $ \_stepped ->
+    runTransaction fake.fakeSource ctx protoConfig (\_ -> pure (Right "x"))
   rows <- readTVarIO fake.fakeRows
   pure (result, Map.size rows)
 
@@ -483,6 +498,12 @@ tests =
           backend <- getBackend
           let fx = DsFixture (dsCtxOver backend) mkFakeDs
           (result, rowCount) <- scenarioInStepRefused fx
+          result @?= Left (InsideStep "transaction")
+          rowCount @?= 0,
+        testCase "a call through a captured parent is refused and records nothing" $ do
+          backend <- getBackend
+          let fx = DsFixture (dsCtxOver backend) mkFakeDs
+          (result, rowCount) <- scenarioCaptureRefused fx
           result @?= Left (InsideStep "transaction")
           rowCount @?= 0,
         testCase "beginSql names every isolation level" $ do
