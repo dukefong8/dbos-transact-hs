@@ -16,7 +16,7 @@ import qualified Data.Text.IO as TIO
 import Scope.Model
 import System.IO.Error (userError)
 
-startIt :: MonadSTM m => WorkflowCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
+startIt :: MonadSTM m => WorkflowCtx inst exec m -> WRef inst m () -> m (Either Text (WHandle inst m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
 isInsideRefusal :: Either Text a -> Bool
@@ -53,14 +53,14 @@ main = withInstance "a" $ \dbos -> do
       Right h -> TIO.putStrLn ("backstop: depth restored after throw (" <> handleId h <> ")")
       Left e -> TIO.putStrLn ("backstop: depth NOT restored after throw: " <> e)
     -- B5: markers are per attempt (fresh scope each entry).
-    m1 <- withAttempt wctx "s" $ \s -> pure (stepMarkerOf s)
-    m2 <- withAttempt wctx "s" $ \s -> pure (stepMarkerOf s)
+    m1 <- withAttempt wctx "s" $ \s -> pure (stepCtxMarker s)
+    m2 <- withAttempt wctx "s" $ \s -> pure (stepCtxMarker s)
     TIO.putStrLn $
       if m1 /= m2 then "backstop: markers distinct"
       else "backstop: markers NOT distinct (HOLE)"
     -- B6: cancellation tokens are per attempt (fresh, unfired).
-    c1 <- withAttempt wctx "s" $ \s -> cancelStep s >> stepCancelled s
-    c2 <- withAttempt wctx "s" $ \s -> stepCancelled s
+    c1 <- withAttempt wctx "s" $ \s -> stepCtxCancel s >> stepCtxCancelled s
+    c2 <- withAttempt wctx "s" $ \s -> stepCtxCancelled s
     TIO.putStrLn $
       if c1 && not c2 then "backstop: tokens per-attempt"
       else "backstop: tokens NOT per-attempt (HOLE)"

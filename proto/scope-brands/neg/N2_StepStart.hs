@@ -9,7 +9,7 @@ import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
 import Data.Text (Text)
 import Scope.Model
 
-startIt :: MonadSTM m => WorkflowCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
+startIt :: MonadSTM m => WorkflowCtx inst exec m -> WRef inst m () -> m (Either Text (WHandle inst m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
 main :: IO ()

@@ -17,7 +17,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Scope.Model
 
-startIt :: MonadSTM m => WorkflowCtx i x m -> WRef i m () -> m (Either Text (WHandle i m ()))
+startIt :: MonadSTM m => WorkflowCtx inst exec m -> WRef inst m () -> m (Either Text (WHandle inst m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
 expectRight :: Either Text a -> IOSim s a
@@ -38,4 +38,4 @@ scenario = withInstance "a" $ \dba ->
     withExecution dbb "wf-b" $ \ctx -> do
       h <- expectRight =<< startIt ctx rb
       a <- takeMVar box
-      pure (a, handleId h, ctxWorkflowId ctx)
+      pure (a, handleId h, workflowCtxWorkflowId ctx)

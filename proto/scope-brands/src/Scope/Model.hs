@@ -44,13 +44,13 @@ module Scope.Model
   , placeAwait
   , drive
     -- * Readers (note the split spellings: no overloaded-field games)
-  , ctxWorkflowId
+  , workflowCtxWorkflowId
   , stepCtxWorkflowId
   , handleId
-  , stepStatusOf
-  , stepMarkerOf
-  , cancelStep
-  , stepCancelled
+  , stepCtxStatus
+  , stepCtxMarker
+  , stepCtxCancel
+  , stepCtxCancelled
   ) where
 
 import Control.Concurrent.Class.MonadMVar (MonadMVar)
@@ -275,8 +275,8 @@ drive wctx p
 -- Readers. Split spellings on purpose (the tree's collision-deviation
 -- practice): one overloaded name for two ctx types is exactly the
 -- ambiguity this design removes.
-ctxWorkflowId :: WorkflowCtx inst exec m -> Text
-ctxWorkflowId = wId
+workflowCtxWorkflowId :: WorkflowCtx inst exec m -> Text
+workflowCtxWorkflowId = wId
 
 stepCtxWorkflowId :: StepCtx inst exec m -> Text
 stepCtxWorkflowId = wId . stepParent
@@ -285,18 +285,18 @@ handleId :: WHandle inst m e -> Text
 handleId = hId
 
 -- | What the attempt may read about itself.
-stepStatusOf :: StepCtx inst exec m -> StepStatus
-stepStatusOf = scopeStatus . sScope
+stepCtxStatus :: StepCtx inst exec m -> StepStatus
+stepCtxStatus = scopeStatus . sScope
 
 -- | Which attempt-body this is (per attempt, never persisted).
-stepMarkerOf :: StepCtx inst exec m -> Int
-stepMarkerOf = scopeMarker . sScope
+stepCtxMarker :: StepCtx inst exec m -> Int
+stepCtxMarker = scopeMarker . sScope
 
 -- | Fire this attempt's own token. It starts unfired per attempt; nothing
 -- here touches any other attempt's.
-cancelStep :: MonadSTM m => StepCtx inst exec m -> m ()
-cancelStep step = atomically (writeTVar (scopeToken (sScope step)) True)
+stepCtxCancel :: MonadSTM m => StepCtx inst exec m -> m ()
+stepCtxCancel step = atomically (writeTVar (scopeToken (sScope step)) True)
 
 -- | Whether this attempt's token has fired.
-stepCancelled :: MonadSTM m => StepCtx inst exec m -> m Bool
-stepCancelled step = readTVarIO (scopeToken (sScope step))
+stepCtxCancelled :: MonadSTM m => StepCtx inst exec m -> m Bool
+stepCtxCancelled step = readTVarIO (scopeToken (sScope step))
