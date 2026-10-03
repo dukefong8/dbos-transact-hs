@@ -33,6 +33,8 @@ Primary sources: `~/dev/Bluefin` `bluefin-examples/.../MonadError.hs`
 Mechanisms that transfer, dependency-free:
 
 - **Rank-2 scope discipline.** `runX :: (forall e. H e -> Eff (e :& es) r) -> …`
+  becomes `withWorkflow :: DBOS m -> Text -> (forall exec. WorkflowCtx exec m -> m a) -> m a`.
+  The ST-region trick; no `Eff` required.
   becomes `withDBOS :: … -> (forall inst. DBOS inst m -> m a) -> m a`.
   The ST-region trick; no `Eff` required.
 - **Scoped capabilities vs unscoped names.** `DB.hs` scopes `DbEff e`
