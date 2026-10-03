@@ -40,7 +40,7 @@ main = withInstance "a" $ \dbos -> do
       else "backstop: capture-place NOT refused (HOLE)"
     -- B3: the success path restores depth: allocating after a step works,
     -- and the counter did not move under the refused attempts above.
-    _ <- withAttempt wctx "s" $ \step -> pure (stepCtxWorkflowId step)
+    _ <- withAttempt wctx "s" $ \step -> pure (sctxWorkflowId step)
     r3 <- startIt wctx ref
     case r3 of
       Right h -> TIO.putStrLn ("backstop: depth restored after success (" <> handleId h <> ")")
@@ -53,14 +53,14 @@ main = withInstance "a" $ \dbos -> do
       Right h -> TIO.putStrLn ("backstop: depth restored after throw (" <> handleId h <> ")")
       Left e -> TIO.putStrLn ("backstop: depth NOT restored after throw: " <> e)
     -- B5: markers are per attempt (fresh scope each entry).
-    m1 <- withAttempt wctx "s" $ \s -> pure (stepCtxMarker s)
-    m2 <- withAttempt wctx "s" $ \s -> pure (stepCtxMarker s)
+    m1 <- withAttempt wctx "s" $ \s -> pure (stepMarkerOf s)
+    m2 <- withAttempt wctx "s" $ \s -> pure (stepMarkerOf s)
     TIO.putStrLn $
       if m1 /= m2 then "backstop: markers distinct"
       else "backstop: markers NOT distinct (HOLE)"
     -- B6: cancellation tokens are per attempt (fresh, unfired).
-    c1 <- withAttempt wctx "s" $ \s -> stepCtxCancel s >> stepCtxCancelled s
-    c2 <- withAttempt wctx "s" $ \s -> stepCtxCancelled s
+    c1 <- withAttempt wctx "s" $ \s -> cancelStep s >> stepCancelled s
+    c2 <- withAttempt wctx "s" $ \s -> stepCancelled s
     TIO.putStrLn $
       if c1 && not c2 then "backstop: tokens per-attempt"
       else "backstop: tokens NOT per-attempt (HOLE)"

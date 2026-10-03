@@ -44,13 +44,13 @@ module Scope.Model
   , placeAwait
   , drive
     -- * Readers (note the split spellings: no overloaded-field games)
-  , workflowCtxWorkflowId
-  , stepCtxWorkflowId
+  , ctxWorkflowId
+  , sctxWorkflowId
   , handleId
-  , stepCtxStatus
-  , stepCtxMarker
-  , stepCtxCancel
-  , stepCtxCancelled
+  , stepStatusOf
+  , stepMarkerOf
+  , cancelStep
+  , stepCancelled
   ) where
 
 import Control.Concurrent.Class.MonadMVar (MonadMVar)
@@ -275,28 +275,28 @@ drive wctx p
 -- Readers. Split spellings on purpose (the tree's collision-deviation
 -- practice): one overloaded name for two ctx types is exactly the
 -- ambiguity this design removes.
-workflowCtxWorkflowId :: WorkflowCtx inst exec m -> Text
-workflowCtxWorkflowId = wId
+ctxWorkflowId :: WorkflowCtx inst exec m -> Text
+ctxWorkflowId = wId
 
-stepCtxWorkflowId :: StepCtx inst exec m -> Text
-stepCtxWorkflowId = wId . stepParent
+sctxWorkflowId :: StepCtx inst exec m -> Text
+sctxWorkflowId = wId . stepParent
 
 handleId :: WHandle inst m e -> Text
 handleId = hId
 
 -- | What the attempt may read about itself.
-stepCtxStatus :: StepCtx inst exec m -> StepStatus
-stepCtxStatus = scopeStatus . sScope
+stepStatusOf :: StepCtx inst exec m -> StepStatus
+stepStatusOf = scopeStatus . sScope
 
 -- | Which attempt-body this is (per attempt, never persisted).
-stepCtxMarker :: StepCtx inst exec m -> Int
-stepCtxMarker = scopeMarker . sScope
+stepMarkerOf :: StepCtx inst exec m -> Int
+stepMarkerOf = scopeMarker . sScope
 
 -- | Fire this attempt's own token. It starts unfired per attempt; nothing
 -- here touches any other attempt's.
-stepCtxCancel :: MonadSTM m => StepCtx inst exec m -> m ()
-stepCtxCancel step = atomically (writeTVar (scopeToken (sScope step)) True)
+cancelStep :: MonadSTM m => StepCtx inst exec m -> m ()
+cancelStep step = atomically (writeTVar (scopeToken (sScope step)) True)
 
 -- | Whether this attempt's token has fired.
-stepCtxCancelled :: MonadSTM m => StepCtx inst exec m -> m Bool
-stepCtxCancelled step = readTVarIO (scopeToken (sScope step))
+stepCancelled :: MonadSTM m => StepCtx inst exec m -> m Bool
+stepCancelled step = readTVarIO (scopeToken (sScope step))

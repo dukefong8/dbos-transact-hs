@@ -38,4 +38,4 @@ scenario = withInstance "a" $ \dba ->
     withExecution dbb "wf-b" $ \ctx -> do
       h <- expectRight =<< startIt ctx rb
       a <- takeMVar box
-      pure (a, handleId h, workflowCtxWorkflowId ctx)
+      pure (a, handleId h, ctxWorkflowId ctx)

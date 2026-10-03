@@ -27,13 +27,13 @@ main = withInstance "a" $ \dba ->
     ra <- register dba "worker"
     rb <- register dbb "worker"
     withExecution dba "wf-a" $ \ctxa -> do
-      TIO.putStrLn ("a: workflow " <> workflowCtxWorkflowId ctxa)
+      TIO.putStrLn ("a: workflow " <> ctxWorkflowId ctxa)
       s0 <- nextStepId ctxa
       TIO.putStrLn ("a: first step id " <> tpack s0)
       ha <- expectRight =<< startIt ctxa ra
       TIO.putStrLn ("a: child " <> handleId ha)
       withAttempt ctxa "charge" $ \step -> do
-        TIO.putStrLn ("a: in step, workflow " <> stepCtxWorkflowId step)
+        TIO.putStrLn ("a: in step, workflow " <> sctxWorkflowId step)
         p <- placeAwait ctxa ha
         driven <- drive ctxa p
         TIO.putStrLn ("a: drive " <> tpack driven)
