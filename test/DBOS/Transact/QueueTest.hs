@@ -11,6 +11,10 @@ import Data.Text qualified as Text
 import Data.Map.Strict qualified as Map
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
+import Hasql.Decoders qualified as Decoders
+import Hasql.Encoders qualified as Encoders
+import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import DBOS.Prelude
 import DBOS.SystemDB (AwaitedOutcome (..), Change (..), NewQueue (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), RateLimit (..), SystemDB (getQueue, upsertQueue), WorkflowFilter (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter, getWorkflow, internalQueueName, newQueue, secondsDuration)
 import DBOS.SystemDB.Postgres qualified as Postgres
@@ -144,6 +148,69 @@ tests =
           removed <- deleteQueue dbos queueName
           assertEqual "delete succeeds" (Right ()) removed
           assertEqual "shutdown sees the executor" True =<< isLaunched dbos,
+      testCase "a queued workflow with a legacy input runs with it" $ do
+        fresh <- UUID.V4.nextRandom
+        backend <- getBackend
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-queue-legacy-" <> Text.take 12 suffix
+            queueName = "hs-l2-legacy-" <> Text.take 12 suffix
+            version = "hs-l2-version-" <> suffix
+            workflowText = "hs-l2-enqueue-legacy-" <> suffix
+            workflowId = WorkflowId workflowText
+        base <- configFromEnv appName
+        let config = base {configAppVersion = Just version}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          let key = newWorkflowKey "doubles"
+              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+              body input _ = pure (Right (input * 2))
+          registered <- registerDBOSWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          started <- launchWithEnvironment dbos isolatedEnvironment
+          case started of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          enqueued <- enqueueDBOSWorkflow dbos key workflowId (Just (encodeWorkflowValue (21 :: Int))) queueName
+          case enqueued of
+            Left err -> fail (show err)
+            Right result -> result.initResultStatus @?= Enqueued
+          -- Make the row legacy: move its input into the status column and
+          -- drop the payload-table row, as a pre-109 writer left it.
+          moved <-
+            Postgres.runSession backend "fixture" $
+              Session.statement workflowText $
+                Statement.preparable
+                  "update dbos.workflow_status set inputs = (select inputs from dbos.workflow_input where workflow_uuid = $1) where workflow_uuid = $1"
+                  (Encoders.param (Encoders.nonNullable Encoders.text))
+                  Decoders.rowsAffected
+          case moved of
+            Left err -> fail (show err)
+            Right 1 -> pure ()
+            Right n -> fail ("expected one moved row, got: " <> show n)
+          dropped <-
+            Postgres.runSession backend "fixture" $
+              Session.statement workflowText $
+                Statement.preparable
+                  "delete from dbos.workflow_input where workflow_uuid = $1"
+                  (Encoders.param (Encoders.nonNullable Encoders.text))
+                  Decoders.rowsAffected
+          case dropped of
+            Left err -> fail (show err)
+            Right 1 -> pure ()
+            Right n -> fail ("expected one dropped row, got: " <> show n)
+          queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
+          case queueRegistered of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          waited <- waitForWorkflow dbos workflowId
+          case waited of
+            Left err -> fail (show err)
+            Right (AwaitedSucceeded (Just output) serialization) -> do
+              let stored = SerializedWorkflowValue output (Serialization <$> serialization)
+                  decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
+              assertEqual "the legacy input reaches the body" (Right 42) decoded
+            Right other -> fail (show other),
       testCase "a queue's worker concurrency runs that many at once in one process" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)

@@ -1006,6 +1006,9 @@ data WorkflowFilter = WorkflowFilter
     workflowFilterParentWorkflowIds   :: [Text],
     workflowFilterHasParent           :: Maybe Bool,
     workflowFilterForkedFrom          :: [Text],
+    -- | Whether the workflow is itself a fork, i.e. whether it has a
+    -- @forked_from@. Mirrors Rust @is_fork@.
+    workflowFilterIsFork            :: Maybe Bool,
     workflowFilterWasForkedFrom       :: Maybe Bool,
     workflowFilterCreatedAfter        :: Maybe Timestamp,
     workflowFilterCreatedBefore       :: Maybe Timestamp,
@@ -1045,6 +1048,7 @@ defaultWorkflowFilter =
       workflowFilterParentWorkflowIds = [],
       workflowFilterHasParent = Nothing,
       workflowFilterForkedFrom = [],
+      workflowFilterIsFork = Nothing,
       workflowFilterWasForkedFrom = Nothing,
       workflowFilterCreatedAfter = Nothing,
       workflowFilterCreatedBefore = Nothing,

@@ -19,8 +19,6 @@ module DBOS.SystemDB.Postgres
     acquirePool,
     dequeueWorkflows,
     dequeueWorkflowsSession,
-    enqueueWorkflow,
-    enqueueWorkflowSession,
     fetchMigrationVersion,
     fetchNotification,
     fetchNotificationSession,
@@ -60,12 +58,8 @@ module DBOS.SystemDB.Postgres
     legacySetEvent,
     setEventSession,
     takeNotificationSession,
-    tryStartWorkflow,
-    tryStartWorkflowSession,
     updateQueueWorkerConcurrency,
     updateQueueWorkerConcurrencySession,
-    updateWorkflowOutcome,
-    updateWorkflowOutcomeSession,
     -- * Backend handle (postgres.rs rewrite, Phase 7)
     Settings (..),
     Config (..),
@@ -182,8 +176,8 @@ fetchNotificationSession (MessageUUID messageUUID) =
     limit 1
   |]
 
--- | Highest applied migration version. The ceiling this port tracks is 108
--- (ranges 1–47 + 100–108); a higher value means the Rust corpus moved and the
+-- | Highest applied migration version. The ceiling this port tracks is 114
+-- (ranges 1–47 + 100–114); a higher value means the Rust corpus moved and the
 -- pinned queries must be re-verified. The single-column table selects as a
 -- full-table model, decoded by the instance below.
 newtype DbosMigration = DbosMigration Int64
@@ -199,110 +193,6 @@ migrationVersionSession =  sqlQueryTypedSession [typedSql|
     order by version desc
     limit 1
   |]
-
-tryStartWorkflowSession ::
-  WorkflowId ->
-  WorkflowName ->
-  Maybe SerializedWorkflowValue ->
-  ExecutorId ->
-  ApplicationVersion ->
-  Session Bool
-tryStartWorkflowSession (WorkflowId workflowId) (WorkflowName workflowName) inputs (ExecutorId executorId) (ApplicationVersion applicationVersion) =
-  -- The singleton select infers @AtMostOneRow@; the query shape provably
-  -- returns one row, and a missing row safely reads as "not started", which
-  -- the caller resolves through the await path.
-  let inputText = (.serializedText) <$> inputs
-      serializationText = case serializedWorkflowSerialization inputs of
-        Just tag -> tag
-        Nothing  -> "json"
-   in fromMaybe False
-        <$> sqlQueryTypedSession [typedSql|
-    with inserted as (
-      insert into dbos.workflow_status
-        (
-          workflow_uuid,
-          status,
-          name,
-          executor_id,
-          created_at,
-          updated_at,
-          application_version,
-          recovery_attempts,
-          queue_name,
-          inputs,
-          serialization,
-          priority,
-          parent_workflow_id
-        )
-      values
-        (
-          ${workflowId},
-          'PENDING',
-          ${workflowName},
-          ${executorId},
-          (extract(epoch from clock_timestamp()) * 1000)::bigint,
-          (extract(epoch from clock_timestamp()) * 1000)::bigint,
-          ${applicationVersion},
-          1,
-          null,
-          ${inputText},
-          ${serializationText},
-          0,
-          null
-        )
-      on conflict (workflow_uuid) do nothing
-      returning workflow_uuid
-    ),
-    claimed as (
-      update dbos.workflow_status
-      set executor_id = ${executorId},
-          recovery_attempts = coalesce(recovery_attempts, 0) + 1,
-          updated_at = (extract(epoch from clock_timestamp()) * 1000)::bigint
-      where workflow_uuid = ${workflowId}
-        and status = 'PENDING'
-        and executor_id is null
-        and not exists (select 1 from inserted)
-      returning workflow_uuid
-    )
-    select
-      (
-        exists (select 1 from inserted)
-        or exists (select 1 from claimed)
-      )
-  |]
-
-updateWorkflowOutcomeSession ::
-  WorkflowId ->
-  ExecutorId ->
-  WorkflowStatus ->
-  Maybe SerializedWorkflowValue ->
-  Maybe SerializedWorkflowValue ->
-  Session ()
-updateWorkflowOutcomeSession (WorkflowId workflowId) (ExecutorId executorId) status output errorValue =
-  let serialization =
-        serializedWorkflowSerialization output
-          <|> serializedWorkflowSerialization errorValue
-      statusText = workflowStatusText status
-      outputText = (.serializedText) <$> output
-      errorText = (.serializedText) <$> errorValue
-   in void $ sqlExecTypedSession [typedSql|
-          update dbos.workflow_status
-          set status = ${statusText}::text,
-              output = ${outputText}::text,
-              error = ${errorText}::text,
-              serialization = coalesce(${serialization}::text, serialization),
-              executor_id = case
-                when ${statusText}::text = 'PENDING' then null
-                else ${executorId}
-              end,
-              deduplication_id = null,
-              updated_at = (extract(epoch from clock_timestamp()) * 1000)::bigint,
-              completed_at = case
-                when ${statusText}::text = 'PENDING' then null
-                else (extract(epoch from clock_timestamp()) * 1000)::bigint
-              end
-          where workflow_uuid = ${workflowId}
-        |]
 
 recordOperationOutputSession ::
   WorkflowId ->
@@ -782,50 +672,6 @@ updateQueueWorkerConcurrencySession (QueueName queueName) workerConcurrency =
     where name = ${queueName}
   |]
 
--- | Record a workflow as ENQUEUED on a queue. Whichever executor next polls
--- the queue claims it; the enqueuer does not run it just because it asked.
-enqueueWorkflowSession ::
-  WorkflowId ->
-  WorkflowName ->
-  QueueName ->
-  Session ()
-enqueueWorkflowSession (WorkflowId workflowId) (WorkflowName workflowName) (QueueName queueName) =
-  void $ sqlExecTypedSession [typedSql|
-    insert into dbos.workflow_status
-      (
-        workflow_uuid,
-        status,
-        name,
-        queue_name,
-        executor_id,
-        created_at,
-        updated_at,
-        application_version,
-        recovery_attempts,
-        priority,
-        inputs,
-        serialization,
-        parent_workflow_id
-      )
-    values
-      (
-        ${workflowId},
-        'ENQUEUED',
-        ${workflowName},
-        ${queueName},
-        null,
-        (extract(epoch from clock_timestamp()) * 1000)::bigint,
-        (extract(epoch from clock_timestamp()) * 1000)::bigint,
-        'v1',
-        0,
-        0,
-        null,
-        'json',
-        null
-      )
-    on conflict (workflow_uuid) do nothing
-  |]
-
 -- | Claim up to the stored worker-concurrency limit, counting this executor's
 -- own running workflows against it, oldest first. A missing queue row or a
 -- NULL limit means unbounded, matching the oracle (the internal queue carries
@@ -1191,7 +1037,7 @@ fromPool pool poolSize settings tracer = do
         psdbLog = tracer
       }
 
--- | Connects and verifies the schema is at the migration ceiling (108).
+-- | Connects and verifies the schema is at the migration ceiling (114).
 -- Verify-only: Haskell never migrates (ADR-0004) and never creates the
 -- database; a missing or drifted schema is a 'Backend' 'Permanent' error,
 -- not a build step.
@@ -1245,7 +1091,7 @@ withPostgresSystemDB config tracer =
   bracket (acquirePostgresSystemDB config tracer) releasePostgresSystemDB
 
 -- | Reads back the highest applied migration and requires the ceiling this
--- port tracks (108). A higher value means the Rust corpus moved and the
+-- port tracks (114). A higher value means the Rust corpus moved and the
 -- pinned queries must be re-verified.
 verifySystemDatabase :: PostgresSystemDB -> IO (Either Error ())
 verifySystemDatabase env = do
@@ -1266,11 +1112,11 @@ verifySystemDatabase env = do
                 )
             )
 
--- | The migration ceiling this port tracks (ranges 1–47 + 100–108). A
+-- | The migration ceiling this port tracks (ranges 1–47 + 100–114). A
 -- higher value means the Rust corpus moved and the pinned queries must be
 -- re-verified.
 migrationCeiling :: Int64
-migrationCeiling = 108
+migrationCeiling = 114
 
 -- | Runs one session through the pool, classifying failures into the shared
 -- 'Error' channel and retrying through 'withRetry' under the operation's
@@ -1400,6 +1246,7 @@ listParams env workflowFilter =
       listParentWorkflowIds = workflowFilter.workflowFilterParentWorkflowIds,
       listForkedFrom = workflowFilter.workflowFilterForkedFrom,
       listQueuesOnly = workflowFilter.workflowFilterQueuesOnly,
+      listIsFork = workflowFilter.workflowFilterIsFork,
       listHasParent = workflowFilter.workflowFilterHasParent,
       listWasForkedFrom = workflowFilter.workflowFilterWasForkedFrom,
       listIsDebounced = workflowFilter.workflowFilterIsDebounced,
@@ -1449,7 +1296,6 @@ initParams env new status queued claiming ownerXid now =
   Statements.InitWorkflowParams
     { initParamWorkflowId = new.newWorkflowId,
       initParamStatus = workflowStatusText status,
-      initParamInput = new.newWorkflowInput,
       initParamName = new.newWorkflowName,
       initParamClassName = new.newWorkflowClassName,
       initParamConfigName = new.newWorkflowConfigName,
@@ -1738,7 +1584,6 @@ debounceBounceParams request app =
       debounceBounceQueueName = request.debounceRequestQueueName,
       debounceBounceDeduplicationId = request.debounceRequestDeduplicationId,
       debounceBounceDelayUntil = timestampToEpochMs request.debounceRequestDelayUntil,
-      debounceBounceInputs = request.debounceRequestInputs,
       debounceBounceSerialization = request.debounceRequestSerialization,
       debounceBounceApplicationName = app,
       debounceBounceClassName = request.debounceRequestClassName,
@@ -1930,7 +1775,11 @@ debounceCallerTx app callerWid callerText callerStep startedAt completedAt reque
     _ -> do
       bounced <- Tx.statement (debounceBounceParams request app) Statements.debounceBounceStatement
       value <- case bounced of
-        Just workflowId -> pure (Right (Debounced {debounceWorkflowId = workflowId}))
+        Just workflowId -> do
+          -- The bounce replaces the held workflow's inputs, which readers
+          -- find in @workflow_input@ before the legacy column.
+          void $ Tx.statement (workflowId, request.debounceRequestInputs) Statements.debounceInputStatement
+          pure (Right (Debounced {debounceWorkflowId = workflowId}))
         Nothing -> do
           holder <- Tx.statement (request.debounceRequestQueueName, request.debounceRequestDeduplicationId) Statements.debounceHolderStatement
           pure (Right (maybe DebounceUnheld debounceHeld holder))
@@ -2599,6 +2448,14 @@ instance SystemDB PostgresSystemDB IO where
                         recordChildApplicationName = env.psdbApplicationName
                       }
                 )
+            -- The input lands where readers look, in the same commit, and
+            -- only when this attempt created the row: a submission that
+            -- found an existing row must not touch its recorded input.
+            when (row.owner_xid == Just ownerXid) $
+              void $
+                Tx.statement
+                  (new.newWorkflowId, new.newWorkflowInput)
+                  Statements.initWorkflowInputStatement
             case (initConflict new row, stored) of
               (Just err, _) -> do
                 -- The stored row is another workflow's: nothing this call
@@ -2635,7 +2492,18 @@ instance SystemDB PostgresSystemDB IO where
           let status = initialStatus new
               queued = status == Enqueued || status == Delayed
               claiming = claimsOwnership submission
-          result <- runSession env "init_workflow" (Statements.initWorkflowSession (initParams env new status queued claiming ownerXid now))
+              params = initParams env new status queued claiming ownerXid now
+          -- The status row and the input commit together, so a crash can
+          -- never leave one without the other; the input lands only when
+          -- this attempt created the row.
+          result <- runTransaction env "init_workflow" $ do
+            row <- Tx.statement () (Statements.initWorkflowStatement params)
+            when (row.owner_xid == Just ownerXid) $
+              void $
+                Tx.statement
+                  (new.newWorkflowId, new.newWorkflowInput)
+                  Statements.initWorkflowInputStatement
+            pure row
           case result of
             Left err
               | queueDeduplicated new err ->
@@ -2665,11 +2533,17 @@ instance SystemDB PostgresSystemDB IO where
   recordWorkflowOutcome env wid outcome = do
     let (output, errorText) = outcomeColumns outcome
         Types.WorkflowId widText = wid
+        statusText = workflowStatusText (outcomeStatus outcome)
+    -- The status change and the payload commit together, and the payload
+    -- lands only behind a change that matched: a refused outcome leaves no
+    -- orphan row behind.
     result <-
-      runSession
-        env
-        "record_workflow_outcome"
-        (Statements.recordWorkflowOutcomeSession widText (workflowStatusText (outcomeStatus outcome)) output errorText)
+      runTransaction env "record_workflow_outcome" $ do
+        updated <- Tx.statement () (Statements.recordWorkflowOutcomeStatement widText statusText output errorText)
+        when (updated > 0) $
+          void $
+            Tx.statement () (Statements.recordWorkflowOutputStatement widText output errorText)
+        pure updated
     pure $ case result of
       Left err -> Left err
       Right updated
@@ -2807,9 +2681,11 @@ instance SystemDB PostgresSystemDB IO where
             let targets = List.nub (List.sort (map unwrap workflowIds <> descendants))
             -- A workflow cannot delete itself, and cannot delete an
             -- ancestor whose tree it is inside. Refused here, before
-            -- either statement runs: the alternative is a foreign key
-            -- violation surfacing as a backend error with nothing in it a
-            -- caller could act on. Only the caller's own id is checked,
+            -- anything runs: the step checkpoint for the delete lands in
+            -- @operation_outputs@ in the same transaction, so it would land
+            -- as an orphan of the status row the delete just removed, and
+            -- the workflow would go on running with no row to record its
+            -- outcome on. Only the caller's own id is checked,
             -- not its ancestry — an ancestor is a target only when it was
             -- named with children, and then the walk above has already put
             -- the caller in the targets.
@@ -3294,7 +3170,9 @@ instance SystemDB PostgresSystemDB IO where
           result <- runTransaction env "debounce_delayed_workflow" $ do
             bounced <- Tx.statement (debounceBounceParams request app) Statements.debounceBounceStatement
             case bounced of
-              Just workflowId -> pure (Debounced {debounceWorkflowId = workflowId})
+              Just workflowId -> do
+                void $ Tx.statement (workflowId, request.debounceRequestInputs) Statements.debounceInputStatement
+                pure (Debounced {debounceWorkflowId = workflowId})
               Nothing -> do
                 holder <- Tx.statement (request.debounceRequestQueueName, request.debounceRequestDeduplicationId) Statements.debounceHolderStatement
                 pure (maybe DebounceUnheld debounceHeld holder)
@@ -3584,32 +3462,6 @@ fetchMigrationVersion pool =
   fmap (\(DbosMigration version) -> version)
     <$> runDbOrFail pool migrationVersionSession
 
-tryStartWorkflow ::
-  Pool.Pool ->
-  WorkflowId ->
-  WorkflowName ->
-  Maybe SerializedWorkflowValue ->
-  ExecutorId ->
-  ApplicationVersion ->
-  IO WorkflowStartDecision
-tryStartWorkflow pool workflowId workflowName inputs executorId applicationVersion = do
-  started <- runDbOrFail pool (tryStartWorkflowSession workflowId workflowName inputs executorId applicationVersion)
-  pure $
-    if started
-      then StartWorkflow
-      else AwaitWorkflow
-
-updateWorkflowOutcome ::
-  Pool.Pool ->
-  WorkflowId ->
-  ExecutorId ->
-  WorkflowStatus ->
-  Maybe SerializedWorkflowValue ->
-  Maybe SerializedWorkflowValue ->
-  IO ()
-updateWorkflowOutcome pool workflowId executorId status output errorValue =
-  runDbOrFail pool (updateWorkflowOutcomeSession workflowId executorId status output errorValue)
-
 recordOperationOutput ::
   Pool.Pool ->
   WorkflowId ->
@@ -3788,16 +3640,6 @@ updateQueueWorkerConcurrency ::
   IO ()
 updateQueueWorkerConcurrency pool queueName workerConcurrency =
   runDbOrFail pool (updateQueueWorkerConcurrencySession queueName workerConcurrency)
-
--- | Record a workflow as ENQUEUED on a queue.
-enqueueWorkflow ::
-  Pool.Pool ->
-  WorkflowId ->
-  WorkflowName ->
-  QueueName ->
-  IO ()
-enqueueWorkflow pool workflowId workflowName queueName =
-  runDbOrFail pool (enqueueWorkflowSession workflowId workflowName queueName)
 
 -- | Claim up to the stored limit, counting this executor's running workflows.
 dequeueWorkflows ::

@@ -31,18 +31,13 @@ import DBOS.SystemDB (Change (..), SendMessage (..), millisDuration)
 import DBOS.Transact
   ( DBOS,
     EngineOnly,
-    Error,
     Queue (..),
     QueueChange (..),
-    QueueConflict (..),
-    QueueOptions (..),
     SerializedWorkflowValue (..),
     StartOptions (..),
     WorkflowId (..),
-    WorkflowKey,
     decodeWorkflowValue,
     WorkflowRef,
-    defaultQueueChange,
     enqueueDBOSWorkflow,
     encodeWorkflowValue,
     fetchWorkflowStatuses,
@@ -56,7 +51,6 @@ import DBOS.Transact
     sendWorkflowMessages,
     updateQueue,
   )
-import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text, pack)
 import Data.Text qualified as Text
@@ -79,7 +73,7 @@ import Starter.Workflows
 
 getPageView :: StarterApp -> Text -> Maybe Text -> RouteHandler PageView
 getPageView app tab taskId = do
-  queue <- getQueueStatus app
+  queueStatus <- getQueueStatus app
   events <- getEventsStatus app
   approvals <- getApprovals app
   progress <- case taskId of
@@ -88,7 +82,7 @@ getPageView app tab taskId = do
   pure
     PageView
       { pvTab = tab,
-        pvQueue = queue,
+        pvQueue = queueStatus,
         pvEvents = events,
         pvProgress = progress,
         pvApprovals = approvals
@@ -144,7 +138,17 @@ applyConcurrency app requested = do
       ( updateQueue
           app.staDbos
           demoQueueName
-          (defaultQueueChange {worker_concurrency = Set (Just (max 1 requested))})
+          ( QueueChange
+              { concurrency = Leave,
+                worker_concurrency = Set (Just (max 1 requested)),
+                polling_interval = Leave,
+                rate_limit = Leave,
+                priority_enabled = Leave,
+                partition_concurrency = Leave,
+                partition_worker_concurrency = Leave,
+                partition_rate_limit = Leave
+              }
+          )
       )
   pure ()
 
@@ -236,7 +240,7 @@ fetchQueueWorkerConcurrency :: DBOS IO -> Text -> IO (Maybe Int)
 fetchQueueWorkerConcurrency dbos name = do
   found <- queue dbos name
   pure $ case found of
-    Right (Just registered) -> registered.worker_concurrency
+    Right (Just (Queue {worker_concurrency = wc})) -> wc
     _ -> Nothing
 
 -- | Start a workflow and return at once; the task is dropped. The id is an

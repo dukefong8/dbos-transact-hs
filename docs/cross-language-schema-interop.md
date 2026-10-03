@@ -20,12 +20,12 @@ Rust, Python and TypeScript because all three define it identically"*
 
 | SDK | ceiling | note |
 |---|---|---|
-| Rust / Haskell (this port) | **108** | the port vendors the Rust corpus; ADR-0007 |
-| Python | **123** | 109–123 add tables/columns Rust has not created |
+| Rust / Haskell (this port) | **114** | the port vendors the Rust corpus; ADR-0007 |
+| Python | **123** | 115–123 add columns Rust has not created |
 | TypeScript | **123** | same shared numbers as Python |
 
 A database migrated by a *newer* SDK is still readable by the port for the
-columns the port uses; the gap is the 109–123 additions below.
+columns the port uses; the gap is the 115–123 additions below.
 
 ## The wire format (values that must match exactly)
 
@@ -92,21 +92,17 @@ Inert for this port (verified: zero references in `src/` and `test/`):
 - `transaction_completion` / `datasource_outputs` — datasource bookkeeping,
   outside the system schema.
 
-**The gap to watch — migrations 109–123 (Python/TS only):**
+**The gap to watch — migrations 115–123 (Python/TS only):**
 
-- `workflow_input` / `workflow_output` tables, and
-  `operation_outputs.retention_timestamp`.
-- Python/TS move inputs/outputs there and read them as
-  `COALESCE(workflow_input.inputs, workflow_status.inputs)`. The port at 108
-  never creates or reads those tables, so a Python workflow whose input lives
-  in `workflow_input` presents `workflow_status.inputs NULL` to the port.
-- Today it is latent (the port writes and reads its own column set). It becomes
-  a real interop break the moment the port is pointed at rows that a Python/TS
-  client created with the 109+ layout, or resumes a workflow whose input moved.
+- `operation_outputs.retention_timestamp` and later columns Rust has not
+  created. The 109–114 payload tables (`workflow_input` / `workflow_output`)
+  are now shared: the port creates, writes, and reads them exactly as the
+  other SDKs do (ported 2026-10-03 from Rust #77, itself verbatim from
+  Python).
 
 ## When this changes
 
-The migration-ceiling test pins 108 (`test/DBOS/SystemDB/PostgresTest.hs`); a
+The migration-ceiling test pins 114 (`test/DBOS/SystemDB/PostgresTest.hs`); a
 higher value means the Rust corpus moved and the pinned columns above must be
 re-verified. Re-check by diffing `information_schema` between a database
 migrated by each SDK, as this note did.

@@ -65,7 +65,7 @@ Then check the Rust oracle: `~/dev/dbos-transact-rust` is the behavioral referen
 
 When porting each module, all three legs must pass: (1) watcher eval on the domain's `*Sim.tests` — green with announcement lines inline; (2) `cabal test test --test-option='--pattern' --test-option='$2 == "<Group>"'` — green with matching FastLogger lines on stdout (tasty `$n` fields are 1-indexed; `$0 ~ /.../` does not parse); (3) `cargo test -p dbos --test <suite>` read-only — green, plus a structural trace comparison against the oracle's `tracing::info!` call sites (Rust integration tests install no collector, so the comparison is format-string-structural, cited by file and line). Live trees (`*Test`) ship in `defaultMain`; sim trees (`*Sim`) are eval-only — never add a `*Sim.tests` to `main`.
 
-The database must always be migrated with the Rust runner first: run `make db-migrate` (idempotent; verifies `108→108`) before build/test. The migration-ceiling test pins version 108; a higher value means the Rust corpus moved and pinned queries must be re-verified.
+The database must always be migrated with the Rust runner first: run `make db-migrate` (idempotent; verifies `114→114`) before build/test. The migration-ceiling test pins version 114; a higher value means the Rust corpus moved and pinned queries must be re-verified.
 
 ## Guardrails
 

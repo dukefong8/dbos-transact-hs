@@ -33,7 +33,8 @@ module DBOS.SystemDB.Postgres.Statements
     workflowStatusSession,
     firstSettledSession,
     settledIdsSession,
-    recordWorkflowOutcomeSession,
+    recordWorkflowOutcomeStatement,
+    recordWorkflowOutputStatement,
     StepCheckRaw (..),
     checkStepSession,
     checkStepStatement,
@@ -81,7 +82,7 @@ module DBOS.SystemDB.Postgres.Statements
     updateWorkflowAttributesSession,
     reenqueueForRecoverySession,
     InitWorkflowParams (..),
-    initWorkflowSession,
+    initWorkflowInputStatement,
     initWorkflowStatement,
     parkWorkflowSession,
     descendantsSession,
@@ -106,6 +107,7 @@ module DBOS.SystemDB.Postgres.Statements
     partitionSweepFlipStatement,
     DebounceBounceParams (..),
     debounceBounceStatement,
+    debounceInputStatement,
     DebounceHolderRaw (..),
     debounceHolderStatement,
     NotificationRecordRaw (..),
@@ -211,16 +213,40 @@ data WorkflowRowRaw = WorkflowRowRaw
 
 -- | Reads one workflow with its payloads, or nothing if there is no such
 -- id. Mirrors @get_workflow@: @WORKFLOW_COLUMNS@ plus all three payload
--- columns (@inputs, output, error@).
+-- columns, each read from its payload table first and the legacy
+-- @workflow_status@ column second, as every SDK does.
 getWorkflowSession :: Text -> Session.Session (Maybe WorkflowRowRaw)
 getWorkflowSession workflowId =
   Session.statement workflowId (Statement.preparable sql encoder decoder)
   where
     sql =
-      "select " <> workflowColumns <> ", inputs, output, error \
+      "select " <> workflowColumns <> ", "
+        <> payloadColumn "workflow_input" "inputs"
+        <> ", "
+        <> payloadColumn "workflow_output" "output"
+        <> ", "
+        <> payloadColumn "workflow_output" "error"
+        <> " \
       \from dbos.workflow_status where workflow_uuid = $1"
     encoder = Encoders.param (Encoders.nonNullable Encoders.text)
     decoder = Decoders.rowMaybe workflowRowDecoder
+
+-- | One payload column as the payload table's value falling back to the
+-- legacy @workflow_status@ column, for a query whose @FROM@ is
+-- @workflow_status@ unaliased. A correlated subquery on the primary key
+-- rather than a join, so @workflow_status@ stays the only table in scope
+-- and no other column needs qualifying. Mirrors the oracle's
+-- @payload_column@.
+payloadColumn :: Text -> Text -> Text
+payloadColumn table name =
+  "coalesce((select p."
+    <> name
+    <> " from dbos."
+    <> table
+    <> " p where p.workflow_uuid = dbos.workflow_status.workflow_uuid), "
+    <> name
+    <> ") as "
+    <> name
 
 -- | @WORKFLOW_COLUMNS@: every column @workflow_from_row@ reads, in order.
 -- Shared by every workflow read so the lists cannot drift.
@@ -304,6 +330,7 @@ data WorkflowListParams = WorkflowListParams
     listParentWorkflowIds   :: [Text],
     listForkedFrom          :: [Text],
     listQueuesOnly          :: Bool,
+    listIsFork              :: Maybe Bool,
     listHasParent           :: Maybe Bool,
     listWasForkedFrom       :: Maybe Bool,
     listIsDebounced         :: Maybe Bool,
@@ -340,9 +367,9 @@ listWorkflowsSql =
   "select "
     <> workflowColumns
     <> ", \
-       \case when $1 then inputs end as inputs, \
-       \case when $2 then output end as output, \
-       \case when $2 then error end as error \
+       \case when $1 then coalesce((select p.inputs from dbos.workflow_input p where p.workflow_uuid = dbos.workflow_status.workflow_uuid), inputs) end as inputs, \
+       \case when $2 then coalesce((select p.output from dbos.workflow_output p where p.workflow_uuid = dbos.workflow_status.workflow_uuid), output) end as output, \
+       \case when $2 then coalesce((select p.error from dbos.workflow_output p where p.workflow_uuid = dbos.workflow_status.workflow_uuid), error) end as error \
        \from dbos.workflow_status \
        \where \
        \(cardinality($3::text[]) = 0 or workflow_uuid = any($3)) \
@@ -362,20 +389,21 @@ listWorkflowsSql =
        \and (cardinality($17::text[]) = 0 or parent_workflow_id = any($17)) \
        \and (cardinality($18::text[]) = 0 or forked_from = any($18)) \
        \and (not $19 or queue_name is not null) \
-       \and ($20::boolean is null or (parent_workflow_id is not null) = $20) \
-       \and ($21::boolean is null or was_forked_from = $21) \
-       \and ($22::boolean is null or is_debounced = $22) \
-       \and ($23::bigint is null or created_at >= $23) \
-       \and ($24::bigint is null or created_at <= $24) \
-       \and ($25::bigint is null or completed_at >= $25) \
-       \and ($26::bigint is null or completed_at <= $26) \
-       \and ($27::bigint is null or started_at_epoch_ms >= $27) \
-       \and ($28::bigint is null or started_at_epoch_ms <= $28) \
-       \and ($29::text is null or attributes @> $29::jsonb) \
+       \and ($20::boolean is null or (forked_from is not null) = $20) \
+       \and ($21::boolean is null or (parent_workflow_id is not null) = $21) \
+       \and ($22::boolean is null or was_forked_from = $22) \
+       \and ($23::boolean is null or is_debounced = $23) \
+       \and ($24::bigint is null or created_at >= $24) \
+       \and ($25::bigint is null or created_at <= $25) \
+       \and ($26::bigint is null or completed_at >= $26) \
+       \and ($27::bigint is null or completed_at <= $27) \
+       \and ($28::bigint is null or started_at_epoch_ms >= $28) \
+       \and ($29::bigint is null or started_at_epoch_ms <= $29) \
+       \and ($30::text is null or attributes @> $30::jsonb) \
        \order by \
-       \case when $30 then created_at end desc, \
-       \case when not $30 then created_at end asc \
-       \limit $31 offset $32"
+       \case when $31 then created_at end desc, \
+       \case when not $31 then created_at end asc \
+       \limit $32 offset $33"
 
 listWorkflowsEncoder :: Encoders.Params WorkflowListParams
 listWorkflowsEncoder =
@@ -399,19 +427,20 @@ listWorkflowsEncoder =
       contramap (.listParentWorkflowIds) textArrayParam, -- $17
       contramap (.listForkedFrom) textArrayParam, -- $18
       contramap (.listQueuesOnly) boolParam, -- $19
-      contramap (.listHasParent) maybeBoolParam, -- $20
-      contramap (.listWasForkedFrom) maybeBoolParam, -- $21
-      contramap (.listIsDebounced) maybeBoolParam, -- $22
-      contramap (.listCreatedAfter) maybeInt8Param, -- $23
-      contramap (.listCreatedBefore) maybeInt8Param, -- $24
-      contramap (.listCompletedAfter) maybeInt8Param, -- $25
-      contramap (.listCompletedBefore) maybeInt8Param, -- $26
-      contramap (.listStartedAfter) maybeInt8Param, -- $27
-      contramap (.listStartedBefore) maybeInt8Param, -- $28
-      contramap (.listAttributes) maybeTextParam, -- $29
-      contramap (.listSortDesc) boolParam, -- $30
-      contramap (.listLimit) maybeInt8Param, -- $31
-      contramap (.listOffset) maybeInt8Param -- $32
+      contramap (.listIsFork) maybeBoolParam, -- $20
+      contramap (.listHasParent) maybeBoolParam, -- $21
+      contramap (.listWasForkedFrom) maybeBoolParam, -- $22
+      contramap (.listIsDebounced) maybeBoolParam, -- $23
+      contramap (.listCreatedAfter) maybeInt8Param, -- $24
+      contramap (.listCreatedBefore) maybeInt8Param, -- $25
+      contramap (.listCompletedAfter) maybeInt8Param, -- $26
+      contramap (.listCompletedBefore) maybeInt8Param, -- $27
+      contramap (.listStartedAfter) maybeInt8Param, -- $28
+      contramap (.listStartedBefore) maybeInt8Param, -- $29
+      contramap (.listAttributes) maybeTextParam, -- $30
+      contramap (.listSortDesc) boolParam, -- $31
+      contramap (.listLimit) maybeInt8Param, -- $32
+      contramap (.listOffset) maybeInt8Param -- $33
     ]
   where
     boolParam = Encoders.param (Encoders.nonNullable Encoders.bool)
@@ -440,7 +469,7 @@ type WorkflowStatusRaw =
 workflowStatusSession :: Text -> Session.Session (Maybe WorkflowStatusRaw)
 workflowStatusSession workflowId =
   sqlQueryTypedSession [typedSql|
-    select status, output, error, serialization, recovery_attempts
+    select status, coalesce((select p.output from dbos.workflow_output p where p.workflow_uuid = dbos.workflow_status.workflow_uuid), output) as output, coalesce((select p.error from dbos.workflow_output p where p.workflow_uuid = dbos.workflow_status.workflow_uuid), error) as error, serialization, recovery_attempts
     from dbos.workflow_status
     where workflow_uuid = ${workflowId}
   |]
@@ -482,19 +511,34 @@ unwrapId (Id key) = key
 -- superseded executor updates nothing and learns it lost rather than
 -- clobbering the winner's result. Finishing also releases the deduplication
 -- key, whose unique index spans every status — a key left on a finished row
--- would be held forever. Returns the rows affected. Mirrors
--- @record_workflow_outcome@.
-recordWorkflowOutcomeSession :: Text -> Text -> Maybe Text -> Maybe Text -> Session.Session Int64
-recordWorkflowOutcomeSession workflowId statusText output errorText =
-  sqlExecTypedSession [typedSql|
+-- would be held forever. The legacy @output@ and @error@ columns are cleared
+-- rather than written: readers fall back to them, so a stale error must not
+-- survive beside a new outcome. Returns the rows affected. Mirrors
+-- @record_workflow_outcome@'s status update.
+recordWorkflowOutcomeStatement :: Text -> Text -> Maybe Text -> Maybe Text -> Statement.Statement () Int64
+recordWorkflowOutcomeStatement workflowId statusText output errorText =
+  sqlExecTypedStatement [typedSql|
     update dbos.workflow_status
     set status = ${statusText},
-      output = ${output},
-      error = ${errorText},
+      output = null,
+      error = null,
       updated_at = (extract(epoch from now()) * 1000)::bigint,
       completed_at = (extract(epoch from now()) * 1000)::bigint,
       deduplication_id = null
     where workflow_uuid = ${workflowId} and status = 'PENDING'
+  |]
+
+-- | Records a finished workflow's outcome in its own table, behind a status
+-- change that landed: an outcome the gate refused leaves no orphan payload.
+-- An upsert, because a resumed or rewound workflow finishes more than once.
+-- Mirrors @record_workflow_outcome@'s payload write.
+recordWorkflowOutputStatement :: Text -> Maybe Text -> Maybe Text -> Statement.Statement () Int64
+recordWorkflowOutputStatement workflowId output errorText =
+  sqlExecTypedStatement [typedSql|
+    insert into dbos.workflow_output (workflow_uuid, output, error)
+    values (${workflowId}, ${output}, ${errorText})
+    on conflict (workflow_uuid) do update
+    set output = excluded.output, error = excluded.error
   |]
 
 -- | Everything @init_workflow@ binds, with the derived values already
@@ -504,7 +548,6 @@ recordWorkflowOutcomeSession workflowId statusText output errorText =
 data InitWorkflowParams = InitWorkflowParams
   { initParamWorkflowId         :: Text,
     initParamStatus             :: Text,
-    initParamInput              :: Maybe Text,
     initParamName               :: Maybe Text,
     initParamClassName          :: Maybe Text,
     initParamConfigName         :: Maybe Text,
@@ -557,16 +600,13 @@ type WorkflowInitRaw =
 -- merely queued, and re-stamps the executor only when the row is unowned,
 -- this attempt's own, or the submission may claim — so a duplicate fresh
 -- submission never takes another executor's row. Mirrors @init_workflow@.
-initWorkflowSession :: InitWorkflowParams -> Session.Session WorkflowInitRaw
-initWorkflowSession params = Session.statement () (initWorkflowStatement params)
-
--- | The statement behind 'initWorkflowSession', exposed so the atomic child
+-- | The statement behind the init transaction, exposed so the atomic child
 -- start runs it on its own transaction.
 initWorkflowStatement :: InitWorkflowParams -> Statement.Statement () WorkflowInitRaw
 initWorkflowStatement params =
   sqlQueryTypedStatement [typedSql|
     insert into dbos.workflow_status
-      (workflow_uuid, status, inputs, name, class_name, config_name,
+      (workflow_uuid, status, name, class_name, config_name,
        queue_name, deduplication_id, priority, queue_partition_key, delay_until_epoch_ms,
        authenticated_user, assumed_role, authenticated_roles,
        executor_id, application_version, application_id,
@@ -575,7 +615,7 @@ initWorkflowStatement params =
        parent_workflow_id, owner_xid, serialization, attributes, schedule_name,
        debounce_deadline_epoch_ms, is_debounced, application_name)
     values
-      (${initParamWorkflowId}, ${initParamStatus}, ${initParamInput}, ${initParamName}, ${initParamClassName}, ${initParamConfigName},
+      (${initParamWorkflowId}, ${initParamStatus}, ${initParamName}, ${initParamClassName}, ${initParamConfigName},
        ${initParamQueueName}, ${initParamDeduplicationId}, ${initParamPriority}, ${initParamQueuePartitionKey}, ${initParamDelayUntil},
        ${initParamAuthenticatedUser}, ${initParamAssumedRole}, ${initParamAuthenticatedRoles},
        ${initParamExecutorId}, ${initParamApplicationVersion}, ${initParamApplicationId},
@@ -605,6 +645,22 @@ initWorkflowStatement params =
   where
     InitWorkflowParams {..} = params
 
+-- | Records a workflow's input in its own table, replacing any orphaned row
+-- a deleted status row left behind. The caller runs this only when its own
+-- attempt created the status row: a submission that found an existing row
+-- must not touch the input the workflow was recorded with. Mirrors the
+-- oracle's @workflow_input@ upsert in @init_workflow@.
+initWorkflowInputStatement :: Statement.Statement (Text, Maybe Text) Int64
+initWorkflowInputStatement =
+  Statement.preparable sql encoder (Decoders.rowsAffected)
+  where
+    sql =
+      "insert into dbos.workflow_input (workflow_uuid, inputs) values ($1, $2) \
+      \on conflict (workflow_uuid) do update set inputs = excluded.inputs"
+    encoder =
+      contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap snd (Encoders.param (Encoders.nullable Encoders.text))
+
 
 -- | Parks a workflow that has been recovered more often than allowed, and
 -- releases what a parked workflow should not hold. Committed before the
@@ -617,7 +673,9 @@ parkWorkflowSession workflowId =
     set status = 'MAX_RECOVERY_ATTEMPTS_EXCEEDED',
       deduplication_id = null,
       started_at_epoch_ms = null,
-      queue_name = null
+      queue_name = null,
+      updated_at = (extract(epoch from now()) * 1000)::bigint,
+      completed_at = (extract(epoch from now()) * 1000)::bigint
     where workflow_uuid = ${workflowId} and status = 'PENDING'
   |]
 
@@ -990,6 +1048,7 @@ forkTx params = do
     then pure (Just missing)
     else do
       void (Tx.statement (forkInsertParams params) forkInsertStatement)
+      void (Tx.statement (params.forkSources, params.forkIds) forkCopyInputStatement)
       void (Tx.statement (params.forkSources) markForkedFromStatement)
       if params.forkCopiesAnything
         then do
@@ -1010,8 +1069,10 @@ existingSourcesStatement =
   where
     textArray = Encoders.foldableArray (Encoders.nonNullable Encoders.text)
 
--- | The fork rows: queued, inheriting the source's identity and payloads,
--- pointed back at the source, on the internal queue unless told otherwise.
+-- | The fork rows: queued, inheriting the source's identity, pointed back
+-- at the source, on the internal queue unless told otherwise. The input
+-- travels separately, into @workflow_input@, so readers find it where they
+-- look first.
 forkInsertStatement :: Statement.Statement ([Text], [Text], [Int32], Maybe Text, Text, Maybe Text, Maybe Int64, Maybe Text) Int64
 forkInsertStatement =
   Statement.preparable sql encoder (Decoders.rowsAffected)
@@ -1019,11 +1080,11 @@ forkInsertStatement =
     sql =
       "insert into dbos.workflow_status (workflow_uuid, status, name, class_name, config_name, \
       \application_version, application_id, authenticated_user, authenticated_roles, \
-      \assumed_role, inputs, serialization, request, queue_name, \
+      \assumed_role, serialization, request, queue_name, \
       \queue_partition_key, forked_from, attributes, workflow_timeout_ms, application_name) \
       \select m.fork_id, 'ENQUEUED', w.name, w.class_name, w.config_name, \
       \  coalesce($4, w.application_version), w.application_id, w.authenticated_user, \
-      \  w.authenticated_roles, w.assumed_role, w.inputs, w.serialization, w.request, \
+      \  w.authenticated_roles, w.assumed_role, w.serialization, w.request, \
       \  $5, $6, w.workflow_uuid, w.attributes, $7, coalesce(w.application_name, $8) \
       \from unnest($1::text[], $2::text[], $3::int4[]) as m(source_id, fork_id, start_step) \
       \join dbos.workflow_status w on w.workflow_uuid = m.source_id"
@@ -1038,6 +1099,26 @@ forkInsertStatement =
         <> contramap (\(_, _, _, _, _, f, _, _) -> f) (Encoders.param (Encoders.nullable Encoders.text))
         <> contramap (\(_, _, _, _, _, _, g, _) -> g) (Encoders.param (Encoders.nullable Encoders.int8))
         <> contramap (\(_, _, _, _, _, _, _, h) -> h) (Encoders.param (Encoders.nullable Encoders.text))
+
+-- | Copies each fork's input under the fork's id, reading it the way
+-- every reader reads it: the payload table first, the legacy column for a
+-- source written before migration 109. An upsert for the same orphaned-row
+-- reason the init write is. Mirrors the oracle's fork input copy.
+forkCopyInputStatement :: Statement.Statement ([Text], [Text]) Int64
+forkCopyInputStatement =
+  Statement.preparable sql encoder (Decoders.rowsAffected)
+  where
+    sql =
+      "insert into dbos.workflow_input (workflow_uuid, inputs) \
+      \select m.fork_id, coalesce(i.inputs, w.inputs) \
+      \from unnest($1::text[], $2::text[]) as m(source_id, fork_id) \
+      \join dbos.workflow_status w on w.workflow_uuid = m.source_id \
+      \left join dbos.workflow_input i on i.workflow_uuid = m.source_id \
+      \on conflict (workflow_uuid) do update set inputs = excluded.inputs"
+    textArray = Encoders.param (Encoders.nonNullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text)))
+    encoder =
+      contramap fst textArray
+        <> contramap snd textArray
 
 -- | Marks the sources as forked from, which is what a later fork walks.
 markForkedFromStatement :: Statement.Statement [Text] Int64
@@ -1249,9 +1330,25 @@ resumeWorkflowsSession workflowIds queue =
 -- | Deletes the ids, whatever their status. Mirrors @delete_workflows@.
 deleteWorkflowsSession :: [Text] -> Session.Session Int64
 deleteWorkflowsSession workflowIds =
-  sqlExecTypedSession [typedSql|
-    delete from dbos.workflow_status where workflow_uuid = any(${workflowIds})
-  |]
+  Session.statement workflowIds deleteWorkflowsStatement
+
+-- | Removes workflows' payload rows and steps with their status rows, in one
+-- statement: none of the three tables cascades from @workflow_status@ any
+-- more — the payload tables never had a key to it, and migration 112 dropped
+-- the steps' — so the status delete no longer takes them with it.
+-- Notifications, events, their history and streams still declare
+-- @ON DELETE CASCADE@, and go with the row. Mirrors the oracle's delete
+-- transaction, which names the same four deletes.
+deleteWorkflowsStatement :: Statement.Statement [Text] Int64
+deleteWorkflowsStatement =
+  Statement.preparable sql encoder (Decoders.rowsAffected)
+  where
+    sql =
+      "with del_input as (delete from dbos.workflow_input where workflow_uuid = any($1)), \
+      \del_output as (delete from dbos.workflow_output where workflow_uuid = any($1)), \
+      \del_steps as (delete from dbos.operation_outputs where workflow_uuid = any($1)) \
+      \delete from dbos.workflow_status where workflow_uuid = any($1)"
+    encoder = Encoders.param (Encoders.nonNullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text)))
 
 -- | Everything @recv@'s taking transaction binds.
 data RecvParams = RecvParams
@@ -2120,7 +2217,6 @@ data DebounceBounceParams = DebounceBounceParams
     debounceBounceQueueName       :: Text,
     debounceBounceDeduplicationId :: Text,
     debounceBounceDelayUntil      :: Int64,
-    debounceBounceInputs          :: Maybe Text,
     debounceBounceSerialization   :: Maybe Text,
     debounceBounceApplicationName :: Maybe Text,
     debounceBounceClassName       :: Maybe Text,
@@ -2133,25 +2229,38 @@ debounceBounceStatement =
     ( "update dbos.workflow_status set \
       \delay_until_epoch_ms = case when debounce_deadline_epoch_ms is not null \
       \and debounce_deadline_epoch_ms < $4 then debounce_deadline_epoch_ms else $4 end, \
-      \inputs = $5, serialization = $6, \
+      \serialization = $5, \
       \updated_at = (extract(epoch from now()) * 1000)::bigint, \
-      \application_name = coalesce(application_name, $7) \
+      \application_name = coalesce(application_name, $6) \
       \where name = $1 and queue_name = $2 and deduplication_id = $3 \
-      \and class_name is not distinct from $8 and config_name is not distinct from $9 \
+      \and class_name is not distinct from $7 and config_name is not distinct from $8 \
       \and status = 'DELAYED' and is_debounced = true \
-      \and ($7::text is null or application_name = $7 or application_name is null) \
+      \and ($6::text is null or application_name = $6 or application_name is null) \
       \returning workflow_uuid" )
     ( contramap (.debounceBounceWorkflowName) (Encoders.param (Encoders.nonNullable Encoders.text))
         <> contramap (.debounceBounceQueueName) (Encoders.param (Encoders.nonNullable Encoders.text))
         <> contramap (.debounceBounceDeduplicationId) (Encoders.param (Encoders.nonNullable Encoders.text))
         <> contramap (.debounceBounceDelayUntil) (Encoders.param (Encoders.nonNullable Encoders.int8))
-        <> contramap (.debounceBounceInputs) (Encoders.param (Encoders.nullable Encoders.text))
         <> contramap (.debounceBounceSerialization) (Encoders.param (Encoders.nullable Encoders.text))
         <> contramap (.debounceBounceApplicationName) (Encoders.param (Encoders.nullable Encoders.text))
         <> contramap (.debounceBounceClassName) (Encoders.param (Encoders.nullable Encoders.text))
         <> contramap (.debounceBounceConfigName) (Encoders.param (Encoders.nullable Encoders.text))
     )
     (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.text)))
+
+-- | Records a bounce's replacement inputs where readers look first. An
+-- upsert, because a workflow enqueued before migration 109 has no row.
+-- Mirrors the oracle's @workflow_input@ write on a bounce.
+debounceInputStatement :: Statement.Statement (Text, Maybe Text) Int64
+debounceInputStatement =
+  Statement.preparable sql encoder (Decoders.rowsAffected)
+  where
+    sql =
+      "insert into dbos.workflow_input (workflow_uuid, inputs) values ($1, $2) \
+      \on conflict (workflow_uuid) do update set inputs = excluded.inputs"
+    encoder =
+      contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap snd (Encoders.param (Encoders.nullable Encoders.text))
 
 -- | The workflow holding a deduplication key in a queue, deliberately
 -- unscoped by application: the bounce is a global address.

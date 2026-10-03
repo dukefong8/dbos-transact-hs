@@ -5,6 +5,7 @@ module DBOS.SystemDB.PostgresTest (tests, streamTests) where
 import DBOS.Prelude
 import Control.Monad (forM_, replicateM)
 import Data.Foldable (traverse_)
+import Data.Functor.Contravariant (contramap)
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
@@ -202,6 +203,7 @@ data FixtureRow = FixtureRow
     fixtureStatus :: Text,
     fixtureName :: Maybe Text,
     fixtureParent :: Maybe Text,
+    fixtureForkedFrom :: Maybe Text,
     fixtureApplication :: Maybe Text,
     fixtureQueue :: Maybe Text,
     fixtureCreatedAt :: Int64,
@@ -227,6 +229,7 @@ defaultFixture wid =
       fixtureStatus = "PENDING",
       fixtureName = Just "fixture",
       fixtureParent = Nothing,
+      fixtureForkedFrom = Nothing,
       fixtureApplication = Nothing,
       fixtureQueue = Nothing,
       fixtureCreatedAt = 0,
@@ -257,7 +260,7 @@ ownedFixture unique = (defaultFixture unique) {fixtureApplication = Just ("fixtu
 insertFixture :: FixtureRow -> Session.Session ()
 insertFixture row =
   Session.script
-    ( "insert into dbos.workflow_status (workflow_uuid, status, name, created_at, updated_at, priority, was_forked_from, rate_limited, is_debounced, parent_workflow_id, application_name, queue_name, inputs, output, error, serialization, deduplication_id, queue_partition_key, executor_id, owner_xid, recovery_attempts, application_version, delay_until_epoch_ms) values ('"
+    ( "insert into dbos.workflow_status (workflow_uuid, status, name, created_at, updated_at, priority, was_forked_from, rate_limited, is_debounced, parent_workflow_id, forked_from, application_name, queue_name, inputs, output, error, serialization, deduplication_id, queue_partition_key, executor_id, owner_xid, recovery_attempts, application_version, delay_until_epoch_ms) values ('"
         <> row.fixtureId
         <> "', '"
         <> row.fixtureStatus
@@ -271,6 +274,8 @@ insertFixture row =
         <> (if row.fixtureIsDebounced then "true" else "false")
         <> ", "
         <> quoted row.fixtureParent
+        <> ", "
+        <> quoted row.fixtureForkedFrom
         <> ", "
         <> quoted row.fixtureApplication
         <> ", "
@@ -302,6 +307,105 @@ insertFixture row =
   where
     quoted :: Maybe Text -> Text
     quoted = maybe "null" (\value -> "'" <> value <> "'")
+
+-- | Seeds a finished row split across the two payload layouts: the status
+-- row carries the legacy payloads, and @workflow_input@/@workflow_output@
+-- carry the new ones. A missing new payload means no row there, the way a
+-- row written before migration 109 looks. Mirrors the oracle's
+-- payload-table seeds.
+seedPayloadRow :: Text -> Text -> (Maybe Text, Maybe Text, Maybe Text) -> (Maybe Text, Maybe Text, Maybe Text) -> Session.Session ()
+seedPayloadRow wid status (legacyInput, legacyOutput, legacyError) (newInput, newOutput, newError) =
+  Session.script
+    ( "insert into dbos.workflow_status (workflow_uuid, status, name, created_at, updated_at, priority, was_forked_from, rate_limited, is_debounced, recovery_attempts, inputs, output, error) values ('"
+        <> wid
+        <> "', '"
+        <> status
+        <> "', 'fixture', 0, 0, 0, false, false, false, 0, "
+        <> lit legacyInput
+        <> ", "
+        <> lit legacyOutput
+        <> ", "
+        <> lit legacyError
+        <> "); "
+        <> "insert into dbos.workflow_input (workflow_uuid, inputs) values ('"
+        <> wid
+        <> "', "
+        <> lit newInput
+        <> ") on conflict (workflow_uuid) do nothing; "
+        <> "insert into dbos.workflow_output (workflow_uuid, output, error) values ('"
+        <> wid
+        <> "', "
+        <> lit newOutput
+        <> ", "
+        <> lit newError
+        <> ") on conflict (workflow_uuid) do nothing"
+    )
+  where
+    lit = maybe "null" (\value -> "'" <> value <> "'")
+
+-- | The payload-table rows for one workflow: the input, then the output
+-- and error. Raw SQL, the way the oracle's payload tests read them.
+payloadRows :: PostgresSystemDB -> Text -> IO (Maybe Text, Maybe Text, Maybe Text)
+payloadRows env wid = do
+  input <- readInput
+  (output, errorValue) <- readOutcome
+  pure (input, output, errorValue)
+  where
+    readInput = do
+      result <-
+        runSession env "fixture" $
+          Session.statement wid $
+            Statement.preparable
+              "select p.inputs from dbos.workflow_input p where p.workflow_uuid = $1"
+              (Encoders.param (Encoders.nonNullable Encoders.text))
+              (Decoders.rowMaybe (Decoders.column (Decoders.nullable Decoders.text)))
+      case result of
+        Left err -> fail ("payload read failed: " <> show err)
+        Right Nothing -> pure Nothing
+        Right (Just value) -> pure value
+    readOutcome = do
+      result <-
+        runSession env "fixture" $
+          Session.statement wid $
+            Statement.preparable
+              "select o.output, o.error from dbos.workflow_output o where o.workflow_uuid = $1"
+              (Encoders.param (Encoders.nonNullable Encoders.text))
+              (Decoders.rowMaybe ((,) <$> Decoders.column (Decoders.nullable Decoders.text) <*> Decoders.column (Decoders.nullable Decoders.text)))
+      case result of
+        Left err -> fail ("payload read failed: " <> show err)
+        Right Nothing -> pure (Nothing, Nothing)
+        Right (Just pair) -> pure pair
+
+-- | The legacy @workflow_status@ payload columns for one workflow, the way
+-- the oracle's payload tests read them.
+legacyPayloads :: PostgresSystemDB -> Text -> IO (Maybe Text, Maybe Text, Maybe Text)
+legacyPayloads env wid = do
+  result <-
+    runSession env "fixture" $
+      Session.statement wid $
+        Statement.preparable
+          "select w.inputs, w.output, w.error from dbos.workflow_status w where w.workflow_uuid = $1"
+          (Encoders.param (Encoders.nonNullable Encoders.text))
+          (Decoders.rowMaybe ((,,) <$> Decoders.column (Decoders.nullable Decoders.text) <*> Decoders.column (Decoders.nullable Decoders.text) <*> Decoders.column (Decoders.nullable Decoders.text)))
+  case result of
+    Left err -> fail ("legacy payload read failed: " <> show err)
+    Right Nothing -> pure (Nothing, Nothing, Nothing)
+    Right (Just triple) -> pure triple
+
+-- | How many rows one table holds for a workflow. The table name is a test
+-- constant interpolated into the query, the way the fixture inserts are.
+tableRowCount :: PostgresSystemDB -> Text -> Text -> IO Int64
+tableRowCount env table wid = do
+  result <-
+    runSession env "fixture" $
+      Session.statement wid $
+        Statement.preparable
+          ("select count(*) from dbos." <> table <> " where workflow_uuid = $1")
+          (Encoders.param (Encoders.nonNullable Encoders.text))
+          (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8)))
+  case result of
+    Left err -> fail ("row count failed: " <> show err)
+    Right count -> pure count
 
 -- | Deletes a fixture row by id, so a replay test can prove the answer came
 -- from the recorded step and not from a second look at the row.
@@ -467,7 +571,7 @@ lifecycleTests getBackend =
       testCase "runs a session through the pool" $
         withBackend getBackend $ \env -> do
           result <- runSession env "probe" migrationVersionSession
-          result @?= Right (Just (DbosMigration 108)),
+          result @?= Right (Just (DbosMigration 114)),
       testCase "rejects a non-dbos schema" $
         withBackend getBackend $ \env -> do
           outcome <- try (fromPool env.psdbPool 8 (defaultSettings {settingsSchema = "other"}) nullTracer)
@@ -518,7 +622,27 @@ schemaTests getBackend =
       testCase "records the notifications columns used by Haskell tests" $
         withBackend getBackend $ \env -> do
           columns <- probeSchemaColumns env "notifications"
-          assertBool "notifications contract columns are present" (all (`elem` columns) requiredNotificationsColumns)
+          assertBool "notifications contract columns are present" (all (`elem` columns) requiredNotificationsColumns),
+      testCase "the migrated enqueue function writes inputs to the payload table" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          called <-
+            runSession env "fixture" $
+              Session.statement (unique, "q-" <> Text.take 8 unique, unique <> "-sql") $
+                Statement.preparable
+                  "select dbos.enqueue_workflow($1::text, $2::text, array['7'::json], '{}'::json, null, null, $3::text)"
+                  ( contramap (\(name, _, _) -> name) (Encoders.param (Encoders.nonNullable Encoders.text))
+                      <> contramap (\(_, queue, _) -> queue) (Encoders.param (Encoders.nonNullable Encoders.text))
+                      <> contramap (\(_, _, wid) -> wid) (Encoders.param (Encoders.nonNullable Encoders.text))
+                  )
+                  (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
+          case called of
+            Left err -> fail ("enqueue function failed: " <> show err)
+            Right wid -> do
+              wid @?= unique <> "-sql"
+              legacyPayloads env wid >>= (@?= (Nothing, Nothing, Nothing))
+              (input, _, _) <- payloadRows env wid
+              input @?= Just "{\"positionalArgs\" : [7], \"namedArgs\" : {}}"
     ]
 
 -- | Base tables in the backend schema, names ascending.
@@ -560,6 +684,8 @@ expectedTables =
     "streams",
     "workflow_events",
     "workflow_events_history",
+    "workflow_input",
+    "workflow_output",
     "workflow_schedules",
     "workflow_status"
   ]
@@ -628,6 +754,21 @@ workflowTests getBackend =
               record.workflowRecordRateLimited @?= False
               record.workflowRecordIsDebounced @?= False
               record.workflowRecordInput @?= Nothing,
+      testCase "reads payloads from the payload tables, falling back to legacy columns" $ do
+        base <- freshWorkflowId
+        let newOnly = base <> "-new"
+            legacyOk = base <> "-legacy-ok"
+            legacyErr = base <> "-legacy-err"
+            both = base <> "-both"
+        withBackend getBackend $ \env -> do
+          _ <- runSession env "fixture" (seedPayloadRow newOnly "SUCCESS" (Nothing, Nothing, Nothing) (Just "\"new in\"", Just "\"new out\"", Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow legacyOk "SUCCESS" (Just "\"old in\"", Just "\"old out\"", Nothing) (Nothing, Nothing, Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow legacyErr "ERROR" (Just "\"old in\"", Nothing, Just "\"old err\"") (Nothing, Nothing, Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow both "SUCCESS" (Just "\"legacy in\"", Just "\"legacy out\"", Nothing) (Just "\"new in\"", Just "\"new out\"", Nothing))
+          checkPayloads env newOnly (Just "\"new in\"") (Just "\"new out\"") Nothing
+          checkPayloads env legacyOk (Just "\"old in\"") (Just "\"old out\"") Nothing
+          checkPayloads env legacyErr (Just "\"old in\"") Nothing (Just "\"old err\"")
+          checkPayloads env both (Just "\"new in\"") (Just "\"new out\"") Nothing,
       testCase "returns Nothing for a missing id" $ do
         wid <- freshWorkflowId
         withBackend getBackend $ \env -> do
@@ -643,6 +784,16 @@ workflowTests getBackend =
             Left (Malformed _) -> pure ()
             _ -> fail "expected Malformed"
     ]
+  where
+    checkPayloads env wid input output errorValue = do
+      found <- getWorkflow env (WorkflowId wid)
+      case found of
+        Left err -> fail ("expected record, got: " <> show err)
+        Right Nothing -> fail "expected record, got Nothing"
+        Right (Just record) -> do
+          record.workflowRecordInput @?= input
+          record.workflowRecordOutput @?= output
+          record.workflowRecordError @?= errorValue
 
 -- | Descendant walks over fixture trees: a root with two children, one of
 -- which has a child of its own, plus a self-parented root (a workflow is
@@ -780,6 +931,30 @@ listTests getBackend =
               record.workflowRecordOutput @?= Nothing
               record.workflowRecordError @?= Nothing
             _ -> fail "expected one record",
+      testCase "lists payloads from the payload tables with legacy fallback" $ do
+        base <- freshWorkflowId
+        let newOnly = base <> "-new"
+            legacyOk = base <> "-legacy-ok"
+            both = base <> "-both"
+            ids = [newOnly, legacyOk, both]
+        withBackend getBackend $ \env -> do
+          _ <- runSession env "fixture" (seedPayloadRow newOnly "SUCCESS" (Nothing, Nothing, Nothing) (Just "\"new in\"", Just "\"new out\"", Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow legacyOk "SUCCESS" (Just "\"old in\"", Just "\"old out\"", Nothing) (Nothing, Nothing, Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow both "SUCCESS" (Just "\"legacy in\"", Just "\"legacy out\"", Nothing) (Just "\"new in\"", Just "\"new out\"", Nothing))
+          records <- listed env (defaultWorkflowFilter {workflowFilterWorkflowIds = ids})
+          let payloadOf wid =
+                [ (record.workflowRecordInput, record.workflowRecordOutput, record.workflowRecordError)
+                  | record <- records,
+                    record.workflowRecordId == WorkflowId wid
+                ]
+          payloadOf newOnly @?= [(Just "\"new in\"", Just "\"new out\"", Nothing)]
+          payloadOf legacyOk @?= [(Just "\"old in\"", Just "\"old out\"", Nothing)]
+          payloadOf both @?= [(Just "\"new in\"", Just "\"new out\"", Nothing)]
+          declined <- listed env (defaultWorkflowFilter {workflowFilterWorkflowIds = ids, workflowFilterLoadInput = False, workflowFilterLoadOutput = False})
+          forM_ declined $ \record -> do
+            record.workflowRecordInput @?= Nothing
+            record.workflowRecordOutput @?= Nothing
+            record.workflowRecordError @?= Nothing,
       testCase "scopes applications: unset, named and any" $ do
         unique <- freshWorkflowId
         let claimed = unique <> "-claimed"
@@ -819,7 +994,20 @@ listTests getBackend =
           onlyParented <- sort <$> scoped defaultWorkflowFilter {workflowFilterHasParent = Just True}
           onlyParented @?= sort [rooted]
           onlyRoots <- sort <$> scoped defaultWorkflowFilter {workflowFilterHasParent = Just False}
-          onlyRoots @?= sort [queued, plain, unrooted]
+          onlyRoots @?= sort [queued, plain, unrooted],
+      testCase "forked flags narrow" $ do
+        unique <- freshWorkflowId
+        let forked = unique <> "-forked"
+            plain = unique <> "-plain"
+            ids = [forked, plain]
+        withBackend getBackend $ \env -> do
+          _ <- runSession env "fixture" (insertFixture (defaultFixture forked) {fixtureForkedFrom = Just unique})
+          _ <- runSession env "fixture" (insertFixture (defaultFixture plain))
+          let scoped workflowFilter = idsOf env workflowFilter {workflowFilterWorkflowIds = ids}
+          onlyForked <- scoped defaultWorkflowFilter {workflowFilterIsFork = Just True}
+          onlyForked @?= [forked]
+          onlyRoots <- sort <$> scoped defaultWorkflowFilter {workflowFilterIsFork = Just False}
+          onlyRoots @?= [plain]
     ]
   where
     listed env workflowFilter = do
@@ -860,6 +1048,21 @@ awaitTests getBackend =
           case settled of
             Left (Malformed _) -> pure ()
             _ -> fail "expected Malformed",
+      testCase "settled payload-table and legacy rows report their outcome" $ do
+        base <- freshWorkflowId
+        let newOk = base <> "-new"
+            legacyOk = base <> "-legacy-ok"
+            legacyErr = base <> "-legacy-err"
+        withBackend getBackend $ \env -> do
+          _ <- runSession env "fixture" (seedPayloadRow newOk "SUCCESS" (Nothing, Nothing, Nothing) (Just "\"new in\"", Just "\"new out\"", Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow legacyOk "SUCCESS" (Just "\"old in\"", Just "\"old out\"", Nothing) (Nothing, Nothing, Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow legacyErr "ERROR" (Just "\"old in\"", Nothing, Just "\"old err\"") (Nothing, Nothing, Nothing))
+          awaitedNew <- await env newOk
+          awaitedNew @?= Right (AwaitedSucceeded (Just "\"new out\"") Nothing)
+          awaitedLegacyOk <- await env legacyOk
+          awaitedLegacyOk @?= Right (AwaitedSucceeded (Just "\"old out\"") Nothing)
+          awaitedLegacyErr <- await env legacyErr
+          awaitedLegacyErr @?= Right (AwaitedFailed "\"old err\"" Nothing),
       testCase "cancellation and parking are reported as values" $ do
         cancelled <- freshWorkflowId
         parked <- freshWorkflowId
@@ -971,8 +1174,125 @@ outcomeTests getBackend =
               record.workflowRecordStatus @?= Error
               record.workflowRecordError @?= Just "boom"
               record.workflowRecordOutput @?= Nothing
-            other -> fail ("expected record, got: " <> show other)
+            other -> fail ("expected record, got: " <> show other),
+      testCase "writes the outcome to the payload table, clearing legacy columns" $ do
+        unique <- freshWorkflowId
+        failed <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          recorded <- recordWorkflowOutcome env (WorkflowId unique) (OutcomeOutput (Just "\"done\""))
+          recorded @?= Right Recorded
+          (input, output, errorValue) <- payloadRows env unique
+          input @?= Just "\"in\""
+          output @?= Just "\"done\""
+          errorValue @?= Nothing
+          legacyPayloads env unique >>= (@?= (Nothing, Nothing, Nothing))
+          _ <- initWorkflow env (newWorkflow failed) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          failedRecorded <- recordWorkflowOutcome env (WorkflowId failed) (OutcomeError "\"boom\"")
+          failedRecorded @?= Right Recorded
+          (_, failedOutput, failedError) <- payloadRows env failed
+          failedOutput @?= Nothing
+          failedError @?= Just "\"boom\""
+          legacyPayloads env failed >>= (@?= (Nothing, Nothing, Nothing)),
+      testCase "a refused outcome writes no payload" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          _ <- cancelWorkflows env [WorkflowId unique] False Nothing
+          refused <- recordWorkflowOutcome env (WorkflowId unique) (OutcomeOutput (Just "\"late\""))
+          refused @?= Right AlreadyFinished
+          (_, output, errorValue) <- payloadRows env unique
+          output @?= Nothing
+          errorValue @?= Nothing,
+      testCase "a new outcome hides a legacy one" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <-
+            runSession env "fixture" $
+              Session.script ("insert into dbos.workflow_status (workflow_uuid, status, name, created_at, updated_at, priority, was_forked_from, rate_limited, is_debounced, recovery_attempts, error) values ('" <> unique <> "', 'PENDING', 'fixture', 0, 0, 0, false, false, false, 0, '\"first run failed\"')")
+          recorded <- recordWorkflowOutcome env (WorkflowId unique) (OutcomeOutput (Just "\"second run\""))
+          recorded @?= Right Recorded
+          found <- getWorkflow env (WorkflowId unique)
+          case found of
+            Right (Just record) -> do
+              record.workflowRecordOutput @?= Just "\"second run\""
+              record.workflowRecordError @?= Nothing
+            other -> fail ("expected record, got: " <> show other),
+      testCase "no write path reaches the legacy payload columns" $ do
+        base <- freshWorkflowId
+        let direct = base <> "-direct"
+            queued = base <> "-queued"
+            parent = base <> "-parent"
+            child = base <> "-child"
+            failed = base <> "-failed"
+            source = base <> "-source"
+            forked = base <> "-forked"
+        withBackend getBackend $ \env -> do
+          _ <- initWorkflow env (newWorkflow direct) {newWorkflowInput = Just "\"1\""} Nothing Fresh Nothing
+          _ <- recordWorkflowOutcome env (WorkflowId direct) (OutcomeOutput (Just "\"2\""))
+          _ <- initWorkflow env (newWorkflow queued) {newWorkflowInput = Just "\"2\"", newWorkflowQueueName = Just ("q-" <> base)} Nothing Fresh Nothing
+          _ <- recordWorkflowOutcome env (WorkflowId queued) (OutcomeOutput (Just "\"4\""))
+          _ <- initWorkflow env (newWorkflow parent) Nothing Fresh Nothing
+          startedAt <- timestampNow
+          _ <-
+            initWorkflow env (newWorkflow child) Nothing Fresh $
+              Just
+                ( InitWorkflowCaller
+                    { initCallerParentWorkflowId = WorkflowId parent,
+                      initCallerStepId = 1,
+                      initCallerStepName = "ChildWorkflow",
+                      initCallerStartedAt = startedAt
+                    }
+                )
+          _ <- recordWorkflowOutcome env (WorkflowId child) (OutcomeOutput (Just "\"5\""))
+          _ <- recordWorkflowOutcome env (WorkflowId parent) (OutcomeOutput (Just "\"10\""))
+          _ <- initWorkflow env (newWorkflow failed) {newWorkflowInput = Just "\"f\""} Nothing Fresh Nothing
+          _ <- recordWorkflowOutcome env (WorkflowId failed) (OutcomeError "\"boom\"")
+          _ <- initWorkflow env (newWorkflow source) {newWorkflowInput = Just "\"s\""} Nothing Fresh Nothing
+          _ <- recordWorkflowOutcome env (WorkflowId source) (OutcomeOutput (Just "\"s\""))
+          _ <- forkWorkflows env [(forkNew source) {forkForkedId = Just forked}] defaultForkOptions Nothing
+          _ <- recordWorkflowOutcome env (WorkflowId forked) (OutcomeOutput (Just "\"s\""))
+          legacy <- legacyRows env (base <> "%")
+          legacy @?= []
+          missingInputs <- missingPayloadRows env (base <> "%") "workflow_input"
+          missingInputs @?= []
+          missingOutputs <- missingFinishedPayloadRows env (base <> "%")
+          missingOutputs @?= []
     ]
+  where
+    legacyRows env pattern = do
+      result <-
+        runSession env "sweep" $
+          Session.statement pattern $
+            Statement.preparable
+              "select s.workflow_uuid from dbos.workflow_status s where s.workflow_uuid like $1 and (s.inputs is not null or s.output is not null or s.error is not null)"
+              (Encoders.param (Encoders.nonNullable Encoders.text))
+              (Decoders.rowList (Decoders.column (Decoders.nonNullable Decoders.text)))
+      case result of
+        Left err -> fail ("legacy sweep failed: " <> show err)
+        Right rows -> pure rows
+    missingPayloadRows env pattern table = do
+      result <-
+        runSession env "sweep" $
+          Session.statement pattern $
+            Statement.preparable
+              ("select s.workflow_uuid from dbos.workflow_status s where s.workflow_uuid like $1 and not exists (select 1 from dbos." <> table <> " p where p.workflow_uuid = s.workflow_uuid)")
+              (Encoders.param (Encoders.nonNullable Encoders.text))
+              (Decoders.rowList (Decoders.column (Decoders.nonNullable Decoders.text)))
+      case result of
+        Left err -> fail ("payload sweep failed: " <> show err)
+        Right rows -> pure rows
+    missingFinishedPayloadRows env pattern = do
+      result <-
+        runSession env "sweep" $
+          Session.statement pattern $
+            Statement.preparable
+              "select s.workflow_uuid from dbos.workflow_status s where s.workflow_uuid like $1 and s.status in ('SUCCESS', 'ERROR') and not exists (select 1 from dbos.workflow_output o where o.workflow_uuid = s.workflow_uuid)"
+              (Encoders.param (Encoders.nonNullable Encoders.text))
+              (Decoders.rowList (Decoders.column (Decoders.nonNullable Decoders.text)))
+      case result of
+        Left err -> fail ("payload sweep failed: " <> show err)
+        Right rows -> pure rows
 
 -- | The queue registry: registration claims or inserts, reads scope the way
 -- the oracle's do, and the deduplication key and partition reads answer from
@@ -1164,6 +1484,17 @@ queueTests getBackend =
           bounced @?= Right (Debounced {debounceWorkflowId = unique})
           unheld <- debounceDelayedWorkflow env (bounceRequest name (key <> "-absent")) Nothing
           unheld @?= Right DebounceUnheld,
+      testCase "a bounce writes the inputs to the payload table" $ do
+        unique <- freshWorkflowId
+        let name = "q-" <> Text.take 8 unique
+            key = "dedup-" <> Text.take 8 unique
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureName = Just "bouncer", fixtureQueue = Just name, fixtureDeduplicationId = Just key, fixtureStatus = "DELAYED", fixtureIsDebounced = True, fixtureDelayUntil = Just 1000}
+          bounced <- debounceDelayedWorkflow env (bounceRequest name key) Nothing
+          bounced @?= Right (Debounced {debounceWorkflowId = unique})
+          (input, _, _) <- payloadRows env unique
+          input @?= Just "{\"n\":2}"
+          legacyPayloads env unique >>= (@?= (Nothing, Nothing, Nothing)),
       testCase "a bounce refuses an empty queue name" $ do
         withBackend getBackend $ \env -> do
           refused <- debounceDelayedWorkflow env (bounceRequest "" "dedup") Nothing
@@ -1440,6 +1771,36 @@ forkTests getBackend =
                 Right (Just record) -> record.workflowRecordWasForkedFrom @?= True
                 other -> fail ("expected the source, got: " <> show other)
             other -> fail ("expected one fork, got: " <> show other),
+      testCase "a fork copies the input to the payload table" $ do
+        base <- freshWorkflowId
+        let srcNew = base <> "-src-new"
+            srcOld = base <> "-src-old"
+            forkNewId = base <> "-fork-new"
+            forkOldId = base <> "-fork-old"
+        withBackend getBackend $ \env -> do
+          _ <- runSession env "fixture" (seedPayloadRow srcNew "SUCCESS" (Nothing, Nothing, Nothing) (Just "\"new in\"", Just "\"new out\"", Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow srcOld "SUCCESS" (Just "\"legacy in\"", Just "\"legacy out\"", Nothing) (Nothing, Nothing, Nothing))
+          forked <-
+            forkWorkflows
+              env
+              [ (forkNew srcNew) {forkForkedId = Just forkNewId},
+                (forkNew srcOld) {forkForkedId = Just forkOldId}
+              ]
+              defaultForkOptions
+              Nothing
+          case forked of
+            Left err -> fail ("expected forks, got: " <> show err)
+            Right _ -> do
+              (newInput, _, _) <- payloadRows env forkNewId
+              newInput @?= Just "\"new in\""
+              (oldInput, _, _) <- payloadRows env forkOldId
+              oldInput @?= Just "\"legacy in\""
+              legacyPayloads env forkNewId >>= (@?= (Nothing, Nothing, Nothing))
+              legacyPayloads env forkOldId >>= (@?= (Nothing, Nothing, Nothing))
+              found <- getWorkflow env (WorkflowId forkOldId)
+              case found of
+                Right (Just record) -> record.workflowRecordInput @?= Just "\"legacy in\""
+                other -> fail ("expected the fork, got: " <> show other),
       testCase "forking from the last step copies everything before it" $ do
         source <- freshWorkflowId
         withBackend getBackend $ \env -> do
@@ -1554,7 +1915,18 @@ lifecycleWriteTests getBackend =
           deleted <- deleteWorkflows env [WorkflowId root] True Nothing
           deleted @?= Right 2
           gone <- getWorkflow env (WorkflowId child)
-          gone @?= Right Nothing
+          gone @?= Right Nothing,
+      testCase "deleting a workflow removes its payloads and steps" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          _ <- recordStep env (WorkflowId unique) 0 "charge" (OutcomeOutput (Just "1")) Nothing Nothing
+          _ <- recordWorkflowOutcome env (WorkflowId unique) (OutcomeOutput (Just "1"))
+          deleted <- deleteWorkflows env [WorkflowId unique] False Nothing
+          deleted @?= Right 1
+          forM_ ["workflow_status", "workflow_input", "workflow_output", "operation_outputs"] $ \table -> do
+            count <- tableRowCount env table unique
+            count @?= 0
     ]
   where
     unId (WorkflowId widText) = widText
@@ -2103,6 +2475,8 @@ initTests getBackend =
               record.workflowRecordStatus @?= MaxRecoveryAttemptsExceeded
               record.workflowRecordDeduplicationId @?= Nothing
               record.workflowRecordQueueName @?= Nothing
+              assertBool "updated_at is stamped" (record.workflowRecordUpdatedAt /= timestampFromEpochMs 0)
+              assertBool "completed_at is stamped" (record.workflowRecordCompletedAt /= Nothing)
             other -> fail ("expected record, got: " <> show other),
       testCase "a deduplication collision is reported" $ do
         unique <- freshWorkflowId
@@ -2113,7 +2487,42 @@ initTests getBackend =
           started <- initWorkflow env (newWorkflow second) {newWorkflowQueueName = Just ("q-" <> unique), newWorkflowDeduplicationId = Just ("key-" <> unique)} Nothing Fresh Nothing
           case started of
             Left (QueueDeduplicated {}) -> pure ()
-            _ -> fail "expected QueueDeduplicated"
+            _ -> fail "expected QueueDeduplicated",
+      testCase "writes the input to the payload table, not the status row" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          case started of
+            Left err -> fail ("expected a start, got: " <> show err)
+            Right _ -> pure ()
+          (input, _, _) <- payloadRows env unique
+          input @?= Just "\"in\""
+          legacyPayloads env unique >>= (@?= (Nothing, Nothing, Nothing)),
+      testCase "a resubmission does not replace the input" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          first <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"first\""} Nothing Fresh Nothing
+          case first of
+            Left err -> fail ("expected a start, got: " <> show err)
+            Right _ -> pure ()
+          again <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"second\""} Nothing Fresh Nothing
+          case again of
+            Left err -> fail ("expected a start, got: " <> show err)
+            Right _ -> pure ()
+          (input, _, _) <- payloadRows env unique
+          input @?= Just "\"first\"",
+      testCase "a fresh start replaces an orphaned input" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <-
+            runSession env "fixture" $
+              Session.script ("insert into dbos.workflow_input (workflow_uuid, inputs) values ('" <> unique <> "', '\"stale\"')")
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"fresh\""} Nothing Fresh Nothing
+          case started of
+            Left err -> fail ("expected a start, got: " <> show err)
+            Right _ -> pure ()
+          (input, _, _) <- payloadRows env unique
+          input @?= Just "\"fresh\""
     ]
 
 -- | Schedules: the cron registry, ported from @postgres.rs@'s schedule
