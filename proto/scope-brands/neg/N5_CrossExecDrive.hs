@@ -9,14 +9,15 @@ import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
 import Data.Text (Text)
 import Scope.Model
 
-startIt :: MonadSTM m => WorkflowCtx inst exec m -> WRef inst m () -> m (Either Text (WHandle inst m ()))
+startIt :: MonadSTM m => WorkflowCtx exec m -> WRef m () -> m (Either Text (WHandle m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
-driveIt :: WorkflowCtx inst exec IO -> Pending inst exec IO Text -> IO (Either Text Text)
+driveIt :: WorkflowCtx exec IO -> Pending exec IO Text -> IO (Either Text Text)
 driveIt ctx p = drive ctx p
 
 main :: IO ()
-main = withDBOS "a" $ \dbos -> do
+main = do
+  dbos <- newDBOS "a"
   ref <- register dbos "worker"
   withWorkflow dbos "p1" $ \w1 -> do
     Right h <- startIt w1 ref

@@ -17,8 +17,8 @@ echo "=== positive flow under IOSim ==="
 if cabal run proto-sim 2>/dev/null; then ok "proto-sim runs"; else bad "proto-sim runs"; fi
 
 echo "=== negative compile tests (each MUST fail) ==="
-for t in neg-n1-mix-instances neg-n2-step-start neg-n3-escape-handle \
-         neg-n4-nextid-on-step neg-n5-cross-exec-drive neg-n6-cross-run; do
+for t in neg-n2-step-start neg-n4-nextid-on-step neg-n5-cross-exec-drive \
+         neg-n6-cross-run; do
   err=$(cabal build exe:$t 2>&1)
   if echo "$err" | grep -q "Couldn't match\|would escape\|Ambiguous\|Not in scope\|could not deduce"; then
     ok "$t rejected"
@@ -31,7 +31,7 @@ done
 echo "=== runtime backstop (capture compiles; refusal must fire) ==="
 out=$(cabal run proto-backstop 2>/dev/null)
 echo "$out"
-for mark in "capture-start refused" "capture-place refused" \
+for mark in "cross-instance refused" "capture-start refused" "capture-place refused" \
             "depth restored after success" "depth restored after throw" \
             "markers distinct" "tokens per-attempt"; do
   if echo "$out" | grep -q "backstop: $mark"; then ok "backstop: $mark";

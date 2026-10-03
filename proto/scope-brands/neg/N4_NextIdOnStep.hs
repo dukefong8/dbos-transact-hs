@@ -7,7 +7,8 @@ module Main (main) where
 import Scope.Model
 
 main :: IO ()
-main = withDBOS "a" $ \dbos ->
+main = do
+  dbos <- newDBOS "a"
   withWorkflow dbos "wf" $ \ctx ->
     withStep ctx "s" $ \step -> do
       _ <- nextStepId step

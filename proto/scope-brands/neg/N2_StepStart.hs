@@ -9,11 +9,12 @@ import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
 import Data.Text (Text)
 import Scope.Model
 
-startIt :: MonadSTM m => WorkflowCtx inst exec m -> WRef inst m () -> m (Either Text (WHandle inst m ()))
+startIt :: MonadSTM m => WorkflowCtx exec m -> WRef m () -> m (Either Text (WHandle m ()))
 startIt ctx ref = startChild ctx ref "opts"
 
 main :: IO ()
-main = withDBOS "a" $ \dbos ->
+main = do
+  dbos <- newDBOS "a"
   withWorkflow dbos "wf" $ \ctx ->
     withStep ctx "s" $ \step -> do
       ref <- register dbos "worker"

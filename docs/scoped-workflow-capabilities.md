@@ -1,11 +1,14 @@
 # Scoped workflow capabilities: phantom brands — research + prototype
 
-**Status (2026-10-03).** Validated on a throwaway prototype
-(`proto/scope-brands/`, branch `proto/phantom-brands`): 9/9 checks green —
-valid flows run under `IO` and `IOSim`, all six misuse shapes are compile
-errors, inference needs no annotations beyond one pinned helper. This
-document consolidates the four research rounds behind it and records what
-the prototype proved, what it refuted, and what remains open.
+**Status (2026-10-03, descoped).** Validated on a throwaway prototype
+(`proto/scope-brands/`, branch `proto/phantom-brands`): 13/13 checks green —
+valid flows run under `IO` and `IOSim`, four misuse shapes are compile
+errors, cross-instance refusal is asserted at runtime (oracle parity),
+inference needs no annotations beyond one pinned helper. Since the last
+revision: `inst` dropped (the DBOS object is singleton-like per process);
+what remains is `exec` branding, the context split, and the depth backstop.
+This document consolidates the four research rounds behind it and records
+what the prototype proved, what it refuted, and what remains open.
 
 **Relationship to prior art.** This direction is *decided*, not proposed:
 `docs/ownership-lifetimes-isomorphism.md` §11 records phantom brands
@@ -56,12 +59,11 @@ Against `crates/dbos/src` (`connection.rs`, `context.rs`, `handle.rs`,
 parent doc §10:
 
 - **R9 cross-instance** (`Arc::ptr_eq` + `Owner` downgrade, runtime):
-  closed at compile time. N1 mixes a ref from instance A with a context
-  from B → `Couldn't match type ‘inst1’ with ‘inst’`. The `Owner`-flag
-  design stays (the oracle deliberately rejected two types,
-  `connection.rs:65-67`); only the comparison moves from `Text` equality
-  to skolem inequality at typed call sites. Runtime checks remain for
-  untyped management paths minting from bare ids.
+  stays runtime, by decision — the DBOS object is singleton-like per
+  process, so the `inst` brand did not earn its CPS keep. The prototype
+  asserts the refusal instead (B0: ref from A started under B →
+  `WrongInstance`, before anything allocates, ADR-0018 order). The
+  `Owner`-flag design stays untouched.
 - **R9/checkHere cross-execution** (ambient `Ctx::current()`, runtime):
   closed at compile time. N5 drives a `Pending` built in execution 1
   from execution 2 → `Couldn't match type ‘exec1’ with ‘exec’`. The
@@ -81,12 +83,11 @@ parent doc §10:
 
 ## 3. IOSim / io-classes interaction
 
-- **Two tags, complementary.** io-sim's `s` (run scope) already flows
+- **One tag plus the sim tag.** io-sim's `s` (run scope) already flows
   through `m` (`MemSystemDB s`, `StrictTVar (IOSim s)`); cross-*run*
-  confusion is ill-typed today. `inst` adds cross-*instance*-within-a-run,
-  exactly the staged-sim-test scenario. N6 proves they nest: a handle
-  carrying both tags escapes neither `runSim`'s nor `withDBOS`'s
-  `forall`.
+  confusion is ill-typed today. `exec` adds cross-*execution*-within-a-run.
+  N6 proves they nest: a handle carrying both tags escapes neither
+  `runSim`'s nor `withWorkflow`'s `forall`.
 - **Zero backend churn.** `SystemDB` class, Postgres sessions, both sim
   fakes, the existential, `runSystemDB` — untouched; scope lives above
   the seam by construction (ADR-0006 holds).
@@ -94,11 +95,12 @@ parent doc §10:
   and `IOSim s` satisfy the same io-classes set. Runtime-invisible
   (erasure): traces, goldens, determinism, and the ADR-0020 mirror are
   unaffected.
-- **The price is CPS.** `newDBOS :: m (DBOS m)` must become region-bound
-  (`withDBOS`), since per-execution scoping breaks parent→child
-  handle flow. Every `bracket (newDBOS …)` site converts; existential
-  unpacking was rejected (fresh skolem per match = silent identity
-  forks). `inst` prevents *confusion*, not *use-after-close* (threads
+- **No CPS regions.** `newDBOS` stays a plain constructor (unscoped
+  bundle, as today); only executions are region-bound (`withWorkflow`),
+  because only executions need fresh scopes — parent→child handle flow is
+  what forced regions, and handles are per-execution values. No bracket
+  conversion, no existential-unpacking question. Lifetimes: `exec`
+  prevents *confusion* across executions, not *use-after-close* (threads
   can smuggle past region end — the ST+`forkIO` caveat; easier to honor
   under IOSim than IO).
 - **Inference rule (validated).** Scoped constructors take scoped parents
@@ -110,48 +112,62 @@ parent doc §10:
 
 | Option | Benefit | Cost | Verdict |
 |---|---|---|---|
-| Phantoms (`inst`/`exec`, CPS regions) | Closes R9 + cross-exec + natural-shape leaf rule; zero deps; erasure-clean | Wide mechanical churn (facade signatures, `withDBOS`, test rewrites, refusal-test rework) | **Do this** |
+| Phantoms (`exec`, one region binder) | Closes cross-exec + natural-shape leaf rule + capture backstop; zero deps; erasure-clean | Moderate mechanical churn (Ctx split, depth counter, refusal-test rework; no CPS, no facade lifecycle change) | **Do this** |
 | Bluefin `Eff` + handlers | Native rank-2 scope, standard idiom | IO-only (kills sim strategy), new dep, ADR-0006 overturn, full rewrite | No |
 | `State`/`Ask`/`Throw`/streams | Nominal | `Eff` + lost STM virtues | No — STM wins |
 | `DslBuilderEff` bridge | Contained ergonomics probe | Days, scratch-only | Prototype-only |
 
-## 5. Prototype report (`proto/scope-brands/`, 14/14 green)
+## 5. Prototype report (`proto/scope-brands/`, 13/13 green, descoped)
 
-- **Model** (`src/Scope/Model.hs`, ~200 lines, real io-classes
-  constraints): `DBOS`/`Connection`/`Registry`/`WRef`/`WHandle` over
-  `inst`; `WorkflowCtx`/`StepCtx`/`Pending` over `inst`+`exec`; `withDBOS` /
-  `withWorkflow` binders; `nextStepId` on `WorkflowCtx` only; `startChild`
-  derives `parent-step` ids; `mintHandle` as the bare-id introduction
+- **Model** (`src/Scope/Model.hs`, real io-classes constraints): unscoped
+  `DBOS`/`Connection`/`Registry`/`WRef`/`WHandle` (plain `newDBOS`
+  constructor); `WorkflowCtx`/`StepCtx`/`Pending` over `exec` only;
+  `withWorkflow` binder; `nextStepId` on `WorkflowCtx` only; `startChild`
+  checks the registry's bound instance id first (runtime `WrongInstance`,
+  ADR-0018 order), then derives `parent-step` ids through the
+  depth-checked `placeCall`; `mintHandle` as the bare-id introduction
   gate; `drive` with the token backstop. Private constructors, explicit
   exports = the privacy boundary.
-- **Positives.** `proto-io`: nested instances, child derivation
-  (`wf-a-1`), step narrowing, same-exec drive
-  (`Right "outcome:wf-a-1"`), bare-id minting, counter independence
-  (`wf-b-0`). `proto-sim`: two instances + virtual-thread rendezvous in
-  one `runSim` — `("wf-a-0","wf-b-0","wf-b")`, deterministic.
-- **Negatives (all rejected with the intended error).** N1 cross-instance
-  (`inst1` vs `inst`); N2 step-body child-start (`StepCtx` vs `WorkflowCtx`); N3
-  region escape ("would escape its scope", textbook skolem text); N4
-  counter on the narrowed view; N5 cross-execution drive (`exec1` vs
-  `exec`); N6 cross-run escape (both tags refuse).
-- **Phase 2: scope-depth backstop.** `WorkflowCtx` owns a depth counter in shared per-execution state alongside the step/marker counters; `placeCall` refuses while depth > 0; `withStep` bumps/restores depth under `finally` (the real tree's `MThrow.finally` pattern) with a fresh marker and token per attempt; `startChild` routes through `placeCall`. `proto-backstop` asserts all six: capture-start refused, capture-place refused, depth restored after success (`wf-0` — refused attempts spend no counter positions), depth restored after a throw, markers distinct across attempts, tokens per-attempt and initially unfired.
-  closures capture, so the split alone cannot remove a value from lexical scope — which is why the backstop above exists. The former `Residual_Capture` exhibit retired into `proto-backstop` B1/B2.
-- **Incidental findings.** Pure constructors need `Applicative m` (invisible in the real tree's full constraint tuples); io-sim's `runSim` returns `Either Failure a` (N6 first drafted against the old pure shape); fork is `Control.Monad.Class.MonadFork`, not `Control.Concurrent.Class.MonadFork`; scratch projects need `ImportQualifiedPost`/`DerivingStrategies` stated (the real tree inherits both from cabal defaults).
+- **Positives.** `proto-io`: two instance objects side by side, child
+  derivation, step narrowing, same-exec drive, bare-id minting, counter
+  independence. `proto-sim`: two instance objects + virtual-thread
+  rendezvous in one `runSim`, deterministic.
+- **Negatives (all rejected with the intended error).** N2 step-body
+  child-start (`StepCtx` vs `WorkflowCtx`); N4 counter on the narrowed
+  view; N5 cross-execution drive (`exec1` vs `exec`); N6 cross-run escape
+  (sim tag refuses). Retired with `inst`: N1/N3 (nothing to check; B0
+  covers the runtime refusal).
+- **Backstop (`proto-backstop`, B0–B6).** Cross-instance refused (B0,
+  oracle parity); capture-start and capture-place refused (B1/B2); depth
+  restored after success (`wf-0` — refused attempts spend no counter
+  positions) and after a throw (B3/B4); markers distinct (B5); tokens
+  per-attempt and initially unfired (B6).
+- **Incidental findings.** Pure constructors need `Applicative m`
+  (invisible in the real tree's full constraint tuples); io-sim's
+  `runSim` returns `Either Failure a` (N6 first drafted against the old
+  pure shape); fork is `Control.Monad.Class.MonadFork`, not
+  `Control.Concurrent.Class.MonadFork`; scratch projects need
+  `ImportQualifiedPost`/`DerivingStrategies` stated (the real tree
+  inherits both from cabal defaults); connection/registry ids deriving
+  from a name is adequate for a prototype but the tree mints UUIDs.
 
 ## 6. Recommendation and migration order
 
-Land phantoms per layer, compiler-guided (every error is local): (1)
-`inst` on core types + `withDBOS` beside `newDBOS`, engine
-internals signatures-only (tree stays green); (2) `exec` + `WorkflowCtx`/`StepCtx`
-split, engine entry points flipped; (3) facade + tests + demo-apps;
-(4) remove `newDBOS`, rework the two refusal-test families. The
-`ghciwatch` loop holds throughout; only phases 2–3 are red, each
-sized for one sitting.
+Land compiler-guided (every error is local): (1) `exec` +
+`WorkflowCtx`/`StepCtx` split, engine entry points flipped — signatures
+first (tree stays green throughout phase 1); (2) depth counter +
+`placeCall` refusal + `withStep` restore, `startChild` keeps its runtime
+instance check (already there today); (3) facade + tests + demo-apps
+call-site updates; (4) rework the refusal tests (`InsideStep` paths
+become unrepresentable through typed calls and move to backstop-style
+runtime assertions; `WrongInstance` tests stay as-is). No `newDBOS`
+change, no CPS conversion, no bracket churn. The `ghciwatch` loop holds
+throughout; only phases 2–3 are red, each sized for one sitting.
 
 ## 7. Open decisions
 
 1. **`InsideStep`: type-error, runtime, or both? RESOLVED by phase 2 — both, with evidence.** The split rejects the natural shape at compile time (N2/N4); the depth counter refuses the capture shape at runtime (B1/B2) and restores under `finally` on success and on throw (B3/B4). §11's "keep runtime" is reinterpreted as "keep as backstop" with a strictly smaller reachable surface; the residual exhibit retired into `proto-backstop`.
-2. **Binder naming: value-named, decided.** `withDBOS` / `withWorkflow` / `withStep` — each named after what the continuation receives (instance bundle, workflow context, step view), superseding §11's `withInstance`/`withExecution` vocabulary. Scope params (`inst`/`exec`) unchanged; placement (`DBOS` level, `executeRegisteredWorkflow`, step bodies) unchanged.
+2. **Binder naming: value-named, decided (amended: `withDBOS` dropped with #1).** `withWorkflow` / `withStep` — each named after what the continuation receives (workflow context, step view). Scope param (`exec`) unchanged; placement (`executeRegisteredWorkflow`, step bodies) unchanged.
 3. **`Tasks` stays unbranded** (per §11: ownership semantics already
    right). No prototype coverage; no change proposed.
 
@@ -159,12 +175,12 @@ sized for one sitting.
 
 | # | Current API | Issue | New API | What it fixes (prototype evidence) |
 |---|---|---|---|---|
-| 1 | `newDBOS :: m (DBOS m)`; unscoped `DBOS`/`Connection`/`Registry`/`Snapshot`/`WorkflowRef`/`WorkflowHandle`; cross-instance misuse refused at runtime (`WrongInstance`, ADR-0018) | R9 cross-instance: values from two instances mix freely until a checkpoint happens to check | `withDBOS :: … -> (forall inst. DBOS inst m -> m a) -> m a`; `inst` on all six types | mixing is ill-typed (N1); identity by skolem, not comparable `Text` |
+| 1 | `newDBOS :: m (DBOS m)`; unscoped everything; cross-instance refused at runtime (`WrongInstance`, ADR-0018) | R9 cross-instance (singleton-like process; wiring-error class) | **DROPPED** — stays exactly as today (oracle parity); B0 asserts the refusal | — |
 | 2 | No execution scope in types; `ExecutionIdentity` compared at runtime; placed values flow across executions; `StepBuiltElsewhere` runtime-only | R9/checkHere cross-execution half runtime-only | `withWorkflow` binding `exec`; `PendingStep` carries `exec`; drive demands same `exec`, token backstop kept | cross-execution driving ill-typed (N5); smuggled values refused at runtime |
 | 3 | Single `Ctx m`; `nextStepId`/`startChildWorkflow` take any `Ctx`; leaf rule is runtime `inStep` → `InsideStep` | step bodies can allocate ids and start children — the natural shape compiles | `WorkflowCtx` (owns counter) + `StepCtx` (narrowed view); allocators and child-start take `WorkflowCtx`; bodies receive `StepCtx` | natural misuse rejected at compile time (N2/N4) |
 | 4 | No depth tracking; `withAttempt` only rebinds | captured parent context bypasses the leaf rule silently (proven by exhibit) | depth counter in shared per-execution state; `placeCall` refuses at depth > 0; `withStep` restores under `finally`; fresh marker + token per attempt | capture refused at runtime (B1/B2); no lockout on success/throw (B3/B4); per-attempt freshness (B5/B6) |
 | 5 | `retrieveWorkflow` mints handles from bare ids, unscoped→unscoped | the membrane between durable names and live capabilities is unnamed | named introduction gates (`DBOS inst m -> Text -> WorkflowHandle inst m e`) | all unscoped→scoped conversions flow through named functions |
-| 6 | `newDBOS` / `newCtx`-style builders / `withAttempt` | names say neither what's provided nor what's scoped | value-named binders `withDBOS` / `withWorkflow` / `withStep` | scope introduction visible at every call site; supersedes §11 vocabulary |
+| 6 | `newDBOS` / `newCtx`-style builders / `withAttempt` | names say neither what's provided nor what's scoped | value-named binders `withWorkflow` / `withStep` (`withDBOS` dropped with #1) | scope introduction visible at every call site |
 | 7 | One reader set on `Ctx` (`workflowId`, `stepId`, `stepStatus`, …) | one type serves two nesting levels | readers split per context type | level confusion visible in signatures |
 
 Deliberately unchanged: SystemDB seam and both backends, wire format and
