@@ -154,3 +154,19 @@ sized for one sitting.
 2. **Binder naming: value-named, decided.** `withDBOS` / `withWorkflow` / `withStep` — each named after what the continuation receives (instance bundle, workflow context, step view), superseding §11's `withInstance`/`withExecution` vocabulary. Scope params (`inst`/`exec`) unchanged; placement (`DBOS` level, `executeRegisteredWorkflow`, step bodies) unchanged.
 3. **`Tasks` stays unbranded** (per §11: ownership semantics already
    right). No prototype coverage; no change proposed.
+
+## 8. Planned-change summary (real-tree migration)
+
+| # | Current API | Issue | New API | What it fixes (prototype evidence) |
+|---|---|---|---|---|
+| 1 | `newDBOS :: m (DBOS m)`; unscoped `DBOS`/`Connection`/`Registry`/`Snapshot`/`WorkflowRef`/`WorkflowHandle`; cross-instance misuse refused at runtime (`WrongInstance`, ADR-0018) | R9 cross-instance: values from two instances mix freely until a checkpoint happens to check | `withDBOS :: … -> (forall inst. DBOS inst m -> m a) -> m a`; `inst` on all six types | mixing is ill-typed (N1); identity by skolem, not comparable `Text` |
+| 2 | No execution scope in types; `ExecutionIdentity` compared at runtime; placed values flow across executions; `StepBuiltElsewhere` runtime-only | R9/checkHere cross-execution half runtime-only | `withWorkflow` binding `exec`; `PendingStep` carries `exec`; drive demands same `exec`, token backstop kept | cross-execution driving ill-typed (N5); smuggled values refused at runtime |
+| 3 | Single `Ctx m`; `nextStepId`/`startChildWorkflow` take any `Ctx`; leaf rule is runtime `inStep` → `InsideStep` | step bodies can allocate ids and start children — the natural shape compiles | `WorkflowCtx` (owns counter) + `StepCtx` (narrowed view); allocators and child-start take `WorkflowCtx`; bodies receive `StepCtx` | natural misuse rejected at compile time (N2/N4) |
+| 4 | No depth tracking; `withAttempt` only rebinds | captured parent context bypasses the leaf rule silently (proven by exhibit) | depth counter in shared per-execution state; `placeCall` refuses at depth > 0; `withStep` restores under `finally`; fresh marker + token per attempt | capture refused at runtime (B1/B2); no lockout on success/throw (B3/B4); per-attempt freshness (B5/B6) |
+| 5 | `retrieveWorkflow` mints handles from bare ids, unscoped→unscoped | the membrane between durable names and live capabilities is unnamed | named introduction gates (`DBOS inst m -> Text -> WorkflowHandle inst m e`) | all unscoped→scoped conversions flow through named functions |
+| 6 | `newDBOS` / `newCtx`-style builders / `withAttempt` | names say neither what's provided nor what's scoped | value-named binders `withDBOS` / `withWorkflow` / `withStep` | scope introduction visible at every call site; supersedes §11 vocabulary |
+| 7 | One reader set on `Ctx` (`workflowId`, `stepId`, `stepStatus`, …) | one type serves two nesting levels | readers split per context type | level confusion visible in signatures |
+
+Deliberately unchanged: SystemDB seam and both backends, wire format and
+codecs, traces, the `Owner` flag (oracle-decided), `P`/`R` erasure,
+must-use discipline, `Tasks` branding.
