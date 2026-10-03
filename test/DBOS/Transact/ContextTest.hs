@@ -64,6 +64,7 @@ import DBOS.Transact
     StepStatus (..),
     Timestamp (..),
     WorkflowCtx,
+    WorkflowId (..),
     acquireLoggerBackend,
     cancelToken,
     cancellationToken,
@@ -350,11 +351,11 @@ scenarioExecCounters :: MonadSTM m => Fixture m -> m ((Int, Int), Int)
 scenarioExecCounters fx = do
   conn <- fx.fixtureMkConn
   let ident = fx.fixtureIdentity
-  first <- withWorkflow conn ident "wf-1" Nothing $ \wctx -> do
+  first <- withWorkflow conn ident (WorkflowId "wf-1") Nothing $ \wctx -> do
     a <- nextWorkflowStepId wctx
     b <- nextWorkflowStepId wctx
     pure (a, b)
-  second <- withWorkflow conn ident "wf-1" Nothing $ \wctx ->
+  second <- withWorkflow conn ident (WorkflowId "wf-1") Nothing $ \wctx ->
     nextWorkflowStepId wctx
   pure (first, second)
 
@@ -377,7 +378,7 @@ scenarioStepView :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Text, Maybe St
 scenarioStepView fx = do
   conn <- fx.fixtureMkConn
   let ident = fx.fixtureIdentity
-  withWorkflow conn ident "wf-9" Nothing $ \wctx -> do
+  withWorkflow conn ident (WorkflowId "wf-9") Nothing $ \wctx -> do
     marker <- nextWorkflowMarker wctx
     withStep wctx marker (firstStepStatus 7) $ \sctx ->
       pure (stepCtxId sctx, stepCtxStatus sctx)

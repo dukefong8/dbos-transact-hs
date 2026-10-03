@@ -11,6 +11,7 @@ module DBOS.SystemDB.Types
     Timestamp (..),
     Duration (..),
     WorkflowId (..),
+    workflowIdText,
     WorkflowName (..),
     ExecutorId (..),
     ApplicationVersion (..),
@@ -1448,6 +1449,10 @@ isTerminal status =
 -- module so @types.rs@ stays one Haskell module.
 newtype WorkflowId = WorkflowId Text
   deriving stock (Eq, Show)
+
+-- | Project an id back to its text for statements, traces, and keys.
+workflowIdText :: WorkflowId -> Text
+workflowIdText (WorkflowId text) = text
 
 newtype WorkflowName = WorkflowName Text
   deriving stock (Eq, Ord, Show)

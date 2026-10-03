@@ -94,7 +94,7 @@ import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomicall
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Text (Text)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Types (Timestamp)
+import DBOS.SystemDB.Types (Timestamp, WorkflowId, workflowIdText)
 import DBOS.Tracer (SomeTracer)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity, nextExecutionIdentity, runSystemDB)
 import DBOS.Transact.Identity (Identity)
@@ -457,10 +457,10 @@ data StepCtx exec m = StepCtx
 -- execution identity, fresh counters, and no step scope. The rank-2
 -- continuation binds the execution scope — values built inside cannot
 -- escape it, so one run's counters never leak into another's.
-withWorkflow :: MonadSTM m => Connection m -> Identity -> Text -> Maybe Timestamp -> (forall exec. WorkflowCtx exec m -> m a) -> m a
+withWorkflow :: MonadSTM m => Connection m -> Identity -> WorkflowId -> Maybe Timestamp -> (forall exec. WorkflowCtx exec m -> m a) -> m a
 withWorkflow conn identity wid deadline run = do
   execution <- nextExecutionIdentity conn
-  state <- newWorkflowState wid deadline execution
+  state <- newWorkflowState (workflowIdText wid) deadline execution
   inner <- newCtx conn identity state
   run (WorkflowCtx inner)
 
