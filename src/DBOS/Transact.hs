@@ -176,6 +176,8 @@ module DBOS.Transact
     PendingStep (..),
     placementAt,
     placementHere,
+    placeCall,
+    takenPlacement,
     placementStepId,
     pendingStepId,
     checkHere,
@@ -366,7 +368,7 @@ module DBOS.Transact
 where
 
 import DBOS.Prelude
-import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, describePlacement, insideAWorkflow, pendingStepId, placementAt, placementHere, placementStepId, placementWhereabouts)
+import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, describePlacement, insideAWorkflow, pendingStepId, placeCall, placementAt, placementHere, placementStepId, placementWhereabouts, takenPlacement)
 import DBOS.SystemDB.Retry (SysdbEvent (..), uuidEntropy)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity (..), Owner (..), SomeSystemDB (..), closeConnection, forApplication, generatedWorkflowId, newConnection, nextExecutionIdentity, runSystemDB, uuidWorkflowId)
 import DBOS.Transact.Dequeue (QueueEvent (..))

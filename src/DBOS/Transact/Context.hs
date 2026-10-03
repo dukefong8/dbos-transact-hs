@@ -37,6 +37,7 @@ module DBOS.Transact.Context
     workflowId,
     deadline,
     nextStepId,
+    stepDepth,
     executionIdentityOf,
     isSameExecution,
 
@@ -77,7 +78,7 @@ module DBOS.Transact.Context
 where
 
 import DBOS.Prelude
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, newTVarIO, readTVar, readTVarIO, writeTVar)
+import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Text (Text)
 import DBOS.SystemDB qualified as SystemDB
@@ -147,6 +148,7 @@ data WorkflowState m = WorkflowState
     deadline          :: Maybe Timestamp,
     nextStepIdRef     :: StrictTVar m Int,
     nextMarkerRef     :: StrictTVar m Int,
+    stepDepthRef      :: StrictTVar m Int,
     executionIdentity :: ExecutionIdentity
   }
 
@@ -156,12 +158,14 @@ newWorkflowState :: MonadSTM m => Text -> Maybe Timestamp -> ExecutionIdentity -
 newWorkflowState workflowText deadlineAt identity = do
   stepRef <- newTVarIO 0
   markerRef <- newTVarIO 0
+  depthRef <- newTVarIO 0
   pure
     WorkflowState
       { workflowId = workflowText,
         deadline = deadlineAt,
         nextStepIdRef = stepRef,
         nextMarkerRef = markerRef,
+        stepDepthRef = depthRef,
         executionIdentity = identity
       }
 
@@ -236,6 +240,15 @@ nextStepId ctx = atomically $ do
     current <- readTVar ctx.ctxWorkflow.nextStepIdRef
     writeTVar ctx.ctxWorkflow.nextStepIdRef (current + 1)
     pure current
+
+-- | How many step bodies deep this execution currently runs: zero at a
+-- step boundary and outside workflows, one inside a step body, more under
+-- nesting — sequential or concurrent, either way an allocation inside is
+-- refused. Bumped by 'withAttempt' on entry and restored on every exit,
+-- so a call reaching through a captured parent sees the running body
+-- exactly like the handed view does.
+stepDepth :: MonadSTM m => Ctx m -> m Int
+stepDepth ctx = readTVarIO ctx.ctxWorkflow.stepDepthRef
 
 -- | Which step body a context is inside. Opaque and equality-only; a fresh
 -- value per attempt, so two bodies of one workflow cannot be confused.
@@ -345,7 +358,17 @@ inStep ctx = case ctx.ctxStep of
 withAttempt :: (MonadSTM m, MonadCatch m) => Ctx m -> StepMarker -> StepStatus -> (Ctx m -> m a) -> m a
 withAttempt ctx marker status body = do
   scope <- newStepScope marker status
-  body ctx {ctxStep = Just scope} `onException` cancelToken scope.scopeCancellation
+  atomically (modifyTVar ctx.ctxWorkflow.stepDepthRef (+ 1))
+  -- Cancel and unbump in one transaction: the token fires and the depth
+  -- restores together, never one without the other. Restored explicitly
+  -- rather than through 'finally' so this keeps its 'MonadCatch'
+  -- constraint — no 'MonadMask' cascade through the step API. The
+  -- residual window (an async kill landing between the body's return and
+  -- the restore below) leaks safe: a stuck depth degrades later calls to
+  -- plain rather than corrupting any position.
+  outcome <- body ctx {ctxStep = Just scope} `onException` atomically (writeTVar scope.scopeCancellation True >> modifyTVar ctx.ctxWorkflow.stepDepthRef (subtract 1))
+  atomically (modifyTVar ctx.ctxWorkflow.stepDepthRef (subtract 1))
+  pure outcome
 
 -- | A token that fires when the step running here is abandoned. Outside a
 -- step it never fires, so a body that is also called outside a workflow

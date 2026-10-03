@@ -5,23 +5,60 @@ module DBOS.Transact.CheckpointTest (tests) where
 
 import DBOS.Prelude
 import DBOS.Transact
-  (
+  ( Connection (..),
+    Ctx,
     EngineOnly, Error (..),
+    Identity (..),
+    LogEvent (..),
+    Owner (..),
     PendingStep (..),
+    Serializer (..),
+    SomeSystemDB (..),
+    SomeTracer (..),
     StepDurability (..),
     StepPlacement (..),
+    StepStatus (..),
+    Timestamp (..),
+    acquireLoggerBackend,
+    cancelToken,
+    cancellationToken,
     checkHere,
+    currentConnection,
+    currentIdentity,
+    deadline,
     describePlacement,
     firstStepStatus,
+    inStep,
     insideAWorkflow,
+    ioTracer,
+    isSameExecution,
+    newConnection,
+    newCtx,
+    newWorkflowState,
+    nextAttempt,
+    nextExecutionIdentity,
+    nextStepId,
     nextStepMarker,
     nullTracer,
     pendingStepId,
+    placeCall,
     placementAt,
     placementHere,
     placementStepId,
     placementWhereabouts,
+    secondsDuration,
+    stepId,
+    stepMarker,
+    stepStatus,
+    stepStatusCurrentAttempt,
+    stepStatusId,
+    stepStatusMaxAttempts,
+    takenPlacement,
+    tokenCancelled,
+    uuidEntropy,
+    uuidWorkflowId,
     withAttempt,
+    workflowId,
   )
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.ContextTest (ctxOver)
@@ -54,6 +91,32 @@ tests =
         placement @?= Recorded ctx 0
         placementStepId placement @?= Just 0
         pendingStepId (PendingStep "checkout" (Just placement) (pure () :: IO ())) @?= Just 0,
+      testCase "a call built through a captured parent while a step body runs is plain" $ do
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
+        marker <- nextStepMarker ctx
+        withAttempt ctx marker (firstStepStatus 0) $ \_stepped -> do
+          placement <- placeCall ctx
+          placement @?= PlacementInsideStep ctx,
+      testCase "a taken placement through a captured parent under another connection is plain" $ do
+        backend <- getBackend
+        ctx <- ctxOver backend nullTracer "wf-1"
+        otherId <- uuidWorkflowId
+        otherConn <-
+          newConnection
+            (SomeSystemDB backend)
+            RustSerde
+            (Just "test-app")
+            (secondsDuration 1)
+            OwnerApplication
+            otherId
+            uuidWorkflowId
+            uuidEntropy
+            nullTracer
+        marker <- nextStepMarker ctx
+        withAttempt ctx marker (firstStepStatus 0) $ \_stepped -> do
+          placed <- takenPlacement otherConn "get_event" ctx :: IO (Either (Error EngineOnly) (StepPlacement IO))
+          placed @?= Right (PlacementInsideStep ctx),
       testCase "inside a step body the call is plain by the leaf rule" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"

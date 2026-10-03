@@ -26,7 +26,7 @@ where
 
 import DBOS.Prelude
 import Data.Text (Text)
-import DBOS.Transact.Context (Ctx, StepMarker, currentConnection, inStep, nextStepId, stepId, stepMarker, workflowId)
+import DBOS.Transact.Context (Ctx, StepMarker, currentConnection, inStep, nextStepId, stepDepth, stepId, stepMarker, workflowId)
 import DBOS.Transact.Connection (Connection (..), Owner (..))
 import DBOS.Transact.Error (Error (..))
 
@@ -88,12 +88,22 @@ placementAt ctx stepId' =
 takenPlacement :: MonadSTM m => Connection m -> Text -> Ctx m -> m (Either (Error e) (StepPlacement m))
 takenPlacement conn operation ctx
   | inStep ctx = pure (Right (PlacementInsideStep ctx))
-  | conn.connInstanceId == (currentConnection ctx).connInstanceId = do
-      stepId' <- nextStepId ctx
-      pure (Right (Recorded ctx stepId'))
-  | otherwise = pure $ case conn.connOwner of
-      OwnerClient -> Right ClientConnection
-      OwnerApplication -> Left (WrongInstance {operation = operation})
+  | otherwise = do
+      depth <- stepDepth ctx
+      -- Ordered as the oracle orders it: inside a step nothing is
+      -- checkpointed whoever serves it, so the depth refusal comes before
+      -- the connection comparison — a captured parent under a foreign
+      -- connection is a plain call, not a 'WrongInstance'.
+      if depth > 0
+        then pure (Right (PlacementInsideStep ctx))
+        else
+          if conn.connInstanceId == (currentConnection ctx).connInstanceId
+            then do
+              stepId' <- nextStepId ctx
+              pure (Right (Recorded ctx stepId'))
+            else pure $ case conn.connOwner of
+              OwnerClient -> Right ClientConnection
+              OwnerApplication -> Left (WrongInstance {operation = operation})
 
 -- | Where a call being *built* stands: the id is claimed here, before
 -- anything the call does can fail, because the position of the call in the
@@ -104,8 +114,19 @@ placeCall :: MonadSTM m => Ctx m -> m (StepPlacement m)
 placeCall ctx
   | inStep ctx = pure (PlacementInsideStep ctx)
   | otherwise = do
-      stepId' <- nextStepId ctx
-      pure (Recorded ctx stepId')
+      depth <- stepDepth ctx
+      -- A call built while a step body runs is plain by the leaf rule,
+      -- whether the context in hand says so or not. The context says it
+      -- when it is the body's own ('inStep'); the depth says it when the
+      -- call reaches through a captured parent, whose own scope field
+      -- predates the body. Either way nothing is recorded and no id
+      -- moves — the oracle degrades the same way for whatever its ambient
+      -- context reports as in-step.
+      if depth > 0
+        then pure (PlacementInsideStep ctx)
+        else do
+          stepId' <- nextStepId ctx
+          pure (Recorded ctx stepId')
 
 -- | Where a call stands given the ambient context, with the id its caller
 -- already allocated. Outside a workflow there is no counter to draw from.

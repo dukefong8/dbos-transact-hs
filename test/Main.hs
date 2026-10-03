@@ -57,7 +57,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SystemDBRetry.tests
 --- $> tasty SystemDBTypes.tests
 --- $> tasty Tracer.tests
---- $> tasty CheckpointTest.tests
+-- $> tasty CheckpointTest.tests
 --- $> tasty ClientTest.tests
 --- $> tasty ConfigTest.tests
 --- $> tasty ContextTest.tests
@@ -65,8 +65,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty DatasourceTest.tests
 --- $> tasty DatasourceSim.tests
 --- $> tasty QueueSim.tests
--- $> tasty WidgetSim.tests
--- $> tasty WidgetTest.tests
+--- $> tasty WidgetSim.tests
+--- $> tasty WidgetTest.tests
 --- $> tasty DeadlinesTest.tests
 --- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests
