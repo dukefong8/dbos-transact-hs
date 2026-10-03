@@ -119,7 +119,7 @@ parent doc §10:
 | `State`/`Ask`/`Throw`/streams | Nominal | `Eff` + lost STM virtues | No — STM wins |
 | `DslBuilderEff` bridge | Contained ergonomics probe | Days, scratch-only | Prototype-only |
 
-## 5. Prototype report (`proto/scope-brands/`, 13/13 green, descoped)
+## 5. Prototype report (`proto/scope-brands/`, 19/19 green, descoped + pinning)
 
 - **Model** (`src/Scope/Model.hs`, real io-classes constraints): unscoped
   `DBOS`/`Connection`/`Registry`/`WRef`/`WHandle` (plain `newDBOS`
@@ -137,13 +137,21 @@ parent doc §10:
 - **Negatives (all rejected with the intended error).** N2 step-body
   child-start (`StepCtx` vs `WorkflowCtx`); N4 counter on the narrowed
   view; N5 cross-execution drive (`exec1` vs `exec`); N6 cross-run escape
-  (sim tag refuses). Retired with `inst`: N1/N3 (nothing to check; B0
-  covers the runtime refusal).
+  (sim tag refuses); N7 cross-execution pin use. Retired with `inst`:
+  N1/N3 (nothing to check; B0 covers the runtime refusal).
 - **Backstop (`proto-backstop`, B0–B6).** Cross-instance refused (B0,
   oracle parity); capture-start and capture-place refused (B1/B2); depth
   restored after success (`wf-0` — refused attempts spend no counter
   positions) and after a throw (B3/B4); markers distinct (B5); tokens
   per-attempt and initially unfired (B6).
+- **Phase 3: scoped pool pinning.** `Pool` models a bounded pool
+  (STM-`retry` blocking take, per-id generations, high-water mark);
+  `checkout` is depth-checked (uniform depth == 0 rule) and exec-branded;
+  `releasePin` invalidates; `useIn` generation-checks. `proto-backstop`
+  asserts: in-step pin refused (B7); cap respected under a deterministic
+  three-racer `runSim` race, high-water exactly 2 with all uses valid
+  (B8); the raw path exceeds (B9: three sequential raw opens mark 3);
+  use-after-release refused (B10); pin released on throw (B11).
 - **Incidental findings.** Pure constructors need `Applicative m`
   (invisible in the real tree's full constraint tuples); io-sim's
   `runSim` returns `Either Failure a` (N6 first drafted against the old
@@ -184,6 +192,7 @@ throughout; only phases 2–3 are red, each sized for one sitting.
 | 5 | `retrieveWorkflow` mints handles from bare ids, unscoped→unscoped | the membrane between durable names and live capabilities is unnamed | named introduction gates (`DBOS inst m -> Text -> WorkflowHandle inst m e`) | all unscoped→scoped conversions flow through named functions |
 | 6 | `newDBOS` / `newCtx`-style builders / `withAttempt` | names say neither what's provided nor what's scoped | value-named binders `withWorkflow` / `withStep` (`withDBOS` dropped with #1) | scope introduction visible at every call site |
 | 7 | One reader set on `Ctx` (`workflowId`, `stepId`, `stepStatus`, …) | one type serves two nesting levels | readers split per context type | level confusion visible in signatures |
+| 8 | Transactional steps bypass the pool (raw per-attempt `Connection.acquire`) for connection affinity | pool limits unenforced on the tx path; leaks/overuse are runtime behavior | pin in step scope: `checkout` (depth-checked, exec-branded, generation-counted) + `releasePin`/`useIn`; pool cap + blocking take + high-water observability | cap respected under contention, nested pins refused, cross-exec and use-after-release refused (B7–B11, N7); raw contrast quantified (B9). Open: verify hasql-pool exposes single-connection checkout; else raw acquire + branded handle (same escape safety, limits unenforced) |
 
 Deliberately unchanged: SystemDB seam and both backends, wire format and
 codecs, traces, the `Owner` flag (oracle-decided), `P`/`R` erasure,

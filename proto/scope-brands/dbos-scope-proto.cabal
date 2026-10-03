@@ -87,10 +87,17 @@ executable neg-n6-cross-run
 
 -- Runtime-backstop checks: the capture shape compiles, so this asserts
 -- it is refused at runtime, plus depth restoration and per-attempt scope.
+executable neg-n7-pin-cross-exec
+  main-is:          N7_PinCrossExec.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
 executable proto-backstop
   main-is:          Main.hs
   hs-source-dirs:   app-backstop
   build-depends:
-      base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+      base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, io-sim, text
   default-language: Haskell2010
   ghc-options:      -Wall

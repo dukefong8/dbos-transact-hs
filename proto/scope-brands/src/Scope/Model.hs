@@ -32,6 +32,15 @@ module Scope.Model
   , Pending
   , StepStatus (..)
   , StepScope
+  , Pool
+  , PinnedConn
+  , newPool
+  , checkout
+  , releasePin
+  , useIn
+  , rawAcquire
+  , rawRelease
+  , poolHighWater
     -- * Region binder (the only place a scope variable is introduced)
   , newDBOS
   , withWorkflow
@@ -68,6 +77,7 @@ import Control.Concurrent.Class.MonadSTM.Strict
   , newTVarIO
   , readTVar
   , readTVarIO
+  , retry
   , writeTVar
   )
 import Control.Monad.Class.MonadThrow qualified as MThrow
@@ -312,3 +322,127 @@ cancelStep sctx = atomically (writeTVar (scopeToken (sScope sctx)) True)
 -- | Whether this attempt's token has fired.
 stepCancelled :: MonadSTM m => StepCtx exec m -> m Bool
 stepCancelled sctx = readTVarIO (scopeToken (sScope sctx))
+
+-- * Pinned pool connections (phase 3: connection affinity, scoped)
+--
+-- A transactional step needs every statement of one attempt on one
+-- physical connection, which a pool will not promise per statement
+-- ('Pool.use' may hand out a different connection each time). The answer
+-- is pinning: check one connection out for the attempt's lifetime and
+-- return it after. The pin is exec-branded (a pin from another execution
+-- is ill-typed) and generation-counted (use after release is a runtime
+-- refusal), and checkout is refused inside a step body (same uniform
+-- depth == 0 rule as 'placeCall': nested pins would double pool
+-- pressure the way nested allocations would shift replay slots).
+--
+-- The blocking take is STM 'retry', so under IOSim a starved checkout
+-- waits in virtual time deterministically; the real tree layers its
+-- acquisition timeout on top of the same semantics.
+
+-- | Pool state: available ids, currently held count, high-water mark,
+-- current generation per id (-1 = released), next generation, and the
+-- out-of-band raw-acquire count. One TVar: checkout/release compose
+-- atomically with the depth read.
+data PoolState = MkPoolState
+  { psAvail :: [Int]
+  , psHeld :: Int
+  , psHigh :: Int
+  , psGen :: Map Int Int
+  , psNextGen :: Int
+  , psRaw :: Int
+  }
+
+-- | A bounded pool of fake connections. Capacity is fixed: checkout past
+-- it waits (STM 'retry'), it never opens more.
+data Pool m = MkPool
+  { poolCap :: Int
+  , poolState :: StrictTVar m PoolState
+  }
+
+-- | A pinned connection: its id plus the generation that proves it is
+-- still held. Exec-branded so a pin cannot be used from another
+-- execution; the generation so a released pin cannot be reused.
+data PinnedConn exec = MkPinned
+  { pinnedConn :: Int
+  , pinnedGen :: Int
+  }
+
+-- | A pool with the given capacity, all connections available.
+newPool :: MonadSTM m => Int -> m (Pool m)
+newPool cap = do
+  st <- newTVarIO (MkPoolState [1 .. cap] 0 0 Map.empty 0 0)
+  pure (MkPool cap st)
+
+-- | Check one connection out for this execution. Refused inside a step
+-- body (uniform depth rule); waits while the pool is empty. The pin it
+-- returns is bound to this execution by type and to this checkout by
+-- generation.
+checkout :: MonadSTM m => Pool m -> WorkflowCtx exec m -> m (Either Text (PinnedConn exec))
+checkout pool wctx = atomically $ do
+  depth <- readTVar (wDepth wctx)
+  if depth > 0
+    then pure (Left ("InsideStep: pinning a connection inside a step body"))
+    else do
+      st <- readTVar (poolState pool)
+      case psAvail st of
+        [] -> retry
+        (c : cs) -> do
+          let g = psNextGen st
+          writeTVar (poolState pool) $
+            st
+              { psAvail = cs,
+                psHeld = psHeld st + 1,
+                psHigh = max (psHigh st) (psHeld st + 1),
+                psGen = Map.insert c g (psGen st),
+                psNextGen = g + 1
+              }
+          pure (Right (MkPinned c g))
+
+-- | Return a pin. Invalidates its generation first, so a later use of the
+-- same value is refused rather than silently landing on a recycled id.
+releasePin :: MonadSTM m => PinnedConn exec -> Pool m -> m ()
+releasePin (MkPinned c _) pool = atomically $ do
+  st <- readTVar (poolState pool)
+  writeTVar (poolState pool) $
+    st
+      { psAvail = c : psAvail st,
+        psHeld = psHeld st - 1,
+        psGen = Map.insert c (-1) (psGen st)
+      }
+
+-- | Use a pinned connection under this execution's context. The context
+-- is what ties the use to the execution at the type level; the generation
+-- is what refuses a use after release at runtime.
+useIn :: MonadSTM m => WorkflowCtx exec m -> PinnedConn exec -> Pool m -> m (Either Text Int)
+useIn _wctx (MkPinned c g) pool = atomically $ do
+  st <- readTVar (poolState pool)
+  case Map.lookup c (psGen st) of
+    Just g' | g' == g -> pure (Right c)
+    _ -> pure (Left "use-after-release: pinned connection no longer held")
+
+-- | Open a connection past the pool, the way today's per-attempt raw
+-- 'Connection.acquire' bypasses pool limits. Shares the high-water
+-- accounting so the contrast is measurable: raw opens never wait and the
+-- high-water mark shows it.
+rawAcquire :: MonadSTM m => Pool m -> m Int
+rawAcquire pool = atomically $ do
+  st <- readTVar (poolState pool)
+  let n = psRaw st + 1
+  writeTVar (poolState pool) $
+    st
+      { psHeld = psHeld st + 1,
+        psHigh = max (psHigh st) (psHeld st + 1),
+        psRaw = n
+      }
+  pure (-n)
+
+-- | Give a raw connection back (bookkeeping only).
+rawRelease :: MonadSTM m => Pool m -> m ()
+rawRelease pool = atomically $ do
+  st <- readTVar (poolState pool)
+  writeTVar (poolState pool) (st {psHeld = psHeld st - 1})
+
+-- | Highest simultaneously-held count so far: the observable the cap
+-- assertion reads.
+poolHighWater :: MonadSTM m => Pool m -> m Int
+poolHighWater pool = psHigh <$> readTVarIO (poolState pool)

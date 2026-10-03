@@ -18,7 +18,7 @@ if cabal run proto-sim 2>/dev/null; then ok "proto-sim runs"; else bad "proto-si
 
 echo "=== negative compile tests (each MUST fail) ==="
 for t in neg-n2-step-start neg-n4-nextid-on-step neg-n5-cross-exec-drive \
-         neg-n6-cross-run; do
+         neg-n6-cross-run neg-n7-pin-cross-exec; do
   err=$(cabal build exe:$t 2>&1)
   if echo "$err" | grep -q "Couldn't match\|would escape\|Ambiguous\|Not in scope\|could not deduce"; then
     ok "$t rejected"
@@ -33,7 +33,9 @@ out=$(cabal run proto-backstop 2>/dev/null)
 echo "$out"
 for mark in "cross-instance refused" "capture-start refused" "capture-place refused" \
             "depth restored after success" "depth restored after throw" \
-            "markers distinct" "tokens per-attempt"; do
+            "markers distinct" "tokens per-attempt" "in-step pin refused" \
+            "pool cap respected" "raw path exceeds" "use-after-release refused" \
+            "pin released on throw"; do
   if echo "$out" | grep -q "backstop: $mark"; then ok "backstop: $mark";
   else bad "backstop: $mark"; fi
 done
