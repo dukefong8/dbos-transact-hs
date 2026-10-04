@@ -87,6 +87,7 @@ module DBOS.Transact.Context
     stepCtxId,
     stepCtxStatus,
     stepCtxAt,
+    stepCtxInner,
     stepCtxTracer,
     workflowCtxInner,
     withWorkflowTaskSpawner,
@@ -513,6 +514,14 @@ withWorkflowTaskSpawner spawner wctx = wctx {workflowCtx = withTaskSpawner wctx.
 -- through 'withStep'.
 stepCtxAt :: WorkflowCtx exec m -> Ctx m -> StepCtx exec m
 stepCtxAt wctx inner = StepCtx wctx inner
+
+-- | The inner context behind a step view: the documented downgrade for
+-- reader calls that have no scoped twin yet (a step body reads its
+-- cancellation token, step id, or deadline through it). Widening is
+-- explicit and greppable; the C5 pass twins the hot readers and deletes
+-- these uses.
+stepCtxInner :: StepCtx exec m -> Ctx m
+stepCtxInner sctx = sctx.stepCtxInner
 
 -- | The tracer behind a step view, for engine paths that must announce
 -- through the view's execution without widening it.

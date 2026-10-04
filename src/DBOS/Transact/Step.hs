@@ -14,6 +14,7 @@ module DBOS.Transact.Step
     runWorkflowStepScoped,
     runNestedStep,
     runWorkflowStepWith,
+    runWorkflowStepWithScoped,
     pendingWorkflowStepScoped,
     pendingWorkflowStepWithScoped,
     driveWorkflowStepWithScoped,
@@ -218,6 +219,18 @@ runWorkflowStep ctx name body
             Right () -> do
               runTracer (contextTracer ctx) (StepOutputRecorded name stepId')
               pure (Right value)
+
+-- | 'runWorkflowStepWith' over the scoped workflow view: the options
+-- variant of the workflow-scope entry.
+runWorkflowStepWithScoped ::
+  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
+  StepOptions e ->
+  WorkflowCtx exec m ->
+  Text ->
+  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
+  m (Either (TransactError.Error e) value)
+runWorkflowStepWithScoped options wctx name body =
+  runWorkflowStepWith options (workflowCtxInner wctx) name (\inner -> body (stepCtxAt wctx inner))
 
 -- | 'runWorkflowStep' over the scoped workflow view: the workflow-scope
 -- entry. The id is allocated through the workflow context and the body is

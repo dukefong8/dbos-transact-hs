@@ -25,6 +25,7 @@ module DBOS.Transact
     pendingWorkflowStepWithScoped,
     driveWorkflowStepWithScoped,
     runWorkflowStepWith,
+    runWorkflowStepWithScoped,
     pendingWorkflowStep,
     pendingWorkflowStepWith,
     stepOptionsDefault,
@@ -323,6 +324,7 @@ module DBOS.Transact
     stepCtxId,
     stepCtxStatus,
     stepCtxAt,
+    stepCtxInner,
     stepCtxTracer,
     workflowCtxInner,
     -- * Workflow registry and runner
@@ -443,7 +445,7 @@ import DBOS.Transact.Handle (Provenance (..), WorkflowHandle (..), awaitChild, a
 import DBOS.Transact.Identity (Environment (..), Identity (..), appIdEnv, appVersionEnv, cloudAppNameEnv, cloudEnv, defaultExecutorId, executorIdEnv, readEnvironment, resolve, validateAppName)
 import DBOS.Transact.Instance (DBOS, Executor, cancelWorkflows, clearDBOSCheckpoints, dbosAppId, dbosAppVersion, dbosExecutorId, dequeueDBOSWorkflows, deleteWorkflows, enqueueDBOSWorkflow, fetchWorkflowStatuses, forkFrom, forkWorkflows, getWorkflowEvent, isLaunched, launch, launchOn, launchWithEnvironment, listWorkflowIdsByName, listWorkflows, newDBOS, registerDBOSDataSource, registerDBOSWorkflow, registerDBOSWorkflowRef, registerDBOSWorkflowRefScoped, registerDBOSWorkflowScoped, resumeWorkflows, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, sendWorkflowMessage, sendWorkflowMessages, setWorkflowDelay, shutdown, startDBOSWorkflowRef, updateWorkflowAttributes)
 import DBOS.Transact.Management (ManagementEvent (..), cancelWorkflowsInWorkflow, cancelWorkflowsInWorkflowScoped, deleteWorkflowsInWorkflow, deleteWorkflowsInWorkflowScoped, forkFromInWorkflow, forkFromInWorkflowScoped, forkWorkflowsInWorkflow, forkWorkflowsInWorkflowScoped, listWorkflowsInWorkflow, listWorkflowsInWorkflowScoped, resumeWorkflowsInWorkflow, resumeWorkflowsInWorkflowScoped)
-import DBOS.Transact.Context (Ctx, StepCtx, StepMarker (..), StepScope, StepStatus (..), WorkflowCtx, cancelToken, cancellationToken, contextTracer, currentConnection, currentIdentity, deadline, executionIdentityOf, firstStepStatus, inStep, insideAStep, isSameExecution, newCtx, newStepScope, newWorkflowState, nextAttempt, nextStepId, nextStepMarker, nextWorkflowMarker, nextWorkflowStepId, raceCancel, spawnLocal, stepCtxAt, stepCtxId, stepCtxStatus, stepCtxTracer, stepId, workflowCtxInner, stepMarker, stepStatus, stepStatusCurrentAttempt, stepStatusId, stepStatusMaxAttempts, tokenCancelled, withAttempt, withStep, withSystemDB, withTracer, withWorkflow, workflowCtxId, workflowId)
+import DBOS.Transact.Context (Ctx, StepCtx, StepMarker (..), StepScope, StepStatus (..), WorkflowCtx, cancelToken, cancellationToken, contextTracer, currentConnection, currentIdentity, deadline, executionIdentityOf, firstStepStatus, inStep, insideAStep, isSameExecution, newCtx, newStepScope, newWorkflowState, nextAttempt, nextStepId, nextStepMarker, nextWorkflowMarker, nextWorkflowStepId, raceCancel, spawnLocal, stepCtxAt, stepCtxId, stepCtxInner, stepCtxStatus, stepCtxTracer, stepId, workflowCtxInner, stepMarker, stepStatus, stepStatusCurrentAttempt, stepStatusId, stepStatusMaxAttempts, tokenCancelled, withAttempt, withStep, withSystemDB, withTracer, withWorkflow, workflowCtxId, workflowId)
 import DBOS.Tracer (LoggerBackend (..), LogEvent (..), LogSeverity (..), SomeTracer (..), ThreadIdCache, TimedFastLogger, Tracer, acquireLoggerBackend, contramap, fastLoggerTracer, ioTracer, mkTracer, newLoggerBackend, nullTracer, parseSeverity, showSeverity, runTracer)
 import DBOS.Transact.Message (Forks (..), Message (..), SendBulkOptions (..), SendOptions (..), recv, recvScoped, send, sendBulk, sendBulkOptionsDefault, sendBulkScoped, sendBulkWith, sendBulkWithScoped, sendOptionsDefault, sendScoped, sendWith, sendWithScoped)
 import DBOS.Transact.Registry
@@ -489,7 +491,7 @@ import DBOS.Transact.Queue
     deleteQueue,
   )
 import DBOS.Transact.Select (Branches (..), Racing (..), Recording (..), SelectArm (..), Winner (..), checkSelect, controlError, newBranches, pushBranch, recordSelect, selectStep, selectStepScoped)
-import DBOS.Transact.Step (StepError (..), StepOptions (..), ShouldRetry, WorkflowEvent (..), driveWorkflowStepWithScoped, pendingWorkflowStep, pendingWorkflowStepScoped, pendingWorkflowStepWith, pendingWorkflowStepWithScoped, runNestedStep, runWorkflowStep, runWorkflowStepScoped, runWorkflowStepWith, stepBackoff, stepOptionsDefault)
+import DBOS.Transact.Step (StepError (..), StepOptions (..), ShouldRetry, WorkflowEvent (..), driveWorkflowStepWithScoped, pendingWorkflowStep, pendingWorkflowStepScoped, pendingWorkflowStepWith, pendingWorkflowStepWithScoped, runNestedStep, runWorkflowStep, runWorkflowStepScoped, runWorkflowStepWith, runWorkflowStepWithScoped, stepBackoff, stepOptionsDefault)
 import DBOS.Transact.Sleep (SleepEvent (..), pendingSleep, pendingSleepScoped, sleepPlain, sleepWorkflowStep, sleepWorkflowStepScoped)
 import DBOS.Transact.Wait (WaitEvent (..), joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
 import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Tasks, Timeout (..), abortAll, childWorkflowId, enqueueNew, enqueueWorkflow, newTasks, resolveEnqueueCollision, resolveTimeoutDeadline, runOptionsDefault, runOptionsToStartOptions, runRegisteredWorkflow, runRegisteredWorkflowWithRow, runRegisteredWorkflowWithSubmission, runWorkflowRef, spawnTracked, startChildWorkflow, startChildWorkflowScoped, startOptionsDefault, startWorkflowRef, storedPriority, tasksSpawner, timeoutBudget, validateEnqueue)
