@@ -73,7 +73,7 @@ these steps *inside* `withStep` bodies at integration time.
 
 Widget bodies move from `Tx m -> …` (hasql-concrete — the reason
 `WidgetSim`'s fake errors on statements today) to `StepOps`-shaped
-records: Postgres handler behind `runTransaction`'s held connection,
+records: Postgres handler behind `runTxStep`'s held connection,
 STM handler behind `atomically` in the sim backend. `WidgetTest` keeps
 live coverage; `WidgetSim` gains real invariant teeth (race/rollback/
 refusal against STM tables instead of statement-unsupported stubs).

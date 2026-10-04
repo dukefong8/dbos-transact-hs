@@ -4,7 +4,7 @@
 
 module NegAllocOnStep where
 
-import DBOS.Transact (StepCtx, nextWorkflowStepId)
+import DBOS.Transact (StepCtx, nextStepId)
 
 bad :: StepCtx exec IO -> IO Int
-bad sctx = nextWorkflowStepId sctx
+bad sctx = nextStepId sctx

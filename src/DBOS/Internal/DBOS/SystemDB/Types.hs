@@ -104,17 +104,17 @@ module DBOS.SystemDB.Types
     setEventStepName,
     getEventStepName,
     getResultStepName,
-    selectWorkflowStepName,
+    selectStepName,
     selectStepStepName,
     debounceStepName,
-    cancelWorkflowStepName,
-    resumeWorkflowStepName,
-    deleteWorkflowStepName,
-    forkWorkflowStepName,
+    cancelStepName,
+    resumeStepName,
+    deleteStepName,
+    forkStepName,
     setWorkflowDelayStepName,
     updateWorkflowAttributesStepName,
     listWorkflowsStepName,
-    listWorkflowStepsStepName,
+    listStepsStepName,
     createScheduleStepName,
     upsertScheduleStepName,
     getScheduleStepName,
@@ -603,8 +603,8 @@ getEventStepName = "DBOS.getEvent"
 getResultStepName :: Text
 getResultStepName = "DBOS.getResult"
 
-selectWorkflowStepName :: Text
-selectWorkflowStepName = "DBOS.selectWorkflow"
+selectStepName :: Text
+selectStepName = "DBOS.selectWorkflow"
 
 selectStepStepName :: Text
 selectStepStepName = "DBOS.selectStep"
@@ -612,17 +612,17 @@ selectStepStepName = "DBOS.selectStep"
 debounceStepName :: Text
 debounceStepName = "DBOS.debounceDelayedWorkflow"
 
-cancelWorkflowStepName :: Text
-cancelWorkflowStepName = "DBOS.cancelWorkflow"
+cancelStepName :: Text
+cancelStepName = "DBOS.cancelWorkflow"
 
-resumeWorkflowStepName :: Text
-resumeWorkflowStepName = "DBOS.resumeWorkflow"
+resumeStepName :: Text
+resumeStepName = "DBOS.resumeWorkflow"
 
-deleteWorkflowStepName :: Text
-deleteWorkflowStepName = "DBOS.deleteWorkflow"
+deleteStepName :: Text
+deleteStepName = "DBOS.deleteWorkflow"
 
-forkWorkflowStepName :: Text
-forkWorkflowStepName = "DBOS.forkWorkflow"
+forkStepName :: Text
+forkStepName = "DBOS.forkWorkflow"
 
 setWorkflowDelayStepName :: Text
 setWorkflowDelayStepName = "DBOS.setWorkflowDelay"
@@ -633,8 +633,8 @@ updateWorkflowAttributesStepName = "DBOS.updateWorkflowAttributes"
 listWorkflowsStepName :: Text
 listWorkflowsStepName = "DBOS.listWorkflows"
 
-listWorkflowStepsStepName :: Text
-listWorkflowStepsStepName = "DBOS.listWorkflowSteps"
+listStepsStepName :: Text
+listStepsStepName = "DBOS.listWorkflowSteps"
 
 createScheduleStepName :: Text
 createScheduleStepName = "DBOS.createSchedule"

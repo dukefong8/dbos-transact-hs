@@ -373,7 +373,7 @@ absent with it.
 
 ### `step.rs` → `Transact.Step` ◐ (defaults only)
 
-`runWorkflowStep` ≈ `step()` with default options; `sleepStepName`
+`runStep` ≈ `step()` with default options; `sleepStepName`
 contract kept. `StepOptions` (7 fields), `ShouldRetry`,
 `step_with`, timeouts, `preemptible`, backoff, and the retry loop are
 all absent — retry wiring is open L2 work, and the legacy pool-based

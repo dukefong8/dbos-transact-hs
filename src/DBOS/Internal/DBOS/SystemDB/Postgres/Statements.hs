@@ -52,7 +52,7 @@ module DBOS.SystemDB.Postgres.Statements
     renameBatchBoundStatement,
     renameBatchRangeStatement,
     StepRowRaw (..),
-    listWorkflowStepsSession,
+    listStepsSession,
     ForkParams (..),
     forkTx,
     forkPointsStatement,
@@ -979,12 +979,12 @@ data StepRowRaw = StepRowRaw
 -- rather than typedSql: the composite primary key of @operation_outputs@
 -- makes the workflow-id parameter's inferred type the table's key type,
 -- which is not what this layer binds.
-listWorkflowStepsSession :: Text -> Bool -> Maybe Int64 -> Maybe Int64 -> Session.Session [StepRowRaw]
-listWorkflowStepsSession workflowId loadOutput limit offset =
-  Session.statement (workflowId, loadOutput, limit, offset) listWorkflowStepsStatement
+listStepsSession :: Text -> Bool -> Maybe Int64 -> Maybe Int64 -> Session.Session [StepRowRaw]
+listStepsSession workflowId loadOutput limit offset =
+  Session.statement (workflowId, loadOutput, limit, offset) listStepsStatement
 
-listWorkflowStepsStatement :: Statement.Statement (Text, Bool, Maybe Int64, Maybe Int64) [StepRowRaw]
-listWorkflowStepsStatement =
+listStepsStatement :: Statement.Statement (Text, Bool, Maybe Int64, Maybe Int64) [StepRowRaw]
+listStepsStatement =
   Statement.preparable sql encoder decoder
   where
     sql =

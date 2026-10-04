@@ -39,25 +39,25 @@ import DBOS.Transact
     newDBOS,
     newWorkflowKey,
     nextWorkflowMarker,
-    nextWorkflowStepId,
+    nextStepId,
     nullTracer,
     pendingGetEvent,
     pendingSetEvent,
     pendingSleep,
-    pendingWorkflowStep,
+    pendingStep,
     registerDBOSWorkflowRef,
     runDBOSWorkflowRef,
     runOptionsDefault,
-    runWorkflowStep,
-    runWorkflowStepWith,
+    runStep,
+    runStepWith,
     setEvent,
     shutdown,
     stepOptionsDefault,
     getEvent,
     pendingSetEvent,
     pendingSleep,
-    pendingWorkflowStep,
-    runWorkflowStep,
+    pendingStep,
+    runStep,
     setEvent,
   )
 import DBOS.Transact.Checkpoint (pendingStepId)
@@ -140,7 +140,7 @@ tests =
           outsideSteps @?= [(0, getEventStepName), (1, sleepStepName)]
           inStepConn <- connOver backend nullTracer
           readInside <- (withWorkflow inStepConn eventTestIdentity (WorkflowId inStepText) Nothing $ \wctx ->
-            runWorkflowStepWith stepOptionsDefault wctx "read" (\sctx -> getEvent sctx.stepCtxWorkflow (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either (Error EngineOnly) (Maybe Int)))
+            runStepWith stepOptionsDefault wctx "read" (\sctx -> getEvent sctx.stepCtxWorkflow (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either (Error EngineOnly) (Maybe Int)))
           readInside @?= Right (Just 42)
           insideSteps <- stepNames backend inStepText
           insideSteps @?= [(0, "read")]
@@ -161,9 +161,9 @@ tests =
             withWorkflow conn eventTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
               marker <- nextWorkflowMarker wctx
               withStep wctx marker (firstStepStatus 0) $ \_sctx -> do
-                before <- nextWorkflowStepId wctx
+                before <- nextStepId wctx
                 refused <- setEvent wctx "progress" ("ready" :: Text)
-                after <- nextWorkflowStepId wctx
+                after <- nextStepId wctx
                 pure (refused, before, after)
           refused @?= Left (InsideStep "set_event")
           after @?= before + 1,
@@ -189,9 +189,9 @@ tests =
             withWorkflow readerConn eventTestIdentity (WorkflowId readerText) Nothing $ \wctx -> do
               marker <- nextWorkflowMarker wctx
               withStep wctx marker (firstStepStatus 0) $ \_sctx -> do
-                before <- nextWorkflowStepId wctx
+                before <- nextStepId wctx
                 readCaptured <- getEvent wctx (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int))
-                after <- nextWorkflowStepId wctx
+                after <- nextStepId wctx
                 pure (readCaptured, before, after)
           readCaptured @?= Right (Just 42)
           -- The probe's own counter read moves one; the plain read moves none.
@@ -250,13 +250,13 @@ tests =
             Left err -> fail (show err)
             Right ref -> pure ref
           exec <- launchEventExec dbos isolatedEnvironment
-          worker <- async (runWfRef exec ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing)
+          worker <- async (runWfRef exec ref (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText)}) Nothing)
           waitForPublish dbos (WorkflowId workflowText)
           shutdown dbos
           cancel worker
           putMVar release ()
           _ <- launchEventExec dbos isolatedEnvironment
-          ran <- runWfRef exec ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing
+          ran <- runWfRef exec ref (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText)}) Nothing
           case ran of
             Right (Just stored) -> do
               let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
@@ -294,7 +294,7 @@ tests =
             -- refuse.
             let inStepBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Int))
                 inStepBody () wctx = do
-                  stepped <- runWorkflowStep wctx "read" $ \inner -> do
+                  stepped <- runStep wctx "read" $ \inner -> do
                     built <- pendingGetEvent other inner.stepCtxWorkflow (WorkflowId "wf-1") "answer" (millisDuration 0)
                     built.pendingRun
                   pure $ case stepped of
@@ -332,7 +332,7 @@ tests =
                 a <- pendingSleep wctx (millisDuration 1)
                 b <- pendingSetEvent wctx "b" (1 :: Int)
                 c <- (pendingGetEvent dbos wctx (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: IO (PendingStep exec IO (Either (Error EngineOnly) (Maybe Int))))
-                d <- (pendingWorkflowStep wctx "after" (\_ -> pure (Right (1 :: Int))) :: IO (PendingStep exec IO (Either (Error EngineOnly) Int)))
+                d <- (pendingStep wctx "after" (\_ -> pure (Right (1 :: Int))) :: IO (PendingStep exec IO (Either (Error EngineOnly) Int)))
                 idsOk <- case (pendingStepId a, pendingStepId b, pendingStepId c, pendingStepId d) of
                   (Just 0, Just 1, Just 2, Just 4) -> pure True
                   _                                -> pure False
@@ -352,12 +352,12 @@ tests =
             Left err  -> fail (show err)
             Right ref -> pure ref
           exec <- launchEventExec dbos isolatedEnvironment
-          ran <- runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just workflowText}) (Just (encodeWorkflowValue ()))
+          ran <- runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText)}) (Just (encodeWorkflowValue ()))
           case ran of
             Right _ -> pure ()
             other   -> fail ("the workflow failed: " <> show other)
           reader <- getBackend
-          listed <- SystemDB.listWorkflowSteps reader (WorkflowId workflowText) True Nothing Nothing Nothing
+          listed <- SystemDB.listSteps reader (WorkflowId workflowText) True Nothing Nothing Nothing
           case listed of
             Right rows -> do
               let recorded = map (\row -> (row.stepRecordStepId, row.stepRecordStepName)) rows
@@ -396,7 +396,7 @@ isolatedEnvironment =
 
 stepNames :: Postgres.PostgresSystemDB -> Text -> IO [(Int, Text)]
 stepNames backend workflowText = do
-  rows <- SystemDB.listWorkflowSteps backend (WorkflowId workflowText) True Nothing Nothing Nothing
+  rows <- SystemDB.listSteps backend (WorkflowId workflowText) True Nothing Nothing Nothing
   pure $ case rows of
     Left _ -> []
     Right steps -> [(record.stepRecordStepId, record.stepRecordStepName) | record <- steps]

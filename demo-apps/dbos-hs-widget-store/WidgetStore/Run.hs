@@ -30,6 +30,7 @@ import Network.Wai (Application)
 import WidgetStore.App (WidgetApp (..))
 import WidgetStore.Route (dispatchWidget, widgetNotFound, widgetRouteTrie)
 import WidgetStore.Store (createSchemaSession)
+import WidgetStore.Steps (pgCheckoutSteps, pgDispatchSteps)
 import WidgetStore.Workflows (checkoutWorkflow, dispatchWorkflow)
 
 -- | The version this build runs as. Recovery only resumes workflows stamped
@@ -67,10 +68,10 @@ start = do
   -- the registry does not know by name is one the recovering executor
   -- cannot resume.
   dispatchRef <-
-    registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchWorkflow ds)
+    registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchWorkflow ds pgDispatchSteps)
       >>= either (die . Text.pack . show) pure
   checkoutRef <-
-    registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutWorkflow ds dispatchRef)
+    registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (\() -> checkoutWorkflow ds pgCheckoutSteps dispatchRef)
       >>= either (die . Text.pack . show) pure
   exec <- launch dbos >>= either (die . Text.pack . show) pure
   let widget = WidgetApp {waDbos = dbos, waExec = exec, waApp = app, waCheckout = checkoutRef}

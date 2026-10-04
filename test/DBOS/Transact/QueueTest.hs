@@ -570,7 +570,7 @@ tests =
             Right _  -> pure ()
           let options =
                 startOptionsDefault
-                  { startWorkflowId = Just workflowText,
+                  { startWorkflowId = Just (WorkflowId workflowText),
                     startQueue = Just (enqueueNew queueName),
                     startTimeout = Explicit (secondsDuration 300)
                   }
@@ -611,7 +611,7 @@ tests =
           exec <- launchQueueExec dbos isolatedEnvironment
           let options =
                 startOptionsDefault
-                  { startWorkflowId = Just workflowText,
+                  { startWorkflowId = Just (WorkflowId workflowText),
                     startQueue = Just (enqueueNew queueName),
                     startTimeout = Explicit (secondsDuration 300)
                   }
@@ -652,7 +652,7 @@ tests =
             Right _  -> pure ()
           let options =
                 startOptionsDefault
-                  { startWorkflowId = Just workflowText,
+                  { startWorkflowId = Just (WorkflowId workflowText),
                     startQueue = Just ((enqueueNew queueName) {partitionKey = Just "tenant-7", priority = Just 4})
                   }
           startedRun <- startDBOSWorkflowRef exec ref options Nothing
@@ -689,7 +689,7 @@ tests =
             Right _  -> pure ()
           let options =
                 startOptionsDefault
-                  { startWorkflowId = Just workflowText,
+                  { startWorkflowId = Just (WorkflowId workflowText),
                     startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 30)})
                   }
           startedRun <- startDBOSWorkflowRef exec ref options Nothing
@@ -762,7 +762,7 @@ tests =
             Right _  -> pure ()
           let options =
                 startOptionsDefault
-                  { startWorkflowId = Just workflowText,
+                  { startWorkflowId = Just (WorkflowId workflowText),
                     startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 3)})
                   }
           startedRun <- startDBOSWorkflowRef exec ref options Nothing
@@ -813,7 +813,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just firstText, startQueue = Just held})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just held})
               Nothing
           first <- case firstRun of
             Left err     -> fail (show (err :: Error EngineOnly))
@@ -822,7 +822,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just secondText, startQueue = Just held})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just held})
               Nothing
           case secondRun of
             Left err -> assertBool "the refusal names the key" ("order-42" `Text.isInfixOf` renderTransactError (err :: Error EngineOnly))
@@ -838,7 +838,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just thirdText, startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42"})})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42"})})
               Nothing
           case thirdRun of
             Left err -> fail ("the key was not released when the holder finished: " <> show (err :: Error EngineOnly))
@@ -871,7 +871,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just firstText, startQueue = Just joining})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just joining})
               Nothing
           first <- case firstRun of
             Left err     -> fail (show (err :: Error EngineOnly))
@@ -880,7 +880,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just secondText, startQueue = Just joining})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just joining})
               Nothing
           second <- case secondRun of
             Left err     -> fail ("the second enqueue was refused rather than joined: " <> show (err :: Error EngineOnly))
@@ -906,7 +906,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just thirdText, startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42", duplicationPolicy = ReturnExisting})})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42", duplicationPolicy = ReturnExisting})})
               Nothing
           third <- case thirdRun of
             Left err     -> fail ("the released key was not claimable: " <> show (err :: Error EngineOnly))
@@ -941,7 +941,7 @@ tests =
               startDBOSWorkflowRef
                 exec
                 ref
-                (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {priority = priority})})
+                (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {priority = priority})})
                 (Just (encodeWorkflowValue name))
             case startedRun of
               Left err     -> fail (show (err :: Error EngineOnly))
@@ -1002,7 +1002,7 @@ tests =
               startDBOSWorkflowRef
                 exec
                 ref
-                (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew queueName)})
+                (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)})
                 Nothing
             case startedRun of
               Left err     -> fail (show (err :: Error EngineOnly))
@@ -1074,7 +1074,7 @@ tests =
                 startDBOSWorkflowRef
                   exec
                   ref
-                  (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})})
+                  (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})})
                   (Just (encodeWorkflowValue partition))
               case startedRun of
                 Left err     -> fail (show (err :: Error EngineOnly))
@@ -1136,7 +1136,7 @@ tests =
                 startDBOSWorkflowRef
                   exec
                   ref
-                  (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})})
+                  (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})})
                   (Just (encodeWorkflowValue partition))
               case startedRun of
                 Left err     -> fail (show (err :: Error EngineOnly))
@@ -1180,7 +1180,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew internalText)})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew internalText)})
               Nothing
           handle <- case startedRun of
             Left err     -> fail (show (err :: Error EngineOnly))
@@ -1226,7 +1226,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew queueName)})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)})
               Nothing
           case startedRun of
             Left err -> fail (show (err :: Error EngineOnly))
@@ -1366,7 +1366,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew queueName)})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)})
               Nothing
           handle <- case startedRun of
             Left err     -> fail (show (err :: Error EngineOnly))
@@ -1408,7 +1408,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew queueName)})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)})
               Nothing
           handle <- case startedRun of
             Left err     -> fail (show (err :: Error EngineOnly))
@@ -1442,7 +1442,7 @@ tests =
                   startChildWorkflow
                     wctx
                     childRef
-                    (startOptionsDefault {startWorkflowId = Just childText, startQueue = Just (enqueueNew queueName)})
+                    (startOptionsDefault {startWorkflowId = Just (WorkflowId childText), startQueue = Just (enqueueNew queueName)})
                     Nothing
                 case startedChild of
                   Left err     -> pure (Left err)
@@ -1459,7 +1459,7 @@ tests =
             runDBOSWorkflowRef
               exec
               parentRef
-              (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 300)})
+              (runOptionsDefault {runWorkflowId = Just (WorkflowId parentText), runTimeout = Explicit (secondsDuration 300)})
               (Just (encodeWorkflowValue ()))
           case ran of
             Right (Just _) -> pure ()

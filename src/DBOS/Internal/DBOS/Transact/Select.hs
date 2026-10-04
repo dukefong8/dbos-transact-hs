@@ -239,7 +239,7 @@ data Winner exec m r = forall a. Winner
 -- nothing.
 --
 -- Branches must already be built — every arm's 'armPending' comes from
--- 'DBOS.Transact.Step.pendingWorkflowStep' or
+-- 'DBOS.Transact.Step.pendingStep' or
 -- 'DBOS.Transact.Handle.pendingAwait' — so every branch has claimed its id
 -- before the race's own id follows them.
 -- | 'selectStep' over the scoped workflow view: the race's id and the

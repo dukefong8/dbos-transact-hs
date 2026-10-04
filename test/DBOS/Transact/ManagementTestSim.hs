@@ -38,7 +38,7 @@ import DBOS.Transact.ManagementSimData (mockOutput, mockSerialization)
 import DBOS.Transact
   (
     EngineOnly,
-    runWorkflowStep,
+    runStep,
     startChildWorkflow,
     CodecError,
     WorkflowCtx,
@@ -69,7 +69,7 @@ import DBOS.Transact
     resumeWorkflows,
     retrieveWorkflow,
     runDBOSWorkflow,
-    runWorkflowStep,
+    runStep,
     startDBOSWorkflowRef,
     startOptionsDefault,
     runTracer,
@@ -122,7 +122,7 @@ tests =
             startWfRefSim
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew "no-runner-here")})
               (Just (encodeWorkflowValue (0 :: Int)))
           cancelled <- cancelWorkflows dbos [workflowId] False
           handle <- orFail =<< retrieveWfSim dbos workflowId
@@ -155,7 +155,7 @@ tests =
             startWfRefSim
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew "no-runner-here")})
               (Just (encodeWorkflowValue (7 :: Int)))
           _ <- cancelWorkflows dbos [workflowId] False
           resumed <- resumeWorkflows dbos [workflowId] (Just queueName)
@@ -354,7 +354,7 @@ stagedBody :: forall s. StrictTVar (IOSim s) [Text] -> forall exec. Int -> Workf
 stagedBody ran _ wctx = do
   outcomes <-
     mapM
-      (\name -> runWorkflowStep wctx name (const (atomically (modifyTVar ran (<> [name])) >> pure (0 :: Int))))
+      (\name -> runStep wctx name (const (atomically (modifyTVar ran (<> [name])) >> pure (0 :: Int))))
       ["one", "two", "three"]
   pure (fmap (const 0) (sequence outcomes))
 

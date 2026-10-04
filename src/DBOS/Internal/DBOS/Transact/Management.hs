@@ -28,11 +28,11 @@ import Data.Text (Text)
 import Data.Word (Word64)
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelWorkflowStepName, deleteWorkflowStepName, forkOptionsValidate, forkValidate, forkWorkflowStepName, listWorkflowsStepName, resumeWorkflowStepName)
+import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionsValidate, forkValidate, forkStepName, listWorkflowsStepName, resumeStepName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, stepStatusId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
-import DBOS.Transact.Step (runWorkflowStepWith, stepOptionsDefault)
+import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 
 -- | Operator-action events: the management surface's announcements.
@@ -95,10 +95,10 @@ cancelWorkflows conn workflowIds cancelChildren = do
 -- every in-workflow call — inside a step body it runs plainly.
 cancelWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflowsInWorkflow wctx workflowIds cancelChildren =
-  runWorkflowStepWith
+  runStepWith
     stepOptionsDefault
     wctx
-    cancelWorkflowStepName
+    cancelStepName
     (\_ -> cancelWorkflows conn workflowIds cancelChildren)
   where
     conn = wctx.wctxConn
@@ -119,10 +119,10 @@ resumeWorkflows conn workflowIds queueName = do
 -- as every in-workflow call.
 resumeWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflowsInWorkflow wctx workflowIds queueName =
-  runWorkflowStepWith
+  runStepWith
     stepOptionsDefault
     wctx
-    resumeWorkflowStepName
+    resumeStepName
     (\_ -> resumeWorkflows conn workflowIds queueName)
   where
     conn = wctx.wctxConn
@@ -154,10 +154,10 @@ deleteWorkflowsWithCaller conn workflowIds deleteChildren caller = do
 -- no caller, by the leaf rule.
 deleteWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflowsInWorkflow wctx workflowIds deleteChildren =
-  runWorkflowStepWith
+  runStepWith
     stepOptionsDefault
     wctx
-    deleteWorkflowStepName
+    deleteStepName
     ( \sctx -> case stepCtxStatus sctx of
         Just status ->
           deleteWorkflowsWithCaller
@@ -190,10 +190,10 @@ forkWorkflowsInWorkflow wctx forks options =
     (Left err, _) -> pure (Left (TransactError.ErrorSystemDatabase err))
     (_, Left err) -> pure (Left (TransactError.ErrorSystemDatabase err))
     (Right (), Right _) ->
-      runWorkflowStepWith
+      runStepWith
         stepOptionsDefault
         wctx
-        forkWorkflowStepName
+        forkStepName
         (\_ -> forkWorkflows conn forks options)
   where
     conn = wctx.wctxConn
@@ -223,10 +223,10 @@ forkFromInWorkflow wctx workflowIds point options =
   case forkOptionsValidate options of
     Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
     Right () ->
-      runWorkflowStepWith
+      runStepWith
         stepOptionsDefault
         wctx
-        forkWorkflowStepName
+        forkStepName
         (\_ -> forkFrom conn workflowIds point options)
   where
     conn = wctx.wctxConn
@@ -260,7 +260,7 @@ listWorkflows conn filters = do
 -- it. Same leaf rule as every in-workflow call.
 listWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 listWorkflowsInWorkflow wctx filters =
-  runWorkflowStepWith
+  runStepWith
     stepOptionsDefault
     wctx
     listWorkflowsStepName

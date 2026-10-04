@@ -35,7 +35,7 @@ import DBOS.Transact
     WorkflowId (..),
     firstStepStatus,
     nextWorkflowMarker,
-    nextWorkflowStepId,
+    nextStepId,
     recv,
     send,
     sendBulk,
@@ -101,7 +101,7 @@ tests =
           marker <- nextWorkflowMarker wctx
           sent <- withStep wctx marker (firstStepStatus 0) $ \_ ->
             send wctx (WorkflowId "sim-message-destination") (Just (Topic "approval")) Nothing ("ping" :: Text)
-          counter <- nextWorkflowStepId wctx
+          counter <- nextStepId wctx
           pure (sent, counter)
         printSimTrace tr
         outcome @?= (Right (), 0),

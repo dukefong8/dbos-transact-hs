@@ -13,14 +13,14 @@ Status codes (verify against `WidgetTest` assertions during migration):
 ```haskell
 newtype OrderId = OrderId Int deriving stock (Eq, Show)
 
-data CheckoutOps exec m = CheckoutOps
+data CheckoutSteps exec m = CheckoutSteps
   { coCreate    :: StepCtx exec m -> m OrderId
   , coReserve   :: StepCtx exec m -> m Bool
   , coUndo      :: StepCtx exec m -> m ()
   , coSetStatus :: StepCtx exec m -> OrderId -> Int -> m ()
   }
 
-data DispatchOps exec m = DispatchOps
+data DispatchSteps exec m = DispatchSteps
   { doTick      :: StepCtx exec m -> OrderId -> m ()
   , doSetStatus :: StepCtx exec m -> OrderId -> Int -> m ()
   }
@@ -33,8 +33,8 @@ embed a sub-record once ≥3 tables need the same subgroup. No inheritance.
 ## 2. STM handlers (single atomically per op)
 
 ```haskell
-stmCheckoutOps :: WidgetStore (IOSim s) -> CheckoutOps exec (IOSim s)
-stmCheckoutOps store = CheckoutOps
+stmCheckoutSteps :: WidgetStore (IOSim s) -> CheckoutSteps exec (IOSim s)
+stmCheckoutSteps store = CheckoutSteps
   { coCreate = \_ -> atomically $ do
       oid <- readTVar store.wsNextOrder
       writeTVar store.wsNextOrder (oid + 1)
@@ -50,8 +50,8 @@ stmCheckoutOps store = CheckoutOps
       modifyTVar store.wsOrders (Map.adjust (\(_, progress) -> (status, progress)) oid)
   }
 
-stmDispatchOps :: WidgetStore (IOSim s) -> DispatchOps exec (IOSim s)
-stmDispatchOps store = DispatchOps
+stmDispatchSteps :: WidgetStore (IOSim s) -> DispatchSteps exec (IOSim s)
+stmDispatchSteps store = DispatchSteps
   { doTick = \_ (OrderId oid) -> atomically $
       modifyTVar store.wsOrders $
         Map.adjust
@@ -76,7 +76,7 @@ Notes:
 ## 3. Failing variant (deterministic seed-8)
 
 ```haskell
-failingCheckoutOps :: StrictTVar (IOSim s) Int -> WidgetStore (IOSim s) -> CheckoutOps exec (IOSim s)
+failingCheckoutSteps :: StrictTVar (IOSim s) Int -> WidgetStore (IOSim s) -> CheckoutSteps exec (IOSim s)
 -- counts table calls; the 3rd (the paid write) aborts via throwSTM:
 -- nothing recorded, checkout stops before the dispatch child.
 ```
@@ -97,7 +97,7 @@ step view beside the transaction handle, so the workflows spend the tables
 directly and the stubs are deleted. The `Tx`-ignoring fakes
 (`createOrder`, `reserveInventory`, …) and the `BackendError`-injection
 datasource (`failingWidgetDs`) are retired; the seed-8 case runs the
-domain-level `failingCheckoutOps` over the plain fake datasource.
+domain-level `failingCheckoutSteps` over the plain fake datasource.
 
 ## 5. Live contract (landed as specified)
 
@@ -107,10 +107,10 @@ per-step `Tx` exactly where the STM tables close over nothing:
 
 ```haskell
 -- live call shape (WidgetTest):
-runTransactionScoped ds wctx cfg (\sctx tx -> coReserve (pgCheckoutOps tables tx) s)
+runTransactionScoped ds wctx cfg (\sctx tx -> coReserve (pgCheckoutSteps tables tx) s)
 ```
 
-Table types (`CheckoutOps`/`DispatchOps`/`OrderId`) are shared across stacks
+Table types (`CheckoutSteps`/`DispatchSteps`/`OrderId`) are shared across stacks
 (dup'd between the sim and live trees per the test convention); only the
 builders differ (store-closed vs Tx-closed).
 
@@ -124,11 +124,25 @@ dummy `Tx` in new code.
 - [x] Direct handler tests: mint sequence, oversell race, bomb rollback,
       failing stops-before-dispatch, status codes vs `WidgetTest`
       assertions (`(1,1,0)` dispatched, `(1,-1,3)` refused).
-- [x] C-phase: Step slice accepts `StepCtx` in runners; runTransaction
+- [x] C-phase: Step slice accepts `StepCtx` in runners; runTxStep
       supplies scope+connection.
 - [x] Flip `WidgetSim` call sites; delete the `Tx`-ignoring fakes.
 - [x] PG tables + live flip; one mixed live+canned test (D2, 2026-10-04:
-      `pgCheckoutOps`/`pgDispatchOps` close over the held `Tx`;
-      `failingPgCheckoutOps` refuses the paid mark; the canned-fail case
+      `pgCheckoutSteps`/`pgDispatchSteps` close over the held `Tx`;
+      `failingPgCheckoutSteps` refuses the paid mark; the canned-fail case
       asserts no `order_id`, order `(1,0,3)`, inventory `4`, and the
       workflow row stays `PENDING` with no dispatch child).
+
+## Dual-stack conversion (2026-10-04)
+
+The widget step tables are exercised by one shared scenario set
+(`test/DBOS/Transact/WidgetCases.hs`) under both interpretations: the live
+tree runs them over Postgres with `pgCheckoutSteps`/`pgDispatchSteps` and the
+real datasource, the sim tree under IOSim with the STM handlers and a fake
+datasource. The fakes now model the checkpoint PK for real — an
+insert-or-`False` map keyed by (workflow, step id) — and the shared checks
+assert **one commit per step name** (and byte-identical effects across a
+crash-and-relaunch), so the positive cases prove the transactional step's
+once-and-only-once guarantee rather than at-least-once presence. The runner
+helpers live in `test/DBOS/DualStack.hs`; the plan and outcome are recorded in
+`docs/dual-stack-concurrency-todo.md` (Step 7).

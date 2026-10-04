@@ -82,7 +82,7 @@ tests =
           case recorded of
             Left err -> fail (show err)
             Right () -> pure ()
-          listed <- SystemDB.listWorkflowSteps backend (WorkflowId workflowText) True Nothing Nothing Nothing
+          listed <- SystemDB.listSteps backend (WorkflowId workflowText) True Nothing Nothing Nothing
           case listed of
             Right [StepRecord {stepRecordStepId = stepId, stepRecordStepName = name, stepRecordOutput = Just output}] -> do
               stepId @?= 0

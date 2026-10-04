@@ -256,7 +256,7 @@ port is deliberately stronger).
 |---|---|---|
 | R1 | `WorkflowRef m` erased (`Registry.hs:92`): JSON checked once at registration, then strings | `E` closes with the typed-error epic (#13–#16); `P`/`R` open; instance identity decided (#12) |
 | R2 | refs are immutable values; `runWorkflowRef`/`startWorkflowRef` take them by value (`Workflow.hs:573,522`) | **subsumed** (§1) |
-| R3 | `PendingStep m a` now carries its deferred run (`Checkpoint.hs`); `placeCall` claims at build and `pendingWorkflowStep`/`pendingAwait`/`drive*` split build from run; `checkHere` re-validates at drive | **landed 2026-09-30** (select core); per-poll re-check stays runtime (§9) |
+| R3 | `PendingStep m a` now carries its deferred run (`Checkpoint.hs`); `placeCall` claims at build and `pendingStep`/`pendingAwait`/`drive*` split build from run; `checkHere` re-validates at drive | **landed 2026-09-30** (select core); per-poll re-check stays runtime (§9) |
 | R4/R5 | `selectStep` takes `[SelectArm]` only — a start or a run can never be raced — and the pending layer backs it | **core landed 2026-09-30; macro dropped by decision** (typed core over syntax; the `<2` refusal is runtime and side-effect-free; guards and `else` arms are not expressible as arms, so there is nothing to refuse) |
 | R6 | `WorkflowHandle m` carries both provenances (`Polling`/`Local`) and `awaitChild` records while `handleResult` is the ctx-less face | **Local landed 2026-09-30**: task channel + `LocalTaskOutcome`, `spawnLocal` seam; run path, child starts and top-level starts hand back `Local`; joins/enqueues/retrievals poll. E-typing and one-shot await open |
 | R7 | `StepPlacement(..)` exported (`Transact.hs:144-149`); comparisons are workflow id + marker text; the await's child-id check and the child start's instance check are both in place | **landed 2026-09-30** (await check with #7; instance identity with ADR-0018) |
@@ -306,7 +306,7 @@ port is deliberately stronger).
   start is local and a join polls"; full suite 611/611 (parallel).
 - Landed after the map was drawn: the select core (`DBOS.Transact.Select`)
   + the pending layer (`PendingStep` carries its run; `placeCall`/
-  `pendingWorkflowStep`/`pendingAwait`/`drive*`), with `selectStep`
+  `pendingStep`/`pendingAwait`/`drive*`), with `selectStep`
   racing arms in source order and cancelling losers; a control-ended step
   now records no row (fidelity fix found by the control-winner case). The
   oracle's `select_step!` macro is deliberately not ported: the semantic

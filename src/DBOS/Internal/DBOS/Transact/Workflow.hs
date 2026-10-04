@@ -72,7 +72,7 @@ import DBOS.SystemDB.Types (ApplicationVersion, AwaitedOutcome (..), Duration, E
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeWorkflowValue)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, nextExecutionIdentity, runSystemDB)
-import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), deadline, insideAStep, newWorkflowState, nextWorkflowStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
+import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), deadline, insideAStep, newWorkflowState, nextStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
@@ -465,7 +465,7 @@ resolveTimeoutDeadline timeout queue parentDeadline now =
 -- be both queued and waited for here, so there is no queue to name — see
 -- 'StartOptions'.
 data RunOptions = RunOptions
-  { runWorkflowId :: Maybe Text,
+  { runWorkflowId :: Maybe WorkflowId,
     runTimeout :: Timeout,
     runAttributes :: Maybe (Map Text Value)
   }
@@ -477,7 +477,7 @@ data RunOptions = RunOptions
 -- 'EnqueueOptions' bare spellings, and one module cannot hold the names
 -- twice.
 data StartOptions = StartOptions
-  { startWorkflowId :: Maybe Text,
+  { startWorkflowId :: Maybe WorkflowId,
     startTimeout :: Timeout,
     startQueue :: Maybe Enqueue,
     startAttributes :: Maybe (Map Text Value)
@@ -521,10 +521,10 @@ runOptionsToStartOptions options =
 -- recovered mid-run re-derives the same id, finds the child it already
 -- started, and adopts it instead of starting a second one. An
 -- application-assigned id wins over the derivation, in every reference.
-childWorkflowId :: Maybe Text -> Maybe (Text, Int) -> Text -> Text
+childWorkflowId :: Maybe WorkflowId -> Maybe (Text, Int) -> Text -> Text
 childWorkflowId chosen parent generated =
   case (chosen, parent) of
-    (Just offered, _) -> offered
+    (Just (WorkflowId offered), _) -> offered
     (Nothing, Just (parentId, stepId)) -> parentId <> "-" <> pack (show stepId)
     (Nothing, Nothing) -> generated
 
@@ -565,7 +565,7 @@ startWorkflowRef tasks conn identity snapshot ref options input =
       now <- timestampNow
       generated <- generatedWorkflowId conn
       let key = ref.refKey
-          workflowText = fromMaybe generated options.startWorkflowId
+          workflowText = maybe generated (\(WorkflowId offered) -> offered) options.startWorkflowId
           deadline' = resolveTimeoutDeadline options.startTimeout options.startQueue Nothing now
           base = workflowNewWorkflow conn identity key (WorkflowId workflowText) input ((.name) <$> options.startQueue)
           new =
@@ -615,7 +615,7 @@ runWorkflowRef tasks conn identity snapshot ref options input = do
   now <- timestampNow
   generated <- generatedWorkflowId conn
   let key = ref.refKey
-      workflowText = fromMaybe generated options.runWorkflowId
+      workflowText = maybe generated (\(WorkflowId offered) -> offered) options.runWorkflowId
       new =
         (workflowNewWorkflow conn identity key (WorkflowId workflowText) input Nothing)
           { newWorkflowTimeout = timeoutBudget options.runTimeout,
@@ -665,7 +665,7 @@ startChildWorkflow wctx ref options input = do
           | otherwise -> case traverse validateEnqueue options.startQueue of
               Left err -> pure (Left (TransactError.liftEngine err))
               Right _ -> do
-                parentStepId <- nextWorkflowStepId wctx
+                parentStepId <- nextStepId wctx
                 startChild parentStepId
   where
     key = ref.refKey

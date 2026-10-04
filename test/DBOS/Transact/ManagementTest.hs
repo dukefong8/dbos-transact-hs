@@ -96,7 +96,7 @@ import DBOS.Transact
     retrieveWorkflow,
     nullTracer,
     runDBOSWorkflow,
-    runWorkflowStep,
+    runStep,
     setWorkflowDelay,
     shutdown,
     updateWorkflowAttributes,
@@ -167,7 +167,7 @@ tests =
             startWfRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew "no-runner-here")})
               (Just (encodeWorkflowValue (0 :: Int)))
           case started of
             Left err -> fail (show err)
@@ -205,7 +205,7 @@ tests =
             startWfRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew "no-runner-here")})
               (Just (encodeWorkflowValue (7 :: Int)))
           case started of
             Left err -> fail (show err)
@@ -266,7 +266,7 @@ tests =
         withInstance "mgmt-delete" $ \dbos suffix -> do
           let key = newWorkflowKey "deletable"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body input wctx = runWorkflowStep wctx "work" (const (pure input))
+              body input wctx = runStep wctx "work" (const (pure input))
               workflowText = "hs-l2-mgmt-delete-" <> suffix
               workflowId = WorkflowId workflowText
           registered <- registerDBOSWorkflow dbos key body
@@ -383,7 +383,7 @@ tests =
               body _ wctx = do
                 outcomes <-
                   mapM
-                    (\name -> runWorkflowStep wctx name (const (modifyIORef' ran (<> [name]) >> pure (0 :: Int))))
+                    (\name -> runStep wctx name (const (modifyIORef' ran (<> [name]) >> pure (0 :: Int))))
                     ["one", "two", "three"]
                 pure (fmap (const 0) (sequence outcomes))
               sourceText = "hs-l2-mgmt-fork-step-source-" <> suffix
@@ -546,7 +546,7 @@ tests =
               sourceId = WorkflowId ("hs-l2-mgmt-fork-fail-src-" <> suffix)
               flakyBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               flakyBody _ wctx = do
-                first <- runWorkflowStep wctx "one" (const (pure (0 :: Int)))
+                first <- runStep wctx "one" (const (pure (0 :: Int)))
                 case first of
                   Left err -> pure (Left err)
                   Right _ -> do
@@ -554,7 +554,7 @@ tests =
                     modifyIORef' calls (+ 1)
                     if attempt < 1
                       then pure (Left (StepFailed "two" "boom"))
-                      else runWorkflowStep wctx "two" (const (pure 99))
+                      else runStep wctx "two" (const (pure 99))
           registered <- registerDBOSWorkflow dbos key flakyBody
           case registered of
             Left err -> fail (show err)
@@ -736,7 +736,7 @@ tests =
           target <- readRow getBackend (WorkflowId targetText)
           target.workflowRecordStatus @?= Cancelled
           backend <- getBackend
-          listed <- SystemDB.listWorkflowSteps backend (WorkflowId operatorText) False Nothing Nothing Nothing
+          listed <- SystemDB.listSteps backend (WorkflowId operatorText) False Nothing Nothing Nothing
           case listed of
             Right steps ->
               map (\StepRecord {stepRecordStepId = sid, stepRecordStepName = name} -> (sid, name)) steps
@@ -752,7 +752,7 @@ tests =
               sourceText = "hs-l2-mgmt-replay-src-" <> suffix
               operatorText = "hs-l2-mgmt-replay-op-" <> suffix
               sourceBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              sourceBody value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+              sourceBody value wctx = runStep wctx "double" (const (pure (value * 2)))
           shouldCrash <- newIORef True
           seen <- newEmptyMVar
           let operatorBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
@@ -860,7 +860,7 @@ tests =
               assertEqual "the resumed workflow runs" (Right 1) decoded
             other -> fail ("expected the resumed run, got: " <> show other)
           backend <- getBackend
-          listed <- SystemDB.listWorkflowSteps backend (WorkflowId operatorText) False Nothing Nothing Nothing
+          listed <- SystemDB.listSteps backend (WorkflowId operatorText) False Nothing Nothing Nothing
           case listed of
             Right steps ->
               map (\StepRecord {stepRecordStepId = sid, stepRecordStepName = name} -> (sid, name)) steps
@@ -884,7 +884,7 @@ tests =
                       case cancelled of
                         Left err -> pure (Left err)
                         Right _ -> do
-                          probe <- runWorkflowStep wctx "probe" (const (pure ()))
+                          probe <- runStep wctx "probe" (const (pure ()))
                           case probe of
                             Left err -> pure (Left err)
                             Right () -> pure (Right ())
@@ -898,7 +898,7 @@ tests =
                   Right _ -> pure ()
                   other -> fail ("expected the operator to run, got: " <> show other)
                 backend <- getBackend
-                listed <- SystemDB.listWorkflowSteps backend (WorkflowId operatorText) False Nothing Nothing Nothing
+                listed <- SystemDB.listSteps backend (WorkflowId operatorText) False Nothing Nothing Nothing
                 case listed of
                   Right [StepRecord {stepRecordStepId = sid, stepRecordStepName = name}] ->
                     (sid, name) @?= (0, "probe")
@@ -922,7 +922,7 @@ tests =
             -- before any id is taken.
             refused <- forkWorkflowsInWorkflow wctx [(forkNew "source") {forkForkedId = Just ""}] defaultForkOptions
             -- The probe that follows still takes step zero.
-            probe <- (runWorkflowStep wctx "probe" (const (pure ())) :: IO (Either (Error EngineOnly) ()))
+            probe <- (runStep wctx "probe" (const (pure ())) :: IO (Either (Error EngineOnly) ()))
             pure (refused, probe)
         case refused of
           Left (ErrorSystemDatabase (SystemDB.InvalidInput {})) -> pure ()
@@ -930,7 +930,7 @@ tests =
         case probe of
           Left err -> fail (show err)
           Right () -> pure ()
-        listed <- SystemDB.listWorkflowSteps backend (WorkflowId workflowText) False Nothing Nothing Nothing
+        listed <- SystemDB.listSteps backend (WorkflowId workflowText) False Nothing Nothing Nothing
         case listed of
           Right [StepRecord {stepRecordStepId = sid, stepRecordStepName = name}] ->
             (sid, name) @?= (0, "probe")
@@ -949,7 +949,7 @@ tests =
         emptied <- withWorkflow conn mgmtTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
           forkWorkflowsInWorkflow wctx [] defaultForkOptions
         emptied @?= Right []
-        listed <- SystemDB.listWorkflowSteps backend (WorkflowId workflowText) False Nothing Nothing Nothing
+        listed <- SystemDB.listSteps backend (WorkflowId workflowText) False Nothing Nothing Nothing
         case listed of
           Right [StepRecord {stepRecordStepId = sid, stepRecordStepName = name}] ->
             (sid, name) @?= (0, "DBOS.forkWorkflow")
@@ -975,7 +975,7 @@ tests =
             startWfRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just ("hs-l2-delayed-" <> suffix), startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 3600)})})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId ("hs-l2-delayed-" <> suffix)), startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 3600)})})
               Nothing
           case started of
             Left err -> fail (show err)

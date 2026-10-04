@@ -2845,8 +2845,8 @@ instance SystemDB PostgresSystemDB IO where
                   pure (() <$ claimed)
     where
       widText = case wid of Types.WorkflowId text -> text
-  listWorkflowSteps env wid loadOutput limit offset _caller = do
-    result <- runSession env "list_workflow_steps" (Statements.listWorkflowStepsSession (unwrap wid) loadOutput limit offset)
+  listSteps env wid loadOutput limit offset _caller = do
+    result <- runSession env "list_workflow_steps" (Statements.listStepsSession (unwrap wid) loadOutput limit offset)
     pure (fmap (map toRecord) result)
     where
       unwrap (Types.WorkflowId widText) = widText

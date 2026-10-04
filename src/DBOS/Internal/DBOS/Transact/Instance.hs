@@ -20,6 +20,7 @@ module DBOS.Transact.Instance
     launch,
     launchWithEnvironment,
     launchOn,
+    launchExecutor,
     shutdown,
     requireExecutor,
     registerDBOSWorkflowRef,
@@ -189,24 +190,12 @@ launchWithEnvironment dbos environment =
             case started of
               Left err -> releaseFastLogger >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources >> pure (Left err)
               Right executor -> do
-                -- The registry learns which connection this launch installed,
-                -- so a child start can tell another instance's reference
-                -- apart (ADR-0018).
-                bindRegistryInstance dbos.dbos_registry executor.conn.connInstanceId
-                runTracer tracer (EngineLaunched resolved.identityAppName resolved.identityExecutorId resolved.identityAppVersion)
-                _ <-
-                  spawnTracked
-                    executor.tasks
-                    ( superviseForever
-                        executor.tasks
-                        executor.conn
-                        executor.identity
-                        executor.workflows
-                        executor.listen_queues
-                    )
+                launched <-
+                  launchExecutor dbos executor
                     `onException` (closeConnection executor.conn >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources)
-                modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
-                pure (Right executor)
+                case launched of
+                  Left err -> releaseFastLogger >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources >> pure (Left err)
+                  Right executor' -> pure (Right executor')
 
 -- | Shutdown is idempotent and reopens registration for a later launch.
 -- Tasks are aborted and waited for before the connection closes, so a
@@ -256,8 +245,8 @@ runDBOSWorkflowRef executor ref options input = do
   outcome <-
     runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
   case options.runWorkflowId of
-    Just workflowText -> do
-      _ <- MThrow.try (clearDatasourceCheckpoints executor.datasources (WorkflowId workflowText)) :: m (Either SomeException ())
+    Just workflowId' -> do
+      _ <- MThrow.try (clearDatasourceCheckpoints executor.datasources workflowId') :: m (Either SomeException ())
       pure outcome
     Nothing -> pure outcome
 
@@ -419,6 +408,10 @@ sendWorkflowMessages dbos messages = do
       pure (either (Left . TransactError.ErrorSystemDatabase) Right written)
 
 -- | Ids of the most recent workflows with this name, newest first, capped.
+-- | The most recent ids registered under one workflow name: the "last N
+-- by name" list the clients render. Descending on purpose — the oracle's
+-- filter defaults to oldest-first, which is useless under a limit on a
+-- used database (the newest run falls outside the window).
 listWorkflowIdsByName :: (MonadMVar m, Monad m) => DBOS m -> Text -> Int64 -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 listWorkflowIdsByName dbos name limit = do
   running <- requireExecutor dbos "list workflows"
@@ -428,7 +421,17 @@ listWorkflowIdsByName dbos name limit = do
       listed <-
         runSystemDB
           executor.conn.connSysdb
-          (\db -> SystemDB.listWorkflows db (defaultWorkflowFilter {workflowFilterNames = [name], workflowFilterLimit = Just limit}) Nothing)
+          ( \db ->
+              SystemDB.listWorkflows
+                db
+                ( defaultWorkflowFilter
+                    { workflowFilterNames = [name],
+                      workflowFilterLimit = Just limit,
+                      workflowFilterSortDesc = True
+                    }
+                )
+                Nothing
+          )
       pure $ case listed of
         Left err      -> Left (TransactError.ErrorSystemDatabase err)
         Right records -> Right [record.workflowRecordId | record <- records]
@@ -481,6 +484,26 @@ launchOn dbos conn identity = do
   modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
   pure executor
 
+-- | Complete a launch over an executor a caller has built: register the
+-- application version, recover this executor's pending rows, announce the
+-- launch, and fork the supervisor. The IO launch and the simulated launches
+-- build the executor differently — pool vs caller connection, configured
+-- queues vs none — and run this same tail from here on. (launchOn has
+-- already bound the registry and installed the executor; the repeats below
+-- keep this tail self-contained for the IO builder path, which does
+-- neither — both operations are idempotent.)
+launchExecutor :: (MonadSTM m, MonadMVar m, MonadFork m, MThrow.MonadMask m, MonadDelay m, MonadTimer m, MonadTime m) => DBOS m -> Executor m -> m (Either (TransactError.Error TransactError.EngineOnly) (Executor m))
+launchExecutor dbos executor = do
+  prepared <- prepare executor.conn executor.identity
+  case prepared of
+    Left err -> closeConnection executor.conn >> pure (Left err)
+    Right _ -> do
+      bindRegistryInstance dbos.dbos_registry executor.conn.connInstanceId
+      runTracer executor.conn.connTracer (EngineLaunched executor.identity.identityAppName executor.identity.identityExecutorId executor.identity.identityAppVersion)
+      _ <- spawnTracked executor.tasks (superviseForever executor.tasks executor.conn executor.identity executor.workflows executor.listen_queues)
+      modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
+      pure (Right executor)
+
 startExecutor :: Config -> Identity -> Snapshot IO -> DataSourceRegistry IO -> SomeTracer IO -> IO () -> IO (Either (TransactError.Error TransactError.EngineOnly) (Executor IO))
 startExecutor config' identity' workflowsSnapshot sources tracer releaseTracer = do
   when (snapshotSize workflowsSnapshot == 0) $
@@ -489,25 +512,21 @@ startExecutor config' identity' workflowsSnapshot sources tracer releaseTracer =
   case acquired of
     Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
     Right conn' -> do
-      prepared <- prepare conn' identity'
-      case prepared of
-        Left err -> closeConnection conn' >> pure (Left err)
-        Right _ -> do
-          tasks' <- newTasks
-          pure
-            ( Right
-                Executor
-                  { conn = conn',
-                    identity = identity',
-                    workflows = workflowsSnapshot,
-                    datasources = sources,
-                    listen_queues = config'.configListenQueues,
-                    tasks = tasks',
-                    releaseTracer = releaseTracer
-                  }
-            )
+      tasks' <- newTasks
+      pure
+        ( Right
+            Executor
+              { conn = conn',
+                identity = identity',
+                workflows = workflowsSnapshot,
+                datasources = sources,
+                listen_queues = config'.configListenQueues,
+                tasks = tasks',
+                releaseTracer = releaseTracer
+              }
+        )
 
-prepare :: Connection IO -> Identity -> IO (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+prepare :: Monad m => Connection m -> Identity -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 prepare conn identity' = do
   registered <- runSystemDB conn.connSysdb (\db -> SystemDB.createApplicationVersion db identity'.identityAppVersion Nothing)
   case registered of

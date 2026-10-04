@@ -22,12 +22,13 @@ import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
+import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (runSimCase, simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (AwaitedOutcome (..), Outcome (..), StepRecord (..), Timestamp (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, defaultWorkflowFilter, getWorkflow, listWorkflowSteps)
+import DBOS.SystemDB (AwaitedOutcome (..), Outcome (..), StepRecord (..), Timestamp (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, defaultWorkflowFilter, getWorkflow, listSteps)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simEntropy, simGeneratedId, simIdentity, simInstance)
-import DBOS.Transact (CodecError, DBOS, Executor, WorkflowCtx, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, millisDuration, newWorkflowKey, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflowRef, registerDBOSWorkflow, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, waitForWorkflow, startChildWorkflow)
+import DBOS.Transact (CodecError, DBOS, Executor, WorkflowCtx, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, millisDuration, newWorkflowKey, pendingAwait, pendingStepWith, registerDBOSWorkflowRef, registerDBOSWorkflow, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runStep, runStepWith, secondsDuration, selectStep, shutdown, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, waitForWorkflow, startChildWorkflow)
 import DBOS.Transact.Workflow (childWorkflowId)
 import DBOS.Transact.Connection (SomeSystemDB (..))
 import DBOS.Transact.WorkflowTest
@@ -131,7 +132,7 @@ tests =
   dependentTestGroup
     "Workflow execution (Sim)"
     AllFinish
-    [ simCase "a registered workflow starts and records its result" scenarioRegisteredRecordsResult checkRegisteredResult traceRegisteredResult,
+    [ simCase simWfFixture "a registered workflow starts and records its result" scenarioRegisteredRecordsResult checkRegisteredResult traceRegisteredResult,
       -- IO only: crash-and-relaunch recovery sweep (MemSystemDB delegates
       -- reenqueueForRecovery to the canned mock; see ADR-0020).
       testCase "a recovery run replays completed steps after a body interruption" (pure ()),
@@ -151,45 +152,45 @@ tests =
         runOptionsDefault @?= RunOptions Nothing Inherit Nothing
         startOptionsDefault @?= StartOptions Nothing Inherit Nothing Nothing
         runOptionsToStartOptions runOptionsDefault @?= startOptionsDefault
-        childWorkflowId (Just "chosen") (Just ("parent", 3)) "generated" @?= "chosen"
+        childWorkflowId (Just (WorkflowId "chosen")) (Just ("parent", 3)) "generated" @?= "chosen"
         childWorkflowId Nothing (Just ("parent", 0)) "generated" @?= "parent-0"
         childWorkflowId Nothing (Just ("parent", 2)) "generated" @?= "parent-2"
         childWorkflowId Nothing Nothing "generated" @?= "generated",
-      simCase "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId traceJoinTakesId,
-      simCase "a fresh start is local and a join polls" scenarioFreshJoinPolls checkFreshJoinPolls traceFreshJoinPolls,
-      simCase "awaiting a child is recorded as a step" scenarioAwaitRecorded checkAwaitRecorded traceAwaitRecorded,
-      simCase "a recorded await of another workflow is refused" scenarioStaleAwaitRefused checkStaleAwaitRefused traceStaleAwaitRefused,
-      simCase "awaiting a child inside a step is covered by that step" scenarioAwaitInsideStep checkAwaitInsideStep traceAwaitInsideStep,
-      simCase "child starts and awaits keep their ids in build order" scenarioChildIdsInBuildOrder checkChildIdsInBuildOrder traceChildIdsInBuildOrder,
-      simCase "runs claim their pairs of step ids adjacently" scenarioStepIdPairs checkStepIdPairs traceStepIdPairs,
-      simCase "a select step races a step against a child's result" scenarioSelectStepRaces checkSelectStepRaces traceSelectStepRaces,
-      simCase "a scoped select races two pending steps" scenarioScopedSelect checkScopedSelect traceScopedSelect,
-      simCase "a converted body runs through the scoped entries" scenarioScopedBody checkScopedBody traceScopedBody,
-      simCase "a control signal winning a select records no winner" scenarioControlSelect checkControlSelect traceControlSelect,
-      simCase "a losing step has its cancellation token fired" scenarioLosingTokenFired checkLosingTokenFired traceLosingTokenFired,
-      simCase "a cancelled child is an awaited cancellation in the parent" scenarioCancelledChildAwaited checkCancelledChildAwaited traceCancelledChildAwaited,
+      simCase simWfFixture "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId traceJoinTakesId,
+      simCase simWfFixture "a fresh start is local and a join polls" scenarioFreshJoinPolls checkFreshJoinPolls traceFreshJoinPolls,
+      simCase simWfFixture "awaiting a child is recorded as a step" scenarioAwaitRecorded checkAwaitRecorded traceAwaitRecorded,
+      simCase simWfFixture "a recorded await of another workflow is refused" scenarioStaleAwaitRefused checkStaleAwaitRefused traceStaleAwaitRefused,
+      simCase simWfFixture "awaiting a child inside a step is covered by that step" scenarioAwaitInsideStep checkAwaitInsideStep traceAwaitInsideStep,
+      simCase simWfFixture "child starts and awaits keep their ids in build order" scenarioChildIdsInBuildOrder checkChildIdsInBuildOrder traceChildIdsInBuildOrder,
+      simCase simWfFixture "runs claim their pairs of step ids adjacently" scenarioStepIdPairs checkStepIdPairs traceStepIdPairs,
+      simCase simWfFixture "a select step races a step against a child's result" scenarioSelectStepRaces checkSelectStepRaces traceSelectStepRaces,
+      simCase simWfFixture "a scoped select races two pending steps" scenarioScopedSelect checkScopedSelect traceScopedSelect,
+      simCase simWfFixture "a converted body runs through the scoped entries" scenarioScopedBody checkScopedBody traceScopedBody,
+      simCase simWfFixture "a control signal winning a select records no winner" scenarioControlSelect checkControlSelect traceControlSelect,
+      simCase simWfFixture "a losing step has its cancellation token fired" scenarioLosingTokenFired checkLosingTokenFired traceLosingTokenFired,
+      simCase simWfFixture "a cancelled child is an awaited cancellation in the parent" scenarioCancelledChildAwaited checkCancelledChildAwaited traceCancelledChildAwaited,
       -- IO only: recorded-await replay across two launches (needs the
       -- recovery sweep).
       testCase "a replayed parent reads the recorded outcome rather than waiting again" (pure ()),
-      simCase "a child inherits its parent's deadline" scenarioDeadlineInherited checkDeadlineInherited traceDeadlineInherited,
-      simCase "a child's own timeout replaces the inherited deadline" scenarioChildBudgetWins checkChildBudgetWins traceChildBudgetWins,
-      simCase "a child can decline the inherited deadline" scenarioDeclinedDeadline checkDeclinedDeadline traceDeclinedDeadline,
-      simCase "a parent and its child hit an inherited deadline independently" scenarioCascadeDeadline checkCascadeDeadline traceCascadeDeadline,
-      simCase "a parent starts a child under a derived id and replay adopts it" scenarioDerivedChildAdopted checkDerivedChildAdopted traceDerivedChildAdopted,
-      simCase "starting a child inside a step is refused, not recorded" scenarioChildInsideStepRefused checkChildInsideStepRefused traceChildInsideStepRefused,
-      simCase "starting a child through a captured parent is refused, not recorded" scenarioCaptureChildRefused checkCaptureChildRefused traceCaptureChildRefused,
-      simCase "a child that fails differently is started through lift" scenarioLiftChildError checkLiftChildError traceLiftChildError,
+      simCase simWfFixture "a child inherits its parent's deadline" scenarioDeadlineInherited checkDeadlineInherited traceDeadlineInherited,
+      simCase simWfFixture "a child's own timeout replaces the inherited deadline" scenarioChildBudgetWins checkChildBudgetWins traceChildBudgetWins,
+      simCase simWfFixture "a child can decline the inherited deadline" scenarioDeclinedDeadline checkDeclinedDeadline traceDeclinedDeadline,
+      simCase simWfFixture "a parent and its child hit an inherited deadline independently" scenarioCascadeDeadline checkCascadeDeadline traceCascadeDeadline,
+      simCase simWfFixture "a parent starts a child under a derived id and replay adopts it" scenarioDerivedChildAdopted checkDerivedChildAdopted traceDerivedChildAdopted,
+      simCase simWfFixture "starting a child inside a step is refused, not recorded" scenarioChildInsideStepRefused checkChildInsideStepRefused traceChildInsideStepRefused,
+      simCase simWfFixture "starting a child through a captured parent is refused, not recorded" scenarioCaptureChildRefused checkCaptureChildRefused traceCaptureChildRefused,
+      simCase simWfFixture "a child that fails differently is started through lift" scenarioLiftChildError checkLiftChildError traceLiftChildError,
       -- IO only: the body performs real IO (the foreign charge call),
       -- which the simulator cannot run.
       testCase "a foreign error is converted at the boundary" (pure ()),
-      simCase "a child started and never awaited is still recorded" scenarioUnawaitedChild checkUnawaitedChild traceUnawaitedChild,
-      simCase "children started in a loop run concurrently" scenarioFanout checkFanout traceFanout,
+      simCase simWfFixture "a child started and never awaited is still recorded" scenarioUnawaitedChild checkUnawaitedChild traceUnawaitedChild,
+      simCase simWfFixture "children started in a loop run concurrently" scenarioFanout checkFanout traceFanout,
       -- IO only: first-to-settle timing is wall-clock-bound.
       testCase "select reports the first workflow to settle, not the first started" (pure ()),
-      simCase "an assigned child id wins over the derived one" scenarioAssignedChildAdopted checkAssignedChildAdopted traceAssignedChildAdopted,
-      simCase "a workflow started outside a workflow has no parent" scenarioRootNoParent checkRootNoParent traceRootNoParent,
-      simCase "a start position holding a plain step is refused" scenarioPlainStepAtStart checkPlainStepAtStart tracePlainStepAtStart,
-      simCase "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance traceWrongInstance,
+      simCase simWfFixture "an assigned child id wins over the derived one" scenarioAssignedChildAdopted checkAssignedChildAdopted traceAssignedChildAdopted,
+      simCase simWfFixture "a workflow started outside a workflow has no parent" scenarioRootNoParent checkRootNoParent traceRootNoParent,
+      simCase simWfFixture "a start position holding a plain step is refused" scenarioPlainStepAtStart checkPlainStepAtStart tracePlainStepAtStart,
+      simCase simWfFixture "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance traceWrongInstance,
       testCase "a child joining a held key is recorded as the workflow it joined" $ do
         (outcome, tr) <- runSimCase $ do
           mem <- newMemDB
@@ -219,7 +220,7 @@ tests =
             startWfRefSim
               exec
               childRef
-              (startOptionsDefault {startWorkflowId = Just holderText, startQueue = Just (enqueueNew queueName) {deduplicationId = Just dedupKey}})
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId holderText), startQueue = Just (enqueueNew queueName) {deduplicationId = Just dedupKey}})
               Nothing
           case holderStarted of
             Left err -> throwIO (userError (show err))
@@ -227,7 +228,7 @@ tests =
           orFailSys =<< SystemDB.recordWorkflowOutcome mem (WorkflowId holderText) (OutcomeOutput (Just "9"))
           outcome <- runWfSim exec parentKey (WorkflowId parentText) Nothing
           derived <- getWorkflow mem (WorkflowId derivedText)
-          listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
+          listed <- SystemDB.listSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
           children <- SystemDB.getWorkflowChildren mem (WorkflowId parentText)
           pure (outcome, derived, listed, children)
         case outcome of
@@ -254,15 +255,15 @@ tests =
                   awaitedChild @?= "sim-join-holder"
               other -> fail ("expected the joining start and its recorded await, got: " <> show other)
             children @?= Right [],
-      simCase "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
-      simCase "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
-      simCase "a panicking workflow leaves its row pending" scenarioPanic checkPanic tracePanic,
-      simCase "retrieving before launch is refused" scenarioRetrieveBeforeLaunch checkRunBeforeLaunch traceRunBeforeLaunch,
-      simCase "an application error round-trips as itself" scenarioAppErrorRoundtrip checkAppErrorRoundtrip traceAppErrorRoundtrip,
-      simCase "a database failure is not the workflow outcome" scenarioDbFailureNotOutcome checkDbFailureNotOutcome traceDbFailureNotOutcome,
-      simCase "a workflow records the steps it took" scenarioStepsTaken checkStepsTaken traceStepsTaken,
-      simCase "shutdown cancels a running workflow and leaves it pending" scenarioShutdownCancels checkShutdownCancels traceShutdownCancels,
-      simCase "dropping the future does not stop the workflow" scenarioDropFuture checkDropFuture traceDropFuture,
+      simCase simWfFixture "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
+      simCase simWfFixture "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
+      simCase simWfFixture "a panicking workflow leaves its row pending" scenarioPanic checkPanic tracePanic,
+      simCase simWfFixture "retrieving before launch is refused" scenarioRetrieveBeforeLaunch checkRunBeforeLaunch traceRunBeforeLaunch,
+      simCase simWfFixture "an application error round-trips as itself" scenarioAppErrorRoundtrip checkAppErrorRoundtrip traceAppErrorRoundtrip,
+      simCase simWfFixture "a database failure is not the workflow outcome" scenarioDbFailureNotOutcome checkDbFailureNotOutcome traceDbFailureNotOutcome,
+      simCase simWfFixture "a workflow records the steps it took" scenarioStepsTaken checkStepsTaken traceStepsTaken,
+      simCase simWfFixture "shutdown cancels a running workflow and leaves it pending" scenarioShutdownCancels checkShutdownCancels traceShutdownCancels,
+      simCase simWfFixture "dropping the future does not stop the workflow" scenarioDropFuture checkDropFuture traceDropFuture,
       -- Sim only: not yet mirrored on IO (needs wall-clock
       -- budget/body scaling).
       testCase "a budget cancels the workflow durably" $ do
@@ -279,7 +280,7 @@ tests =
             runWfRefSim
               exec
               ref
-              (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (millisDuration 1)})
+              (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText), runTimeout = Explicit (millisDuration 1)})
               Nothing
           row <- getWorkflow mem (WorkflowId workflowText)
           pure (ran, row)
@@ -291,8 +292,8 @@ tests =
             case row of
               Right (Just found) -> found.workflowRecordStatus @?= Cancelled
               other              -> fail ("expected the row CANCELLED, got: " <> show other),
-      simCase "a started workflow carries the attributes it was given" scenarioAttributes checkAttributes traceAttributes,
-      simCase "a step error is recorded in its column" scenarioStepErrorRecorded checkStepErrorRecorded traceStepErrorRecorded,
+      simCase simWfFixture "a started workflow carries the attributes it was given" scenarioAttributes checkAttributes traceAttributes,
+      simCase simWfFixture "a step error is recorded in its column" scenarioStepErrorRecorded checkStepErrorRecorded traceStepErrorRecorded,
       -- Sim only: typed trace assertions live only in sim.
       testCase "workflow announcements carry their counts and ids" $ do
         (_, tr) <- runSimCase demoTrace
@@ -374,22 +375,6 @@ simWfFixture = do
     (simEntropy entropy)
     (SomeSystemDB mem)
     simTracer
-
--- | One sim leaf: build the sim fixture, drive the shared scenario
--- through @runSimCase@, judge the value by the shared check and the
--- trace by typed event assertions. Nothing prints: the watcher stays
--- quiet and the trace speaks through types, not lines. The mirror of
--- 'liveCase': same scenario, same value check, sim runner plus events.
-simCase ::
-  String ->
-  (forall s. WfFixture (IOSim s) -> IOSim s a) ->
-  (a -> Either String ()) ->
-  (forall x. SimTrace x -> IO ()) ->
-  TestTree
-simCase name scen check traceCheck = testCase name $ do
-  (out, tr) <- runSimCase (simWfFixture >>= scen)
-  either fail pure (check out)
-  traceCheck tr
 
 -- | Typed event assertions for the converted sim leaves: what the engine
 -- emitted, constructor by constructor. Read off the say trace once, then

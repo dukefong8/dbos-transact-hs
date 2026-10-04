@@ -43,8 +43,8 @@ workflow body only.
 | `awaitChild` | plain (unrecorded settle) | plain. No change (read-only wait, no ids) |
 | `sleep` | plain | plain (via `placeCall` — slice 1). No change |
 | `selectStep` | fresh/non-recorded | same (via `placeCall` — slice 1) + `<2` arms `ErrorConfig`. No change |
-| `runTransaction` | refused (`InsideStep`) | **HOLE — proceeded** (`inStep` check only). Fix: slice 5 |
-| `runWorkflowStep` (nested) | plain (leaf rule) | plain (via `placeCall` — slice 1). Matches TS "step-from-step nests" |
+| `runTxStep` | refused (`InsideStep`) | **HOLE — proceeded** (`inStep` check only). Fix: slice 5 |
+| `runStep` (nested) | plain (leaf rule) | plain (via `placeCall` — slice 1). Matches TS "step-from-step nests" |
 | `enqueueWorkflow` / `enqueueDBOSWorkflow` / `startWorkflowRef` via `currentConnection` or captured `DBOS`/`Client` | n/a (no `Ctx`) — **HOLE: reachable from a step body with no guard** | same. Fix: engine rewire (below), not a point fix |
 
 The shared fix for the point holes is one predicate,
@@ -96,7 +96,7 @@ documentation. No delta.
 TS Incorrect: raw `pool.query` in a workflow (not checkpointed). Correct:
 `dataSource.runTransaction` (exactly-once, checkpointed).
 
-Tree: `runTransaction` is the bracketed path with `transaction_completion`
+Tree: `runTxStep` is the bracketed path with `transaction_completion`
 exactly-once (`Datasource/Postgres.hs:171-200`, check-outside / body+record
 in one tx / `ON CONFLICT DO NOTHING` adopt-winner). Two raw paths exist
 alongside it:
@@ -146,7 +146,7 @@ hole. No delta.
 ## 8. Deltas
 
 Implemented (slices 4–6): `insideAStep` + depth guards on `send` /
-`recv` (slice 4), `getEvent` / `runTransaction` (slice 5), each with
+`recv` (slice 4), `getEvent` / `runTxStep` (slice 5), each with
 live+sim RED tests; `raceCancel` + `runAppSession` docs (slice 6).
 Deferred: a typed start wrapper (taking the input value with `ToJSON`
 instead of `Maybe SerializedWorkflowValue`) belongs with the engine

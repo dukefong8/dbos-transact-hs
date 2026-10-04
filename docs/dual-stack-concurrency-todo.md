@@ -103,7 +103,7 @@ Converted 2026-10-01 (slice 4):
 - "awaiting a child is recorded as a step" — shared
   `scenarioAwaitRecorded` returning decoded result, parent steps, and the
   derived child id; `WfFixture` grows `wfListSteps` (live: suite-backend
-  `listWorkflowSteps` with payloads; sim: `MemSystemDB` steps). Child +
+  `listSteps` with payloads; sim: `MemSystemDB` steps). Child +
   parent bodies shared verbatim (same `startChildWorkflow`/`awaitChild`
   engine calls). Both trees assert the start + `DBOS.getResult`
   checkpoint shapes. Live 54 green, sim 40 green, flip guard (`n+1`)
@@ -124,8 +124,8 @@ Converted 2026-10-01 (slice 5):
 Converted 2026-10-01 (slice 6):
 - "awaiting a child inside a step is covered by that step" — shared
   `scenarioAwaitInsideStep` (child start, await inside
-  `runWorkflowStepWith "collect"`, step list) + `checkAwaitInsideStep`.
-  The scenario needs `MonadAsync m` (`runWorkflowStepWith`'s constraint).
+  `runStepWith "collect"`, step list) + `checkAwaitInsideStep`.
+  The scenario needs `MonadAsync m` (`runStepWith`'s constraint).
   Sim asserts the events: child `WorkflowCompleted`, `StepOutputRecorded
   "collect" 1`, parent `WorkflowCompleted`, no printing. Live 51 green,
   sim 51 green, flip guard (`n` expectation) failed both halves.
@@ -359,10 +359,10 @@ read each hit. Findings:
   structural case hand-emits events for its typed-trace assertions
   (`ContextTestSim.hs:180-190`, `StepRunning`/`SysdbRetryAttempt`), the
   same allowed shape as the announcements case below.
-- `SleepTestSim` — drives the real `sleepWorkflowStep`/`sleepPlain`
+- `SleepTestSim` — drives the real `sleepStep`/`sleepPlain`
   over the mock; nothing staged.
 - `WaitTestSim` — drives the real `selectWorkflow`; nothing staged.
-- `StepTestSim` — drives the real `runWorkflowStep(With)`; the
+- `StepTestSim` — drives the real `runStep(With)`; the
   `atomically (modifyTVar attempts ...)` hits are step-body counters,
   not staging.
 - `MessageTestSim` — drives the real `recv`; the one canned-answer case
@@ -466,3 +466,435 @@ move, so no oracle leg was owed. (Re-run after slice 35: same result,
 - Where the step-2 fixture record lives (live module, as `ContextTest` does, or a new shared module once three trees use it).
 - Whether a converted body that *does* emit events switches its sim half to `runSimCase` + `printSimTrace` (then the tree needs `dependentTestGroup ... AllFinish`), or drops the say half entirely.
 - Whether to adopt `exploreSimTrace`/POR for the fork→registration race (needs `ScheduleControl` bookkeeping + QuickCheck; ADR-0020 records it as an option, not a default).
+
+## Step 7 — Widget workflows and steps join the shared-scenario frame (decided 2026-10-04)
+
+Goal (user-directed): the widget trees convert to the `WorkflowTest` shape —
+shared scenario bodies under polymorphic effect constraints, separate
+interpretations (IO top-level runner + PG step handlers vs IOSim runner + STM
+handlers). Decisions from review:
+
+- 3 composition scenarios (paid, refused, canned paid-write refusal) + 4
+  direct step-table cases become shared; the live tree gains PG twins for the
+  table cases so the pair diffs name-for-name; the 2 crash-and-relaunch cases
+  convert only if the sim recovery spike lands, else keep their IO-only
+  markers (ADR-0020).
+- New shared module `test/DBOS/Transact/WidgetCases.hs`: scenario bodies,
+  `WidgetFixture m`, the shared `OrderId`/`CheckoutSteps`/`DispatchSteps`
+  types, and the pure `check*` verdicts. `WidgetTest`/`WidgetSim` keep only
+  fixture factories, one-line runners, and backend extras.
+- Frame: `liveCase`/`simCase` generalize over the fixture type and move to a
+  shared test module; `mkWfFixture` stays domain-local.
+- Shared checks + per-tree extras (live: checkpoint rows; sim: typed traces).
+
+### Once-and-only-once assertions, especially in IOSim
+
+Positive-case assertions must prove the transactional step's exactly-once
+guarantee; at-least-once evidence (`> 0`, `any`, "a row exists") is rejected
+where a count is observable. **The IOSim half is the strictest obligation**:
+the sim checks must prove one and only one commit and one and only one
+application effect per step, not merely that the step ran.
+
+To make that provable in sim, the fake `DataSource` must model the real
+checkpoint semantics instead of record-and-forget (`WidgetSim.hs:252-253`,
+`dsRecordOutput`/`dsRecordError` always `True` and store nothing): it gains a
+`StrictTVar (Map (WorkflowId, Int) StepCommit)` with insert-or-`False` (the
+`transaction_completion` PK), so a duplicate record is observable and returns
+`False` — exactly the signal the engine's adopt path consumes. The shared
+observation record then carries per-step commit counts (`stepCommits ::
+WorkflowId -> m (Map Text Int)`) plus exact app state; live counts
+`transaction_completion` rows grouped by step name, sim counts the fake's map.
+Checks assert exact equalities:
+
+| Case | Exactly-once evidence (same check on both stacks) |
+|---|---|
+| paid checkout | inventory exactly 5→4 (one decrement); exactly one order row `(1, 1, 0)`; exactly one commit each for `create_order`, `reserve_inventory`, `mark_order_paid` |
+| refused payment | inventory restored to exactly 5 (one undo); order exactly `(1, -1, 3)`; exactly one commit per step; no dispatch commits |
+| canned paid-write refusal | inventory exactly 4 (the reservation), order exactly `(1, 0, 3)`; no commit for the paid write, no child, no `order_id` |
+| dispatch | exactly three ticks (3→2→1→0, never below 0); exactly three `update_order_progress` commits |
+| crash while waiting | after relaunch the observation record is byte-identical to before (state + commit counts) — the replay adopts, re-running and re-committing nothing |
+| crash mid-dispatch | exactly three progress commits in total; the recorded tick is replayed (`StepReplaying`), never re-run or double-decremented |
+| table create | ids exactly `[1,2,3]`; exactly one commit per op |
+| table reserve race | exactly one winner; stock exactly 0 (never negative); exactly one reserve commit |
+| table failing third call | the third commit absent entirely (stock exactly 4, no status write); first two commits exactly once each |
+
+Sim `StepOutputRecorded` traces stay as the additional witness (one per step;
+replays show `StepReplaying` only). A flip of any expectation — extra tick,
+second commit, `False` where `True` expected — must fail **both** halves
+before the case is done.
+
+### Execution order (never red; one case per step; flip guard per shared check)
+
+0. Switch the `test/Main.hs` `-- $>`/`--- $>` toggles to the widget pair
+   (`WidgetTest.tests` + `WidgetSim.tests`); read `ghcid.txt` after the reload.
+1. Frame module extraction (below); `WorkflowTest` pair stays green.
+2. `WidgetCases` skeleton (fixture, types, checks, sim fake) + paid checkout
+   converted, one line per tree.
+3. Refused payment; canned paid-write refusal.
+4. Direct table cases: sim rebased onto shared scenarios; live PG twins.
+5. Sim recovery spike (below) → crash cases shared, or the fallback markers.
+6. Docs + gates + review.
+
+### Frame module — `test/DBOS/DualStack.hs`
+
+Two runner helpers, generalized over the fixture type; nothing else moves.
+
+```haskell
+-- shared-resource fixtures (WorkflowTest): the fixture is built per leaf
+-- from the group's resource, so the leaf does not release it
+liveCase :: IO fixture -> String -> (fixture -> IO a) -> (a -> Either String ()) -> TestTree
+
+-- per-case fixtures (widget): acquire/release bracketed around the leaf
+liveCaseWith :: (forall b. (fixture -> IO b) -> IO b) -> String -> (fixture -> IO a) -> (a -> Either String ()) -> TestTree
+
+simCase ::
+  (forall s. IOSim s (fixture (IOSim s))) ->
+  String ->
+  (forall s. fixture (IOSim s) -> IOSim s a) ->
+  (a -> Either String ()) ->
+  (forall x. SimTrace x -> IO ()) ->
+  TestTree
+```
+
+- `WorkflowTest.hs` deletes its `liveCase` (`:2560`) and imports the frame;
+  its call sites keep their getters through the mechanical rewrite
+  `liveCase getBackend X` → `liveCase (liveWfFixture getBackend X)` (X is
+  each site's existing tracer expression; the same two getters are in scope
+  for every call).
+- `WorkflowTestSim.hs` deletes its `simCase` (`:383`); call sites become
+  `simCase simWfFixture "…" scen check trace`.
+- `mkWfFixture`/`liveWfFixture`/`simWfFixture` stay in `WorkflowTest`
+  (domain-local), as the sim tree already imports `mkWfFixture`.
+- Cabal: the test suite's `other-modules` gains `DBOS.DualStack` here and
+  `DBOS.Transact.WidgetCases` in step 2.
+- Gate before moving on: `cabal build test:test`, the WorkflowTest pair green
+  on the watcher, `cabal test all` green.
+
+### `test/DBOS/Transact/WidgetCases.hs`
+
+Everything the two widget trees share:
+
+- Step-table types `OrderId`, `CheckoutSteps`, `DispatchSteps` and
+  `widgetConfig` (one definition; both trees' copies delete).
+- `WidgetObservation` — the normalized verdict input: `inventory`, `orders`
+  (sorted `(id, status, progress)`), `stepCommits :: Map Text Int` (commits
+  per step name for the workflow), `checkoutStatus`/`dispatchStatus :: Maybe
+  WorkflowStatus`, `publishedOrderId :: Maybe Text`.
+- `WidgetFixture m` (capabilities observe, never stage):
+
+  ```haskell
+  data WidgetFixture m = WidgetFixture
+    { wfDataSource         :: DataSource m
+    , wfDBOS               :: DBOS m
+    , wfMkCheckout         :: forall exec. Tx m -> CheckoutSteps exec m
+    , wfMkDispatch         :: forall exec. Tx m -> DispatchSteps exec m
+    , wfMkFailingCheckout  :: forall exec. Tx m -> CheckoutSteps exec m
+    , wfCheckoutRef        :: WorkflowRef m EngineOnly
+    , wfFailingCheckoutRef :: WorkflowRef m EngineOnly
+    , wfLaunch             :: m (Executor m)
+    , wfRelaunch           :: m (Executor m)      -- same instance, after shutdown
+    , wfFreshWorkflowId    :: m WorkflowId
+    , wfWithTableStep      :: forall a. (forall exec. StepCtx exec m -> m a) -> m a
+    , wfWaitEvent          :: WorkflowId -> Text -> m ()
+    , wfWaitDispatched     :: WorkflowId -> m ()
+    , wfReadInventory      :: m Int
+    , wfReadOrders         :: m [(Int, Int, Int)]
+    , wfReadStepCommits    :: WorkflowId -> m (Map Text Int)
+    , wfReadStatus         :: WorkflowId -> m (Maybe WorkflowStatus)
+    }
+  ```
+
+  Rank-n fields (`wfMkCheckout`/`wfMkDispatch`/`wfMkFailingCheckout`,
+  `wfWithTableStep`) are read by pattern (house record rules). `wfReadStatus`
+  is the facade's `retrieveWorkflow`, backend-neutral on both stacks; if a
+  stack cannot use the facade entry, its factory provides the read as a
+  capability instead (same observation, no staging). Waits (`wfWaitEvent`/
+  `wfWaitDispatched`) are observation capabilities too: live bounded polls,
+  sim virtual-time polls or engine waits — never test-side forks of engine
+  scheduling.
+- Shared bodies generalized from the two copies: `checkoutBody`/`dispatchBody`
+  (`forall exec m` with the engine's io-classes constraints, taking
+  `DataSource m`, the `Tx m -> …Steps exec m` builder, the dispatch ref) and
+  the four table scenarios (`scenarioTableCreate`,
+  `scenarioTableReserveRace`, `scenarioTableFailing`,
+  `scenarioTableStatusCodes`). Composition scenarios:
+  `scenarioPaidCheckout`, `scenarioRefusedPayment`,
+  `scenarioCannedPaidWriteRefused`, `scenarioCrashWhileWaiting`,
+  `scenarioCrashMidDispatch` (the last two if the spike lands), and the pure
+  `check*` verdicts from the exactly-once table above.
+
+### Per-stack factories
+
+- **Live (`WidgetTest.hs`)** — the existing `acquireWidgetFixture` bracket
+  grows: `wfFailingCheckoutRef` registration, `wfRelaunch = launchWidget`,
+  `wfFreshWorkflowId` (UUID-suffixed), a `Connection IO` over the suite
+  backend + case tracer for `wfWithTableStep` (`withWorkflow` →
+  `nextWorkflowMarker` → `withStep`, the `ContextTest.connOver` pattern
+  `StepTest` already uses), and SQL observations (`wtInventory`/`wtOrders`,
+  plus a new per-step-name commit count over `transaction_completion`).
+  Leaves use `liveCaseWith (bracket acquireWidgetFixture releaseWidgetFixture)`.
+- **Sim (`WidgetSim.hs`)** — `simWidgetFixture :: IOSim s (WidgetFixture
+  (IOSim s))` builds the store, the upgraded fake DS, the refs, and
+  `memLaunchOn`; `wfRelaunch` per the spike. The STM handlers stay here
+  (sim-private); `failingCheckoutSteps`' counter is factory-owned.
+  `wfReadStepCommits` reads the fake's checkpoint map.
+
+### Sim fake: checkpoint semantics (the exactly-once instrument)
+
+`mkWidgetDs` records into `StrictTVar (Map (WorkflowId, Int) (Text, Either
+Text Text))`:
+
+- `dsRecordOutput` — insert only if `(wid, step)` is absent (return `False`
+  otherwise; the `transaction_completion` PK), storing `(name, Right output)`.
+- `dsRecordError` — same with `Left error`.
+- `dsCheck` — return the stored row as `RecordedOutcome`.
+- `dsStepName` — return the stored step name.
+- `dsDeleteCheckpoints wid step` — drop entries with `functionNum >= step`.
+- `dsWithTransaction` stays the direct-run fake (sim handlers are STM
+  closures; no statements).
+
+This makes a duplicate commit observable and `False`, so the engine's adopt
+path is exercised exactly as the real datasource exercises it, and
+`wfReadStepCommits` can prove one-and-only-one per step.
+
+### Live table framing
+
+The live `wfWithTableStep` runs the same `withWorkflow`/`withStep` shape as
+the sim's existing helper, so the reserve-race halves both race real engine
+step scopes — live through the real datasource and OS threads, sim through
+IOSim's scheduler — judged by one shared check.
+
+### Sim recovery spike — decision rules (no check-in required)
+
+`memLaunchOn` (`test/DBOS/SystemDB/IOSim.hs:413`) launches via the generic
+`launchOn` (`Instance.hs:487`), which installs no supervisor; the live
+`launch`/`launchWithEnvironment` path (`Instance.hs:188,200`) starts
+`startExecutor` + `superviseForever` (`Dequeue.hs`), whose pass drains what
+`reenqueueForRecovery` produced. Rules, in order:
+
+1. Sim `wfRelaunch` = `memLaunchOn` then drive the engine's dequeue entry
+   (`dequeueDBOSWorkflows`, `Instance.hs:281`) until it reports no more work.
+   Driving an engine function is permitted (ADR-0020's observation rule);
+   document the one-call-vs-loop difference beside the helper. If both crash
+   checks pass with the sim half running the same replay path as live, done.
+2. If a driven pass cannot resume the row, fork a `superviseForever`-shaped
+   loop off the sim launch (virtual-time timers), keeping `memLaunchOn`'s call
+   surface.
+3. If neither resumes cleanly without a test-side stand-in, keep the two
+   crash cases IO-only with their `-- IO only:` reasons and record why in
+   ADR-0020's running list. The spike's outcome is the fallback; nothing to
+   ask.
+
+### Gates
+
+- Per case: watcher pair green (`ghcid.txt` read immediately), flip guard on
+  the shared check fails both halves before moving on.
+- End: `cabal test all` green; `make probes` 10/10; `make db-migrate`
+  idempotent (114→114); psql mirror unchanged (the widget fixtures are
+  per-case schemas; the 7 fixed rows are unaffected); sim tree still
+  eval-only (never in `defaultMain`); docs updated
+  (`docs/widget-step-tables.md`, ADR-0020's list if markers stand, this
+  file); then `/review`.
+
+### Step 7 status — done 2026-10-04
+
+- **Frame** `test/DBOS/DualStack.hs` (`liveCase`, `liveCaseWith`, `simCase`);
+  `WorkflowTest`/`WorkflowTestSim` migrated (39 + 39 call sites) and stayed
+  green through the move.
+- **Shared module** `test/DBOS/Transact/WidgetCases.hs`: step-table types,
+  `WidgetFixture`, `WidgetObservation`/`TableObservation`, the generalized
+  bodies, 5 composition + 4 table scenarios, and pure exact-count checks.
+- **Leaves**: both trees carry the identical 9 names, one line per tree —
+  paid, refused, canned paid-write refusal, crash-while-waiting,
+  crash-mid-dispatch, and the four table cases with new live PG twins.
+- **Exactly-once instrumentation**: live counts `transaction_completion`
+  grouped by workflow and step name; the sim fake now holds a real checkpoint
+  map with insert-or-`False` (the PK), so a duplicate commit is observable in
+  IOSim and the engine's adopt signal is exercised. Positive checks assert one
+  commit per expected step name and byte-identical effects across the crash.
+- **Recovery spike: succeeded** (option 1). Sim `wfRelaunch` re-enqueues via
+  `reenqueueForRecovery`, launches with `memLaunchOn`, then drives
+  `dequeueDBOSWorkflows` until it reports no work — the supervisor's pass,
+  driven synchronously because `launchOn` installs no supervisor. Both crash
+  scenarios run unchanged under IOSim; no IO-only markers remain and ADR-0020's
+  list is unchanged.
+- **Gate run**: watcher widget pair live 9/9 + sim 9/9 (`All good (88
+  modules)`); `cabal test all` — **654 green** (650 + the 4 live table twins),
+  ihp-hsx PASS; `make probes` 10/10; `make db-migrate` 114→114; psql mirror
+  green (7 expected rows).
+
+## Step 8 — Crash-model hardening + scheduler-event assertions (decided 2026-10-04)
+
+User-directed, after review of Step 7: keep the engine-shutdown crash **and**
+add the two missing crash models plus scheduler-level concurrency assertions.
+Step 7's tree is the baseline (live 9/9, sim 9/9 green).
+
+### A. Assert IOSim's built-in concurrent events
+
+`runSimCase` already returns the full `SimTrace` (`runSim` + `runSimTrace`,
+`test/DBOS/IOSimTracer.hs:46-50`), but the sinks are `selectTraceEventsSay`
+(`printSimTrace`) and `selectTraceEventsDynamic` (typed domain events). Add
+per-case **built-in event** assertions (verify the exact io-sim `SimEvent`
+names against the installed version with `ghci -e ':browse Control.Monad.IOSim'`
+first):
+
+- Reserve race: both racers' fork events precede the winning commit (the race
+  actually interleaved); exactly one commit for the winner.
+- Crash-while-waiting: the relaunch re-forks the recovered workflow, it parks
+  (blocked on the recv wait), and a wake event precedes completion.
+- Crash-mid-dispatch: the recovered run's fork precedes the remaining tick
+  commits; exactly three commits in total.
+
+Where: the sim leaves' `traceCheck` (the frame's `simCase` already threads a
+`SimTrace` check). Scheduler-event assertions are sim-only and stay out of the
+shared checks; `printSimTrace` still feeds the pane.
+
+### B2. killThread crash (abrupt death, no cooperative shutdown)
+
+The engine does not expose the running workflow's `ThreadId` (`WorkflowHandle`
+carries only `conn`/`workflowId`/`provenance`), but a step handler runs **on
+the workflow's thread**, so the fixture can capture it:
+
+- Each factory wraps its step-table builders so every op records `myThreadId`
+  into a TVar — one per registration (checkout, dispatch child) — exposed as
+  fixture capabilities (`wfCheckoutThread`, `wfDispatchThread`).
+- New shared scenarios `scenarioKilledWhileWaiting` / `scenarioKilledMidDispatch`:
+  start, wait for the workflow to park (or for the first tick), `killThread`
+  the captured id with an async exception (a non-`AsyncCancelled` exception
+  surfaces as `WorkflowPanicked` — no outcome, row PENDING: the
+  crash-equivalent state), then relaunch and assert the Step 7 exactly-once
+  checks unchanged.
+- Both stacks run the same scenario: live IO kills the real workflow thread,
+  sim kills the IOSim thread. ADR-0020 classification: fault injection, not a
+  scheduling stand-in; add a note to the ADR's permitted-divergence table.
+
+### B3. Commit-boundary fault injection (lost acknowledgement)
+
+Prove the boundary where the transaction commits but the caller sees a
+failure. Implement as a datasource wrapper in the fixture factories:
+
+- `lostAckOnce :: StrictTVar m Int -> DataSource m -> DataSource m` overrides
+  `dsWithTransaction`: run the real attempt; on `Right`, if the counter is
+  positive, decrement and return `Left` with a synthetic transport-class
+  `BackendError` (no SQLSTATE → non-retriable control), leaving the committed
+  rows in place; otherwise pass the result through.
+- Fixture capability `wfLoseNextAck :: m ()` arms it for the next successful
+  transaction.
+- New shared scenario `scenarioLostAck`: arm, start the checkout, wait for the
+  run to stop (control; row PENDING, no error column), relaunch, complete the
+  payment, and assert the Step 7 paid-checkout check — the already-committed
+  steps must be replayed, never re-committed, and exactly one commit per step
+  remains.
+
+### Order and gates
+
+1. A (scheduler assertions) — sim-only, shared checks untouched.
+2. B2 (thread capture + killed scenarios) — both stacks.
+3. B3 (lost-ack wrapper + scenario) — both stacks.
+4. Gates as Step 7; ADR-0020 gains the fault-injection note; this file gains
+   the Step 8 status when done.
+
+### Step 8 status (2026-10-04) — done
+
+Live **12/12**, sim **12/12**. Runner gates: `cabal test all` 657/657,
+`make probes` 10/10, `make db-migrate` 114→114, psql mirror 7 rows.
+
+- **A** landed on io-sim 1.11's vocabulary: `traceEvents` yields
+  `SimEventType`, so the race checks that the *second* `EventThreadForked`
+  precedes a later `EventTxCommitted` (the stock set-up commits before the
+  racers exist, so "forks before the first commit" would be wrong), and the
+  crash leaves check re-forking plus `EventTxBlocked`/`EventThreadDelay` and
+  `EventTxWakeup`/`EventUnblocked`. Counts are floors, not exact sequences —
+  the engine's internal forks are not attributable by name.
+- **B2** used io-classes' `killThread` as-is: it throws `AsyncCancelled`,
+  which the engine already treats as cancellation — no outcome, row PENDING,
+  the same observable crash state. No non-`AsyncCancelled` route was needed,
+  so the plan's `WorkflowPanicked` note is moot. Thread capture is a fixture
+  seam (`captureCheckoutThread`/`captureDispatchThread` wrappers over the
+  step tables), not an engine surface change. Shared scenarios:
+  `scenarioKilledWhileWaiting`, `scenarioKilledMidDispatch`.
+- **B3** landed as planned: `lostAckOnce` + `wfLoseNextAck` +
+  `scenarioLostAck`, reusing `checkPaidCheckout` — the lost acknowledgement
+  leaves exactly the paid-checkout commit record.
+
+Follow-on (2026-10-04): the launch tail is now shared — `launchExecutor`
+(application-version registration, recovery, `EngineLaunched`, supervisor
+fork, install) is what `launchWithEnvironment` and `memLaunchOn` both run, so
+the sim forks the real supervisor. Review found and fixed the widget sim
+fixture's duplicate setup launch (two executors/supervisors per case against
+live's one); `memLaunchOn` documents that it always launches.
+
+## Step 9 — Dual-stack migration of the critical suites (decided 2026-10-04)
+
+Step 8's follow-on removed the last launch asymmetry for the mem-backed
+stack: `launchExecutor` (application-version registration,
+`reenqueueForRecovery`, `EngineLaunched`, supervisor fork, executor install)
+is the one tail the IO launch (`launchWithEnvironment`) and `memLaunchOn`
+both run, so `WorkflowTestSim` and `WidgetSim` fork the real supervisor over
+their simulated backends. The widget pattern is the target for the remaining
+critical suites: one `*Cases.hs` per domain (shared scenario bodies + shared
+pure checks + a fixture capability record), leaves built by
+`liveCase`/`simCase`, per-stack factories, sim-only scheduler/trace extras,
+identical case names in both trees.
+
+Survey (2026-10-04; live/sim line counts):
+
+| Suite | Live | Sim | Critical for | State |
+| --- | ---: | ---: | --- | --- |
+| SleepTest | 93 | 88 | durability | near-complete pair, not framed |
+| DatasourceTest | 608 | 178 | transactions | sim is a sketch |
+| StepRetryTest | 352 | — | transactions | no sim half |
+| CheckpointTest | 171 | — | durability/transactions | no sim half |
+| WaitTest | 193 | 101 | concurrency (events) | partial |
+| MessageTest | 273 | 115 | concurrency (delivery) | partial |
+| SelectTest | 129 | — | concurrency | no sim half |
+| DeadlinesTest | 319 | — | concurrency/timing | no sim half |
+| QueueTest | 1640 | 149 | concurrency/durability | sim is a sketch |
+| WorkflowTest | 3350 | 827 | durability/concurrency | framed, scenarios not shared |
+| ManagementTest | 1095 | 418 | durability/management | partial |
+| ContextTest | 546 | 215 | durability/context | partial |
+| HandleTest | 312 | 131 | transactions (handles) | partial |
+| EventTest | 418 | — | durability (events) | no sim half |
+| StepTest | 333 | 344 | transactions | near-complete pair |
+
+Order (criticality first, size ascending inside a tier):
+
+1. SleepTest/Sim → `SleepCases.hs` (durable sleep; small first slice).
+2. DatasourceTest/Sim → `DatasourceCases.hs` (transaction semantics).
+3. StepRetryTest and CheckpointTest sim halves (retry/checkpoint).
+4. WaitTest/Sim and MessageTest/Sim (event delivery and wakeups).
+5. SelectTest and DeadlinesTest sim halves (concurrency and timing).
+6. QueueTest/Sim → `QueueCases.hs` (fan-out, limits, queue recovery).
+7. WorkflowTest/Sim → `WorkflowCases.hs` (recovery/replay/children/Tasks).
+8. Management, Context, Handle, Event.
+
+### TODO checklist (execution order)
+
+- [x] **Gate the supervisor slice** (green 2026-10-04: `cabal test all` 657/657, probes 10/10, migrate 114→114, psql mirror 7 rows; review fix: the widget sim fixture's duplicate setup launch was removed, so sim launches once per case like live): `cabal test all`, `make probes`,
+      `make db-migrate`, psql mirror, restart the demo on :8090; fold the
+      results into Step 8's status.
+- [ ] **S1 SleepTest/Sim** — `SleepCases.hs`: fixture + scenarios + checks;
+      both trees through `DualStack`; sim timer extras (`EventThreadDelay`).
+- [ ] **S2 DatasourceTest/Sim** — `DatasourceCases.hs`: shared transaction
+      scenarios (commit/rollback, isolation, conflict retry, error classing);
+      grow the sim fake to model the checkpoint PK and conflicts.
+- [ ] **S3 StepRetry + Checkpoint sim halves** — `StepRetryCases.hs`,
+      `CheckpointCases.hs`; durable retry and checkpoint replay.
+- [ ] **S4 Wait + Message** — `WaitCases.hs`, `MessageCases.hs`; wakeup and
+      delivery exactly-once; sim block/wake scheduler extras.
+- [ ] **S5 Select + Deadlines sim halves** — `SelectCases.hs`,
+      `DeadlinesCases.hs`.
+- [ ] **S6 QueueTest/Sim** — `QueueCases.hs`: fan-out, concurrency limits,
+      queue recovery; build the full sim half.
+- [ ] **S7 WorkflowTest/Sim** — `WorkflowCases.hs`: share the 54 scenario
+      bodies; Tasks concurrency cases; recovery/replay/children.
+- [ ] **S8 Management/Context/Handle/Event** — `*Cases.hs` per domain.
+
+Per-slice acceptance: identical case names in both trees; the sim leaf
+drives the same engine entry points as its live half (deletion test);
+`dependentTestGroup ... AllFinish` wherever `printSimTrace` prints; an
+exactly-once check for every effectful step; Step 7 gates.
+
+The mock-backed sim trees (`simLaunchWith`/`simConnectionWith`) keep the
+minimal launch until a slice owns their stubs; that seam is recorded on
+purpose.

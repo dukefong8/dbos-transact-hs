@@ -2,104 +2,103 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The widget store's checkout and dispatch composed over the
--- transactional-step engine — the port's own end-to-end seam. Mirrors the
--- Python widget-store oracle (probe 2026-10-02): a paid order walks
--- @PENDING(0) -> PAID(2) -> DISPATCHED(1)@ with inventory @5 -> 4@; a
--- refused payment walks @PENDING(0) -> CANCELLED(-1)@ with inventory
--- restored. Application tables are TVars behind a fake 'DataSource', so
--- the cases run under IOSim; the engine functions are the real ones
--- ('runTransaction', 'setEvent', 'recv', 'sleepWorkflowStep',
--- 'startChildWorkflow', 'runDBOSWorkflow', 'sendWorkflowMessage',
--- 'getWorkflowEvent').
+-- | The widget store's checkout and dispatch over the transactional-step
+-- engine under IOSim — the sim half of the dual-stack mirror. The shared
+-- scenarios, fixture, and checks live in "DBOS.Transact.WidgetCases"; this
+-- module owns the sim interpretation: STM step handlers over TVars, the
+-- checkpoint-map fake datasource (the exactly-once instrument), and
+-- MemSystemDB plus the sim carrier.
 module DBOS.Transact.WidgetSim (tests) where
 
-import DBOS.Prelude
-import Control.Monad.Except (ExceptT (..), runExceptT)
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
-import Control.Monad.IOSim (IOSim)
+import Control.Monad.IOSim (IOSim, SimEventType (..), SimTrace, traceEvents)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Data.Text qualified as Text
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
-import DBOS.SystemDB (BackendErrorKind (..))
+import DBOS.DualStack (simCase)
+import DBOS.IOSimTracer (printSimTrace, simTracer)
+import DBOS.Prelude
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simConnectionWith, simInstance)
 import DBOS.Transact
-  ( BackendError (..),
-    CodecError,
-    WorkflowCtx,
+  ( DBOS,
     DataSource (..),
-    EngineOnly,
-    Executor,
-    Error (..),
     Identity (..),
-    StepCtx,
     RecordedOutcome (..),
-    SerializedWorkflowValue (..),
-    Topic (..),
-    TransactionConfig (..),
+    StepCtx,
     Tx (..),
     WorkflowId (..),
-    WorkflowRef,
-    decodeWorkflowValue,
-    encodeWorkflowValue,
     firstStepStatus,
-    getWorkflowEvent,
-    millisDuration,
+    handleStatus,
     newWorkflowKey,
     nextWorkflowMarker,
-    recv,
     registerDBOSWorkflowRef,
-    runDBOSWorkflow,
-    runTransaction,
-    sendWorkflowMessage,
-    setEvent,
-    sleepWorkflowStep,
-    startDBOSWorkflowRef,
-    startOptionsDefault,
-    StartOptions (..),
+    retrieveWorkflow,
     withStep,
     withWorkflow,
-    recv,
-    runTransaction,
-    setEvent,
-    sleepWorkflowStep,
-    startChildWorkflow,
+  )
+import DBOS.Transact.WidgetCases
+  ( CheckoutSteps (..),
+    lostAckOnce,
+    DispatchSteps (..),
+    OrderId (..),
+    WidgetFixture (..),
+    checkCannedPaidWriteRefused,
+    checkCrashMidDispatch,
+    captureCheckoutThread,
+    captureDispatchThread,
+    waitThread,
+    checkCrashWhileWaiting,
+    checkLostAck,
+    checkPaidCheckout,
+    checkRefusedPayment,
+    checkoutBody,
+    dispatchBody,
+    checkTableCreate,
+    checkTableFailing,
+    checkTableReserveRace,
+    checkTableStatusCodes,
+    scenarioCannedPaidWriteRefused,
+    scenarioCrashMidDispatch,
+    scenarioCrashWhileWaiting,
+    scenarioKilledMidDispatch,
+    scenarioKilledWhileWaiting,
+    scenarioLostAck,
+    scenarioPaidCheckout,
+    scenarioRefusedPayment,
+    scenarioTableCreate,
+    scenarioTableFailing,
+    scenarioTableReserveRace,
+    scenarioTableStatusCodes,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (assertBool, testCase)
 
--- * Step tables (A3)
+-- * The sim storefront
 
--- | The checkout's transactional capabilities: every field is one step and
--- one 'atomically' block, mirroring the Postgres handler's one transaction
--- per step. The 'StepCtx' parameter is the capability that scopes each
--- call to a step — implementations do not read it.
-newtype OrderId = OrderId Int
-  deriving stock (Eq, Show)
-
-data CheckoutOps exec m = CheckoutOps
-  { coCreate :: StepCtx exec m -> m OrderId,
-    coReserve :: StepCtx exec m -> m Bool,
-    coUndo :: StepCtx exec m -> m (),
-    coSetStatus :: StepCtx exec m -> OrderId -> Int -> m ()
+-- | The storefront's tables: inventory, orders (id -> status, progress), the
+-- order-id sequence, and the checkpoint map — the local
+-- @transaction_completion@ the fake datasource writes.
+data WidgetStore m = WidgetStore
+  { wsInventory :: StrictTVar m Int,
+    wsOrders :: StrictTVar m (Map Int (Int, Int)),
+    wsNextOrder :: StrictTVar m Int,
+    wsCommits :: StrictTVar m (Map (Text, Int) (Text, RecordedOutcome))
   }
 
--- | The dispatch's capabilities: the tick loop's decrement and the status
--- writes. 'coSetStatus' is repeated from the checkout table per the
--- share-by-two rule (records are cheap; embed at three).
-data DispatchOps exec m = DispatchOps
-  { doTick :: StepCtx exec m -> OrderId -> m (),
-    doSetStatus :: StepCtx exec m -> OrderId -> Int -> m ()
-  }
+newWidgetStore :: MonadSTM m => Int -> m (WidgetStore m)
+newWidgetStore stock = do
+  wsInventory <- newTVarIO stock
+  wsOrders <- newTVarIO Map.empty
+  wsNextOrder <- newTVarIO 1
+  wsCommits <- newTVarIO Map.empty
+  pure WidgetStore {wsInventory = wsInventory, wsOrders = wsOrders, wsNextOrder = wsNextOrder, wsCommits = wsCommits}
 
 -- | The STM handler: one atomic block per op. The split read-then-write of
 -- the old fakes is closed — concurrent checkouts cannot mint one id or
 -- oversell one unit.
-stmCheckoutOps :: WidgetStore (IOSim s) -> CheckoutOps exec (IOSim s)
-stmCheckoutOps store =
-  CheckoutOps
+stmCheckoutSteps :: WidgetStore (IOSim s) -> CheckoutSteps exec (IOSim s)
+stmCheckoutSteps store =
+  CheckoutSteps
     { coCreate = \_ -> atomically $ do
         oid <- readTVar store.wsNextOrder
         writeTVar store.wsNextOrder (oid + 1)
@@ -115,9 +114,9 @@ stmCheckoutOps store =
         modifyTVar store.wsOrders (Map.adjust (\(_, progress) -> (status, progress)) oid)
     }
 
-stmDispatchOps :: WidgetStore (IOSim s) -> DispatchOps exec (IOSim s)
-stmDispatchOps store =
-  DispatchOps
+stmDispatchSteps :: WidgetStore (IOSim s) -> DispatchSteps exec (IOSim s)
+stmDispatchSteps store =
+  DispatchSteps
     { doTick = \_ (OrderId oid) -> atomically $
         modifyTVar store.wsOrders $
           Map.adjust
@@ -127,26 +126,117 @@ stmDispatchOps store =
         modifyTVar store.wsOrders (Map.adjust (\(_, progress) -> (status, progress)) oid)
     }
 
--- | The deterministic seed-8 shape: the table counts its calls and the
--- third (the paid write) aborts via 'throwSTM', so the whole block —
--- including anything it wrote — vanishes. Replaces the old
--- 'BackendError'-injection fake with a domain-level refusal.
-failingCheckoutOps :: StrictTVar (IOSim s) Int -> WidgetStore (IOSim s) -> CheckoutOps exec (IOSim s)
-failingCheckoutOps calls store =
-  CheckoutOps
+-- | The canned refusal: the third call — the paid write — aborts via
+-- 'throwSTM', so the whole block vanishes.
+failingCheckoutSteps :: StrictTVar (IOSim s) Int -> WidgetStore (IOSim s) -> CheckoutSteps exec (IOSim s)
+failingCheckoutSteps calls store =
+  CheckoutSteps
     { coCreate = \s -> do
         _ <- atomically (modifyTVar calls (+ 1))
-        (stmCheckoutOps store).coCreate s,
+        (stmCheckoutSteps store).coCreate s,
       coReserve = \s -> do
         _ <- atomically (modifyTVar calls (+ 1))
-        (stmCheckoutOps store).coReserve s,
-      coUndo = (stmCheckoutOps store).coUndo,
+        (stmCheckoutSteps store).coReserve s,
+      coUndo = (stmCheckoutSteps store).coUndo,
       coSetStatus = \s oid status -> do
         n <- atomically (modifyTVar calls (+ 1) >> readTVar calls)
         if n == 3
           then atomically (throwSTM (userError "mark_order_paid refused"))
-          else (stmCheckoutOps store).coSetStatus s oid status
+          else (stmCheckoutSteps store).coSetStatus s oid status
     }
+
+-- * The fake datasource (the exactly-once instrument)
+
+-- | The app datasource: every op runs in a transaction; the fake's
+-- 'atomically' block is the shared commit. Checkpoints are modelled for real
+-- — an insert-or-@False@ map keyed by (workflow, step id), the
+-- @transaction_completion@ PK — so a duplicate commit is observable and the
+-- engine's adopt signal is exercised, which is what makes the
+-- once-and-only-once checks provable under IOSim.
+mkWidgetDs :: WidgetStore (IOSim s) -> DataSource (IOSim s)
+mkWidgetDs store =
+  DataSource
+    { dsName = "widget-db",
+      dsSchema = "dbos",
+      dsCheck = \(WorkflowId widText) _name step -> do
+        commits <- readTVarIO store.wsCommits
+        pure (Right (snd <$> Map.lookup (widText, step) commits)),
+      dsWithTransaction = \_ action -> Right <$> action (Tx (\_ _ -> error "widget fake: statements unsupported")),
+      dsRecordOutput = \(Tx _) (WorkflowId widText) name step text ->
+        insertCommit store (widText, step) (name, RecordedOutput text),
+      dsRecordError = \(Tx _) (WorkflowId widText) name step text ->
+        insertCommit store (widText, step) (name, RecordedError text),
+      dsStepName = \(WorkflowId widText) step -> do
+        commits <- readTVarIO store.wsCommits
+        pure (Right (fst <$> Map.lookup (widText, step) commits)),
+      dsDeleteCheckpoints = \(WorkflowId widText) step -> do
+        atomically (modifyTVar store.wsCommits (Map.filterWithKey (\(w, s) _ -> w /= widText || s < step)))
+        pure (Right ())
+    }
+
+-- | Insert a checkpoint unless the step already holds one — the
+-- @transaction_completion@ primary key, and the signal the engine's adopt
+-- path consumes.
+insertCommit :: MonadSTM m => WidgetStore m -> (Text, Int) -> (Text, RecordedOutcome) -> m Bool
+insertCommit store key value = atomically $ do
+  commits <- readTVar store.wsCommits
+  if Map.member key commits
+    then pure False
+    else do
+      writeTVar store.wsCommits (Map.insert key value commits)
+      pure True
+
+-- * The sim fixture
+
+-- | One sim interpretation of the shared fixture: a fresh Mem database, the
+-- widget store, both checkout registrations, the sim launch, and the
+-- observation capabilities the shared scenarios use.
+simWidgetFixture :: IOSim s (WidgetFixture (IOSim s))
+simWidgetFixture = do
+  mem <- newMemDB
+  dbos <- simInstance
+  store <- newWidgetStore 5
+  calls <- newTVarIO 0
+  let ds = mkWidgetDs store
+  checkoutTid <- newTVarIO Nothing
+  dispatchTid <- newTVarIO Nothing
+  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (\_tx -> captureDispatchThread dispatchTid (stmDispatchSteps store)))
+  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds (\_tx -> captureCheckoutThread checkoutTid (stmCheckoutSteps store)) dispatchRef)
+  failingRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutCannedFailWorkflow") (checkoutBody ds (\_tx -> failingCheckoutSteps calls store) dispatchRef)
+  acked <- newTVarIO 0
+  let lostDs = lostAckOnce acked ds
+  lostRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutLostAckWorkflow") (checkoutBody lostDs (\_tx -> stmCheckoutSteps store) dispatchRef)
+  pure
+    WidgetFixture
+      { wfDataSource = ds,
+        wfDBOS = dbos,
+        wfMkCheckout = \_tx -> stmCheckoutSteps store,
+        wfMkDispatch = \_tx -> stmDispatchSteps store,
+        wfMkFailingCheckout = \_tx -> failingCheckoutSteps calls store,
+        wfCheckoutRef = checkoutRef,
+        wfFailingCheckoutRef = failingRef,
+        wfLostAckCheckoutRef = lostRef,
+        wfLoseNextAck = atomically (writeTVar acked 1),
+        wfCheckoutThread = waitThread "checkout" checkoutTid,
+        wfDispatchThread = waitThread "dispatch" dispatchTid,
+        wfLaunch = memLaunchOn mem simTracer dbos,
+        wfRelaunch = memLaunchOn mem simTracer dbos,
+        wfFreshWorkflowId = pure (WorkflowId "widget-wf-1"),
+        wfSetInventory = \n -> atomically (writeTVar store.wsInventory n),
+        wfWithTableStep = \body -> withTableStep store body,
+        wfReadInventory = readTVarIO store.wsInventory,
+        wfReadOrders = map (\(oid, (status, progress)) -> (oid, status, progress)) . Map.toList <$> readTVarIO store.wsOrders,
+        wfReadStepCommits = do
+          commits <- readTVarIO store.wsCommits
+          pure (Map.fromListWith (Map.unionWith (+)) [(widText, Map.singleton name 1) | ((widText, _), (name, _)) <- Map.toList commits]),
+        wfReadStatus = \wid -> do
+          found <- retrieveWorkflow dbos wid
+          case found of
+            Left _ -> pure Nothing
+            Right wfHandle -> either (const Nothing) id <$> handleStatus wfHandle
+      }
+
+-- * The table step scope (sim interpretation)
 
 -- | A sim identity for the direct table cases.
 tableIdentity :: Identity
@@ -159,7 +249,7 @@ tableIdentity =
     }
 
 -- | Run one table op under a real step scope: the workflow view, then a
--- step view, exactly the shape the workflows will use.
+-- step view, exactly the shape the workflows use.
 withTableStep :: WidgetStore (IOSim s) -> (forall exec. StepCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
 withTableStep _ body = do
   conn <- simConnectionWith simTracer
@@ -167,248 +257,78 @@ withTableStep _ body = do
     marker <- nextWorkflowMarker wctx
     withStep wctx marker (firstStepStatus 0) body
 
-scenarioTableCreate :: IOSim s ([Int], Map Int (Int, Int))
-scenarioTableCreate = do
-  store <- newWidgetStore 5
-  -- The table is built inside the scope's continuation so its phantom
-  -- execution unifies with the scope it is spent in.
-  ids <- withTableStep store $ \s -> do
-    let ops = stmCheckoutOps store
-    mapM (\_ -> ops.coCreate s) [1 :: Int, 2, 3]
-  orders <- readTVarIO store.wsOrders
-  pure ([oid | OrderId oid <- ids], orders)
 
-scenarioTableReserveRace :: IOSim s (Int, Int)
-scenarioTableReserveRace = do
-  store <- newWidgetStore 1
-  first <- async (withTableStep store (\s -> (stmCheckoutOps store).coReserve s))
-  second <- async (withTableStep store (\s -> (stmCheckoutOps store).coReserve s))
-  a <- wait first
-  b <- wait second
-  stock <- readTVarIO store.wsInventory
-  pure (length (filter id [a, b]), stock)
+-- * Scheduler-event assertions (sim-only)
 
-scenarioTableFailing :: IOSim s (Bool, Map Int (Int, Int), Int)
-scenarioTableFailing = do
-  calls <- newTVarIO 0
-  store <- newWidgetStore 5
-  threw <-
-    withTableStep store $ \s -> do
-      let ops = failingCheckoutOps calls store
-      oid <- ops.coCreate s
-      reserved <- ops.coReserve s
-      if not reserved
-        then pure False
-        else do
-          result <- try (ops.coSetStatus s oid 2)
-          pure (either (const True) (const False) (result :: Either SomeException ()))
-  orders <- readTVarIO store.wsOrders
-  stock <- readTVarIO store.wsInventory
-  pure (threw, orders, stock)
+-- | The scheduler's own record. These tighten individual sim leaves: the
+-- shared checks judge outcomes, these assert the concurrency that produced
+-- them actually happened in the simulator — never in IO.
+eventTypes :: SimTrace a -> [SimEventType]
+eventTypes = map (\(_, _, _, eventType) -> eventType) . traceEvents
 
-scenarioTableStatusCodes :: IOSim s (Int, Int)
-scenarioTableStatusCodes = do
-  store <- newWidgetStore 5
-  withTableStep store $ \s -> do
-    let checkout = stmCheckoutOps store
-        dispatch = stmDispatchOps store
-    oid <- checkout.coCreate s
-    reserved <- checkout.coReserve s
-    if not reserved
-      then pure ()
-      else do
-        checkout.coSetStatus s oid 2
-        mapM_ (\_ -> dispatch.doTick s oid) [1 :: Int, 2, 3]
-  orders <- readTVarIO store.wsOrders
-  pure (Map.findWithDefault (0, 0) 1 orders)
+countEvents :: (SimEventType -> Bool) -> SimTrace a -> Int
+countEvents predicate = length . filter predicate . eventTypes
 
--- * Application tables (the fake's state)
+isFork, isCommit, isTxBlocked, isWakeup, isDelay, isUnblocked :: SimEventType -> Bool
+isFork EventThreadForked {} = True
+isFork _ = False
+isCommit EventTxCommitted {} = True
+isCommit _ = False
+isTxBlocked EventTxBlocked {} = True
+isTxBlocked _ = False
+isWakeup EventTxWakeup {} = True
+isWakeup _ = False
+isDelay EventThreadDelay {} = True
+isDelay _ = False
+isUnblocked EventUnblocked {} = True
+isUnblocked _ = False
 
--- | The storefront's tables: inventory, orders (id -> status, progress),
--- and the order-id sequence.
-data WidgetStore m = WidgetStore
-  { wsInventory :: StrictTVar m Int,
-    wsOrders :: StrictTVar m (Map Int (Int, Int)),
-    wsNextOrder :: StrictTVar m Int
-  }
+-- | The reserve race must actually race: both racer threads are forked, and a
+-- commit lands after the second fork (the winner's; the stock setup commits
+-- before either racer exists).
+traceTableReserveRace :: SimTrace a -> IO ()
+traceTableReserveRace tr = do
+  let types = eventTypes tr
+      forkIndexes = [i | (i, e) <- zip [0 :: Int ..] types, isFork e]
+      commitIndexes = [i | (i, e) <- zip [0 :: Int ..] types, isCommit e]
+  assertBool "both reserve racers must be forked" (length forkIndexes >= 2)
+  assertBool "the winning reserve must commit after both forks" $
+    case forkIndexes of
+      (_ : secondFork : _) -> any (> secondFork) commitIndexes
+      _ -> False
 
-newWidgetStore :: MonadSTM m => Int -> m (WidgetStore m)
-newWidgetStore stock =
-  WidgetStore <$> newTVarIO stock <*> newTVarIO Map.empty <*> newTVarIO 1
+-- | The crash-while-waiting mirror: the relaunch re-forks the recovered
+-- workflow, it blocks on its durable wait, and a wakeup releases it.
+traceCrashWhileWaiting :: SimTrace a -> IO ()
+traceCrashWhileWaiting tr = do
+  assertBool "the recovered workflow must be re-forked" (countEvents isFork tr >= 2)
+  assertBool "the parked workflow must block on its wait" (countEvents isTxBlocked tr >= 1 || countEvents isDelay tr >= 1)
+  assertBool "a wakeup must release the wait" (countEvents isWakeup tr >= 1 || countEvents isUnblocked tr >= 1)
 
--- | The app datasource: every op runs in a transaction; the fake's
--- 'atomically' block is the shared commit. Checkpoint writes are no-ops —
--- the engine's step ids still advance, which is what replay relies on.
-widgetConfig :: TransactionConfig
-widgetConfig = TransactionConfig {txName = Just "widget_step", txIsolation = Nothing}
+-- | The crash-mid-dispatch mirror: the ticks sleep on the sim clock and the
+-- recovered run commits its remaining ticks.
+traceCrashMidDispatch :: SimTrace a -> IO ()
+traceCrashMidDispatch tr = do
+  assertBool "the dispatch ticks must sleep on the sim clock" (countEvents isDelay tr >= 1)
+  assertBool "the recovered dispatch must commit its remaining ticks" (countEvents isCommit tr >= 4)
 
-mkWidgetDs :: Monad m => DataSource m
-mkWidgetDs =
-  DataSource
-    { dsName = "widget-db",
-      dsSchema = "dbos",
-      dsCheck = \_ _ _ -> pure (Right Nothing),
-      dsWithTransaction = \_ action -> Right <$> action (Tx (\_ _ -> error "widget fake: statements unsupported")),
-      dsRecordOutput = \_ _ _ _ _ -> pure True,
-      dsRecordError = \_ _ _ _ _ -> pure True,
-      dsStepName = \_ _ -> pure (Right Nothing),
-      dsDeleteCheckpoints = \_ _ -> pure (Right ())
-    }
-
--- * The workflows
-
--- * The workflows
--- | The checkout workflow: create, reserve, publish the payment id, wait
--- for the payment, then dispatch or compensate. Mirrors the oracle's
--- @checkout_workflow@ (create before reserve; the payment id event is the
--- workflow's own id in the oracle — here the order id names the order).
-checkoutBody :: forall s exec. DataSource (IOSim s) -> CheckoutOps exec (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
-checkoutBody ds ops dispatchRef () wctx = runExceptT $ do
-  -- The checkpoint payload stays a plain Int (as before the flip); the
-  -- OrderId boundary is the ops table, unwrapped at the transaction edge.
-  orderId <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right . (\(OrderId oid) -> oid) <$> ops.coCreate sctx))
-  onShelf <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coReserve sctx))
-  if not onShelf
-    then do
-      _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) (-1) ))
-      _ <- ExceptT (setEvent wctx "payment_id" (Nothing :: Maybe Text))
-      pure "no-inventory"
-    else do
-      _ <- ExceptT (setEvent wctx "payment_id" (Just (Text.pack (show orderId))))
-      ExceptT (recv wctx (Just (Topic "payment_status")) (millisDuration 5000) :: IOSim s (Either (Error EngineOnly) (Maybe Text))) >>= \case
-        Just status | status == "paid" -> do
-          _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) 2))
-          _ <- ExceptT (startChildWorkflow wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
-          _ <- ExceptT (setEvent wctx "order_id" (Text.pack (show orderId)))
-          pure "paid"
-        _ -> do
-          _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coUndo sctx))
-          _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) (-1) ))
-          _ <- ExceptT (setEvent wctx "order_id" (Text.pack (show orderId)))
-          pure "cancelled"
-
--- | The dispatch workflow: three ticks 50ms apart (the oracle runs ten
--- one-second ticks; shortened so the simulation stays fast).
-dispatchBody :: forall s exec. DataSource (IOSim s) -> DispatchOps exec (IOSim s) -> Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
-dispatchBody ds ops orderId wctx = go (3 :: Int)
-  where
-    go 0 = pure (Right "dispatched")
-    go n = do
-      slept <- sleepWorkflowStep wctx (millisDuration 50)
-      case slept of
-        Left err -> pure (Left err)
-        Right () -> do
-          _ <- runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.doTick sctx (OrderId orderId)) :: IOSim s (Either (Error EngineOnly) ())
-          go (n - 1)
-
--- * The composition scenario
-
--- | One checkout to completion: start it under a fixed id, answer the
--- payment on the topic the workflow waits on, await the order id, and
--- report the final store state. The started checkout is left to run; the
--- event wait is what tells us it finished publishing.
-scenarioCheckout :: Maybe Text -> IOSim s ((Int, Maybe Text), Map Int (Int, Int), Int)
-scenarioCheckout payment = do
-  mem <- newMemDB
-  dbos <- simInstance
-  store <- newWidgetStore 5
-  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs (stmDispatchOps store))
-  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs (stmCheckoutOps store) dispatchRef)
-  exec <- memLaunchOn mem simTracer dbos
-  let wid = WorkflowId "widget-wf-1"
-  _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-1"}) Nothing
-  paymentId <- getWorkflowEvent dbos wid "payment_id" (millisDuration 1000)
-  case payment of
-    Just decision -> do
-      _ <- sendWorkflowMessage dbos wid (Just (Topic "payment_status")) Nothing (encodeWorkflowValue decision)
-      pure ()
-    Nothing -> pure ()
-  orderIdResult <- getWorkflowEvent dbos wid "order_id" (millisDuration 2000)
-  -- Let the spawned dispatch workflow finish: sleep advances simulated
-  -- time, and the child runs while this thread is parked.
-  mapM_ (\_ -> threadDelay 100000) [1 .. 30 :: Int]
-  inventory <- readTVarIO store.wsInventory
-  orders <- readTVarIO store.wsOrders
-  let orderCount = case orderIdResult of
-        Left _ -> 0
-        Right Nothing -> 0
-        Right (Just _) -> Map.size orders
-      paymentText = case paymentId of
-        Left _ -> Nothing
-        Right Nothing -> Nothing
-        Right (Just stored) -> case decodeWorkflowValue "payment_id" (Just stored) :: Either CodecError Text of
-          Left _ -> Nothing
-          Right text -> Just text
-  pure ((inventory, paymentText), orders, orderCount)
-
--- | The seed-8 shape at the sim seam: the paid write cannot commit, so the
--- checkout must stop before the child starts and before @order_id@ is
--- published. A swallow regression walks on and dispatches the order anyway.
-scenarioPaidStepFails :: IOSim s (Bool, Map Int (Int, Int), Int)
-scenarioPaidStepFails = do
-  mem <- newMemDB
-  dbos <- simInstance
-  store <- newWidgetStore 5
-  calls <- newTVarIO 0
-  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs (stmDispatchOps store))
-  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs (failingCheckoutOps calls store) dispatchRef)
-  exec <- memLaunchOn mem simTracer dbos
-  let wid = WorkflowId "widget-wf-fail"
-  _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-fail"}) Nothing
-  paymentId <- getWorkflowEvent dbos wid "payment_id" (millisDuration 1000)
-  case paymentId of
-    Right (Just _) -> do
-      _ <- sendWorkflowMessage dbos wid (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("paid" :: Text))
-      pure ()
-    _ -> pure ()
-  -- Give a swallow regression time to publish @order_id@ and dispatch.
-  mapM_ (\_ -> threadDelay 100000) [1 .. 30 :: Int]
-  orderIdResult <- getWorkflowEvent dbos wid "order_id" (millisDuration 0)
-  inventory <- readTVarIO store.wsInventory
-  orders <- readTVarIO store.wsOrders
-  let published = case orderIdResult of
-        Right (Just _) -> True
-        _ -> False
-  pure (published, orders, inventory)
+-- * The tree
 
 tests :: TestTree
 tests =
   dependentTestGroup
     "Widget composition (IOSim)"
     AllFinish
-    [ testCase "a paid checkout dispatches the order and keeps inventory down" $ do
-        (res, tr) <- runSimCase (scenarioCheckout (Just "paid"))
-        printSimTrace tr
-        res @?= ((4, Just "1"), Map.singleton 1 (1, 0), 1),
-      testCase "a refused payment restores inventory and cancels the order" $ do
-        (res, tr) <- runSimCase (scenarioCheckout (Just "failed"))
-        printSimTrace tr
-        res @?= ((5, Just "1"), Map.singleton 1 (-1, 3), 1),
-      testCase "a failed paid write stops the checkout instead of dispatching" $ do
-        (res, tr) <- runSimCase scenarioPaidStepFails
-        printSimTrace tr
-        res @?= (False, Map.singleton 1 (0, 3), 4),
-      -- * Step tables (A3): direct handler cases over the same store, no
-      -- engine — the table ops are what the workflows will spend once the
-      -- rewire lands. See docs/widget-step-tables.md.
-      testCase "the create op mints ids in order" $ do
-        ((ids, orders), tr) <- runSimCase scenarioTableCreate
-        printSimTrace tr
-        ids @?= [1, 2, 3]
-        Map.keys orders @?= [1, 2, 3],
-      testCase "the reserve op never oversells under a race" $ do
-        ((winners, stock), tr) <- runSimCase scenarioTableReserveRace
-        printSimTrace tr
-        winners @?= 1
-        stock @?= 0,
-      testCase "the failing table's third call aborts whole" $ do
-        ((threw, orders, stock), tr) <- runSimCase scenarioTableFailing
-        printSimTrace tr
-        threw @?= True
-        orders @?= Map.singleton 1 (0, 3)
-        stock @?= 4,
-      testCase "the table status codes match the live assertions" $ do
-        (order, tr) <- runSimCase scenarioTableStatusCodes
-        printSimTrace tr
-        order @?= (1, 0)
+    [ simCase simWidgetFixture "a paid checkout dispatches the order and keeps inventory down" scenarioPaidCheckout checkPaidCheckout printSimTrace,
+      simCase simWidgetFixture "a refused payment restores inventory and cancels the order" scenarioRefusedPayment checkRefusedPayment printSimTrace,
+      simCase simWidgetFixture "a refused paid write stops the checkout instead of dispatching" scenarioCannedPaidWriteRefused checkCannedPaidWriteRefused printSimTrace,
+      simCase simWidgetFixture "a crash while waiting for payment replays the reserved steps" scenarioCrashWhileWaiting checkCrashWhileWaiting traceCrashWhileWaiting,
+      simCase simWidgetFixture "a crash mid-dispatch resumes the remaining ticks" scenarioCrashMidDispatch checkCrashMidDispatch traceCrashMidDispatch,
+      simCase simWidgetFixture "the create op mints ids in order" scenarioTableCreate checkTableCreate printSimTrace,
+      simCase simWidgetFixture "the reserve op never oversells under a race" scenarioTableReserveRace checkTableReserveRace traceTableReserveRace,
+      simCase simWidgetFixture "the failing table's third call aborts whole" scenarioTableFailing checkTableFailing printSimTrace,
+      simCase simWidgetFixture "the table status codes match the live assertions" scenarioTableStatusCodes checkTableStatusCodes printSimTrace,
+      simCase simWidgetFixture "a lost acknowledgement replays the committed step instead of re-running it" scenarioLostAck checkLostAck printSimTrace,
+      simCase simWidgetFixture "a killed checkout replays the reserved steps" scenarioKilledWhileWaiting checkCrashWhileWaiting printSimTrace,
+      simCase simWidgetFixture "a killed dispatch resumes the remaining ticks" scenarioKilledMidDispatch checkCrashMidDispatch traceCrashMidDispatch
     ]

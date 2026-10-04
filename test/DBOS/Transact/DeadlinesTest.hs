@@ -78,7 +78,7 @@ tests =
             runWfRef
               exec
               ref
-              (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
+              (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText), runTimeout = Explicit (secondsDuration 30)})
               Nothing
           case ran of
             Right (Just stored) -> do
@@ -115,7 +115,7 @@ tests =
             runWfRef
               exec
               ref
-              (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (millisDuration 100)})
+              (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText), runTimeout = Explicit (millisDuration 100)})
               Nothing
           case ran of
             Left (ErrorSystemDatabase (SystemDB.WorkflowCancelled {workflowId})) -> workflowId @?= workflowText
@@ -150,7 +150,7 @@ tests =
               ( runWfRef
                   exec
                   ref
-                  (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
+                  (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText), runTimeout = Explicit (secondsDuration 30)})
                   Nothing
               )
           first <- waitForDeadline getBackend (WorkflowId workflowText)
@@ -164,7 +164,7 @@ tests =
             runWfRef
               exec
               ref
-              (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
+              (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText), runTimeout = Explicit (secondsDuration 30)})
               Nothing
           case ran of
             Right (Just stored) -> do
@@ -193,7 +193,7 @@ tests =
               ( runWfRef
                   exec
                   ref
-                  (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
+                  (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText), runTimeout = Explicit (secondsDuration 30)})
                   Nothing
               )
           _ <- waitForDeadline getBackend (WorkflowId workflowText)
@@ -221,7 +221,7 @@ tests =
             runWfRef
               exec
               ref
-              (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
+              (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText), runTimeout = Explicit (secondsDuration 30)})
               Nothing
           case first of
             Right (Just stored) -> do
@@ -232,7 +232,7 @@ tests =
             runWfRef
               exec
               ref
-              (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (millisDuration 1)})
+              (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText), runTimeout = Explicit (millisDuration 1)})
               Nothing
           case again of
             Right (Just stored) -> do

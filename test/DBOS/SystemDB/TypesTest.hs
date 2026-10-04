@@ -8,7 +8,7 @@ where
 import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
-import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), Submission (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelWorkflowStepName, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteWorkflowStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkNew, forkOptionsValidate, forkValidate, forkWorkflowStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isValidApplicationName, listSchedulesStepName, listWorkflowStepsStepName, listWorkflowsStepName, newQueue, newSchedule, newWorkflow, outcomeStatus, parseScheduleStatus, pauseScheduleStepName, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resolvedIsPartitioned, resumeScheduleStepName, resumeWorkflowStepName, scheduleStatusText, secondsDuration, selectStepStepName, selectWorkflowStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
+import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), Submission (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, newQueue, newSchedule, newWorkflow, outcomeStatus, parseScheduleStatus, pauseScheduleStepName, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
 import DBOS.Transact (IdempotencyKey (..), MessageUUID (..), NotificationRow (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), WorkflowStatus (..), notificationRowForMessage, nullTopicSentinel)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -221,18 +221,18 @@ engineTests =
           setEventStepName,
           getEventStepName,
           getResultStepName,
-          selectWorkflowStepName,
+          selectStepName,
           selectStepStepName,
           recvStepName,
           debounceStepName,
-          cancelWorkflowStepName,
-          resumeWorkflowStepName,
-          deleteWorkflowStepName,
-          forkWorkflowStepName,
+          cancelStepName,
+          resumeStepName,
+          deleteStepName,
+          forkStepName,
           setWorkflowDelayStepName,
           updateWorkflowAttributesStepName,
           listWorkflowsStepName,
-          listWorkflowStepsStepName,
+          listStepsStepName,
           createScheduleStepName,
           upsertScheduleStepName,
           getScheduleStepName,

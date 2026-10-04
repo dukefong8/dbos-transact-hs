@@ -351,7 +351,7 @@ conditions); token → per-attempt `TVar Bool` (receiving end);
 deadline-as-instant riding row + context → `resolveTimeoutDeadline`;
 `check_here` table → `checkHere` (now marker-compared);
 step-name consts → present, including `selectStepStepName` /
-`selectWorkflowStepName` ahead of the engine.
+`selectStepName` ahead of the engine.
 
 **Hard — the select port design space.**
 - *Branch heterogeneity.* Rust leans on `PendingStep<T, E>` as the

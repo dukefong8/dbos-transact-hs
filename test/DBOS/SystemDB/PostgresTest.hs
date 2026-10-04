@@ -1760,7 +1760,7 @@ forkTests getBackend =
                   record.workflowRecordForkedFrom @?= Just (WorkflowId source)
                   record.workflowRecordQueueName @?= Just "_dbos_internal_queue"
                 other -> fail ("expected the fork, got: " <> show other)
-              copied <- listWorkflowSteps env (WorkflowId forkedId) True Nothing Nothing Nothing
+              copied <- listSteps env (WorkflowId forkedId) True Nothing Nothing Nothing
               case copied of
                 Right steps -> map (.stepRecordStepId) steps @?= [1]
                 other -> fail ("expected copied steps, got: " <> show other)
@@ -1833,7 +1833,7 @@ forkTests getBackend =
     ]
   where
     runReaderAt env forkedId = do
-      copied <- listWorkflowSteps env (WorkflowId forkedId) True Nothing Nothing Nothing
+      copied <- listSteps env (WorkflowId forkedId) True Nothing Nothing Nothing
       case copied of
         Right steps -> pure (map (.stepRecordStepId) steps)
         Left err -> fail ("expected copied steps, got: " <> show err)

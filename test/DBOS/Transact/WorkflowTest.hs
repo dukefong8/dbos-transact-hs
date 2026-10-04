@@ -103,6 +103,7 @@ module DBOS.Transact.WorkflowTest
   )
 where
 
+import DBOS.DualStack (liveCase)
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (atomically, newTVarIO, readTVarIO, writeTVar)
 import Control.Monad.Class.MonadTimer (threadDelay)
@@ -117,7 +118,7 @@ import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word32)
-import DBOS.SystemDB (AwaitedOutcome (..), NewWorkflow (..), StepRecord (..), Submission (..), WorkflowId (..), WorkflowRecord (..), Timestamp (..), addTimeout, getWorkflow, listWorkflowSteps, newWorkflow)
+import DBOS.SystemDB (AwaitedOutcome (..), NewWorkflow (..), StepRecord (..), Submission (..), WorkflowId (..), WorkflowRecord (..), Timestamp (..), addTimeout, getWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
@@ -176,11 +177,11 @@ import DBOS.Transact
     runOptionsToStartOptions,
     nullTracer,
     pendingAwait,
-    pendingWorkflowStep,
-    pendingWorkflowStepWith,
-    runWorkflowStep,
-    runWorkflowStepWith,
-    sleepWorkflowStep,
+    pendingStep,
+    pendingStepWith,
+    runStep,
+    runStepWith,
+    sleepStep,
     selectWorkflow,
     startChildWorkflow,
     millisDuration,
@@ -224,7 +225,7 @@ tests =
   withResource acquireLoggerBackend snd $ \getLogger ->
   testGroup
     "Workflow execution"
-    [ liveCase getBackend (ioTracer . fst <$> getLogger) "a registered workflow starts and records its result" scenarioRegisteredRecordsResult checkRegisteredResult,
+    [ liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a registered workflow starts and records its result" scenarioRegisteredRecordsResult checkRegisteredResult,
       -- IO only: crash-and-relaunch recovery sweep (MemSystemDB delegates
       -- reenqueueForRecovery to the canned mock; see ADR-0020).
       testCase "a recovery run replays completed steps after a body interruption" $ do
@@ -242,7 +243,7 @@ tests =
         bodyCalls <- newIORef (0 :: Int)
         let body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = do
-              completedStep <- runWorkflowStep wctx "once" (const (modifyIORef' bodyCalls (+ 1) >> pure (value * 2)))
+              completedStep <- runStep wctx "once" (const (modifyIORef' bodyCalls (+ 1) >> pure (value * 2)))
               case completedStep of
                 Left err -> pure (Left err)
                 Right result -> do
@@ -312,8 +313,8 @@ tests =
             Right ref -> pure ref
           execFirst <- launchExec first isolatedEnvironment
           -- Ghost first, so the sweep meets the skip before the recovery.
-          ghostWorker <- async (runWfRef execFirst ghostRef (runOptionsDefault {runWorkflowId = Just ghostText}) Nothing)
-          keeperWorker <- async (runWfRef execFirst keeperRef (runOptionsDefault {runWorkflowId = Just keeperText}) Nothing)
+          ghostWorker <- async (runWfRef execFirst ghostRef (runOptionsDefault {runWorkflowId = Just (WorkflowId ghostText)}) Nothing)
+          keeperWorker <- async (runWfRef execFirst keeperRef (runOptionsDefault {runWorkflowId = Just (WorkflowId keeperText)}) Nothing)
           entered <- timeout 15000000 (takeMVar enteredGhost >> takeMVar enteredKeeper)
           case entered of
             Nothing -> fail "the abandoned runs never started"
@@ -350,25 +351,25 @@ tests =
         runOptionsDefault @?= RunOptions Nothing Inherit Nothing
         startOptionsDefault @?= StartOptions Nothing Inherit Nothing Nothing
         runOptionsToStartOptions runOptionsDefault @?= startOptionsDefault
-        childWorkflowId (Just "chosen") (Just ("parent", 3)) "generated" @?= "chosen"
+        childWorkflowId (Just (WorkflowId "chosen")) (Just ("parent", 3)) "generated" @?= "chosen"
         childWorkflowId Nothing (Just ("parent", 0)) "generated" @?= "parent-0"
         childWorkflowId Nothing (Just ("parent", 2)) "generated" @?= "parent-2"
         childWorkflowId Nothing Nothing "generated" @?= "generated",
       -- The double-click: the same id while the first run still owns it
       -- joins rather than failing — one id, one execution.
-      liveCase getBackend (ioTracer . fst <$> getLogger) "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a fresh start is local and a join polls" scenarioFreshJoinPolls checkFreshJoinPolls,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "awaiting a child is recorded as a step" scenarioAwaitRecorded checkAwaitRecorded,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a recorded await of another workflow is refused" scenarioStaleAwaitRefused checkStaleAwaitRefused,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "awaiting a child inside a step is covered by that step" scenarioAwaitInsideStep checkAwaitInsideStep,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "child starts and awaits keep their ids in build order" scenarioChildIdsInBuildOrder checkChildIdsInBuildOrder,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "runs claim their pairs of step ids adjacently" scenarioStepIdPairs checkStepIdPairs,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a select step races a step against a child's result" scenarioSelectStepRaces checkSelectStepRaces,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a scoped select races two pending steps" scenarioScopedSelect checkScopedSelect,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a converted body runs through the scoped entries" scenarioScopedBody checkScopedBody,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a control signal winning a select records no winner" scenarioControlSelect checkControlSelect,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a losing step has its cancellation token fired" scenarioLosingTokenFired checkLosingTokenFired,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a cancelled child is an awaited cancellation in the parent" scenarioCancelledChildAwaited checkCancelledChildAwaited,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a fresh start is local and a join polls" scenarioFreshJoinPolls checkFreshJoinPolls,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "awaiting a child is recorded as a step" scenarioAwaitRecorded checkAwaitRecorded,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a recorded await of another workflow is refused" scenarioStaleAwaitRefused checkStaleAwaitRefused,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "awaiting a child inside a step is covered by that step" scenarioAwaitInsideStep checkAwaitInsideStep,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "child starts and awaits keep their ids in build order" scenarioChildIdsInBuildOrder checkChildIdsInBuildOrder,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "runs claim their pairs of step ids adjacently" scenarioStepIdPairs checkStepIdPairs,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a select step races a step against a child's result" scenarioSelectStepRaces checkSelectStepRaces,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a scoped select races two pending steps" scenarioScopedSelect checkScopedSelect,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a converted body runs through the scoped entries" scenarioScopedBody checkScopedBody,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a control signal winning a select records no winner" scenarioControlSelect checkControlSelect,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a losing step has its cancellation token fired" scenarioLosingTokenFired checkLosingTokenFired,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a cancelled child is an awaited cancellation in the parent" scenarioCancelledChildAwaited checkCancelledChildAwaited,
       -- IO only: recorded-await replay across two launches (needs the
       -- recovery sweep).
       testCase "a replayed parent reads the recorded outcome rather than waiting again" $ do
@@ -412,13 +413,13 @@ tests =
             Left err -> fail (show err)
             Right ref -> pure ref
           execFirst <- launchExec first isolatedEnvironment
-          _ <- startWfRef execFirst parentRef (startOptionsDefault {startWorkflowId = Just parentText}) Nothing
+          _ <- startWfRef execFirst parentRef (startOptionsDefault {startWorkflowId = Just (WorkflowId parentText)}) Nothing
           reader <- getBackend
           let awaitRecorded = go (200 :: Int)
                 where
                   go 0 = fail "the await was never recorded"
                   go n = do
-                    rows <- listWorkflowSteps reader (WorkflowId parentText) False Nothing Nothing Nothing
+                    rows <- listSteps reader (WorkflowId parentText) False Nothing Nothing Nothing
                     case rows of
                       Right found | length found >= 2 -> pure ()
                       _ -> threadDelay 50000 >> go (n - 1)
@@ -465,14 +466,14 @@ tests =
                   decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
               assertEqual "the replayed parent read the recorded await" (Right 5) decoded
             other -> fail ("expected the replayed parent to finish, got: " <> show other),
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a child inherits its parent's deadline" scenarioDeadlineInherited checkDeadlineInherited,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a child's own timeout replaces the inherited deadline" scenarioChildBudgetWins checkChildBudgetWins,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a child can decline the inherited deadline" scenarioDeclinedDeadline checkDeclinedDeadline,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a parent and its child hit an inherited deadline independently" scenarioCascadeDeadline checkCascadeDeadline,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a parent starts a child under a derived id and replay adopts it" scenarioDerivedChildAdopted checkDerivedChildAdopted,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "starting a child inside a step is refused, not recorded" scenarioChildInsideStepRefused checkChildInsideStepRefused,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "starting a child through a captured parent is refused, not recorded" scenarioCaptureChildRefused checkCaptureChildRefused,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a child that fails differently is started through lift" scenarioLiftChildError checkLiftChildError,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child inherits its parent's deadline" scenarioDeadlineInherited checkDeadlineInherited,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child's own timeout replaces the inherited deadline" scenarioChildBudgetWins checkChildBudgetWins,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child can decline the inherited deadline" scenarioDeclinedDeadline checkDeclinedDeadline,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a parent and its child hit an inherited deadline independently" scenarioCascadeDeadline checkCascadeDeadline,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a parent starts a child under a derived id and replay adopts it" scenarioDerivedChildAdopted checkDerivedChildAdopted,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "starting a child inside a step is refused, not recorded" scenarioChildInsideStepRefused checkChildInsideStepRefused,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "starting a child through a captured parent is refused, not recorded" scenarioCaptureChildRefused checkCaptureChildRefused,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child that fails differently is started through lift" scenarioLiftChildError checkLiftChildError,
       -- IO only: the body performs real IO (the foreign charge call),
       -- which the simulator cannot run.
       testCase "a foreign error is converted at the boundary" $ do
@@ -510,8 +511,8 @@ tests =
                   other -> fail ("expected the encoded error in the column, got: " <> show other)
                 Nothing -> fail "the pay workflow recorded no error"
             other -> fail ("expected the pay row, got: " <> show other),
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a child started and never awaited is still recorded" scenarioUnawaitedChild checkUnawaitedChild,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "children started in a loop run concurrently" scenarioFanout checkFanout,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child started and never awaited is still recorded" scenarioUnawaitedChild checkUnawaitedChild,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "children started in a loop run concurrently" scenarioFanout checkFanout,
       -- IO only: first-to-settle timing is wall-clock-bound.
       testCase "select reports the first workflow to settle, not the first started" $ do
         fresh <- UUID.V4.nextRandom
@@ -538,7 +539,7 @@ tests =
                   startWfRef
                     exec
                     childRef
-                    (startOptionsDefault {startWorkflowId = Just (childText n)})
+                    (startOptionsDefault {startWorkflowId = Just (WorkflowId (childText n))})
                     (Just (encodeWorkflowValue n))
                 case startedChild of
                   Left err -> fail (show err)
@@ -574,10 +575,10 @@ tests =
             Just (Right won) -> won @?= WorkflowId (childText 1)
             other -> fail ("expected the middle workflow to win, got: " <> show other)
           mapM_ (`putMVar` ()) [gates !! 0, gates !! 2],
-      liveCase getBackend (ioTracer . fst <$> getLogger) "an assigned child id wins over the derived one" scenarioAssignedChildAdopted checkAssignedChildAdopted,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a workflow started outside a workflow has no parent" scenarioRootNoParent checkRootNoParent,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a start position holding a plain step is refused" scenarioPlainStepAtStart checkPlainStepAtStart,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "an assigned child id wins over the derived one" scenarioAssignedChildAdopted checkAssignedChildAdopted,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow started outside a workflow has no parent" scenarioRootNoParent checkRootNoParent,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a start position holding a plain step is refused" scenarioPlainStepAtStart checkPlainStepAtStart,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance,
       testCase "a child joining a held key is recorded as the workflow it joined" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -633,7 +634,7 @@ tests =
                   { deduplicationId = Just dedupKey,
                     delay = Just (secondsDuration 3)
                   }
-          holder <- startWfRef exec childRef (startOptionsDefault {startWorkflowId = Just holderText, startQueue = Just holderQueue}) Nothing
+          holder <- startWfRef exec childRef (startOptionsDefault {startWorkflowId = Just (WorkflowId holderText), startQueue = Just holderQueue}) Nothing
           case holder of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -646,7 +647,7 @@ tests =
           reader <- getBackend
           derived <- getWorkflow reader (WorkflowId derivedText)
           derived @?= Right Nothing
-          listed <- listWorkflowSteps reader (WorkflowId parentText) True Nothing Nothing Nothing
+          listed <- listSteps reader (WorkflowId parentText) True Nothing Nothing Nothing
           case listed of
             Right
               [ StepRecord {stepRecordStepName = startName, stepRecordChildWorkflowId = Just (WorkflowId startedChild)},
@@ -667,20 +668,20 @@ tests =
           -- the parent's replay without listing among its children.
           children <- SystemDB.getWorkflowChildren reader (WorkflowId parentText)
           children @?= Right [],
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a panicking workflow leaves its row pending" scenarioPanic checkPanic,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "retrieving before launch is refused" scenarioRetrieveBeforeLaunch checkRunBeforeLaunch,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "an application error round-trips as itself" scenarioAppErrorRoundtrip checkAppErrorRoundtrip,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a database failure is not the workflow outcome" scenarioDbFailureNotOutcome checkDbFailureNotOutcome,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a workflow records the steps it took" scenarioStepsTaken checkStepsTaken,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "shutdown cancels a running workflow and leaves it pending" scenarioShutdownCancels checkShutdownCancels,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "dropping the future does not stop the workflow" scenarioDropFuture checkDropFuture,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a panicking workflow leaves its row pending" scenarioPanic checkPanic,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "retrieving before launch is refused" scenarioRetrieveBeforeLaunch checkRunBeforeLaunch,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "an application error round-trips as itself" scenarioAppErrorRoundtrip checkAppErrorRoundtrip,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a database failure is not the workflow outcome" scenarioDbFailureNotOutcome checkDbFailureNotOutcome,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow records the steps it took" scenarioStepsTaken checkStepsTaken,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "shutdown cancels a running workflow and leaves it pending" scenarioShutdownCancels checkShutdownCancels,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "dropping the future does not stop the workflow" scenarioDropFuture checkDropFuture,
       -- Sim only: not yet mirrored on IO (needs wall-clock
       -- budget/body scaling).
       testCase "a budget cancels the workflow durably" (pure ()),
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a started workflow carries the attributes it was given" scenarioAttributes checkAttributes,
-      liveCase getBackend (ioTracer . fst <$> getLogger) "a step error is recorded in its column" scenarioStepErrorRecorded checkStepErrorRecorded,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a started workflow carries the attributes it was given" scenarioAttributes checkAttributes,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a step error is recorded in its column" scenarioStepErrorRecorded checkStepErrorRecorded,
       -- Sim only: typed trace assertions live only in sim.
       testCase "workflow announcements carry their counts and ids" (pure ()),
       tasksTests
@@ -732,7 +733,7 @@ scenarioRegisteredRecordsResult fx = do
         -- scoped step runner. The body takes WorkflowCtx and every call
         -- it makes takes that view or one derived from it.
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+        body value wctx = runStep wctx "double" (const (pure (value * 2)))
     registered <- registerDBOSWorkflow dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
@@ -805,7 +806,7 @@ mkWfFixture config identity connApp nameScheme genId genEntropy sysdb tracer = d
             Left err -> throwIO (userError (show err))
             Right row -> pure row,
         wfListSteps = \wid -> do
-          listed <- runSystemDB sysdb (\db -> listWorkflowSteps db wid True Nothing Nothing Nothing)
+          listed <- runSystemDB sysdb (\db -> listSteps db wid True Nothing Nothing Nothing)
           case listed of
             Left err -> throwIO (userError (show err))
             Right steps -> pure steps,
@@ -901,7 +902,7 @@ scenarioJoinTakesId fx = do
     exec <- fx.wfLaunch dbos
     wid <- fx.wfFreshId "join-start"
     let WorkflowId widText = wid
-        startOpts = startOptionsDefault {startWorkflowId = Just widText}
+        startOpts = startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}
     (firstE :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <- startDBOSWorkflowRef exec ref startOpts Nothing
     firstHandle <- case firstE of
       Left err -> throwIO (userError (show err))
@@ -974,7 +975,7 @@ scenarioFreshJoinPolls fx = do
     exec <- fx.wfLaunch dbos
     wid <- fx.wfFreshId "local-id"
     let WorkflowId widText = wid
-        startOpts = startOptionsDefault {startWorkflowId = Just widText}
+        startOpts = startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}
         label :: WorkflowHandle m EngineOnly -> Text
         label (WorkflowHandle _ _ provenance') = case provenance' of
           Local _ -> "local"
@@ -1188,10 +1189,10 @@ scenarioStepsTaken fx = do
     let key = newWorkflowKey "two-steps"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body value wctx = do
-          first <- runWorkflowStep wctx "one" (const (pure (value + 1)))
+          first <- runStep wctx "one" (const (pure (value + 1)))
           case first of
             Left err -> pure (Left err)
-            Right stepped -> runWorkflowStep wctx "two" (const (pure (stepped * 2)))
+            Right stepped -> runStep wctx "two" (const (pure (stepped * 2)))
     registered <- registerDBOSWorkflow dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
@@ -1226,7 +1227,7 @@ scenarioShutdownCancels fx = do
     wid <- fx.wfFreshId "shutdown-run-id"
     worker <-
       async
-        ( runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just (let WorkflowId t = wid in t)}) Nothing ::
+        ( runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid}) Nothing ::
             m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
         )
     waitForRowShared fx.wfReadRow wid
@@ -1259,7 +1260,7 @@ scenarioDropFuture fx = do
     wid <- fx.wfFreshId "drop-future-id"
     worker <-
       async
-        ( runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just (let WorkflowId t = wid in t)}) Nothing ::
+        ( runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid}) Nothing ::
             m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
         )
     waitForRowShared fx.wfReadRow wid
@@ -1314,7 +1315,7 @@ scenarioAttributes fx = do
     wid <- fx.wfFreshId "attributes-parent"
     let WorkflowId parentText = wid
     (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
-      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just parentText, runAttributes = Just (Map.singleton "tenant" (String tenant))}) Nothing
+      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just (WorkflowId parentText), runAttributes = Just (Map.singleton "tenant" (String tenant))}) Nothing
     parentRow <- fx.wfReadRow wid
     childRow <- fx.wfReadRow (WorkflowId (parentText <> "-0"))
     pure (ran, parentRow, childRow, tenant)
@@ -1331,7 +1332,7 @@ scenarioStepErrorRecorded fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     let key = newWorkflowKey "charger"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        body () wctx = runWorkflowStepWith stepOptionsDefault wctx "charge" (const (pure (Left (StepFailed "charge" "short by 12"))))
+        body () wctx = runStepWith stepOptionsDefault wctx "charge" (const (pure (Left (StepFailed "charge" "short by 12"))))
     registered <- registerDBOSWorkflow dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
@@ -1558,7 +1559,7 @@ scenarioDerivedChildAdopted fx = do
     let childKey = newWorkflowKey "double"
         parentKey = newWorkflowKey "parent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        childBody value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+        childBody value wctx = runStep wctx "double" (const (pure (value * 2)))
     childRefE <- registerDBOSWorkflowRef dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
@@ -1614,7 +1615,7 @@ scenarioAssignedChildAdopted fx = do
         parentBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         parentBody _ wctx = do
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow wctx childRef (startOptionsDefault {startWorkflowId = Just chosenText}) (Just (encodeWorkflowValue (21 :: Int)))
+            startChildWorkflow wctx childRef (startOptionsDefault {startWorkflowId = Just (WorkflowId chosenText)}) (Just (encodeWorkflowValue (21 :: Int)))
           pure ((.workflowId) <$> started)
     parentReg <- registerDBOSWorkflow dbos parentKey parentBody
     case parentReg of
@@ -1719,7 +1720,7 @@ scenarioUnawaitedChild fx = do
     let childKey = newWorkflowKey "child"
         parentKey = newWorkflowKey "forgetful"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        childBody value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+        childBody value wctx = runStep wctx "double" (const (pure (value * 2)))
     childRefE <- registerDBOSWorkflowRef dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
@@ -1797,7 +1798,7 @@ scenarioLiftChildError fx = do
     let WorkflowId billText = billWid
         shipText = billText <> "-0"
     ran <-
-      runDBOSWorkflowRef exec billRef (runOptionsDefault {runWorkflowId = Just billText}) (Just (encodeWorkflowValue ()))
+      runDBOSWorkflowRef exec billRef (runOptionsDefault {runWorkflowId = Just (WorkflowId billText)}) (Just (encodeWorkflowValue ()))
     childRow <- fx.wfReadRow (WorkflowId shipText)
     pure (ran, childRow)
 
@@ -1815,7 +1816,7 @@ scenarioCaptureChildRefused fx = do
     let childKey = newWorkflowKey "double"
         parentKey = newWorkflowKey "badparent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        childBody value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+        childBody value wctx = runStep wctx "double" (const (pure (value * 2)))
     childRefE <- registerDBOSWorkflowRef dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
@@ -1855,7 +1856,7 @@ scenarioChildInsideStepRefused fx = do
     let childKey = newWorkflowKey "double"
         parentKey = newWorkflowKey "badparent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        childBody value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+        childBody value wctx = runStep wctx "double" (const (pure (value * 2)))
     childRefE <- registerDBOSWorkflowRef dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
@@ -1922,7 +1923,7 @@ scenarioCascadeDeadline fx = do
     let WorkflowId parentText = wid
         childText = parentText <> "-0"
     (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
-      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (millisDuration 400)}) Nothing
+      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just (WorkflowId parentText), runTimeout = Explicit (millisDuration 400)}) Nothing
     childOutcome <- waitForWorkflow dbos (WorkflowId childText)
     steps <- fx.wfListSteps wid
     pure (ran, childOutcome, steps)
@@ -1975,7 +1976,7 @@ scenarioDeclinedDeadline fx = do
     wid <- fx.wfFreshId "decline-deadline-parent"
     let WorkflowId parentText = wid
     (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
-      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 300)}) Nothing
+      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just (WorkflowId parentText), runTimeout = Explicit (secondsDuration 300)}) Nothing
     parentRow <- fx.wfReadRow wid
     inheritedRow <- fx.wfReadRow (WorkflowId (parentText <> "-0"))
     detachedRow <- fx.wfReadRow (WorkflowId (parentText <> "-2"))
@@ -2023,7 +2024,7 @@ scenarioChildBudgetWins fx = do
     let WorkflowId parentText = wid
         childText = parentText <> "-0"
     (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
-      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 60)}) Nothing
+      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just (WorkflowId parentText), runTimeout = Explicit (secondsDuration 60)}) Nothing
     parentRow <- fx.wfReadRow wid
     childRow <- fx.wfReadRow (WorkflowId childText)
     pure (ran, parentRow, childRow)
@@ -2071,7 +2072,7 @@ scenarioDeadlineInherited fx = do
     let WorkflowId parentText = wid
         childText = parentText <> "-0"
     (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
-      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 300)}) Nothing
+      runDBOSWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just (WorkflowId parentText), runTimeout = Explicit (secondsDuration 300)}) Nothing
     parentRow <- fx.wfReadRow wid
     childRow <- fx.wfReadRow (WorkflowId childText)
     pure (ran, parentRow, childRow)
@@ -2146,11 +2147,11 @@ scenarioScopedBody fx = do
     let key = newWorkflowKey "scoped-body"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body value wctx = do
-          stepped <- runWorkflowStep wctx "double" (\_ -> pure (value * 2))
+          stepped <- runStep wctx "double" (\_ -> pure (value * 2))
           case stepped of
             Left err -> pure (Left err)
             Right doubled -> do
-              slept <- sleepWorkflowStep wctx (millisDuration 1)
+              slept <- sleepStep wctx (millisDuration 1)
               pure (doubled <$ slept)
     registered <- registerDBOSWorkflow dbos key body
     case registered of
@@ -2199,8 +2200,8 @@ scenarioScopedSelect fx = do
     conn <- fx.wfConn
     outcome <-
       withWorkflow conn fx.wfIdentity wid Nothing $ \wctx -> do
-        slow <- pendingWorkflowStep wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (2 :: Int)))
-        fast <- pendingWorkflowStep wctx "fast" (\_ -> pure (Right (1 :: Int)))
+        slow <- pendingStep wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (2 :: Int)))
+        fast <- pendingStep wctx "fast" (\_ -> pure (Right (1 :: Int)))
         selectStep
           wctx
           [ SelectArm "slow" slow (\armOutcome -> pure (armOutcome >>= \value -> Right value)),
@@ -2234,7 +2235,7 @@ scenarioLosingTokenFired fx = do
     let parentKey = newWorkflowKey "parent"
         parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          slow <- pendingWorkflowStep wctx "slow" $ \inner -> do
+          slow <- pendingStep wctx "slow" $ \inner -> do
             token <- stepCtxCancellationToken inner
             _ <- async $ do
               let watch = do
@@ -2245,7 +2246,7 @@ scenarioLosingTokenFired fx = do
             putMVar watching ()
             threadDelay 30000000
             pure (Right (2 :: Int))
-          fast <- pendingWorkflowStep wctx "fast" (\_ -> takeMVar watching >> pure (Right (1 :: Int)))
+          fast <- pendingStep wctx "fast" (\_ -> takeMVar watching >> pure (Right (1 :: Int)))
           selectStep
             wctx
             [ SelectArm "slow" slow (\outcome -> pure (outcome >>= \value -> Right value)),
@@ -2282,8 +2283,8 @@ scenarioControlSelect fx = do
     let WorkflowId parentText = wid
         parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          interrupted <- pendingWorkflowStep wctx "interrupted" (\_ -> pure (Left (Interrupted {workflowId = parentText})))
-          slow <- pendingWorkflowStep wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (1 :: Int)))
+          interrupted <- pendingStep wctx "interrupted" (\_ -> pure (Left (Interrupted {workflowId = parentText})))
+          slow <- pendingStep wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (1 :: Int)))
           selectStep
             wctx
             [ SelectArm "interrupted" interrupted (\outcome -> pure (outcome >>= \value -> Right value)),
@@ -2328,7 +2329,7 @@ scenarioSelectStepRaces fx = do
           case started of
             Left err -> pure (Left err)
             Right childHandle -> do
-              slow <- pendingWorkflowStep wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (0 :: Int)))
+              slow <- pendingStep wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (0 :: Int)))
               awaited <- pendingAwait wctx childHandle
               selectStep
                 wctx
@@ -2443,7 +2444,7 @@ scenarioAwaitInsideStep fx = do
           case started of
             Left err -> pure (Left err)
             Right wfHandle ->
-              runWorkflowStepWith stepOptionsDefault wctx "collect" $ \_sctx -> do
+              runStepWith stepOptionsDefault wctx "collect" $ \_sctx -> do
                 awaited <- awaitChild wctx wfHandle
                 pure $ case awaited of
                   Left err -> Left err
@@ -2554,11 +2555,6 @@ scenarioStaleAwaitRefused fx = do
 -- name-for-name. A single imported @TestTree@ cannot cover both
 -- backends: tasty leaves are @IO@, while sim execution is rank-2
 -- (@forall s. IOSim s a@) with trace printing on top.
-
--- | One live leaf: build the fixture over the FastLogger tracer, drive
--- the shared scenario, judge by the shared check.
-liveCase :: IO Postgres.PostgresSystemDB -> IO (SomeTracer IO) -> String -> (WfFixture IO -> IO a) -> (a -> Either String ()) -> TestTree
-liveCase getBackend getTracer name scen check = testCase name (liveWfFixture getBackend getTracer >>= scen >>= either fail pure . check)
 
 -- | The shared verdicts both trees assert. Pure so either runner can own
 -- the failure; messages match the assertions they replace.

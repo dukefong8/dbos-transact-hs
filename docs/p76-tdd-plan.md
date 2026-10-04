@@ -180,7 +180,7 @@ and the `Statements` seam are the port's own and re-export, never redefine.
 `setWorkflowDelay`, `clearQueueAssignment`, `updateWorkflowAttributes`,
 `reenqueueForRecovery`, `transitionDelayedWorkflows`, `cancelWorkflows`,
 `resumeWorkflows`, `deleteWorkflows`, `forkWorkflows`, `forkFrom`,
-`renameApplication` (+ `listWorkflowSteps`).
+`renameApplication` (+ `listSteps`).
 
 ### P7.4 — steps, events, messages (done; streams deferred):
 `checkStep`, `recordStep`, `recordSleep`, `setEvent`, `getEvent`,
@@ -362,7 +362,7 @@ StarterTest mirror, and removal of the v1 pool/Store path have not landed.
   launched executor in pieces: backend, config, identity — bodies that
   start children read it instead of capturing a handle). Adaptations:
   executor pointer stays below the seam (no `WrongInstance` comparison),
-  `runWorkflowStep` now scopes bodies via `withAttempt`. `Ctx` gains a
+  `runStep` now scopes bodies via `withAttempt`. `Ctx` gains a
   third field (`ctxDeadline`); all constructors updated.
 - `Transact.Workflow` (6 tests): `Timeout` (`Inherit`/`None`/`Explicit`)
   with `timeoutBudget`/`resolveTimeoutDeadline` (queued budgets leave the

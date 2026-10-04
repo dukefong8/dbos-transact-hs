@@ -134,7 +134,7 @@ beginSql isolation =
 -- Never call this from a workflow body or a step body: a write here runs
 -- outside the execution's checkpoint, so replay re-runs it (double
 -- effects) and recovery cannot adopt it. Bodies that touch the
--- application database go through 'runTransaction', whose
+-- application database go through 'runTxStep', whose
 -- transaction-completion row makes the body exactly-once. This stays
 -- exported for setup, verification, and handler reads — the same reason
 -- the TypeScript datasources keep their raw clients usable.

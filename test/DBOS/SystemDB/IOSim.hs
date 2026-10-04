@@ -114,6 +114,7 @@ import DBOS.Transact
     Serializer (..),
     SomeTracer (..),
     configNew,
+    launchExecutor,
     launchOn,
     newDBOS,
   )
@@ -191,7 +192,7 @@ instance SystemDB MockSystemDB (IOSim s) where
   close = \cases _ -> pure ()
   checkStep = \cases _ _ _ _ -> pure (Right Nothing)
   recordStep = \cases _ _ _ _ _ _ _ -> pure (Right ())
-  listWorkflowSteps = \cases _ wid _ _ _ _ -> pure (Right [mockStep wid 0 "mock-step"])
+  listSteps = \cases _ wid _ _ _ _ -> pure (Right [mockStep wid 0 "mock-step"])
   recordSleep = \cases _ _ _ _ -> pure (Right mockTimestamp)
   setEvent = \cases _ _ _ _ _ _ -> pure (Right ())
   getEvent = \cases _ _ _ _ _ -> pure (Right (Just (EncodedValue mockEventBody (Just mockSerialization))))
@@ -409,11 +410,18 @@ memConnectionOn mem tracer = do
     (simEntropy entropy)
     tracer
 
--- | Launch carrying the given tracer over simulated data.
+-- | Launch carrying the given tracer over simulated data. Unlike
+-- 'launchWithEnvironment', this always launches: there is no
+-- existing-executor guard, so callers must launch once per executor
+-- lifetime and relaunch only after 'shutdown'.
 memLaunchOn :: MemSystemDB s -> SomeTracer (IOSim s) -> DBOS (IOSim s) -> IOSim s (Executor (IOSim s))
 memLaunchOn mem tracer dbos = do
   conn <- memConnectionOn mem tracer
-  launchOn dbos conn simIdentity
+  executor <- launchOn dbos conn simIdentity
+  -- The same launch tail the IO path runs: application-version registration,
+  -- recovery of this executor's pending rows, the launch announcement, and
+  -- the supervisor fork — over the simulated backends.
+  launchExecutor dbos executor >>= either (error . show) pure
 
 -- | A launched sim instance over simulated data carrying the given tracer.
 memDBOSOn :: MemSystemDB s -> SomeTracer (IOSim s) -> IOSim s (DBOS (IOSim s))
@@ -646,7 +654,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     where
       memPriorOutput (Just record) = record.stepRecordOutput
       memPriorOutput Nothing = Nothing
-  listWorkflowSteps db (WorkflowId wid) _ _ _ _ = do
+  listSteps db (WorkflowId wid) _ _ _ _ = do
     steps <- readTVarIO db.memSteps
     pure (Right [record | ((w, _), record) <- Map.toList steps, w == wid])
   recordChildWorkflow db parent child stepId name _time = atomically $ do

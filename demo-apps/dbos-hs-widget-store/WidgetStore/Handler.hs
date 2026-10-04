@@ -18,6 +18,7 @@ module WidgetStore.Handler
 where
 
 import Control.Monad (void)
+import Control.Monad.Except (ExceptT (..), liftEither, runExcept, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -82,35 +83,22 @@ restockProduct app = runAppOr500 app.waApp (Session.statement () restockStatemen
 -- starting another. A 'Left' is the storefront's "checkout failed" (no
 -- inventory); the API surface spells it 500, the htmx surface a retry panel.
 startCheckout :: WidgetApp -> Text -> RouteHandler (Either Text Text)
-startCheckout app key = do
-  started <- liftIO (startCheckoutWorkflow app key)
-  case started of
-    Left message -> pure (Left (Text.pack (show message)))
-    Right () -> do
-      paymentId <- awaitEvent app (WorkflowId key) paymentIdEvent
-      pure $ case paymentId of
-        Right pid | not (Text.null pid) -> Right pid
-        _                               -> Left "Checkout failed"
+startCheckout app key = runExceptT $ do
+  ExceptT (either (Left . Text.pack . show) Right <$> liftIO (startCheckoutWorkflow app key))
+  paymentId <- ExceptT (awaitEvent app (WorkflowId key) paymentIdEvent)
+  if Text.null paymentId then throwError "Checkout failed" else pure paymentId
 
 -- | The payment provider's callback: tells the waiting checkout whether the
 -- card was charged, then waits for it to settle the order.
 settlePayment :: WidgetApp -> Text -> Text -> RouteHandler (Either Text Order)
-settlePayment app paymentId status = do
-  sent <- liftIO (sendWorkflowMessage app.waDbos (WorkflowId paymentId) (Just (Topic paymentStatusTopic)) Nothing (encodeWorkflowValue status))
-  case sent of
-    Left err -> pure (Left (Text.pack (show err)))
-    Right () -> do
-      orderId <- awaitEvent app (WorkflowId paymentId) orderIdEvent
-      case orderId of
-        Right oid | not (Text.null oid) -> do
-          case readMaybe (Text.unpack oid) of
-            Nothing -> pure (Left "Checkout failed")
-            Just rawId -> do
-              found <- runAppOr500 app.waApp (Session.statement () (orderStatement (Id rawId)))
-              pure $ case found of
-                Nothing  -> Left "Checkout failed"
-                Just row -> Right (decodeOrderRow row)
-        _ -> pure (Left "Checkout failed")
+settlePayment app paymentId status = runExceptT $ do
+  ExceptT (either (Left . Text.pack . show) Right <$> liftIO (sendWorkflowMessage app.waDbos (WorkflowId paymentId) (Just (Topic paymentStatusTopic)) Nothing (encodeWorkflowValue status)))
+  oid <- ExceptT (awaitEvent app (WorkflowId paymentId) orderIdEvent)
+  if Text.null oid then throwError "Checkout failed" else pure ()
+  rawId <- maybe (throwError "Checkout failed") pure (readMaybe (Text.unpack oid))
+  -- The one action that is not IO: the route monad owns the 500 mapping, so
+  -- it stays the only place the transformer is named.
+  ExceptT (maybe (Left "Checkout failed") (Right . decodeOrderRow) <$> runAppOr500 app.waApp (Session.statement () (orderStatement (Id rawId))))
 
 -- * Helpers
 
@@ -119,7 +107,7 @@ settlePayment app paymentId status = do
 -- for a payment, and no HTTP request should be held open for that.
 startCheckoutWorkflow :: WidgetApp -> Text -> IO (Either (Error EngineOnly) ())
 startCheckoutWorkflow app key = do
-  started <- startDBOSWorkflowRef app.waExec app.waCheckout (startOptionsDefault {startWorkflowId = Just key}) Nothing
+  started <- startDBOSWorkflowRef app.waExec app.waCheckout (startOptionsDefault {startWorkflowId = Just (WorkflowId key)}) Nothing
   pure (void started)
 
 -- | Wait for one published event, decoded to 'Text'. The same deadline the
@@ -128,12 +116,10 @@ startCheckoutWorkflow app key = do
 awaitEvent :: WidgetApp -> WorkflowId -> Text -> RouteHandler (Either Text Text)
 awaitEvent app workflow key = do
   found <- liftIO (getWorkflowEvent app.waDbos workflow key paymentTimeout)
-  pure $ case found of
-    Left err -> Left (Text.pack (show err))
-    Right Nothing -> Left ("event " <> key <> " was never published")
-    Right (Just value) -> case decodeWorkflowValue key (Just value) of
-      Left err      -> Left (Text.pack (show err))
-      Right decoded -> Right decoded
+  pure (runExcept $ do
+    stored <- liftEither (either (Left . Text.pack . show) Right found)
+    value <- maybe (throwError ("event " <> key <> " was never published")) pure stored
+    liftEither (either (Left . Text.pack . show) Right (decodeWorkflowValue key (Just value))))
 
 freshIdempotencyKey :: IO Text
 freshIdempotencyKey = UUID.toText <$> UUID.V4.nextRandom

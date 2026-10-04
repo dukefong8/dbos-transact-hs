@@ -66,7 +66,7 @@ import DBOS.Transact
     firstStepStatus,
     ioTracer,
     nextWorkflowMarker,
-    nextWorkflowStepId,
+    nextStepId,
     nullTracer,
     secondsDuration,
     stepCtxStatus,
@@ -189,16 +189,16 @@ scenarioWorkflowId fx = workflowId <$> fx.fixtureMkCtx "wf-1"
 scenarioStepIds :: MonadSTM m => Fixture m -> m (Int, Int, Int)
 scenarioStepIds fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  (,,) <$> nextWorkflowStepId ctx <*> nextWorkflowStepId ctx <*> nextWorkflowStepId ctx
+  (,,) <$> nextStepId ctx <*> nextStepId ctx <*> nextStepId ctx
 
 scenarioDenseIds :: MonadSTM m => Fixture m -> m (Int, Int, Int)
 scenarioDenseIds fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  first <- nextWorkflowStepId ctx
+  first <- nextStepId ctx
   _ <- nextWorkflowMarker ctx
-  second <- nextWorkflowStepId ctx
+  second <- nextStepId ctx
   _ <- nextWorkflowMarker ctx
-  third <- nextWorkflowStepId ctx
+  third <- nextStepId ctx
   pure (first, second, third)
 
 scenarioAttemptScope :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe Int, Maybe Int, Maybe Int)
@@ -263,7 +263,7 @@ scenarioSharedCounter fx = do
   state <- newWorkflowState "wf-1" Nothing identity
   first <- newWorkflowCtx conn fx.fixtureIdentity state
   second <- newWorkflowCtx conn fx.fixtureIdentity state
-  (,) <$> nextWorkflowStepId first <*> nextWorkflowStepId second
+  (,) <$> nextStepId first <*> nextStepId second
 
 scenarioRerunIdentity :: MonadSTM m => Fixture m -> m (Bool, Bool)
 scenarioRerunIdentity fx = do
@@ -303,7 +303,7 @@ scenarioStateInterop fx = do
 scenarioThrowEscape :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Either MThrow.SomeException Int)
 scenarioThrowEscape fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  MThrow.try (nextWorkflowStepId ctx >> MThrow.throwIO (userError "boom") >> pure 0)
+  MThrow.try (nextStepId ctx >> MThrow.throwIO (userError "boom") >> pure 0)
 
 scenarioCoopFlag :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m) => Fixture m -> m ()
 scenarioCoopFlag _ = do
@@ -317,9 +317,9 @@ scenarioCoopFlag _ = do
 scenarioForkCounter :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m) => Fixture m -> m (Int, Int)
 scenarioForkCounter fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  first <- nextWorkflowStepId ctx
+  first <- nextStepId ctx
   seen <- newEmptyMVar
-  _ <- forkIO (nextWorkflowStepId ctx >>= putMVar seen)
+  _ <- forkIO (nextStepId ctx >>= putMVar seen)
   second <- waitFor (takeMVar seen)
   pure (first, second)
 
@@ -360,11 +360,11 @@ scenarioExecCounters fx = do
   conn <- fx.fixtureMkConn
   let ident = fx.fixtureIdentity
   first <- withWorkflow conn ident (WorkflowId "wf-1") Nothing $ \wctx -> do
-    a <- nextWorkflowStepId wctx
-    b <- nextWorkflowStepId wctx
+    a <- nextStepId wctx
+    b <- nextStepId wctx
     pure (a, b)
   second <- withWorkflow conn ident (WorkflowId "wf-1") Nothing $ \wctx ->
-    nextWorkflowStepId wctx
+    nextStepId wctx
   pure (first, second)
 
 scenarioRaceCompletes :: (MonadSTM m, MonadAsync m, MonadCatch m) => Fixture m -> m (Maybe Text)

@@ -10,7 +10,7 @@ post-merge; gate green (11 passed, 1 skipped on the mapped subset).
 |---|---|---|
 | `create(url, schema=…)` | `acquireAppDataSource` / `acquireAppDataSourceIn` | Covered (checkpoint schema parameter ported; serializer/sessionmaker/engine injection are app-layer, out of scope) |
 | `transaction(func\|config)` decorator | `registerTransaction` | Covered (Haskell callers close over args; no decorator protocol needed) |
-| `run_tx_step(opts, func, *args)` | `runTransaction` | Covered |
+| `run_tx_step(opts, func, *args)` | `runTxStep` | Covered |
 | `sql_session()` (txn-bound queries) | `Tx.txStatement` | Covered (explicit runner vs ambient session) |
 | `DatasourceOptions{name, isolation_level}` | `TransactionConfig` | Covered (`readOnly` deferred per ADR-0021) |
 | `IsolationLevel` strings | `IsolationLevel` ADT | Covered |

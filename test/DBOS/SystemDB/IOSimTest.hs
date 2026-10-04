@@ -180,8 +180,8 @@ stepTests =
         run (checkStep backend (WorkflowId "wf-1") 0 "step") @?= Right Nothing,
       testCase "recordStep succeeds" $ do
         run (recordStep backend (WorkflowId "wf-1") 0 "step" (OutcomeOutput (Just "\"v\"")) Nothing Nothing) @?= Right (),
-      testCase "listWorkflowSteps answers the workflow's steps" $ do
-        let result = run (listWorkflowSteps backend (WorkflowId "wf-1") False Nothing Nothing Nothing)
+      testCase "listSteps answers the workflow's steps" $ do
+        let result = run (listSteps backend (WorkflowId "wf-1") False Nothing Nothing Nothing)
         case result of
           Right steps -> map (.stepRecordStepName) steps @?= ["mock-step"]
           Left err -> fail (show err),

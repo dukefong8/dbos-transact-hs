@@ -27,7 +27,7 @@ where
 
 import DBOS.Prelude
 import Data.Text (Text)
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), insideAStep, nextWorkflowStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), insideAStep, nextStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
 import DBOS.Transact.Connection (Connection (..), Owner (..))
 import DBOS.Transact.Error (Error (..))
 
@@ -102,7 +102,7 @@ takenPlacement conn operation wctx = do
     else
       if conn.connInstanceId == wctx.wctxConn.connInstanceId
         then do
-          stepId' <- nextWorkflowStepId wctx
+          stepId' <- nextStepId wctx
           pure (Right (Recorded wctx stepId'))
         else pure $ case conn.connOwner of
           OwnerClient -> Right ClientConnection
@@ -123,7 +123,7 @@ placeCall wctx = do
   if stepped
     then pure (PlacementInsideStep (stepCtxBoundary wctx))
     else do
-      stepId' <- nextWorkflowStepId wctx
+      stepId' <- nextStepId wctx
       pure (Recorded wctx stepId')
 
 -- | Where a call stands given the ambient context, with the id its caller

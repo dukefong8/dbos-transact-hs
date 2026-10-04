@@ -28,9 +28,9 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextWorkflowStepId, stepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextStepId, stepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
-import DBOS.Transact.Step (runWorkflowStepWith, stepOptionsDefault)
+import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
 
 -- | One message in a bulk send: the destination and payload, with the topic
 -- and idempotency key that vary per message travelling on the message rather
@@ -102,7 +102,7 @@ sendWith wctx destination value options = do
     if stepped
       then pure Nothing
       else do
-        stepId' <- nextWorkflowStepId wctx
+        stepId' <- nextStepId wctx
         pure (Just (WorkflowId workflowText, stepId'))
   written <- withSystemDB wctx (\db -> SystemDB.sendMessage db message serialization caller sendToForks)
   pure $ case written of
@@ -130,8 +130,8 @@ sendBulkWith wctx messages options = do
         [] -> Nothing
   -- 'sendBulk' takes only the workflow view, so it always checkpoints
   -- here; a bulk send through a captured parent degrades inside
-  -- 'runWorkflowStepWith' by the depth backstop.
-  runWorkflowStepWith stepOptionsDefault wctx sendBulkStepName $ \sctx -> do
+  -- 'runStepWith' by the depth backstop.
+  runStepWith stepOptionsDefault wctx sendBulkStepName $ \sctx -> do
     let caller = (\sid -> (WorkflowId (workflowId sctx.stepCtxWorkflow), sid)) <$> stepId sctx
     plainSend sctx.stepCtxWorkflow encoded serialization caller
   where
@@ -161,8 +161,8 @@ recv wctx topic timeout = do
     then pure (Left (TransactError.InsideStep "recv"))
     else do
       let workflowText = workflowId wctx
-      stepId' <- nextWorkflowStepId wctx
-      timeoutStepId <- nextWorkflowStepId wctx
+      stepId' <- nextStepId wctx
+      timeoutStepId <- nextStepId wctx
       let workflowId' = WorkflowId workflowText
           topicText = case topic of
             Nothing -> Nothing

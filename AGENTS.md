@@ -13,9 +13,11 @@ Repo guide for DBOS Haskell.
 - `rust-migrate/` is a standalone Cargo crate driving the Rust migration runner (`make db-migrate`); it is not part of any workspace, and it vendors the corpus (`migrations/*.sql` + `src/migrations/{mod,runner}.rs`, copied from `dbos-transact-rust/crates/dbos`) so the only path deps are its own files.
 - `docs/` holds durable engineering notes, workflow guidance, research context, and ADRs (`cross-language-schema-interop.md` = the shared `dbos` schema contract).
 - `docs/adr/` records architectural decisions.
+- `demo-apps/` holds the two worked examples (starter, widget store) and `Demo.Http`; their code panels are compile-time source extractions (`Starter.CodePanel.panel` with `addDependentFile`, tag needles in `Starter/Assets.hs`) — a panel always shows the real `.hs` source, never a hand-written copy, and a rename must update the tag needles in the same sweep.
 - `probes/` holds the permanent compile probes for the scoped-capability brands: each `neg-*.hs` must fail to typecheck with its expected error class and each `w-*.hs` witness twin must build clean; run through `make probes` (`cabal exec -- ghc -fno-code -fno-write-interface`, driven by `probes/run.sh`). The policy is `docs/invariant-gates.md`.
 - `.lavish/rust-port-plan.html` is the living port plan; fold each phase's delta back into it (self-recursive loop) and mark edits with dated notes.
 - `CONTEXT.md` is the glossary for domain language only.
+- `.agents/skills/dbos-transact-hs/SKILL.md` is the client-app skill: how to build an application on the `DBOS.Transact` facade (registration, step bodies, transactional steps, testing). Port-development rules live here; that skill serves app authors.
 
 ## HARD RULES — Rust fidelity (module + type one-to-one)
 
@@ -24,6 +26,16 @@ Repo guide for DBOS Haskell.
 - **A split or a rename requires an explicit ADR** in `docs/adr/` recording why it was unavoidable. (No module split is in force today: the short-lived `DBOS.SystemDB.Time` leaf was merged back into `Types` once the cycle it broke was removed. Constructor-prefix collisions like `ForkStep` and `ErrorMaxRecoveryAttemptsExceeded` are the deviation style instead.)
 - Facades (`DBOS.SystemDB`, `DBOS.Transact`) and `[typedSql| ... |]` session modules are the port's own seams, not Rust module counterparts; they may re-export (`module Types`) but never redefine ported types.
 - **Keep the established `SystemDB` spelling in Haskell module, type, and class names.** Use `DBOS.SystemDB.*`, `SystemDB`, and `PostgresSystemDB` — never `SystemDatabase` — for Haskell artifacts. References to Rust's `trait SystemDatabase` keep the Rust spelling.
+
+## Naming and Refactor Conventions
+
+- **Sweeps are word-boundary, counted, and verified.** Replace `\bname\b` per file, print per-file counts, and re-grep the whole tree for leftovers before building. Substring traps met in practice: `runTransactionOutside`/`runTransactionAt` are different functions (system-DB internals, never swept with the step API), `forkWorkflowStepName` parses as `<op>Workflow` + `StepName` rather than the runner family, and `WorkflowStep` also hides inside `nextWorkflowStepId` and `listWorkflowSteps`.
+- **Identifier sweeps never touch string literals.** Wire names are data, not names: the `WorkflowStep` → `Step` sweep silently corrupted `listStepsStepName = "DBOS.listSteps"` where the oracle constant is `LIST_WORKFLOW_STEPS = "DBOS.listWorkflowSteps"`. After any sweep, `grep -rn '"DBOS\.'` and compare against `sysdb/types.rs`.
+- **Approved names and argument order**: `Tx` abbreviates `Transaction` in the transactional-step API — `runTxStep`, `runTxOutside`, `Tx`, `txName`, `txIsolation`; runners take the workflow context last (`runTxStep ds txConfig wctx body`, `runTxOutside ds txConfig body`). The step family is `runStep`/`runStepWith`/`pendingStep`/`pendingStepWith`/`sleepStep`/`runNestedStep`; engine internals are `driveStepWith`/`replayStep`.
+- **Event ADTs stay full-word per owner** (`WorkflowEvent` with `Step*`, `TransactionEvent` with `Transaction*`): `renderLine` renders the constructor via `show`, so renaming one changes observable log `kind`s. Update living docs; leave dated captured traces as evidence.
+- **Facade discipline**: apps, tests, and demos import through `DBOS.Transact` only, and every name imported into the facade must stay exported — a trimmed export block breaks consumers, and GHCi hides it until `cabal build all` / `cabal test all`. When facade and internal names disagree, the facade defines the client surface.
+- **Post-sweep checks**: `cabal build all` does not compile test suites — finish with `cabal test all` (or watch the enabled pair) before calling a sweep done. A test-local helper that collides with a newly public runner (`runStep`) silently shadows the import and can become self-recursive; qualify the library call (`import DBOS.Transact qualified as Transact`) or rename the helper.
+- **Editor coordination**: a save from an editor buffer held open across agent edits reverts sweeps; after the agent edits an open file, reload (`:e!`) before saving. When both sides need the same file, agree on the owner first.
 
 ## TDD Loop
 
@@ -34,7 +46,7 @@ Repo guide for DBOS Haskell.
 4. Use `ghci -e ':hoogle ...'` and `ghci -e ':browse ...'` before adding any new dependency.
 5. Write one public Tasty test at a time.
 6. Implement the smallest code that passes that test.
-7. Run `cabal test` only when the watcher is idle — the full suite and a watcher eval must not run at the same time.
+7. Run `cabal test all` only when the watcher is idle — the full suite and a watcher eval must not run at the same time. `cabal.project` pins this package to `test-options: --num-threads 1` (the default parallel run stalls against the shared database) and disables `ihp-typed-sql`'s tests (its AUTO_DB spec needs a local `postgres` server keg; a libpq-only install cannot run it). Tasty flags on the `cabal` command line are unusable — they also reach the dependencies' hspec suites and fail them.
 8. Tests share one live database and run in parallel (tasty default): every test must own its rows — fresh UUIDs, unique workflow/queue names, per-test executor ids. A sweep only ever matches its launching executor's id.
 
 Use Neovim LSP document symbols to inspect module structure and exported surfaces before changing a module layout.
@@ -62,6 +74,8 @@ Expected rows include the mirrored simple workflow status row (`hs-simple-wf`, `
 
 Then check the Rust oracle: `~/dev/dbos-transact-rust` is the behavioral reference. Run matching suites from that directory (e.g. `cargo test -p dbos --test recovery` for crash-and-resume, `--test queues` for the fan-out), read-only, pinned to v0.5.0 semantics — never copy code, never chase main.
 
+For the demos, restart the server after every rebuild (`PORT=8090 cabal run exe:demo-apps`) and stop it before any `cabal test` (its queue supervisor claims test fixtures). Drive the browser with `chrome-devtools-axi open/snapshot`; the storefront auto-refreshes and stale refs are rejected, so click by text via `eval` (`[...document.querySelectorAll('button')].find(...)`). Verify in psql: `widget_store.orders` (`order_status`, `progress_remaining`), `widget_store.transaction_completion` (transactional-step rows), `dbos.operation_outputs` (sleeps/steps), and `dbos.workflow_status` (`CheckoutWorkflow`, `DispatchOrderWorkflow`).
+
 ## Three-Leg Port Gate (ADR-0016)
 
 When porting each module, all three legs must pass: (1) watcher eval on the domain's `*Sim.tests` — green with announcement lines inline; (2) `cabal test test --test-option='--pattern' --test-option='$2 == "<Group>"'` — green with matching FastLogger lines on stdout (tasty `$n` fields are 1-indexed; `$0 ~ /.../` does not parse); (3) `cargo test -p dbos --test <suite>` read-only — green, plus a structural trace comparison against the oracle's `tracing::info!` call sites (Rust integration tests install no collector, so the comparison is format-string-structural, cited by file and line). Live trees (`*Test`) ship in `defaultMain`; sim trees (`*Sim`) are eval-only — never add a `*Sim.tests` to `main`.
@@ -70,6 +84,7 @@ The database must always be migrated with the Rust runner first: run `make db-mi
 
 ## Guardrails
 
+- **Commits wait for the user's `/review`** (standing rule): do not commit unprompted; a slice lands only when the user invokes `/review` with the gates green.
 - **Database URLs: `DBOS_DATABASE_URL` is the system database, `DATABASE_URL` is the application's own datasource.** The two are read separately (`DBOS.SystemDB.Postgres.configFromEnv` vs `DBOS.Transact.Config.appDatabaseUrlFromEnv`); a single-database deployment sets both to the same URL, and the app pool falls back to the system URL when `DATABASE_URL` is unset.
 - **MUST: NEVER store e2e or other ad-hoc harness scripts in the project folder.** Throwaway runners, crash/restart loops, Chrome/E2E drivers, live side-by-side comparison scripts, fuzz drivers, and snoop harnesses live outside the repo. Keep them under the operator's own scratch space (for example `~/.local/share/…` or a `scratch/` directory outside the workspace) and check them in only when a script is a durable, reviewed part of the build or test story (e.g. `Makefile` targets and the in-repo test suite). A `.sh`/`.py` file that exists only to poke a running demo or drive a one-off investigation does not belong in the tree.
 - Keep tests on public behavior, not implementation details.

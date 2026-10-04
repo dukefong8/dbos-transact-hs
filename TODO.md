@@ -1,8 +1,8 @@
 # TODO — scoped workflow capabilities + step tables
 
 Branch `proto/phantom-brands` (cut from main-line work; main untouched).
-Date: 2026-10-03. Gate state: full suite **650/650**, psql mirror green,
-migration ceiling 114, permanent probes 8/8 (`make probes`).
+Date: 2026-10-04. Gate state: full suite **650/650**, psql mirror green,
+migration ceiling 114, permanent probes 10/10 (`make probes`).
 Design record: `.lavish/rust-port-plan.html` (Phase 10, Rule 9, TODO 12–16),
 `docs/scoped-workflow-capabilities.md` (§1–§10),
 `docs/agent-skill-api-review.md` (per-rule verdicts),
@@ -19,7 +19,7 @@ Design record: `.lavish/rust-port-plan.html` (Phase 10, Rule 9, TODO 12–16),
    (keeps `MonadCatch`, no `MonadMask` cascade; residual window leaks safe).
 5. One shared `insideAStep` predicate (scope field OR depth) read by every
    guard: `placeCall`, `takenPlacement`, `startChildWorkflow`, `send`,
-   `recv`, eager `getEvent`, `runTransaction`.
+   `recv`, eager `getEvent`, `runTxStep`.
 6. `WorkflowCtx`/`StepCtx` run parallel-track until the rewire; `Ctx`
    stays until the last module flips.
 7. App-level StepCtx-keyed domain records; engine core stays ops-free.
@@ -42,7 +42,7 @@ Design record: `.lavish/rust-port-plan.html` (Phase 10, Rule 9, TODO 12–16),
 - [x] A1: fold deltas (plan HTML Phase 10 / Rule 9 / TODO 12–16 / sidebar).
 - [x] A2: record decisions 1–11 (this section).
 - [x] A3: widget table sketch (`docs/widget-step-tables.md`):
-      `CheckoutOps`/`DispatchOps` (the actual workflow pair), `setStatus`
+      `CheckoutSteps`/`DispatchSteps` (the actual workflow pair), `setStatus`
       repeated per the ≤2 rule, STM handlers with split-race fixes,
       failing variant, live contract specified for C-phase.
 
@@ -64,16 +64,16 @@ Step → Handle → Select/Event/Sleep → Workflow → Management/Datasource/re
 Per module: signatures → call sites → live+sim → gate. `Ctx` stays until
 the last module flips.
 
-- [x] C1a scoped step runners (7384031): `runWorkflowStepScoped`
+- [x] C1a scoped step runners (7384031): `runStepScoped`
       (workflow view, allocates, hands `StepCtx`) and `runNestedStep`
       (step view, plain, no allocation possible); context seam readers
       `stepCtxAt`/`stepCtxTracer`/`workflowCtxInner`; live+sim tests with
       exact trace asserts; 646/646.
-- [x] C2a scoped pending pair (0bc1852): `pendingWorkflowStepWithScoped`/
-      `pendingWorkflowStepScoped`/`driveWorkflowStepWithScoped`;
+- [x] C2a scoped pending pair (0bc1852): `pendingStepWithScoped`/
+      `pendingStepScoped`/`driveStepWithScoped`;
       `awaitChildScoped`/`pendingAwaitScoped`; live+sim tests (StepSim
       pins the drive trace: `StepOutputRecorded` only).
-- [x] C2b scoped sleep/event/select (0adf014): `sleepWorkflowStepScoped`/
+- [x] C2b scoped sleep/event/select (0adf014): `sleepStepScoped`/
       `pendingSleepScoped`, `setEventScoped`/`pendingSetEventScoped`/
       `getEventScoped`/`pendingGetEventScoped`, `selectStepScoped`; the
       shared `scenarioScopedSelect` races two pending steps (rows
@@ -110,7 +110,7 @@ the last module flips.
       ManagementSim 12/12, Widget pair 4/7, full suite 650/650, psql 3/3.
 - [x] C1c step-body flip (fa5768f): StepRetryTest/StepTest/EventTest/
       MessageTest/WidgetSim/WidgetTest/DatasourceTest step bodies take
-      `StepCtx`; runner call sites go through runWorkflowStep(With)Scoped;
+      `StepCtx`; runner call sites go through runStep(With)Scoped;
       nested shapes use `runNestedStep`; the Datasource fixture is
       `dsFixtureRun` (scope runner) instead of a Ctx builder. In-step
       downgrades for refusal tests stay explicit via `stepCtxInner`.
@@ -138,11 +138,11 @@ the last module flips.
       (`stepCtxBoundary`, `stepCtxWorkflow`, captured parents), and the
       exec-brand probes pin the shapes that must not typecheck.
 - [x] C5a op-pair promotion: every `*Scoped` operation takes the plain
-      oracle name (`send`, `recv`, `setEvent`, `getEvent`, `runTransaction`,
-      `runWorkflowStep(With)`, `sleepWorkflowStep`, `awaitChild`,
+      oracle name (`send`, `recv`, `setEvent`, `getEvent`, `runTxStep`,
+      `runStep(With)`, `sleepStep`, `awaitChild`,
       `selectStep`, `startChildWorkflow`, the pendings, the six management
       `...InWorkflow`s, the `register*` entries); the raw-context workers
-      are inlined or module-private (`selectStepOn`, `runTransactionWith`,
+      are inlined or module-private (`selectStepOn`, `runTxStepWith`,
       the `drive*` drivers). Direct-shape backstop tests move to the
       captured shape with identical verdicts — except place-first ops,
       where capture now degrades to plain per the new `checkHere` arm
@@ -180,7 +180,7 @@ the last module flips.
       `WorkflowRef m e`-taking entry); enqueue/start are `WorkflowCtx`-only
       with no `StepCtx` overload.
 - [x] C5 Management/Datasource/rest + final `Ctx` removal (106e872): the
-      six management `...InWorkflow`s, `runTransaction`, waits, selects,
+      six management `...InWorkflow`s, `runTxStep`, waits, selects,
       events, messages, sleeps, steps, handles, and checkpoints all take
       views; `stepCtxBoundary` is the boundary-shaped attempt view drives
       hand where a step view is expected. Gates: full suite 650/650,
@@ -188,7 +188,7 @@ the last module flips.
 
 ## Phase D — StepOps widget pilot (`docs/widget-step-tables.md`)
 
-- [x] D0 sketch: `CheckoutOps`/`DispatchOps` (StepCtx-keyed, `OrderId`
+- [x] D0 sketch: `CheckoutSteps`/`DispatchSteps` (StepCtx-keyed, `OrderId`
       boundary, `setStatus` repeated per the ≤2 rule), STM handlers
       (single-`atomically`, split-race fixes), failing variant, status
       codes, live contract specified for C-phase.
@@ -199,10 +199,10 @@ the last module flips.
       phantom unifies; watcher Widget pair green (live 4, sim 7).
 - [x] D2 engine integration (1f9d630 sim + live half): the
       `runTransactionScoped` bridge hands bodies `(StepCtx, Tx)`;
-      `WidgetSim` bodies spend `stmCheckoutOps`/`stmDispatchOps`,
+      `WidgetSim` bodies spend `stmCheckoutSteps`/`stmDispatchSteps`,
       `Tx`-ignoring fakes and `failingWidgetDs` retired; live bodies spend
-      `pgCheckoutOps`/`pgDispatchOps` closing over the held `Tx`; the mixed
-      live+canned case (`failingPgCheckoutOps` refuses the paid mark)
+      `pgCheckoutSteps`/`pgDispatchSteps` closing over the held `Tx`; the mixed
+      live+canned case (`failingPgCheckoutSteps` refuses the paid mark)
       asserts no `order_id`, order `(1,0,3)`, inventory `4`, PENDING row
       with no dispatch child. Gates: full suite 651/651, Widget pair 5/7.
 - [ ] D3 follow-up domains after the pilot proves the pattern (intentionally
@@ -234,5 +234,9 @@ the last module flips.
   has no STM counterpart for `m`-typed bodies; the shared unit is one step.
 - Brands track executions, not lexical nesting; the depth counter tracks
   dynamic step scope. Both layers stay.
-- `RunOptions.runWorkflowId` still bare `Text` (plan TODO 16).
+- Record-access conventions landed 2026-10-04: dot-first reads (preference
+  order in `AGENTS.md`), `RecordWildCards` a cabal default, pass-through
+  accessors deleted, `StepStatus` oracle-shaped; public fields are
+  camelCase (ADR-0023) while SQL/Aeson/config keys and log prose keep
+  Rust spelling.
 - `hasql` pinned to the repo's 1.10 range in probes (2.x moved `acquire`).

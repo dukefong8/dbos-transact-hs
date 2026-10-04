@@ -40,7 +40,7 @@ import DBOS.Transact
     renderTransactError,
     retrieveWorkflow,
     runDBOSWorkflow,
-    runWorkflowStep,
+    runStep,
     shutdown,
     withWorkflow,
   )
@@ -91,7 +91,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
           case registered of
@@ -122,7 +122,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
           case registered of
@@ -216,7 +216,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
           case registered of
@@ -251,7 +251,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
             parentRow = (newWorkflow parentText) {newWorkflowName = Just "L2HandleAwaiter"}
         created <- initWorkflow backend parentRow Nothing Fresh Nothing
         case created of
@@ -279,7 +279,7 @@ tests =
                   let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
                   assertEqual "the scoped await adopts the recorded output" (Right 42) decoded
                 other -> fail (show other)
-              steps <- SystemDB.listWorkflowSteps backend (WorkflowId parentText) True Nothing Nothing Nothing
+              steps <- SystemDB.listSteps backend (WorkflowId parentText) True Nothing Nothing Nothing
               case steps of
                 Right rows -> map (.stepRecordStepName) rows @?= [getResultStepName]
                 other -> fail (show other)

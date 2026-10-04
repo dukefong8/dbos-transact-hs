@@ -105,6 +105,7 @@ test-suite test
     -- `cabal build test` cover the DBOS.SystemDB slice only.
     DBOS.Transact.SerializationTest
     DBOS.TracerTest
+    DBOS.DualStack
     DBOS.IOSimTracer
     DBOS.SystemDB.TypesTest
     DBOS.SystemDB.ErrorTest
@@ -121,6 +122,7 @@ test-suite test
     DBOS.Transact.DatasourceTestSim
     DBOS.Transact.QueueTestSim
     DBOS.Transact.WidgetTest
+    DBOS.Transact.WidgetCases
     DBOS.Transact.WidgetSim
     DBOS.Transact.ContextSimData
     DBOS.Transact.DeadlinesTest

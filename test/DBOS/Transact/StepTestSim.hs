@@ -5,7 +5,7 @@
 
 -- | 'DBOS.Transact.StepRetryTest' mirrored under IOSim: the same retry,
 -- predicate and timeout cases, with the real ported runner
--- ('runWorkflowStepWith') and backoff/timeouts on virtual time, each case
+-- ('runStepWith') and backoff/timeouts on virtual time, each case
 -- printing its sim's 'Say' trace inline so a plain @-- $> tasty@ run
 -- shows announcements with no extra plumbing. Every case asserts its
 -- behavior and its exact 'WorkflowEvent' trace — the typed asserts behind
@@ -36,12 +36,12 @@ import DBOS.Transact
     WorkflowId (..),
     firstStepStatus,
     nextWorkflowMarker,
-    nextWorkflowStepId,
-    pendingWorkflowStep,
+    nextStepId,
+    pendingStep,
     renderTransactError,
     runNestedStep,
-    runWorkflowStep,
-    runWorkflowStepWith,
+    runStep,
+    runStepWith,
     stepCtxStatus,
     stepOptionsDefault,
     withStep,
@@ -176,7 +176,7 @@ tests =
         printSimTrace tr
         outcome @?= (Right 42, Just 0)
         -- The drive path announces the recorded output; the run-path
-        -- StepRunning announce belongs to runWorkflowStep, not to drives.
+        -- StepRunning announce belongs to runStep, not to drives.
         traceEvents tr @?= [StepOutputRecorded "pending" 0]
     ]
 
@@ -194,7 +194,7 @@ scopedRun = do
   observed <- newTVarIO Nothing
   result <-
     withWorkflow conn simIdentity (WorkflowId "sim-step-scoped") Nothing $ \wctx ->
-      runWorkflowStep wctx "scoped" $ \s -> do
+      runStep wctx "scoped" $ \s -> do
         atomically (writeTVar observed (stepCtxStatus s))
         pure 42
   seen <- readTVarIO observed
@@ -207,7 +207,7 @@ scopedPending = do
   conn <- simConnectionWith simTracer
   withWorkflow conn simIdentity (WorkflowId "sim-step-pending-scoped") Nothing $ \wctx -> do
     pending <-
-      pendingWorkflowStep wctx "pending" $ \_ ->
+      pendingStep wctx "pending" $ \_ ->
         pure (Right (42 :: Int))
     outcome <- pending.pendingRun
     pure (outcome, pendingStepId pending)
@@ -217,7 +217,7 @@ scopedNested :: forall s. IOSim s (Either (Error EngineOnly) Int)
 scopedNested = do
   conn <- simConnectionWith simTracer
   withWorkflow conn simIdentity (WorkflowId "sim-step-nested-scoped") Nothing $ \wctx ->
-    runWorkflowStep wctx "outer" $ \s -> do
+    runStep wctx "outer" $ \s -> do
       inner <- runNestedStep s "inner" (\_ -> pure (7 :: Int)) :: IOSim s (Either (Error EngineOnly) Int)
       case inner of
         Right n -> pure (n + 1)
@@ -236,7 +236,7 @@ thirdAttempt = do
           then pure (Left (StepFailed "flaky" "boom"))
           else pure (Right (42 :: Int))
       options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1}
-  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "flaky" body
+  outcome <- simRun "sim-step" $ \wctx -> runStepWith options wctx "flaky" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
@@ -248,7 +248,7 @@ exhausted = do
         atomically (modifyTVar attempts (+ 1))
         pure (Left (StepFailed "doomed" "boom"))
       options = stepOptionsDefault {maxAttempts = 2, interval = millisDuration 1}
-  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "doomed" body
+  outcome <- simRun "sim-step" $ \wctx -> runStepWith options wctx "doomed" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
@@ -259,7 +259,7 @@ defaultOnce = do
       body _ = do
         atomically (modifyTVar attempts (+ 1))
         pure (Left (StepFailed "plain" "boom"))
-  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith stepOptionsDefault wctx "plain" body
+  outcome <- simRun "sim-step" $ \wctx -> runStepWith stepOptionsDefault wctx "plain" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
@@ -278,7 +278,7 @@ replayed = do
                 else pure (Right (7 :: Int))
             options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1}
         withWorkflow conn simIdentity (WorkflowId "sim-step-replay") Nothing $ \wctx ->
-          runWorkflowStepWith options wctx "flaky" body
+          runStepWith options wctx "flaky" body
   first <- runOnce
   second <- runOnce
   made <- readTVarIO attempts
@@ -297,7 +297,7 @@ declined = do
             interval = millisDuration 1,
             shouldRetry = Just (const False)
           }
-  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "declined" body
+  outcome <- simRun "sim-step" $ \wctx -> runStepWith options wctx "declined" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
@@ -318,27 +318,27 @@ declinedMid = do
             interval = millisDuration 1,
             shouldRetry = Just declinesSecond
           }
-  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "pick" body
+  outcome <- simRun "sim-step" $ \wctx -> runStepWith options wctx "pick" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
 timedOut :: IOSim s (Either (Error EngineOnly) Int)
 timedOut = do
   let options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 5)}
-  simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "slow" (\_ -> threadDelay 50000 >> pure (Right (1 :: Int)))
+  simRun "sim-step" $ \wctx -> runStepWith options wctx "slow" (\_ -> threadDelay 50000 >> pure (Right (1 :: Int)))
 
 withinTimeout :: IOSim s (Either (Error EngineOnly) Int)
 withinTimeout = do
   let options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 500)}
-  simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "quick" (\_ -> pure (Right (9 :: Int)))
+  simRun "sim-step" $ \wctx -> runStepWith options wctx "quick" (\_ -> pure (Right (9 :: Int)))
 
 tracedRun :: IOSim s (Either (Error EngineOnly) Int)
 tracedRun = do
-  simRun "sim-step" $ \wctx -> runWorkflowStep wctx "traced" (const (pure (1 :: Int)))
+  simRun "sim-step" $ \wctx -> runStep wctx "traced" (const (pure (1 :: Int)))
 
 plainRun :: IOSim s (Either (Error EngineOnly) Int)
 plainRun = do
   simRun "sim-step-plain" $ \wctx -> do
     marker <- nextWorkflowMarker wctx
     withStep wctx marker (firstStepStatus 0) $ \_stepped ->
-      runWorkflowStepWith stepOptionsDefault wctx "inner" (const (pure (Right (3 :: Int))))
+      runStepWith stepOptionsDefault wctx "inner" (const (pure (Right (3 :: Int))))

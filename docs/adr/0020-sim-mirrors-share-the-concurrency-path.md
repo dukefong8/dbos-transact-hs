@@ -77,6 +77,23 @@ replay adopts the recorded id — with no relaunch. The lesson matches the
 observation rule's: state what the engine actually did, not what the
 harness assumed it would not do.
 
+## Addendum: fault injection is not a scheduling stand-in (2026-10-04)
+
+Step 8 added two deliberate faults to the shared widget scenarios:
+`killThread` on a captured workflow thread (abrupt death) and `lostAckOnce`,
+a datasource wrapper that reports failure after a successful commit
+(commit-boundary lost acknowledgement). Both are *inputs* the live engine
+can genuinely receive — a cancelled thread, a dropped acknowledgement after
+commit — and both are carried by the same shared scenario body on each
+stack; only the fault's carrier differs (the IO thread id vs the IOSim
+thread id, the real datasource vs the STM fake, both under the same
+wrapper). Neither is a scheduling stand-in: the test never forks, kills, or
+polls to emulate concurrency the simulator cannot express, and no
+hand-emitted event or re-encoded call sequence is involved. The
+permitted-divergence rule classifies them as fault injection; the engine's
+real handling (recovery's replay pre-check, the exactly-once commit record)
+is what the shared checks judge.
+
 ## Addendum: Tasks runners split (2026-10-01)
 
 The `Tasks` group no longer runs both halves in-process in the live tree.

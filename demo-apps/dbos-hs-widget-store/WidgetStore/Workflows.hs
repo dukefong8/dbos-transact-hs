@@ -32,8 +32,8 @@ import Control.Monad.Except (ExceptT (..), runExceptT)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Prelude
-import DBOS.Transact (DataSource, Duration, EngineOnly, Error, IsolationLevel (..), Topic (..), TransactionConfig (..), Tx (..), WorkflowRef, encodeWorkflowValue, millisDuration, recv, runTransaction, secondsDuration, setEvent, sleepWorkflowStep, startOptionsDefault, WorkflowCtx, workflowId, runTransaction, setEvent, recv, startChildWorkflow)
-import IHP.TypedSql.Id (Id' (..))
+import DBOS.Transact (DataSource, Duration, EngineOnly, Error, IsolationLevel (..), Topic (..), TransactionConfig (..), Tx, WorkflowCtx, WorkflowRef, encodeWorkflowValue, millisDuration, recv, runTxStep, secondsDuration, setEvent, sleepStep, startChildWorkflow, startOptionsDefault, workflowId)
+import WidgetStore.Steps (CheckoutSteps (..), DispatchSteps (..), OrderId (..))
 import WidgetStore.Store
 
 -- * Topics and keys (workflows.rs)
@@ -75,31 +75,6 @@ dispatchTick = millisDuration 1000
 namedStep :: Text -> TransactionConfig
 namedStep name = TransactionConfig {txName = Just name, txIsolation = Just Serializable}
 
--- * Transaction bodies (one commit each, with the step's checkpoint)
-
-createOrderTx :: Tx IO -> IO Int
-createOrderTx (Tx run) = do
-  Id key <- run createOrderStatement ()
-  pure key
-
-reserveInventoryTx :: Tx IO -> IO Bool
-reserveInventoryTx (Tx run) = (> 0) <$> run reserveInventoryStatement ()
-
-undoReserveTx :: Tx IO -> IO ()
-undoReserveTx (Tx run) = run undoReserveInventoryStatement ()
-
-setOrderStatusTx :: Int -> Int -> Tx IO -> IO ()
-setOrderStatusTx status orderId (Tx run) = run (setOrderStatusStatement status (Id orderId)) ()
-
--- | Tick one unit off the order's progress and mark it dispatched when it
--- runs out — both inside the step's transaction.
-tickOrderTx :: Int -> Tx IO -> IO ()
-tickOrderTx orderId (Tx run) = do
-  remaining <- run (updateOrderProgressStatement (Id orderId)) ()
-  case remaining of
-    [0] -> run (setOrderStatusStatement orderStatusDispatched (Id orderId)) ()
-    _   -> pure ()
-
 -- * Workflows
 
 -- | Buys a widget: reserve it, wait to be paid, then either dispatch it or
@@ -110,17 +85,19 @@ tickOrderTx orderId (Tx run) = do
 checkoutWorkflow ::
   forall exec.
   DataSource IO ->
+  (Tx IO -> CheckoutSteps exec IO) ->
   WorkflowRef IO EngineOnly ->
-  () ->
   WorkflowCtx exec IO ->
   IO (Either (Error EngineOnly) ())
-checkoutWorkflow ds dispatchRef () wctx = runExceptT $ do
+checkoutWorkflow ds mkCheckout dispatchRef wctx = runExceptT $ do
   let wid = workflowId wctx
-  orderId <- ExceptT (runTransaction ds wctx (namedStep "create_order") (\_sctx tx -> Right <$> createOrderTx tx))
-  onShelf <- ExceptT (runTransaction ds wctx (namedStep "reserve_inventory") (\_sctx tx -> Right <$> reserveInventoryTx tx))
+  -- The checkpoint payload stays a plain Int; the OrderId boundary is the
+  -- steps table, unwrapped at the transaction edge (as in WidgetTest).
+  orderId <- ExceptT (runTxStep ds (namedStep "create_order") wctx (\sctx tx -> Right . (\(OrderId oid) -> oid) <$> (mkCheckout tx).coCreate sctx))
+  onShelf <- ExceptT (runTxStep ds (namedStep "reserve_inventory") wctx (\sctx tx -> Right <$> (mkCheckout tx).coReserve sctx))
   if not onShelf
     then do
-      ExceptT (runTransaction ds wctx (namedStep "cancel_order") (\_sctx tx -> Right <$> setOrderStatusTx orderStatusCancelled orderId tx))
+      ExceptT (runTxStep ds (namedStep "cancel_order") wctx (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) orderStatusCancelled))
       -- An empty payment id is how the storefront hears "no": it is waiting
       -- on this key, and leaving it unpublished would only make it wait out
       -- its own timeout for an answer that is already known.
@@ -129,8 +106,8 @@ checkoutWorkflow ds dispatchRef () wctx = runExceptT $ do
     else do
       ExceptT (setEvent wctx paymentIdEvent wid)
       ExceptT (recv wctx (Just (Topic paymentStatusTopic)) paymentTimeout) >>= \case
-        Just status | status == paidStatus -> do
-          ExceptT (runTransaction ds wctx (namedStep "mark_order_paid") (\_sctx tx -> Right <$> setOrderStatusTx orderStatusPaid orderId tx))
+        Just paid | paid == paidStatus -> do
+          ExceptT (runTxStep ds (namedStep "mark_order_paid") wctx (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) orderStatusPaid))
           -- A child workflow, started and not awaited: dispatching takes ten
           -- seconds and the buyer should not be kept waiting for it.
           _ <- ExceptT (startChildWorkflow wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
@@ -138,30 +115,26 @@ checkoutWorkflow ds dispatchRef () wctx = runExceptT $ do
         _ -> do
           -- Refused, or nobody answered before the deadline: the widget
           -- goes back on the shelf.
-          ExceptT (runTransaction ds wctx (namedStep "undo_reserve_inventory") (\_sctx tx -> Right <$> undoReserveTx tx))
-          ExceptT (runTransaction ds wctx (namedStep "cancel_order") (\_sctx tx -> Right <$> setOrderStatusTx orderStatusCancelled orderId tx))
+          ExceptT (runTxStep ds (namedStep "undo_reserve_inventory") wctx (\sctx tx -> Right <$> (mkCheckout tx).coUndo sctx))
+          ExceptT (runTxStep ds (namedStep "cancel_order") wctx (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) orderStatusCancelled))
           ExceptT (setEvent wctx orderIdEvent (Text.pack (show orderId)))
 
 -- | Walks a paid order to the buyer, one tick a second, and marks it
--- dispatched at the end. @sleepWorkflowStep@ is durable, so the ticks
+-- dispatched at the end. @sleepStep@ is durable, so the ticks
 -- already taken stay taken and a restart picks up the count where it
 -- stopped.
 dispatchWorkflow ::
   forall exec.
   DataSource IO ->
+  (Tx IO -> DispatchSteps exec IO) ->
   Int ->
   WorkflowCtx exec IO ->
   IO (Either (Error EngineOnly) ())
-dispatchWorkflow ds orderId wctx = go dispatchTicks
+dispatchWorkflow ds mkDispatch orderId wctx = runExceptT (go dispatchTicks)
   where
-    go :: Int -> IO (Either (Error EngineOnly) ())
-    go 0 = pure (Right ())
+    go :: Int -> ExceptT (Error EngineOnly) IO ()
+    go 0 = pure ()
     go n = do
-      slept <- sleepWorkflowStep wctx dispatchTick
-      case slept of
-        Left err -> pure (Left err)
-        Right () -> do
-          ticked <- runTransaction ds wctx (namedStep "update_order_progress") (\_sctx tx -> Right <$> tickOrderTx orderId tx) :: IO (Either (Error EngineOnly) ())
-          case ticked of
-            Left err -> pure (Left err)
-            Right () -> go (n - 1)
+      ExceptT (sleepStep wctx dispatchTick)
+      ExceptT (runTxStep ds (namedStep "update_order_progress") wctx (\sctx tx -> Right <$> (mkDispatch tx).doTick sctx (OrderId orderId)))
+      go (n - 1)

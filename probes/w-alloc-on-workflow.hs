@@ -4,7 +4,7 @@
 
 module WAllocOnWorkflow where
 
-import DBOS.Transact (WorkflowCtx, nextWorkflowStepId)
+import DBOS.Transact (WorkflowCtx, nextStepId)
 
 good :: WorkflowCtx exec IO -> IO Int
-good wctx = nextWorkflowStepId wctx
+good wctx = nextStepId wctx

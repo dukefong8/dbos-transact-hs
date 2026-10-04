@@ -29,15 +29,15 @@ import DBOS.Transact
     firstStepStatus,
     ioTracer,
     nullTracer,
-    pendingWorkflowStep,
+    pendingStep,
     runNestedStep,
-    runWorkflowStep,
-    runWorkflowStepWith,
+    runStepWith,
     stepCtxStatus,
-    sleepWorkflowStep,
+    sleepStep,
     stepOptionsDefault,
     withWorkflow,
   )
+import DBOS.Transact qualified as Transact
 import DBOS.Transact.Checkpoint (pendingStepId)
 import DBOS.Transact.Context
   ( cancellationToken,
@@ -153,7 +153,7 @@ tests =
             runScoped = do
               conn <- connOver backend nullTracer
               withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-                runWorkflowStep wctx "scoped_step" $ \s -> do
+                runStep wctx "scoped_step" $ \s -> do
                   writeIORef observed (stepCtxStatus s)
                   modifyIORef' calls (+ 1)
                   pure 42
@@ -176,7 +176,7 @@ tests =
         conn <- connOver backend (ioTracer logger)
         outer <-
           withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-            ( runWorkflowStep wctx "outer" $ \s -> do
+            ( runStep wctx "outer" $ \s -> do
                 inner <- runNestedStep s "inner" (\_ -> pure (7 :: Int)) :: IO (Either (Error EngineOnly) Int)
                 case inner of
                   Right n -> pure (n + 1)
@@ -207,7 +207,7 @@ tests =
               conn <- connOver backend nullTracer
               withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
                 (pending :: PendingStep exec IO (Either (Error EngineOnly) Int)) <-
-                  pendingWorkflowStep wctx "pending_step" $ \_ -> do
+                  pendingStep wctx "pending_step" $ \_ -> do
                     modifyIORef' calls (+ 1)
                     pure (Right 42)
                 outcome <- pending.pendingRun
@@ -229,10 +229,10 @@ tests =
           Right _ -> pure ()
         conn <- connOver backend nullTracer
         first <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-          sleepWorkflowStep wctx (millisDuration 25)
+          sleepStep wctx (millisDuration 25)
         assertEqual "first sleep succeeds" (Right ()) first
         replay <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-          sleepWorkflowStep wctx (millisDuration 25)
+          sleepStep wctx (millisDuration 25)
         assertEqual "replay adopts the original wake time" (Right ()) replay,
       testCase "a nested step reports the step that encloses it" $ do
         backend <- getBackend
@@ -265,7 +265,7 @@ tests =
                       then pure (Left (StepFailed "outer" "boom"))
                       else pure (Right ())
               options = stepOptionsDefault {maxAttempts = 2, interval = millisDuration 1}
-          outcome <- runWorkflowStepWith options wctx "outer" outerBody
+          outcome <- runStepWith options wctx "outer" outerBody
           pure (first, outcome)
         assertEqual "the leading step runs" (Right ()) first
         assertEqual "the outer step succeeds on its retry" (Right ()) outcome
@@ -288,7 +288,7 @@ tests =
                 assertEqual "the cap holds still" 2 (stepStatusMaxAttempts secondStatus)
               _ -> fail ("expected enclosing statuses, got: " <> show observed)
           _ -> fail ("expected two nested observations, got: " <> show observed)
-        listed <- SystemDB.listWorkflowSteps backend (WorkflowId workflowText) False Nothing Nothing Nothing
+        listed <- SystemDB.listSteps backend (WorkflowId workflowText) False Nothing Nothing Nothing
         case listed of
           Right rows -> assertEqual "the nested call writes no checkpoint" ["first", "outer"] (map (.stepRecordStepName) rows)
           Left err -> fail ("expected step rows, got: " <> show err),
@@ -309,7 +309,7 @@ tests =
             let hanging :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) ())
                 hanging _ = threadDelay 1000000 >> pure (Right ())
                 options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 20)}
-            abandoned <- runWorkflowStepWith options wctx "times-out" hanging
+            abandoned <- runStepWith options wctx "times-out" hanging
             pure (outside, body, abandoned)
         assertBool "outside a workflow there is no attempt to abandon" =<< stayedQuiet outside
         case abandoned of
@@ -330,4 +330,4 @@ stayedQuiet token = do
 -- | The simple step runner at the engine-only channel: top-level test
 -- calls do not sit in an annotated body, so the channel needs pinning.
 runStep :: (FromJSON value, ToJSON value) => WorkflowCtx exec IO -> Text -> (StepCtx exec IO -> IO value) -> IO (Either (Error EngineOnly) value)
-runStep wctx name body = runWorkflowStep wctx name body
+runStep wctx name body = Transact.runStep wctx name body

@@ -4,3 +4,15 @@ packages:
   ../ihp/ihp-hsx/
   ../ihp/ihp-router/
   ../ihp/ihp-typed-sql/
+
+-- The DBOS suite stalls under tasty's default parallelism (recorded hazard:
+-- a parallel run froze ~23 tests against the shared live database), so the
+-- gate always runs it sequential. Scoped here so `cabal test all` gets it.
+package dbos-transact-hs
+  test-options: --num-threads 1
+
+-- ihp-typed-sql's spec spawns its own initdb/postgres cluster (AUTO_DB); a
+-- libpq-only Homebrew install cannot satisfy it, and it is not part of this
+-- repo's test story. ihp-hsx's tests stay enabled (they pass).
+package ihp-typed-sql
+  tests: False

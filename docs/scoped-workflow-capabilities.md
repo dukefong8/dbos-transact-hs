@@ -229,7 +229,7 @@ deliberately:
    calls, refusal for starts.
 3. **`onException` + explicit restore, not `finally`.** `finally` needs
    `MonadMask`, which would cascade through the public step API
-   (`runWorkflowStep`, `driveWorkflowStepWith`, bodies, sim trees).
+   (`runStep`, `driveStepWith`, bodies, sim trees).
    `onException` + explicit success-path restore keeps `MonadCatch`;
    the residual window (async kill between body return and restore)
    leaks safe (degrade-to-plain, never corrupt).

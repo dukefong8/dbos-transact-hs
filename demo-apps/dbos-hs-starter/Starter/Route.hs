@@ -118,7 +118,7 @@ dispatchStarter app route req respond = case route of
           else runEmpty action req respond
   EventsStartAction
     | isHtmx req -> runViewTriggering eventsTrigger eventKeysView (startOrder app >> getEventsStatus app) req respond
-    | otherwise -> runText (workflowIdText <$> startOrder app) req respond
+    | otherwise -> runText (startOrderText app) req respond
   EventsStatusAction
     | isHtmx req -> runViewTriggering eventsTrigger eventKeysView (getEventsStatus app) req respond
     | otherwise -> runJson (getEventsStatus app) req respond
@@ -131,7 +131,7 @@ dispatchStarter app route req respond = case route of
           else runJson action req respond
   MessagesStartAction
     | isHtmx req -> runViewTriggering messagesTrigger approvalRowsView (startApproval app >> getApprovals app) req respond
-    | otherwise -> runText (workflowIdText <$> startApproval app) req respond
+    | otherwise -> runText (startApprovalText app) req respond
   MessagesStatusAction
     | isHtmx req -> runViewTriggering messagesTrigger approvalRowsView (getApprovals app) req respond
     | otherwise -> runJson (getApprovals app) req respond

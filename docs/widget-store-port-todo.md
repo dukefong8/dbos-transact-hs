@@ -18,7 +18,7 @@ Playground/hs web stack (ihp-hsx + htmx v4 + ihp-router + ihp-typed-sql).
   the field). Uncommitted, local to the IHP checkout.
 - **typedSql + transactional step**: `WidgetStore.Store` exposes plain
   `Statement`s. Workflow steps run them through `Tx.txStatement` inside
-  `runTransaction` (one commit with the checkpoint); handlers run the same
+  `runTxStep` (one commit with the checkpoint); handlers run the same
   statements through `runAppSession`. typedSql's compile-time describe needs
   the `widget_store` schema, so `make widget-db` applies `schema.sql` before
   the first build; the app also creates the schema at startup (Rust's

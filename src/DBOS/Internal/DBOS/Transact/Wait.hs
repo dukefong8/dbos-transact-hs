@@ -24,11 +24,11 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), selectWorkflowStepName, timestampNow)
+import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), selectStepName, timestampNow)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (WorkflowCtx (wctxConn, wctxTracer), nextWorkflowStepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (WorkflowCtx (wctxConn, wctxTracer), nextStepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 
@@ -61,8 +61,8 @@ selectWorkflow wctx workflowIds = do
   let workflowText = workflowId wctx
       workflowId' = WorkflowId workflowText
       interval = wctx.wctxConn.connOutcomePollInterval
-  stepId' <- nextWorkflowStepId wctx
-  checked <- withSystemDB wctx (\db -> SystemDB.checkStep db workflowId' stepId' selectWorkflowStepName)
+  stepId' <- nextStepId wctx
+  checked <- withSystemDB wctx (\db -> SystemDB.checkStep db workflowId' stepId' selectStepName)
   case checked of
     Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
     Right (Just recorded) ->
@@ -72,7 +72,7 @@ selectWorkflow wctx workflowIds = do
         -- revive of the recorded error, narrowed to this call's one error.
         Just _errorText -> pure (Left (TransactError.InvalidArgument "select_workflow" "no workflow ids to wait for"))
         Nothing -> case recorded.stepRecordOutput of
-          Nothing -> pure (Left (TransactError.StepFailed selectWorkflowStepName "recorded select_workflow has no output"))
+          Nothing -> pure (Left (TransactError.StepFailed selectStepName "recorded select_workflow has no output"))
           Just output ->
             case
                 ( decodeWorkflowValue
@@ -108,7 +108,7 @@ selectWorkflow wctx workflowIds = do
             withSystemDB
               wctx
               ( \db ->
-                  SystemDB.recordStep db workflowId' stepId' selectWorkflowStepName (OutcomeError (TransactError.encodeErrorText refused)) Nothing (Just (StepTiming startedAt startedAt))
+                  SystemDB.recordStep db workflowId' stepId' selectStepName (OutcomeError (TransactError.encodeErrorText refused)) Nothing (Just (StepTiming startedAt startedAt))
               )
           pure (Left refused)
         else do
@@ -125,7 +125,7 @@ selectWorkflow wctx workflowIds = do
                 withSystemDB
                   wctx
                   ( \db ->
-                      SystemDB.recordStep db workflowId' stepId' selectWorkflowStepName (OutcomeOutput (Just encoded.serializedText)) serialization (Just (StepTiming startedAt completedAt))
+                      SystemDB.recordStep db workflowId' stepId' selectStepName (OutcomeOutput (Just encoded.serializedText)) serialization (Just (StepTiming startedAt completedAt))
                   )
               pure (Right winnerId)
   where

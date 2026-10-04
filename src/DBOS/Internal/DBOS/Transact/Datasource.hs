@@ -13,7 +13,7 @@
 -- writes and the checkpoint insert, an already-recorded conflict adopts the
 -- winner, retriable failures loop with backoff, and ownership conflicts are
 -- rethrown unrecorded. The handle is explicit ('Tx' threaded into the body)
--- where the oracles use ambient storage; the engine ('runTransaction',
+-- where the oracles use ambient storage; the engine ('runTxStep',
 -- staged next) allocates the step id from the explicit context.
 module DBOS.Transact.Datasource
   ( -- * Configuration
@@ -26,8 +26,8 @@ module DBOS.Transact.Datasource
     Tx (..),
     DataSource (..),
     -- * Runner (staged: signatures first, bodies next)
-    runTransaction,
-    runTransactionOutside,
+    runTxStep,
+    runTxOutside,
     -- * Registry (per-instance list, frozen at launch)
     DataSourceRegistry,
     newDataSourceRegistry,
@@ -56,7 +56,7 @@ import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderErro
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..))
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextWorkflowMarker, nextWorkflowStepId, withStep, withSystemDB, workflowId)
+import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextWorkflowMarker, nextStepId, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
@@ -184,7 +184,7 @@ instance ToLogStr TransactionEvent where
 -- rolls back and either adopts the recorded outcome or, when another
 -- executor owns the workflow, stops without recording. Retriable failures
 -- back off and retry; an in-step call is refused. Bodies report their
--- failure as a value (like 'runWorkflowStepWith'); a body panic propagates
+-- failure as a value (like 'runStepWith'); a body panic propagates
 -- unrecorded.
 --
 -- The scoped entry hands the body the step view of the transaction's own
@@ -193,15 +193,15 @@ instance ToLogStr TransactionEvent where
 -- the body is a step like any other (nested durable calls are refused by
 -- the leaf rule, the checkpoint id is visible, and a retry gets a fresh
 -- marker and token).
-runTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
-runTransaction ds wctx config body =
-  runTransactionWith ds wctx config body
+runTxStep :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> TransactionConfig -> WorkflowCtx exec m -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
+runTxStep ds config wctx body =
+  runTxStepWith ds config wctx body
 
 -- | The shared transaction path: the shaped body receives the attempt's
 -- context (the scoped entry turns it into the step view) and the
 -- transaction handle.
-runTransactionWith :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
-runTransactionWith ds wctx config body = do
+runTxStepWith :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> TransactionConfig -> WorkflowCtx exec m -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
+runTxStepWith ds config wctx body = do
   -- Refused through the handed context or a captured parent alike: a
   -- transaction inside a step would checkpoint under the wrong id.
   stepped <- insideAStep wctx
@@ -209,7 +209,7 @@ runTransactionWith ds wctx config body = do
     then pure (Left (InsideStep "transaction"))
     else do
       let stepName = fromMaybe "transaction" config.txName
-      stepId <- nextWorkflowStepId wctx
+      stepId <- nextStepId wctx
       let wid = WorkflowId (workflowId wctx)
           tracer = wctx.wctxTracer
           DataSource {dsStepName = nameAt} = ds
@@ -410,8 +410,8 @@ maxBackoffMs = 2000.0
 -- and nothing is announced — there is no execution to record against
 -- (mirrors the oracle running plainly outside workflows). Backend
 -- failures surface as 'Left'; anything else the body throws propagates.
-runTransactionOutside :: (MonadDelay m, MonadCatch m) => DataSource m -> TransactionConfig -> (Tx m -> m a) -> m (Either BackendError a)
-runTransactionOutside ds config body = loop (1 :: Int) initialBackoffMs
+runTxOutside :: (MonadDelay m, MonadCatch m) => DataSource m -> TransactionConfig -> (Tx m -> m a) -> m (Either BackendError a)
+runTxOutside ds config body = loop (1 :: Int) initialBackoffMs
   where
     DataSource {dsWithTransaction = withTx} = ds
     loop n waitMs = do

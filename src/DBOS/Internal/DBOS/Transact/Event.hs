@@ -26,7 +26,7 @@ import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Se
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextWorkflowStepId, stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextStepId, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 
@@ -91,8 +91,8 @@ getEvent wctx destination key timeout = do
     if stepped
       then pure Nothing
       else do
-        readStep <- nextWorkflowStepId wctx
-        timeoutStep <- nextWorkflowStepId wctx
+        readStep <- nextStepId wctx
+        timeoutStep <- nextStepId wctx
         pure
           ( Just
               GetEventCaller
@@ -153,7 +153,7 @@ pendingGetEvent dbos wctx destination key timeout = do
         Left err -> pure (PendingStep getEventStepName Nothing (pure (Left err)))
         Right placement -> case placement of
           Recorded wctx' readStep -> do
-            timeoutStep <- nextWorkflowStepId wctx'
+            timeoutStep <- nextStepId wctx'
             let caller = Just (GetEventCaller (WorkflowId (workflowId wctx')) readStep timeoutStep)
             pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor caller destination key timeout))
           _ -> pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor Nothing destination key timeout))

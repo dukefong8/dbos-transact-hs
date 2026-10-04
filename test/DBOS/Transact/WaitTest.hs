@@ -11,7 +11,7 @@ import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (NewWorkflow (..), Outcome (..), StepRecord (..), Submission (..), WorkflowId (..), newWorkflow, selectWorkflowStepName)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), StepRecord (..), Submission (..), WorkflowId (..), newWorkflow, selectStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact (Error (..), acquireLoggerBackend, ioTracer, joinWorkflows, nullTracer, selectWorkflow)
@@ -32,7 +32,7 @@ tests =
             operation @?= "select_workflow"
             detail @?= "no workflow ids to wait for"
           other -> fail (show other)
-        recorded <- SystemDB.checkStep backend (WorkflowId workflowText) 0 selectWorkflowStepName
+        recorded <- SystemDB.checkStep backend (WorkflowId workflowText) 0 selectStepName
         case recorded of
           Right (Just record) -> assertBool "the refusal is recorded as a step error" (record.stepRecordError /= Nothing)
           other -> fail (show other)
@@ -89,7 +89,7 @@ tests =
         context <- ctxOver backend nullTracer firstText
         first <- selectWorkflow context [WorkflowId firstText, WorkflowId secondText]
         first @?= Right (WorkflowId secondText)
-        recorded <- SystemDB.checkStep backend (WorkflowId firstText) 0 selectWorkflowStepName
+        recorded <- SystemDB.checkStep backend (WorkflowId firstText) 0 selectStepName
         case recorded of
           Right (Just record) -> case record.stepRecordOutput of
             Just _ -> pure ()
@@ -156,7 +156,7 @@ tests =
         context <- ctxOver backend nullTracer workflowText
         outcome <- joinWorkflows context []
         outcome @?= Right ()
-        free <- SystemDB.checkStep backend (WorkflowId workflowText) 0 selectWorkflowStepName
+        free <- SystemDB.checkStep backend (WorkflowId workflowText) 0 selectStepName
         case free of
           Right Nothing -> pure ()
           other -> fail (show other),

@@ -35,7 +35,7 @@ Decision, in parts:
   (`txName`, `txIsolation` — no `readOnly` in v1), `RecordedOutcome`
   (`RecordedOutput|RecordedError`), opaque `Tx m` (explicit where TS uses ALS),
   `DataSource m` as a record-of-functions (`dsCheck/dsWithTransaction/dsRecordOutput/dsRecordError`
-  — test fakes are records, per the typeclass rule), `runTransaction` /
+  — test fakes are records, per the typeclass rule), `runTxStep` /
   `registerTransaction`, and `TransactionEvent` homed here (Rule 5: emitter-adjacent
   leaf; `LogEvent`+`ToLogStr`, `Warning` only for the contention retry).
 - Error mapping (ADR-0019 channel): body failure → `Application e` via `application`;
@@ -59,7 +59,7 @@ compile; its questions were answered from the Python oracle + ADR-0011 recon ins
 Consequences:
 
 - Staging, each ending green: (1) this ADR; (2) types + `TransactionEvent` + one pure
-  test; (3) `runTransaction` engine + live/sim mirror over a fake `DataSource`;
+  test; (3) `runTxStep` engine + live/sim mirror over a fake `DataSource`;
   (4) Postgres app-pool binding + `Statements`-style `Tx` sessions;
   (5) facade re-exports; widget composition stays a follow-up.
 - Gate: `tests/test_datasource.py` (records/replays `:332`, errors `:379`,
@@ -75,7 +75,7 @@ Three shapes were designed in parallel and judged on depth (leverage per
 interface unit), seam reality (one adapter = hypothetical), the deletion
 test, and correctness (exactly-once must be achievable, not just drawable):
 
-- **Record seam (kept).** The `DataSource` record + `runTransaction` stands:
+- **Record seam (kept).** The `DataSource` record + `runTxStep` stands:
   6 fields, one loop, STM fake now, live binding next. `dsRecordError` was
   fixed to take `Tx` and return `Bool` like `dsRecordOutput` — an error
   checkpoint outside the commit violated the module's own invariant.
@@ -117,7 +117,7 @@ the call's name (TS `runInternalStep`, `DBOSUnexpectedStepError`; Rust
   it, along with the test scratch schemas.
 - `DataSource` gains `dsStepName`, and `dsCheck`/`dsRecordOutput`/
   `dsRecordError` take the step name.
-- `runTransaction` compares the recorded name before replaying a row and
+- `runTxStep` compares the recorded name before replaying a row and
   raises the same `UnexpectedStep {expected, recorded}` the
   `operation_outputs` path already raises. A missing name (a row staged by
   hand) adopts, as the missing-owner rule does.

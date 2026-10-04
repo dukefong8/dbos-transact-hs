@@ -75,7 +75,7 @@ module DBOS.Transact.Context
     withSystemDB,
 
     -- * Execution readers
-    nextWorkflowStepId,
+    nextStepId,
     nextWorkflowMarker,
     workflowId,
     stepCtxStatus,
@@ -428,8 +428,8 @@ withStep wctx marker status body = do
 
 -- | Allocate the next step id in this execution. Only 'WorkflowCtx' can
 -- spend the counter — the narrowed view exposes no allocator.
-nextWorkflowStepId :: MonadSTM m => WorkflowCtx exec m -> m Int
-nextWorkflowStepId wctx = atomically $ do
+nextStepId :: MonadSTM m => WorkflowCtx exec m -> m Int
+nextStepId wctx = atomically $ do
     current <- readTVar wctx.wctxState.nextStepIdRef
     writeTVar wctx.wctxState.nextStepIdRef (current + 1)
     pure current

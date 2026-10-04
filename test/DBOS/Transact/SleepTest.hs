@@ -13,7 +13,7 @@ import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (NewWorkflow (..), StepRecord (..), Submission (..), WorkflowId (..), millisDuration, newWorkflow, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (Identity (..), acquireLoggerBackend, ioTracer, nullTracer, sleepPlain, sleepWorkflowStep, withWorkflow)
+import DBOS.Transact (Identity (..), acquireLoggerBackend, ioTracer, nullTracer, sleepPlain, sleepStep, withWorkflow)
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -37,7 +37,7 @@ tests =
           withSleepWorkflow backend "sleep-checkpoint" $ \workflowText -> do
             conn <- connOver backend nullTracer
             outcome <- withWorkflow conn sleepTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-              sleepWorkflowStep wctx (millisDuration 25)
+              sleepStep wctx (millisDuration 25)
             outcome @?= Right ()
             checkpoint <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName
             case checkpoint of
@@ -50,7 +50,7 @@ tests =
           withSleepWorkflow backend "sleep-replay" $ \workflowText -> do
             firstConn <- connOver backend nullTracer
             _ <- withWorkflow firstConn sleepTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-              sleepWorkflowStep wctx (millisDuration 25)
+              sleepStep wctx (millisDuration 25)
             before <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName
             -- The replay announces through FastLogger, so the run proves
             -- the trace seam as well as the wake it waits until.
@@ -58,7 +58,7 @@ tests =
             replayConn <- connOver backend (ioTracer logger)
             -- A much longer request still returns at the recorded wake time.
             replayed <- withWorkflow replayConn sleepTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-              sleepWorkflowStep wctx (millisDuration 60000)
+              sleepStep wctx (millisDuration 60000)
             cleanup
             replayed @?= Right ()
             after <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName

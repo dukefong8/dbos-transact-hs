@@ -9,13 +9,13 @@ Parity evaluation: `docs/transactional-step-parity.md`.
 - [x] ADR-0021 (seam, semantics, error/event/schema/Sim rules, staging, gate map)
 - [x] Types + `TransactionEvent` + `transactionConfigDefault` + pure test (green)
 - [x] P1 engine-logic prototype 11/11 (`/tmp/opencode/ds-p1/Proto.hs`, throwaway)
-- [x] Watcher pair on Datasource IO/Sim; `runTransaction`/`registerTransaction`
+- [x] Watcher pair on Datasource IO/Sim; `runTxStep`/`registerTransaction`
       signatures staged as loud stubs; 5+5 ported cases compile, fail red at seam
 - [x] `RecordedOutcome` stays text-shaped: decode paths ignore serde tags
       (`Serialization.hs:61`), so no per-row tag needed in v1
 - [x] Locked-precheck retry (`checkWithRetry`: transient reads back off with
       the oracle's 1ms×1.5/2s constants, attempts restart per phase)
-- [x] Outside-workflow entry (`runTransactionOutside`: same retry loop,
+- [x] Outside-workflow entry (`runTxOutside`: same retry loop,
       nothing checkpointed, nothing announced, silent trace)
 - [x] Delete-checkpoints op (`dsDeleteCheckpoints`: range delete, re-run
       after full clear)
@@ -27,14 +27,14 @@ Parity evaluation: `docs/transactional-step-parity.md`.
       checkpoints best-effort. Live test: duplicate refused, rows 1→0.
       Follow-up (recorded): child-workflow completions and `startDBOSWorkflowRef`
       fire-and-forget starts do not clear yet
-- [x] Outside-workflow entry (`runTransactionOutside`: same retry loop,
+- [x] Outside-workflow entry (`runTxOutside`: same retry loop,
       nothing checkpointed, nothing announced, silent trace)
 - [x] Ownership check: executor-gated adoption (`checkOwner` — missing or
       unowned row adopts; foreign-executor row stops without recording as
       control). `MemSystemDB` stamps deterministic owners like live stamps
       UUIDs, so both stacks rule identically (Mock stays ownerless/canned)
 - [x] Body-failure record channel: bodies report failure as a value
-      (`Tx m -> m (Either (Error e) a)`, the `runWorkflowStepWith`
+      (`Tx m -> m (Either (Error e) a)`, the `runStepWith`
       precedent — no `Exception` plumbing); a held error-checkpoint rolls
       back and adopts; panics propagate unrecorded
 - [x] Facade complete (`-- * Transactional steps` group, incl. binding:
@@ -73,7 +73,7 @@ Parity evaluation: `docs/transactional-step-parity.md`.
       `.lavish/rust-port-plan.html`)
 - [x] Widget checkout/dispatch composition (2026-10-02): `WidgetSim`
       (sim-only, in `simTests`) composes the real engine —
-      `runTransaction` checkout (create → reserve → payment-id event →
+      `runTxStep` checkout (create → reserve → payment-id event →
       `recv` → dispatch or compensate), a spawned `DispatchOrderWorkflow`
       (3 durable sleep ticks), and a TVar app store. Oracle-matched
       assertions: paid `inventory 5→4`, order `(0,3)→(1,0)` (PENDING→

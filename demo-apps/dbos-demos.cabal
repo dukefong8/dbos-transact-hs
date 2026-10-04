@@ -31,6 +31,7 @@ executable demo-apps
     Demo.Http
     Starter.App
     Starter.Assets
+    Starter.CodePanel
     Starter.Handler
     Starter.Route
     Starter.Run
@@ -38,6 +39,7 @@ executable demo-apps
     Starter.Workflows
     WidgetStore.App
     WidgetStore.Handler
+    WidgetStore.Steps
     WidgetStore.Route
     WidgetStore.Run
     WidgetStore.Store

@@ -26,10 +26,10 @@ import DBOS.Transact
     WorkflowCtx,
     firstStepStatus,
     nextWorkflowMarker,
-    nextWorkflowStepId,
+    nextStepId,
     nullTracer,
     recv,
-    runWorkflowStep,
+    runStep,
     send,
     sendOptionsDefault,
     sendWith,
@@ -198,7 +198,7 @@ tests =
           total @?= 2,
       testCase "a step may send but may not receive" $
         withPair getBackend "step-send" $ \backend sender _ destination -> do
-          outcome <- (runWorkflowStep sender "probe" (\sctx -> probeSendRecv destination sctx) :: IO (Either (Error EngineOnly) Text))
+          outcome <- (runStep sender "probe" (\sctx -> probeSendRecv destination sctx) :: IO (Either (Error EngineOnly) Text))
           outcome @?= Right "sent recv",
       testCase "a send through a captured parent is plain and moves no id" $
         withPair getBackend "captured-send" $ \_backend sender _ destination -> do
@@ -206,7 +206,7 @@ tests =
           sent <- withStep sender marker (firstStepStatus 0) $ \_stepped ->
             send sender destination (Just (Topic "approval")) Nothing ("ping" :: Text)
           sent @?= Right ()
-          counter <- nextWorkflowStepId sender
+          counter <- nextStepId sender
           counter @?= 0,
       testCase "a recv through a captured parent is refused" $
         withPair getBackend "captured-recv" $ \_backend sender _ _ -> do

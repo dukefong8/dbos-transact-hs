@@ -220,7 +220,7 @@ workflowsTabView page =
         When you restart, the workflow always resumes from exactly where it left off.
       </p>
       <div class="grid">
-        {codeEditor codePanelWorkflows}
+        {codeEditor "Starter/Workflows.hs" codePanelWorkflows}
         <div class="card controls">
           <h2>Run the demo</h2>
           <button onclick="startBackgroundJob()" class="btn btn-flashy">
@@ -270,12 +270,12 @@ queuesTabView page =
         Three run at a time and the rest wait &mdash; then change the limit and press Apply, without restarting the app.
       </p>
       <div class="grid">
-        {codeEditor codePanelQueues}
+        {codeEditor "Starter/Workflows.hs · Run.hs · Handler.hs" codePanelQueues}
         <div class="card controls">
           <h2>Queue</h2>
 
           <div class="concurrency-row">
-            <input id="concurrency-input" class="concurrency-input" type="number" min="1" value={Text.pack (show page.pvQueue.qsWorkerConcurrency)}>
+            <input id="concurrency-input" name="concurrency" class="concurrency-input" type="number" min="1" value={Text.pack (show page.pvQueue.qsWorkerConcurrency)}>
             <span style="font-size:12.5px;color:var(--muted);align-self:center;white-space:nowrap">worker_concurrency</span>
             <button
               hx-post={starterMountPath <> "/queue/concurrency"}
@@ -328,7 +328,7 @@ eventsTabView page =
         held open on the workflow's side.
       </p>
       <div class="grid">
-        {codeEditor codePanelEvents}
+        {codeEditor "Starter/Workflows.hs · Handler.hs" codePanelEvents}
         <div class="card controls">
           <h2>Order</h2>
           <button hx-post={starterMountPath <> "/events/start"} hx-target="#event-keys" hx-swap="outerHTML" class="btn btn-flashy">Start an order</button>
@@ -378,7 +378,7 @@ messagesTabView page =
         requests are still waiting when it comes back.
       </p>
       <div class="grid">
-        {codeEditor codePanelMessages}
+        {codeEditor "Starter/Workflows.hs · Handler.hs" codePanelMessages}
         <div class="card controls">
           <h2>Approval requests</h2>
           <button hx-post={starterMountPath <> "/messages/start"} hx-target="#approval-rows" hx-swap="outerHTML" class="btn btn-flashy">Request an approval</button>
@@ -407,8 +407,8 @@ messagesTabView page =
     classes :: Text
     classes = tabClasses page "messages"
 
-codeEditor :: Text -> Html ()
-codeEditor panel =
+codeEditor :: Text -> Text -> Html ()
+codeEditor filename panel =
   [hsx|
     <div class="card editor">
       <div class="chrome">
@@ -418,8 +418,6 @@ codeEditor panel =
       <pre class="code">{toHtmlRaw panel}</pre>
     </div>
   |]
-  where
-    filename = "Main.hs" :: Text
 
 -- * Dynamic fragments
 
@@ -674,7 +672,7 @@ pageScript =
       function highlightCode(step) {
         document.querySelectorAll(".step-highlight").forEach((el) => el.classList.remove("step-highlight"));
         if (step >= 1 && step <= 3) {
-          const stepBlock = document.querySelector(`.step-${step}`);
+          const stepBlock = document.querySelector(`.code-block-step.step-${step}`);
           if (stepBlock) stepBlock.classList.add("step-highlight");
           const workflowLine = document.querySelector(`.workflow-step-${step}`);
           if (workflowLine) workflowLine.classList.add("step-highlight");

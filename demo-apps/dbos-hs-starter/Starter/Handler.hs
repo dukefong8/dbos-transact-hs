@@ -20,12 +20,14 @@ module Starter.Handler
     startApproval,
     respondApproval,
     respondAllApprovals,
-    workflowIdText,
+    startOrderText,
+    startApprovalText,
   )
 where
 
 import Control.Concurrent.Class.MonadSTM.Strict (atomically, readTVarIO, writeTVar)
 import Control.Monad (replicateM_)
+import Data.Maybe (fromMaybe)
 import Control.Monad.Class.MonadTime (getMonotonicTimeNSec)
 import Control.Monad.IO.Class (liftIO)
 import Prelude
@@ -100,11 +102,9 @@ getWorkflowProgress app task = do
 lastStepOf :: StarterApp -> Text -> IO Int
 lastStepOf app task = do
   stored <- getWorkflowEvent app.staDbos (WorkflowId task) stepsEventKey (millisDuration 0)
-  pure $ case stored of
-    Right (Just recorded) -> case decodeWorkflowValue "result" (Just recorded) of
-      Right step -> step
-      Left _ -> 0
-    _ -> 0
+  pure (fromMaybe 0 (do
+    recorded <- either (const Nothing) id stored
+    either (const Nothing) Just (decodeWorkflowValue "result" (Just recorded))))
 
 startWorkflow :: StarterApp -> Text -> RouteHandler ()
 startWorkflow app taskId = do
@@ -160,12 +160,24 @@ getEventsStatus :: StarterApp -> RouteHandler EventsStatus
 getEventsStatus app = do
   current <- liftIO (readTVarIO app.staOrderId)
   keys <- liftIO (traverse (readKey current) orderKeys)
-  pure EventsStatus {esWorkflowId = workflowIdText <$> current, esKeys = keys}
+  pure EventsStatus {esWorkflowId = (\(WorkflowId text) -> text) <$> current, esKeys = keys}
   where
     readKey Nothing key = pure EventKey {ekKey = key, ekValue = Nothing}
     readKey (Just workflowId) key = do
       stored <- getWorkflowEvent app.staDbos workflowId key (millisDuration 0)
       pure EventKey {ekKey = key, ekValue = either (const Nothing) (>>= decodeToText) stored}
+
+-- | 'startOrder' with the id rendered as text, for the non-HTMX response.
+startOrderText :: StarterApp -> RouteHandler Text
+startOrderText app = do
+  WorkflowId text <- startOrder app
+  pure text
+
+-- | 'startApproval' with the id rendered as text, for the non-HTMX response.
+startApprovalText :: StarterApp -> RouteHandler Text
+startApprovalText app = do
+  WorkflowId text <- startApproval app
+  pure text
 
 startOrder :: StarterApp -> RouteHandler WorkflowId
 startOrder app = do
@@ -235,9 +247,6 @@ decodeToText stored = case decodeWorkflowValue "result" (Just stored) of
   Right text -> Just text
   Left _ -> Nothing
 
-workflowIdText :: WorkflowId -> Text
-workflowIdText (WorkflowId text) = text
-
 fetchQueueWorkerConcurrency :: DBOS IO -> Text -> IO (Maybe Int)
 fetchQueueWorkerConcurrency dbos name = do
   found <- queue dbos name
@@ -250,7 +259,7 @@ fetchQueueWorkerConcurrency dbos name = do
 -- running rather than failing.
 startBackground :: StarterApp -> WorkflowRef IO EngineOnly -> WorkflowId -> IO WorkflowId
 startBackground app ref (WorkflowId widText) = do
-  _ <- startDBOSWorkflowRef app.staExec ref (startOptionsDefault {startWorkflowId = Just widText}) Nothing
+  _ <- startDBOSWorkflowRef app.staExec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}) Nothing
   pure (WorkflowId widText)
 
 freshId :: Text -> IO WorkflowId

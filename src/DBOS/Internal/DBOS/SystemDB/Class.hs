@@ -84,7 +84,7 @@ class Monad m => SystemDB db m where
   close :: db -> m ()
   checkStep :: db -> WorkflowId -> Int -> Text -> m (Either Error (Maybe StepRecord))
   recordStep :: db -> WorkflowId -> Int -> Text -> Outcome -> Maybe Text -> Maybe StepTiming -> m (Either Error ())
-  listWorkflowSteps :: db -> WorkflowId -> Bool -> Maybe Int64 -> Maybe Int64 -> Maybe (WorkflowId, Int) -> m (Either Error [StepRecord])
+  listSteps :: db -> WorkflowId -> Bool -> Maybe Int64 -> Maybe Int64 -> Maybe (WorkflowId, Int) -> m (Either Error [StepRecord])
   recordSleep :: db -> WorkflowId -> Int -> Duration -> m (Either Error Timestamp)
   setEvent :: db -> WorkflowId -> Int -> Text -> Text -> Maybe Text -> m (Either Error ())
   getEvent :: (MonadDelay m, MonadTime m) => db -> WorkflowId -> Text -> Duration -> Maybe GetEventCaller -> m (Either Error (Maybe EncodedValue))

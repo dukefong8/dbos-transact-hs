@@ -3,7 +3,7 @@
 {-# LANGUAGE RankNTypes #-}
 
 -- | 'DBOS.Transact.SleepTest' mirrored under IOSim over the mock backend:
--- the real 'sleepWorkflowStep'/'sleepPlain' with virtual time, each case
+-- the real 'sleepStep'/'sleepPlain' with virtual time, each case
 -- printing its sim's 'Say' trace inline so a plain @-- $> tasty@ run
 -- shows announcements with no extra plumbing. The mock's @recordSleep@
 -- answers a fixed wake time, so the replay case adopts it; every
@@ -25,9 +25,9 @@ import DBOS.Transact
     WorkflowId (..),
     firstStepStatus,
     nextWorkflowMarker,
-    nextWorkflowStepId,
+    nextStepId,
     sleepPlain,
-    sleepWorkflowStep,
+    sleepStep,
     withStep,
     withWorkflow,
   )
@@ -58,14 +58,14 @@ tests =
     AllFinish
     [ testCase "a sleep waits and is checkpointed" $ do
         (outcome, tr) <- runSimCase $ simRun "sim-sleep" $ \wctx ->
-          sleepWorkflowStep wctx (millisDuration 25)
+          sleepStep wctx (millisDuration 25)
         printSimTrace tr
         outcome @?= Right (),
       testCase "a replayed sleep does not start its clock again" $ do
         (outcome, tr) <- runSimCase $ simRun "sim-sleep-replay" $ \wctx -> do
-          _ <- sleepWorkflowStep wctx (millisDuration 25)
+          _ <- sleepStep wctx (millisDuration 25)
           -- A much longer request still returns at the recorded wake time.
-          sleepWorkflowStep wctx (millisDuration 60000)
+          sleepStep wctx (millisDuration 60000)
         printSimTrace tr
         outcome @?= Right (),
       testCase "a sleep outside a workflow waits plainly" $ do
@@ -76,9 +76,9 @@ tests =
         (outcome, tr) <- runSimCase $ simRun "sim-sleep-in-step" $ \wctx -> do
           marker <- nextWorkflowMarker wctx
           withStep wctx marker (firstStepStatus 0) $ \_stepped -> do
-            before <- nextWorkflowStepId wctx
-            slept <- sleepWorkflowStep wctx (millisDuration 5)
-            after <- nextWorkflowStepId wctx
+            before <- nextStepId wctx
+            slept <- sleepStep wctx (millisDuration 5)
+            after <- nextStepId wctx
             pure (slept, before, after)
         printSimTrace tr
         case outcome of

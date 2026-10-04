@@ -66,7 +66,7 @@ All core types and operations are exported from `DBOS.Transact`.
 See demo apps for code examples:
 
 - `demo-apps/dbos-hs-starter/`: Workflows, steps, durable sleeps, event communication, and queues.
-- `demo-apps/dbos-hs-widget-store/`: Transactional steps (`runTransaction`) committing application writes and checkpoints together.
+- `demo-apps/dbos-hs-widget-store/`: Transactional steps (`runTxStep`) committing application writes and checkpoints together.
 
 ---
 

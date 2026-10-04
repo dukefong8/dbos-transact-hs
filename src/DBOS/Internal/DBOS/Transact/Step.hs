@@ -10,11 +10,11 @@
 module DBOS.Transact.Step
   ( StepError (..),
     WorkflowEvent (..),
-    runWorkflowStep,
+    runStep,
     runNestedStep,
-    runWorkflowStepWith,
-    pendingWorkflowStep,
-    pendingWorkflowStepWith,
+    runStepWith,
+    pendingStep,
+    pendingStepWith,
     stepOptionsDefault,
     stepBackoff,
     StepOptions (..),
@@ -38,7 +38,7 @@ import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encode
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..))
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), StepStatus, WorkflowCtx (wctxConn, wctxTracer), cancellationToken, cancelToken, firstStepStatus, insideAStep, nextWorkflowMarker, nextWorkflowStepId, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), StepStatus, WorkflowCtx (wctxConn, wctxTracer), cancellationToken, cancelToken, firstStepStatus, insideAStep, nextWorkflowMarker, nextStepId, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import GHC.Stack (HasCallStack)
 
@@ -52,7 +52,7 @@ data StepError
   deriving stock (Eq, Show)
 
 -- | Step-run and workflow-execution events: the announcements
--- 'runWorkflowStep'/'runWorkflowStepWith' make across the retry seam —
+-- 'runStep'/'runStepWith' make across the retry seam —
 -- plain runs, replays, control ends, declines, retries, recorded outcomes,
 -- preemptions and timeouts — plus the execution announcements from
 -- 'DBOS.Transact.Workflow' (joins, deadlines, outcomes). Mirrors @step.rs@
@@ -169,8 +169,8 @@ instance ToLogStr WorkflowEvent where
 -- Run and replay announcements go through the context's tracer, so the
 -- same call sites log to FastLogger in production and to the io-sim trace
 -- in simulations with no logger argument at all.
-runWorkflowStep :: (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m, HasCallStack) => WorkflowCtx exec m -> Text -> (StepCtx exec m -> m value) -> m (Either (TransactError.Error e) value)
-runWorkflowStep wctx name body = do
+runStep :: (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m, HasCallStack) => WorkflowCtx exec m -> Text -> (StepCtx exec m -> m value) -> m (Either (TransactError.Error e) value)
+runStep wctx name body = do
   stepped <- insideAStep wctx
   if stepped
     then do
@@ -179,7 +179,7 @@ runWorkflowStep wctx name body = do
       pure (Right value)
     else do
       let workflowId' = WorkflowId (workflowId wctx)
-      stepId' <- nextWorkflowStepId wctx
+      stepId' <- nextStepId wctx
       -- 'started_at' covers the lookup round-trip, as in the oracle.
       startedAt <- timestampNow
       checked <- withSystemDB wctx (\db -> SystemDB.checkStep db workflowId' stepId' name)
@@ -187,7 +187,7 @@ runWorkflowStep wctx name body = do
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
         Right (Just recorded) -> do
           runTracer wctx.wctxTracer (StepReplaying name stepId')
-          pure (replayWorkflowStep name stepId' recorded)
+          pure (replayStep name stepId' recorded)
         Right Nothing -> do
           runTracer wctx.wctxTracer (StepRunning name stepId')
           marker <- nextWorkflowMarker wctx
@@ -232,8 +232,8 @@ runNestedStep sctx name body = do
   Right <$> body sctx
 
 -- | The recorded outcome of a step, replayed without entering the body.
-replayWorkflowStep :: (FromJSON value, FromJSON e) => Text -> Int -> StepRecord -> Either (TransactError.Error e) value
-replayWorkflowStep name stepId record =
+replayStep :: (FromJSON value, FromJSON e) => Text -> Int -> StepRecord -> Either (TransactError.Error e) value
+replayStep name stepId record =
   case record.stepRecordChildWorkflowId of
     Just (WorkflowId childText) -> Left (TransactError.StepFailed name ("unexpected child workflow checkpoint: " <> childText))
     Nothing -> case record.stepRecordError of
@@ -316,60 +316,60 @@ stepBackoff options failures =
         then options.maxInterval
         else Duration (realToFrac grown)
 
--- | 'runWorkflowStep' with the oracle's retry seam: the body returns its
+-- | 'runStep' with the oracle's retry seam: the body returns its
 -- failure as a value, the options decide whether it is worth retrying, each
 -- attempt gets its own timeout, and the final outcome is checkpointed once.
 -- A control error (a system-database failure, a cancellation) ends the step
 -- without a checkpoint, so a cancelled or interrupted step re-runs rather
 -- than replaying as permanently failed.
 --
--- Leaf rule, as in 'runWorkflowStep': inside a step body the call runs
+-- Leaf rule, as in 'runStep': inside a step body the call runs
 -- plainly once, uncheckpointed.
-runWorkflowStepWith ::
+runStepWith ::
   (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepOptions e ->
   WorkflowCtx exec m ->
   Text ->
   (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
   m (Either (TransactError.Error e) value)
-runWorkflowStepWith options wctx name body =
-  placeCall wctx >>= \placement -> driveWorkflowStepWith options wctx name placement body
+runStepWith options wctx name body =
+  placeCall wctx >>= \placement -> driveStepWith options wctx name placement body
 
 -- | A durable step built at its position and not yet run: the call claims
 -- its id here, where it is written, and 'pendingRun' drives exactly what
--- 'driveWorkflowStepWith' does when the pending value is awaited or raced.
+-- 'driveStepWith' does when the pending value is awaited or raced.
 -- Mirrors Rust @PendingStep@ for steps; a pending value that is dropped
 -- unconsumed still spent its id, which is what keeps a replay's numbering
 -- stable.
-pendingWorkflowStepWith ::
+pendingStepWith ::
   (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepOptions e ->
   WorkflowCtx exec m ->
   Text ->
   (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
   m (PendingStep exec m (Either (TransactError.Error e) value))
-pendingWorkflowStepWith options wctx name body = do
+pendingStepWith options wctx name body = do
   placement <- placeCall wctx
   pure
     PendingStep
       { name = name,
         placement = Just placement,
-        pendingRun = driveWorkflowStepWith options wctx name placement body
+        pendingRun = driveStepWith options wctx name placement body
       }
 
--- | 'pendingWorkflowStepWith' with the default options: a plain step.
-pendingWorkflowStep ::
+-- | 'pendingStepWith' with the default options: a plain step.
+pendingStep ::
   (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   WorkflowCtx exec m ->
   Text ->
   (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
   m (PendingStep exec m (Either (TransactError.Error e) value))
-pendingWorkflowStep = pendingWorkflowStepWith stepOptionsDefault
+pendingStep = pendingStepWith stepOptionsDefault
 
 -- | Drives a placed call: check where it stands, replay its recorded row,
 -- or run and record it. Building and driving are separate so a race can
 -- build every branch — claiming every id — before any branch runs.
-driveWorkflowStepWith ::
+driveStepWith ::
   (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepOptions e ->
   WorkflowCtx exec m ->
@@ -377,7 +377,7 @@ driveWorkflowStepWith ::
   StepPlacement exec m ->
   (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
   m (Either (TransactError.Error e) value)
-driveWorkflowStepWith options wctx name placement body =
+driveStepWith options wctx name placement body =
   case checkHere placement name (Just (stepCtxBoundary wctx)) of
     Left err -> pure (Left err)
     Right DurabilityPlain -> do
@@ -397,7 +397,7 @@ driveWorkflowStepWith options wctx name placement body =
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
         Right (Just recorded) -> do
           runTracer wctx'.wctxTracer (StepReplaying name stepId')
-          pure (replayWorkflowStep name stepId' recorded)
+          pure (replayStep name stepId' recorded)
         Right Nothing -> do
           outcome <- attemptLoop workflowId' stepId' 1 []
           -- A control signal — a cancellation, an interruption, a database

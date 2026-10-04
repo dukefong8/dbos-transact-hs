@@ -5,7 +5,7 @@
 -- wait until it, and on replay wait only what is left of the original wait.
 -- The recorded wake time is the step output and @completed_at@ is stamped at
 -- the wake time, so an hour's sleep reads as an hour rather than an instant.
-module DBOS.Transact.Sleep (sleepWorkflowStep, pendingSleep, sleepPlain, SleepEvent (..)) where
+module DBOS.Transact.Sleep (sleepStep, pendingSleep, sleepPlain, SleepEvent (..)) where
 
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
@@ -16,7 +16,7 @@ import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
-import DBOS.Transact.Context (WorkflowCtx (wctxTracer), nextWorkflowStepId, stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.Transact.Context (WorkflowCtx (wctxTracer), nextStepId, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Error qualified as TransactError
 
@@ -41,8 +41,8 @@ instance LogEvent SleepEvent where
 instance ToLogStr SleepEvent where
   toLogStr = toLogStr . renderLine
 
-sleepWorkflowStep :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-sleepWorkflowStep wctx duration = placeCall wctx >>= driveSleep wctx duration
+sleepStep :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sleepStep wctx duration = placeCall wctx >>= driveSleep wctx duration
 
 -- | A sleep built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the wait runs when the
