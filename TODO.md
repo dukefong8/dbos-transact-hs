@@ -160,13 +160,15 @@ the last module flips.
       (near-miss with the raw reader), typeclass overloading. 4 body
       sites swapped; StepTest's 2 workflow-scope checks stay downgraded
       by design (documented asymmetry). Gates: 650/650, probes 8/8.
-- [ ] C5b remainder (narrowed 2026-10-04 — old entries ARE deleted, zero
-      `*Scoped` identifiers remain, enqueue/start take `Executor`/
-      `WorkflowCtx`): `data Ctx` still defined (`Context.hs`), 10
-      `let ctx = workflowCtxInner` downgradelets remain in bodies, the
-      `currentConnection` hole is open (`Management.hs` reads it), and the
-      permanent tree-level `-fno-code` probes (negative + witness) for the
-      exec brand are not yet written.
+- [x] C5b remainder (finished 2026-10-04, 106e872): `data Ctx` deleted —
+      `WorkflowCtx`/`StepCtx` own every field (conn/identity/state/spawner/
+      tracer; scope), `withStep` holds the bump/restore/cancel trio, the
+      ten `workflowCtxInner` downgradelets are gone with the accessor, the
+      `currentConnection` hole is closed (`workflowConnection` is
+      engine-internal and takes a view), and the exec-brand `-fno-code`
+      probe pair landed (`neg-exec-escape`/`w-exec-escape`, probes 10/10).
+      Engines and tests build views; `newWorkflowCtx` replaces `newCtx` as
+      the documented fixture seam.
 - [x] C2 Handle — executed as C2a + C5a: awaits over scoped views
       (`awaitChild`/`pendingAwait` take the plain oracle names).
 - [x] C3 Select/Event/Sleep — executed as C2b + C5a: scoped arms/reads/
@@ -175,9 +177,12 @@ the last module flips.
       `startChildWorkflow` takes `WorkflowCtx` (the typed surface is the
       `WorkflowRef m e`-taking entry); enqueue/start are `WorkflowCtx`-only
       with no `StepCtx` overload.
-- [ ] C5 remainder (narrowed 2026-10-04 — management `...InWorkflow`s and
-      `runTransaction` are scoped): the final `Ctx` removal, which is the
-      C5b remainder above; then the full gate.
+- [x] C5 Management/Datasource/rest + final `Ctx` removal (106e872): the
+      six management `...InWorkflow`s, `runTransaction`, waits, selects,
+      events, messages, sleeps, steps, handles, and checkpoints all take
+      views; `stepCtxBoundary` is the boundary-shaped attempt view drives
+      hand where a step view is expected. Gates: full suite 650/650,
+      probes 10/10, migrate 114→114, psql mirror green.
 
 ## Phase D — StepOps widget pilot (`docs/widget-step-tables.md`)
 
