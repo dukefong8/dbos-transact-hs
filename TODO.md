@@ -98,9 +98,24 @@ the last module flips.
       `runTransactionScoped`, six management `...Scoped` wrappers. Two
       bodies converted as the pattern (the capture-refusal body now uses
       `withStep` + `startChildWorkflowScoped` and still refuses).
-- [ ] C4c bulk body conversion (mechanical once C5a lands): every
-      registered body swaps to the scoped entry, takes `WorkflowCtx`,
-      and replaces its calls with the scoped twins.
+- [x] C4c bulk (2455671): every registered body across ClientTest,
+      DeadlinesTest, EventTest, InstanceTest, ManagementTest, QueueTest,
+      RegistryTest, WidgetTest, WorkflowTest and the sim trees takes
+      `WorkflowCtx` and registers through the scoped entries. Each body
+      keeps one explicit `let ctx = workflowCtxInner wctx` downgrade;
+      local body-forwarding helpers are retyped rank-2; sim bodies that
+      capture state/refs move to top-level helpers (forall s in argument
+      position, forall exec in result position — MonoLocalBinds cannot
+      generalize let-bound bodies to rank-2). Gates: Workflow pair 54/54,
+      ManagementSim 12/12, Widget pair 4/7, full suite 650/650, psql 3/3.
+- [ ] C1c step-body flip: StepRetryTest's `body :: Ctx IO -> ...` step
+      bodies and MessageTest's helpers convert with the step-runner call
+      sites (runWorkflowStep(With) -> scoped twins) when the step bodies
+      take `StepCtx`; `runNestedStep` covers the nested shape.
+- [ ] C5b cleanup: delete the old registration entries, the `let ctx =`
+      aliases, and the helper downgrades by twin-swapping each body's
+      calls; enqueue/start `WorkflowCtx`-only; permanent `-fno-code`
+      probes (negative + witness) for the exec brand.
 - [ ] C5a remaining scoped surface for body code: `runWorkflowStepWithScoped`
       (options variant); scoped reader twins — StepCtx:
       `cancellationToken`/`cancelToken`/`tokenCancelled`/`stepId`/
