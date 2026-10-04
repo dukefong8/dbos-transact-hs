@@ -46,21 +46,15 @@ Design record: `.lavish/rust-port-plan.html` (Phase 10, Rule 9, TODO 12–16),
       repeated per the ≤2 rule, STM handlers with split-race fixes,
       failing variant, live contract specified for C-phase.
 
-## Phase B — Executor runner slice
+## Phase B — Executor runner slice — DONE (ac51207)
 
-- [ ] B1 `Instance.hs`: `Executor` gains `datasources`; `launchOn` +
-      `launch`/`launchWithEnvironment`/`startExecutor` return `Executor`
-      (double launch hands back the live one).
-- [ ] B2 `runDBOSWorkflow`, `runDBOSWorkflowRef`,
-      `startDBOSWorkflowRef` take `Executor m`; drop `requireExecutor`
-      boilerplate; checkpoint clearing via `executor.datasources`.
-- [ ] B3 facade exports `Executor` (abstract).
-- [ ] B4 `WfFixture.wfLaunch` retyped; scenarios bind exec (covers
-      live+sim); sweep Event/Queue/Widget/WidgetSim/Instance/Client/
-      Deadlines/Handle/Management launch-match + threading fixes.
-- [ ] B5 demo-apps `Handler.hs` ×2 by hand + standalone typecheck
-      (outside cabal gates).
-- [ ] B6 gate: watcher pair green, full `cabal test`, psql mirror, commit.
+- [x] B1–B5 landed: `datasources` field; launch paths return `Executor`;
+      three runners take it (`ErrorNotLaunched` unconstructible there);
+      facade exports `Executor` abstract; every test file and both demo
+      apps thread the executor; the run-before-launch case retargeted to
+      retrieve (compile-time half recorded).
+- [x] B6 gate: 644/644, psql 3/3, sim trees re-run one pair at a time
+      (WorkflowSim 52/52, ManagementSim 12/12, WidgetSim 3/3).
 - Remainder (NOT in slice): enqueue/queue/management/dequeue/getters/
   `pendingGetEvent` stay on `DBOS`+`requireExecutor`.
 
@@ -70,8 +64,16 @@ Step → Handle → Select/Event/Sleep → Workflow → Management/Datasource/re
 Per module: signatures → call sites → live+sim → gate. `Ctx` stays until
 the last module flips.
 
-- [ ] C1 Step: runners accept `StepCtx`, degrade-by-construction;
-      `PendingStep exec` introduced here; consumers adapt in their slices.
+- [x] C1a scoped step runners (7384031): `runWorkflowStepScoped`
+      (workflow view, allocates, hands `StepCtx`) and `runNestedStep`
+      (step view, plain, no allocation possible); context seam readers
+      `stepCtxAt`/`stepCtxTracer`/`workflowCtxInner`; live+sim tests with
+      exact trace asserts; 646/646.
+- [ ] C1b `PendingStep exec`: deferred to the pending-layer slice (the
+      type is shared by Checkpoint/Event/Handle/Sleep/Select producers,
+      so branding it forces their conversion — lands with C2/C3).
+- [ ] C1c flip call sites to the scoped runners and delete the Ctx
+      entries (after the pending layer converts).
 - [ ] C2 Handle: awaits over scoped views.
 - [ ] C3 Select/Event/Sleep: scoped arms/reads/sleeps.
 - [ ] C4 Workflow execute path: `startChildWorkflow` takes `WorkflowCtx`;
