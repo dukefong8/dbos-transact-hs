@@ -101,7 +101,7 @@ import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomicall
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Kind (Type)
 import Data.Text (Text)
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Timestamp, WorkflowId, workflowIdText)
 import DBOS.Tracer (SomeTracer)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity, nextExecutionIdentity, runSystemDB)

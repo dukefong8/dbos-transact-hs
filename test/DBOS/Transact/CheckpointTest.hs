@@ -5,61 +5,51 @@ module DBOS.Transact.CheckpointTest (tests) where
 
 import DBOS.Prelude
 import DBOS.Transact
-  ( Connection (..),
-    Ctx,
-    EngineOnly, Error (..),
+  ( EngineOnly, Error (..),
     Identity (..),
     LogEvent (..),
-    Owner (..),
     PendingStep (..),
     Serializer (..),
-    SomeSystemDB (..),
     SomeTracer (..),
     StepDurability (..),
     StepPlacement (..),
     StepStatus (..),
     Timestamp (..),
     acquireLoggerBackend,
-    cancelToken,
-    cancellationToken,
-    checkHere,
-    currentConnection,
-    currentIdentity,
-    deadline,
-    describePlacement,
     firstStepStatus,
-    inStep,
-    insideAWorkflow,
     ioTracer,
-    isSameExecution,
-    newConnection,
-    newCtx,
-    newWorkflowState,
-    nextAttempt,
-    nextExecutionIdentity,
-    nextStepId,
-    nextStepMarker,
     nullTracer,
+    secondsDuration,
+    workflowId,
+  )
+import DBOS.Transact.Context
+  ( withAttempt,
+    nextStepMarker,
+    cancellationToken,
+    stepStatusCurrentAttempt,
+    stepStatusId,
+    stepStatusMaxAttempts
+  )
+import DBOS.Transact.Checkpoint
+  ( checkHere,
+    describePlacement,
+    insideAWorkflow,
     pendingStepId,
     placeCall,
     placementAt,
     placementHere,
     placementStepId,
     placementWhereabouts,
-    secondsDuration,
-    stepId,
-    stepMarker,
-    stepStatus,
-    stepStatusCurrentAttempt,
-    stepStatusId,
-    stepStatusMaxAttempts,
-    takenPlacement,
-    tokenCancelled,
-    uuidEntropy,
-    uuidWorkflowId,
-    withAttempt,
-    workflowId,
+    takenPlacement
   )
+import DBOS.Transact.Connection
+  ( Connection (..),
+    Owner (..),
+    SomeSystemDB (..),
+    newConnection,
+    uuidWorkflowId
+  )
+import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.ContextTest (ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)

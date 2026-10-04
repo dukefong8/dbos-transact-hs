@@ -7,9 +7,7 @@ import DBOS.Prelude
 import DBOS.Transact
   (
     EngineOnly, CodecError,
-    Ctx,
     WorkflowCtx,
-    ErasedWorkflow (..),
     Identity (..),
     WorkflowId (..),
     Error,
@@ -17,22 +15,25 @@ import DBOS.Transact
     SerializedWorkflowValue (..),
     decodeWorkflowValue,
     encodeWorkflowValue,
+    newWorkflowKey,
+    nullTracer,
+    registerTypedWorkflow,
+    registerWorkflowRef,
+    renderTransactError,
+    withWorkflow,
+  )
+import DBOS.Transact.Registry
+  ( ErasedWorkflow (..),
     instanceWorkflowKey,
     lookupSnapshotWorkflow,
     newRegistry,
-    newWorkflowKey,
-    nullTracer,
+    registerErasedWorkflow,
+    renderWorkflowKey,
     refKey,
     refName,
-    registerTypedWorkflow,
-    registerErasedWorkflow,
-    registerWorkflowRef,
-    renderTransactError,
-    renderWorkflowKey,
     snapshotRegistry,
     snapshotSize,
     thawRegistry,
-    withWorkflow,
     workflowKeyFromRow,
   )
 import DBOS.SystemDB.Postgres qualified as Postgres

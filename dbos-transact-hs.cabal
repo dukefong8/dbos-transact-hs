@@ -44,15 +44,12 @@ common commons
     uuid,
     vector,
 
-library
+library dbos-transact-internals
   import: commons
-  hs-source-dirs: src
+  visibility: private
+  hs-source-dirs: src/DBOS/Internal
   exposed-modules:
     DBOS.Prelude
-    DBOS.SystemDB
-    DBOS.SystemDB.Postgres
-    DBOS.Transact
-  other-modules:
     DBOS.Transact.Checkpoint
     DBOS.Transact.Client
     DBOS.Transact.Config
@@ -60,7 +57,6 @@ library
     DBOS.Transact.Context
     DBOS.Transact.Datasource
     DBOS.Transact.Datasource.Postgres
-    DBOS.Transact.Datasource.Registry
     DBOS.Transact.Dequeue
     DBOS.Transact.Error
     DBOS.Transact.Event
@@ -79,12 +75,24 @@ library
     DBOS.Transact.Wait
     DBOS.Transact.Workflow
     DBOS.Tracer
+    DBOS.SystemDB.Class
     DBOS.SystemDB.Error
     DBOS.SystemDB.Notify
+    DBOS.SystemDB.Postgres.Backend
     DBOS.SystemDB.Postgres.Notifier
     DBOS.SystemDB.Postgres.Statements
     DBOS.SystemDB.Retry
     DBOS.SystemDB.Types
+
+library
+  import: commons
+  hs-source-dirs: src
+  exposed-modules:
+    DBOS.SystemDB
+    DBOS.SystemDB.Postgres
+    DBOS.Transact
+  build-depends:
+    dbos-transact-hs:dbos-transact-internals
 
 test-suite test
   import: commons
@@ -152,6 +160,7 @@ test-suite test
     breakpoint,
     bytestring,
     dbos-transact-hs,
+    dbos-transact-hs:dbos-transact-internals,
     hasql,
     hasql-pool,
     hedgehog,
@@ -172,39 +181,3 @@ test-suite test
 
 -- | One executable, one Main: both demo apps are compiled (the module names
 -- are unique) and routed under their prefixes.
-executable demo-apps
-  import: commons
-  hs-source-dirs:
-    demo-apps,
-    demo-apps/dbos-hs-starter,
-    demo-apps/dbos-hs-widget-store,
-    demo-apps/demo-common
-  main-is: Main.hs
-  other-modules:
-    Demo.Htmx
-    Demo.Http
-    Starter.App
-    Starter.Assets
-    Starter.Handler
-    Starter.Route
-    Starter.Run
-    Starter.View
-    Starter.Workflows
-    WidgetStore.App
-    WidgetStore.Handler
-    WidgetStore.Route
-    WidgetStore.Run
-    WidgetStore.Store
-    WidgetStore.View
-    WidgetStore.Workflows
-  build-depends:
-    dbos-transact-hs,
-    http-types,
-    ihp-hsx,
-    ihp-hsx:ihp-hsx-lucid2,
-    ihp-router,
-    ihp-typed-sql,
-    lucid2,
-    unix,
-    wai,
-    warp,

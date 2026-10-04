@@ -37,7 +37,8 @@ import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text, pack)
 import Data.Word (Word64)
-import DBOS.Prelude
+import Control.Monad.Class.MonadTimer (threadDelay)
+import Prelude
 import DBOS.SystemDB (Topic (..), millisDuration)
 import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowCtx, WorkflowRef, newWorkflowKey, recv, registerDBOSWorkflow, registerDBOSWorkflowRef, runWorkflowStep, setEvent, sleepWorkflowStep)
 

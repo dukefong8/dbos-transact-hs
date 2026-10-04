@@ -57,10 +57,10 @@ import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word, Word64)
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Postgres (PostgresSystemDB, Settings (..))
-import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
+import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.SystemDB.Types
   ( Duration,

@@ -5,7 +5,8 @@
 -- the original page kept it in @?id=@).
 module Starter.App (StarterApp (..)) where
 
-import DBOS.Prelude
+import Control.Concurrent.Class.MonadSTM.Strict (StrictTVar)
+import Prelude
 import DBOS.Transact (DBOS, Executor, WorkflowId)
 import Starter.Workflows (StarterRefs)
 

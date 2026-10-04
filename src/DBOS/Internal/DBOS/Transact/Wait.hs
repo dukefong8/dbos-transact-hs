@@ -19,12 +19,12 @@ module DBOS.Transact.Wait
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import Data.Text (Text)
 import Data.Text qualified as Text
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), selectWorkflowStepName, timestampNow)
+import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), selectWorkflowStepName, timestampNow)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)

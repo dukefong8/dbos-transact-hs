@@ -6,7 +6,7 @@
 -- vocabulary the rest of the htmx stack uses.
 module Demo.Htmx (hsx) where
 
-import DBOS.Prelude
+import Prelude
 import Data.Set qualified as Set
 import IHP.HSX.Lucid2.QQ (customHsx)
 import IHP.HSX.Parser (HsxSettings (..))

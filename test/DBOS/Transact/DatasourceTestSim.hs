@@ -13,15 +13,12 @@ import Control.Monad.IOSim (IOSim, selectTraceEventsDynamic)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, newMemDB, simConnectionWith)
 import DBOS.Transact
-  ( Ctx,
-    Error (..),
+  ( Error (..),
     Identity (..),
     TransactionEvent (..),
     WorkflowCtx,
     WorkflowId (..),
     application,
-    newWorkflowState,
-    nextExecutionIdentity,
     renderTransactError,
     withWorkflow,
   )

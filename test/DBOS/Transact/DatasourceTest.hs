@@ -46,21 +46,17 @@ import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   ( AppDataSource,
     BackendError (..),
-    Connection,
     DataSource (..),
     DBOS,
     EngineOnly,
     Error (..),
     Identity (..),
     IsolationLevel (..),
-    Owner (..),
     RecordedOutcome (..),
     Serializer (..),
     SerializedWorkflowValue (..),
-    SomeSystemDB (..),
     TransactionConfig (..),
     WorkflowCtx,
-    workflowCtxInner,
     Tx (..),
     WorkflowId (..),
     acquireAppDataSource,
@@ -73,10 +69,7 @@ import DBOS.Transact
     encodeWorkflowValue,
     firstStepStatus,
     launchOn,
-    newConnection,
     newDBOS,
-    newWorkflowState,
-    nextExecutionIdentity,
     nextWorkflowMarker,
     nullTracer,
     registerDBOSDataSource,
@@ -88,13 +81,22 @@ import DBOS.Transact
     secondsDuration,
     toDataSource,
     transactionConfigDefault,
-    uuidEntropy,
-    uuidWorkflowId,
     verifyAppDataSource,
     withStep,
     withWorkflow,
-    withSystemDB,
   )
+import DBOS.Transact.Context
+  ( workflowCtxInner,
+    withSystemDB
+  )
+import DBOS.Transact.Connection
+  ( newConnection,
+    uuidWorkflowId,
+    Connection,
+    Owner (..),
+    SomeSystemDB (..)
+  )
+import DBOS.SystemDB.Retry (uuidEntropy)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 

@@ -36,11 +36,11 @@ where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (MonadIO (..))
-import DBOS.Prelude
+import Prelude
 import DBOS.Transact (AppDataSource, runAppSession)
 import Data.Aeson (ToJSON, encode)
 import Data.ByteString.Lazy qualified as LBS
-import Data.Text (Text)
+import Data.Text (Text, pack)
 import Demo.Htmx (hsx)
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import Hasql.Session qualified as Session
@@ -69,7 +69,7 @@ runAppOr500 :: AppDataSource -> Session.Session a -> RouteHandler a
 runAppOr500 app session = do
   result <- liftIO (runAppSession app session)
   case result of
-    Left err -> throwRouteError status500 (LBS.fromStrict (encodeUtf8 (showText err)))
+    Left err -> throwRouteError status500 (LBS.fromStrict (encodeUtf8 (pack (show err))))
     Right value -> pure value
 
 errorResponse :: RouteError -> Response

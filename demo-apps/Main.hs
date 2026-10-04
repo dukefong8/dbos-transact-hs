@@ -6,7 +6,8 @@
 module Main (main) where
 
 import Data.Maybe (fromMaybe)
-import DBOS.Prelude
+import Control.Monad.Class.MonadFork (myThreadId, throwTo)
+import Prelude
 import Network.HTTP.Types (status200, status404)
 import Network.Wai (Application, pathInfo, responseLBS)
 import Network.Wai.Handler.Warp qualified as Warp

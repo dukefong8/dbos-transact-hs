@@ -17,9 +17,9 @@ import DBOS.Transact
     Serialization (..),
     SerializedWorkflowValue (..),
     decodeWorkflowValue,
-    encodeUnit,
     encodeWorkflowValue,
   )
+import DBOS.Transact.Serialization (encodeUnit)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 

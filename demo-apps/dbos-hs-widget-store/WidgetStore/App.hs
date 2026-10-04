@@ -4,7 +4,7 @@
 -- cycle (the Todo app keeps its pool in the argument the same way).
 module WidgetStore.App (WidgetApp (..)) where
 
-import DBOS.Prelude
+import Prelude
 import DBOS.Transact (AppDataSource, DBOS, EngineOnly, Executor, WorkflowRef)
 
 data WidgetApp = WidgetApp

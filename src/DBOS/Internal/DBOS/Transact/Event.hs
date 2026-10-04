@@ -20,7 +20,8 @@ import Control.Monad.Class.MonadTimer (MonadDelay)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
+import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), getEventStepName, setEventStepName)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
@@ -112,7 +113,7 @@ getEvent wctx destination key timeout = do
 -- back into the caller's channel. Shared by the eager read and the pending
 -- drive, which differ only in whose connection serves them and which ids
 -- the read was claimed under.
-adoptEventValue :: FromJSON value => Either SystemDB.Error (Maybe EncodedValue) -> Either (TransactError.Error e) (Maybe value)
+adoptEventValue :: FromJSON value => Either Error (Maybe EncodedValue) -> Either (TransactError.Error e) (Maybe value)
 adoptEventValue found = case found of
   Left err -> Left (TransactError.ErrorSystemDatabase err)
   Right Nothing -> Right Nothing

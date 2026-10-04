@@ -53,8 +53,9 @@ import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Types (Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), Timestamp, WorkflowId (..), selectStepStepName, timestampNow)
+import DBOS.SystemDB.Class qualified as SystemDB
+import DBOS.SystemDB.Error qualified as SystemDBError
+import DBOS.SystemDB.Types (Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), selectStepStepName, timestampNow)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepPlacement (..), pendingStepId, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
@@ -144,7 +145,7 @@ checkSelect ctx branches = do
               pure
                 ( Left
                     ( TransactError.ErrorSystemDatabase
-                        ( SystemDB.UnexpectedStep
+                        ( SystemDBError.UnexpectedStep
                             { workflowId = workflowId ctx',
                               stepId = stepId',
                               expected = "a recorded select winner",
@@ -158,7 +159,7 @@ checkSelect ctx branches = do
                   pure
                     ( Left
                         ( TransactError.ErrorSystemDatabase
-                            ( SystemDB.UnexpectedStep
+                            ( SystemDBError.UnexpectedStep
                                 { workflowId = workflowId ctx',
                                   stepId = stepId',
                                   expected =
@@ -279,7 +280,7 @@ selectStepOn ctx arms = do
         pure
           ( Left
               ( TransactError.ErrorSystemDatabase
-                  ( SystemDB.UnexpectedStep
+                  ( SystemDBError.UnexpectedStep
                       { workflowId = workflowId ctx,
                         stepId = replayedStep,
                         expected = "a branch a recorded select can replay",

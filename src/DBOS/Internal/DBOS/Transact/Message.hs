@@ -25,8 +25,8 @@ import Control.Monad.Class.MonadTime (MonadTime)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text qualified as Text
-import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Types (Duration, IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
+import DBOS.SystemDB.Class qualified as SystemDB
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Context (Ctx, WorkflowCtx, insideAStep, nextStepId, stepCtxInner, stepId, withSystemDB, workflowCtxInner, workflowId)
 import DBOS.Transact.Error qualified as TransactError

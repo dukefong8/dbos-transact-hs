@@ -15,18 +15,21 @@ import Data.Text (Text)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB.IOSim (simConnectionWith)
 import DBOS.Transact
-  ( Connection,
-    Identity (..),
+  ( Identity (..),
     SysdbEvent (..),
     WorkflowEvent (..),
-    contextTracer,
     firstStepStatus,
-    newCtx,
-    newCtx,
-    newWorkflowState,
-    nextExecutionIdentity,
     runTracer,
-    withTracer,
+  )
+import DBOS.Transact.Context
+  ( newCtx,
+    newWorkflowState,
+    contextTracer,
+    withTracer
+  )
+import DBOS.Transact.Connection (Connection)
+import DBOS.Transact.Connection
+  ( nextExecutionIdentity
   )
 import DBOS.Transact.ContextTest
   ( Fixture (..),

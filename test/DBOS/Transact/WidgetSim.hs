@@ -28,9 +28,7 @@ import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simConnectionWith, simInstanc
 import DBOS.Transact
   ( BackendError (..),
     CodecError,
-    Ctx,
     WorkflowCtx,
-    workflowCtxInner,
     DataSource (..),
     EngineOnly,
     Executor,

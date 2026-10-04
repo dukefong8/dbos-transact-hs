@@ -39,7 +39,7 @@ import Data.Aeson.Key (fromText)
 import Data.List qualified as List
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.Prelude
+import Prelude
 import Demo.Htmx (hsx)
 import Demo.Http (pageShell)
 import Lucid
@@ -275,7 +275,7 @@ queuesTabView page =
           <h2>Queue</h2>
 
           <div class="concurrency-row">
-            <input id="concurrency-input" class="concurrency-input" type="number" min="1" value={showText page.pvQueue.qsWorkerConcurrency}>
+            <input id="concurrency-input" class="concurrency-input" type="number" min="1" value={Text.pack (show page.pvQueue.qsWorkerConcurrency)}>
             <span style="font-size:12.5px;color:var(--muted);align-self:center;white-space:nowrap">worker_concurrency</span>
             <button
               hx-post={starterMountPath <> "/queue/concurrency"}
@@ -448,7 +448,7 @@ timelineView progress
       [hsx|
         <div class={"step " <> stepState number}>
           <div class="node">
-            <span class="num">{showText number}</span>
+            <span class="num">{Text.pack (show number)}</span>
             <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
           </div>
           <div class="step-label">
@@ -497,7 +497,7 @@ queueCountsView status =
                 [hsx|
                   <div class="wf-count-row">
                     <span class="wf-count-label">{name}</span>
-                    <span class={"wf-count-value " <> statusClass name}>{showText count}</span>
+                    <span class={"wf-count-value " <> statusClass name}>{Text.pack (show count)}</span>
                   </div>
                 |]
             )

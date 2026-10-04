@@ -61,9 +61,9 @@ import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Word (Word64)
 import DBOS.Prelude
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic, WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord, WorkflowStatus, defaultWorkflowFilter)
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic, WorkflowDelay (..), WorkflowFilter (..), VersionInfo (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
 import DBOS.Transact.Config (Config (..))
 import DBOS.Transact.Config qualified as Config
 import DBOS.Transact.Connection (Connection (..), closeConnection, forApplication, runSystemDB)
@@ -76,8 +76,7 @@ import DBOS.Tracer (SomeTracer, acquireLoggerBackend, ioTracer, runTracer)
 import DBOS.Transact.Management qualified as Management
 import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
-import DBOS.Transact.Datasource (DataSource (..))
-import DBOS.Transact.Datasource.Registry (DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, registerDataSource, thawDataSourceRegistry)
+import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, registerDataSource, thawDataSourceRegistry)
 import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflow, registerWorkflowRef, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
 import DBOS.Transact.Workflow (RunOptions (..), StartOptions, Tasks, abortAll, enqueueWorkflow, newTasks, runRegisteredWorkflow, runWorkflowRef, spawnTracked, startWorkflowRef)
 

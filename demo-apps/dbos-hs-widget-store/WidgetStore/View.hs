@@ -28,7 +28,7 @@ where
 
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.Prelude
+import Prelude
 import Demo.Htmx (hsx)
 import Demo.Http (pageShell)
 import Lucid
@@ -70,7 +70,7 @@ statusBadgeClass :: Int -> Text
 statusBadgeClass status = "status-" <> Text.toLower (statusName status)
 
 progressWidth :: Int -> Text
-progressWidth remaining = showText (max 0 (100 - remaining * 10)) <> "%"
+progressWidth remaining = Text.pack (show (max 0 (100 - remaining * 10))) <> "%"
 
 isTerminalStatus :: Int -> Bool
 isTerminalStatus status = status == orderStatusDispatched || status == orderStatusCancelled
@@ -459,11 +459,11 @@ storePanelView panel =
 
         <div class="flex justify-center items-center space-x-4">
           <div class="text-2xl font-bold text-primary-600">
-            ${showText storeProduct.productPrice}
+            ${Text.pack (show storeProduct.productPrice)}
           </div>
           <div class="flex items-center space-x-2">
             <div class="text-sm text-gray-500">
-              Only <span class="font-bold text-red-600">{showText storeProduct.productInventory}</span> left!
+              Only <span class="font-bold text-red-600">{Text.pack (show storeProduct.productInventory)}</span> left!
             </div>
             <button
               hx-post={widgetMountPath <> "/restock"}
@@ -548,7 +548,7 @@ orderStatusPanel order
       [hsx|
         <div
           class="text-center space-y-6"
-          hx-get={widgetMountPath <> "/order/" <> showText order.orderId}
+          hx-get={widgetMountPath <> "/order/" <> Text.pack (show order.orderId)}
           hx-trigger="every 1s"
           hx-swap="outerHTML"
         >
@@ -569,7 +569,7 @@ orderStatusBody order =
     <div class="bg-gray-50 rounded-lg p-4 space-y-3">
       <div class="flex justify-between items-center">
         <span class="font-medium text-gray-700">Order ID:</span>
-        <span class="font-bold text-gray-900">{showText order.orderId}</span>
+        <span class="font-bold text-gray-900">{Text.pack (show order.orderId)}</span>
       </div>
       <div class="flex justify-between items-center">
         <span class="font-medium text-gray-700">Status:</span>
@@ -642,7 +642,7 @@ orderItem order =
     <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow duration-200">
       <div class="flex justify-between items-start">
         <div>
-          <div class="font-bold text-gray-900">Order #{showText order.orderId}</div>
+          <div class="font-bold text-gray-900">Order #{Text.pack (show order.orderId)}</div>
           <div class={badgeClasses}>{statusName order.orderStatus}</div>
         </div>
         <div class="text-right">

@@ -18,7 +18,7 @@ module Starter.Route
 where
 
 import Control.Monad.IO.Class (liftIO)
-import DBOS.Prelude
+import Prelude
 import Data.Aeson (FromJSON (..), eitherDecodeStrict, encode, object, withObject, (.:), (.=))
 import Data.ByteString.Lazy qualified as LBS
 import Data.Maybe (fromMaybe)
@@ -148,7 +148,7 @@ dispatchStarter app route req respond = case route of
           respondAllApprovals app decision
      in if isHtmx req
           then runViewTriggering messagesTrigger approvalRowsView (action >> getApprovals app) req respond
-          else runText (showText <$> action) req respond
+          else runText ((pack . show) <$> action) req respond
 
 -- | Crash like kill -9: die at once with no cleanup, so in-flight rows stay
 -- PENDING for the next launch to recover. Plain exitWith would only kill
@@ -167,7 +167,7 @@ starterNotFound _req respond = respond (responseLBS status404 [] "Not Found")
 -- * Responses
 
 lastStepResponse :: WorkflowProgress -> Response
-lastStepResponse progress = textResponse status200 (showText progress.wpLastStep)
+lastStepResponse progress = textResponse status200 (pack (show progress.wpLastStep))
 
 -- * Parameters (htmx posts values; the API sends JSON)
 

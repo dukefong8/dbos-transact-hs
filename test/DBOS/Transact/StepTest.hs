@@ -17,7 +17,6 @@ import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
     EngineOnly,
-    Ctx,
     Error (..),
     PendingStep (..),
     StepOptions (..),
@@ -27,26 +26,28 @@ import DBOS.Transact
     WorkflowId (..),
     Identity (..),
     acquireLoggerBackend,
-    cancellationToken,
     firstStepStatus,
     ioTracer,
     nullTracer,
-    pendingStepId,
     pendingWorkflowStep,
     runNestedStep,
     runWorkflowStep,
     runWorkflowStepWith,
     stepCtxStatus,
     sleepWorkflowStep,
-    stepId,
+    stepOptionsDefault,
+    withWorkflow,
+  )
+import DBOS.Transact.Checkpoint (pendingStepId)
+import DBOS.Transact.Context
+  ( cancellationToken,
     stepCtxInner,
+    stepId,
     stepStatus,
     stepStatusCurrentAttempt,
     stepStatusId,
     stepStatusMaxAttempts,
-    stepOptionsDefault,
-    withWorkflow,
-    workflowCtxInner,
+    workflowCtxInner
   )
 import DBOS.Transact.ContextTest (connOver, ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)

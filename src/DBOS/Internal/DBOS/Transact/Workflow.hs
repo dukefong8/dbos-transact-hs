@@ -65,10 +65,10 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
 import GHC.Stack (HasCallStack)
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (ApplicationVersion, AwaitedOutcome (..), Duration, ExecutorId, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), Submission (..), Timestamp, WorkflowId (..), WorkflowInitResult, WorkflowName (..), WorkflowStatus (..), addTimeout, newWorkflow, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types (ApplicationVersion, AwaitedOutcome (..), Duration, ExecutorId, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), Submission (..), StepRecord (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowName (..), WorkflowStatus (..), addTimeout, newWorkflow, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeWorkflowValue)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, nextExecutionIdentity, runSystemDB)

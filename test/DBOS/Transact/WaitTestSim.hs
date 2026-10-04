@@ -20,14 +20,18 @@ import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simConnectionWith)
 import DBOS.Transact
-  ( Ctx,
-    Error (..),
+  ( Error (..),
     Identity (..),
     joinWorkflows,
-    newCtx,
-    newWorkflowState,
-    nextExecutionIdentity,
     selectWorkflow,
+  )
+import DBOS.Transact.Context
+  ( Ctx,
+    newCtx,
+    newWorkflowState
+  )
+import DBOS.Transact.Connection
+  ( nextExecutionIdentity
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))

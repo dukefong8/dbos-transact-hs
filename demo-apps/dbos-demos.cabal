@@ -1,0 +1,66 @@
+cabal-version: 3.6
+name: dbos-demos
+version: 0.1.0.0
+build-type: Simple
+
+-- Client demos for dbos-transact-hs. A separate package on purpose: demos
+-- may depend only on the public library, so any import of a private
+-- internal module fails here exactly as it would for an external user.
+
+common commons
+  default-language: GHC2024
+  default-extensions:
+    DuplicateRecordFields
+    NoFieldSelectors
+    NoImplicitPrelude
+    OverloadedLabels
+    OverloadedRecordDot
+  ghc-options: -Wall -threaded
+
+executable demo-apps
+  import: commons
+  hs-source-dirs:
+    .,
+    dbos-hs-starter,
+    dbos-hs-widget-store,
+    demo-common
+  main-is: Main.hs
+  other-modules:
+    Demo.Htmx
+    Demo.Http
+    Starter.App
+    Starter.Assets
+    Starter.Handler
+    Starter.Route
+    Starter.Run
+    Starter.View
+    Starter.Workflows
+    WidgetStore.App
+    WidgetStore.Handler
+    WidgetStore.Route
+    WidgetStore.Run
+    WidgetStore.Store
+    WidgetStore.View
+    WidgetStore.Workflows
+  build-depends:
+    aeson,
+    base >=4.21 && <5,
+    bytestring,
+    containers,
+    dbos-transact-hs,
+    hasql >=1.10 && <1.11,
+    http-types,
+    ihp-hsx,
+    ihp-hsx:ihp-hsx-lucid2,
+    ihp-router,
+    ihp-typed-sql,
+    io-classes,
+    io-classes:strict-stm,
+    lucid2,
+    mtl,
+    template-haskell,
+    text,
+    unix,
+    uuid,
+    wai,
+    warp,

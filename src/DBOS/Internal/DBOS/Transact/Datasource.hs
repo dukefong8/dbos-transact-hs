@@ -27,28 +27,37 @@ module DBOS.Transact.Datasource
     DataSource (..),
     -- * Runner (staged: signatures first, bodies next)
     runTransaction,
-    registerTransaction,
     runTransactionOutside,
+    -- * Registry (per-instance list, frozen at launch)
+    DataSourceRegistry,
+    newDataSourceRegistry,
+    registerDataSource,
+    freezeDataSourceRegistry,
+    thawDataSourceRegistry,
+    snapshotDatasources,
+    clearDatasourceCheckpoints,
     -- * Tracing
     TransactionEvent (..),
   )
 where
 
 import DBOS.Prelude
+import Control.Concurrent.Class.MonadMVar (MonadMVar)
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
+import Control.Concurrent.Class.MonadMVar.Strict (StrictMVar, modifyMVar, modifyMVar_, newMVar, readMVar)
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text, pack)
 import Data.Text qualified as Text
 import Hasql.Statement qualified as Statement
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderError)
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..))
+import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..))
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
 import DBOS.Transact.Context (Ctx, StepCtx, WorkflowCtx, contextTracer, currentIdentity, firstStepStatus, insideAStep, nextStepId, nextStepMarker, stepCtxAt, withAttempt, withSystemDB, workflowCtxInner, workflowId)
-import DBOS.Transact.Error (Error (..), decodeErrorText, encodeErrorText)
+import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import GHC.Stack (HasCallStack)
@@ -426,5 +435,53 @@ runTransactionOutside ds config body = loop (1 :: Int) initialBackoffMs
           backendKind = Permanent
         }
 
-registerTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> TransactionConfig -> (Tx m -> m (Either (Error e) a)) -> (Ctx m -> m (Either (Error e) a))
-registerTransaction ds config body ctx = runTransactionWith ds ctx config (\_inner tx -> body tx)
+-- | The per-instance datasource list, frozen at launch like the workflow
+-- registry beside it. A registration after launch is refused — this is
+-- the oracle's created-before-launch rule — and a failed launch or
+-- shutdown thaws it again.
+data DataSourceRegistry m = DataSourceRegistry
+  { dsrSources :: StrictMVar m [DataSource m],
+    dsrFrozen :: StrictMVar m Bool
+  }
+
+newDataSourceRegistry :: MonadMVar m => m (DataSourceRegistry m)
+newDataSourceRegistry = DataSourceRegistry <$> newMVar [] <*> newMVar False
+
+-- | Register one datasource unless launch has frozen the registry or its
+-- name is taken.
+registerDataSource :: MonadMVar m => DataSourceRegistry m -> DataSource m -> m (Either (Error EngineOnly) ())
+registerDataSource registry source = do
+  frozen <- readMVar registry.dsrFrozen
+  if frozen
+    then pure (Left (ErrorAlreadyLaunched "register_datasource"))
+    else
+      modifyMVar registry.dsrSources $ \sources ->
+        case filter ((== source.dsName) . (.dsName)) sources of
+          _ : _ -> pure (sources, Left (ErrorAlreadyRegistered ("datasource " <> source.dsName)))
+          [] -> pure (source : sources, Right ())
+
+-- | The registered datasources, oldest first.
+snapshotDatasources :: MonadMVar m => DataSourceRegistry m -> m [DataSource m]
+snapshotDatasources registry = reverse <$> readMVar registry.dsrSources
+
+-- | Freeze registrations at launch, so a datasource created afterwards is
+-- refused rather than silently unused.
+freezeDataSourceRegistry :: MonadMVar m => DataSourceRegistry m -> m ()
+freezeDataSourceRegistry registry = modifyMVar_ registry.dsrFrozen (const (pure True))
+
+-- | Reopen registration after a failed launch or a shutdown.
+thawDataSourceRegistry :: MonadMVar m => DataSourceRegistry m -> m ()
+thawDataSourceRegistry registry = modifyMVar_ registry.dsrFrozen (const (pure False))
+
+-- | Clear a finished workflow's checkpoints from every registered
+-- datasource, best effort and silent: a leftover row is harmless, since a
+-- later replay adopts from it or re-runs.
+clearDatasourceCheckpoints :: forall m. (MonadMVar m, MThrow.MonadCatch m) => DataSourceRegistry m -> WorkflowId -> m ()
+clearDatasourceCheckpoints registry wid = do
+  sources <- snapshotDatasources registry
+  mapM_
+    ( \source -> do
+        _ <- MThrow.try (source.dsDeleteCheckpoints wid 0) :: m (Either SomeException (Either BackendError ()))
+        pure ()
+    )
+    sources

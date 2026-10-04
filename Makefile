@@ -17,8 +17,7 @@ dev:
 		--reload-glob  '!dist-newstyle/**/*.hs' \
 		--enable-eval \
 		--watch src \
-		--watch test \
-		--watch demo-apps
+		--watch test
 
 
 build:

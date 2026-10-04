@@ -27,7 +27,7 @@ import DBOS.Prelude
 import Data.Text (Text)
 import Data.Word (Word64)
 import System.Log.FastLogger (ToLogStr (..))
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelWorkflowStepName, deleteWorkflowStepName, forkOptionsValidate, forkValidate, forkWorkflowStepName, listWorkflowsStepName, resumeWorkflowStepName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx, currentConnection, stepCtxId, stepCtxStatus, stepStatusId, workflowCtxInner)

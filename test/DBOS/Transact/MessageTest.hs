@@ -15,7 +15,7 @@ import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
-    EngineOnly, Ctx,
+    EngineOnly,
     StepCtx,
     stepCtxWorkflow,
     Error (..),

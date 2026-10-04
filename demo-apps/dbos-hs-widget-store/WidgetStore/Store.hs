@@ -65,7 +65,7 @@ import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.Prelude
+import Prelude
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import IHP.TypedSql.Hasql (sqlExecTypedStatement, sqlQueryTypedStatement, typedSql)
@@ -192,8 +192,8 @@ decodeOrderRow row =
 -- describe.
 schemaSql :: Text
 schemaSql = Text.pack $(do
-  sql <- runIO (readFile "demo-apps/dbos-hs-widget-store/schema.sql")
-  addDependentFile "demo-apps/dbos-hs-widget-store/schema.sql"
+  sql <- runIO (readFile "dbos-hs-widget-store/schema.sql")
+  addDependentFile "dbos-hs-widget-store/schema.sql"
   lift sql)
 
 -- | Create the demo schema idempotently. Run once at startup, before launch.

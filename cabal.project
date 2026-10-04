@@ -1,5 +1,6 @@
 packages:
   .
+  demo-apps
   ../ihp/ihp-hsx/
   ../ihp/ihp-router/
   ../ihp/ihp-typed-sql/

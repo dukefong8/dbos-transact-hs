@@ -26,15 +26,11 @@ import DBOS.Transact
     Error (..),
     Serializer (..),
     SerializedWorkflowValue (..),
-    Ctx,
     WorkflowCtx,
-    workflowCtxInner,
     WorkflowId (..),
     WorkflowKey,
     cancelWorkflows,
     configFromEnv,
-    dbosAppVersion,
-    dbosExecutorId,
     encodeWorkflowValue,
     enqueueDBOSWorkflow,
     isLaunched,
@@ -48,6 +44,7 @@ import DBOS.Transact
     shutdown,
     waitForWorkflow,
   )
+import DBOS.Transact.Instance (dbosAppVersion, dbosExecutorId)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 

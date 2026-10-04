@@ -33,8 +33,8 @@ import DBOS.Transact
     ioTracer,
     stepOptionsDefault,
     nullTracer,
-    tokenCancelled,
   )
+import DBOS.Transact.Context (tokenCancelled)
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))

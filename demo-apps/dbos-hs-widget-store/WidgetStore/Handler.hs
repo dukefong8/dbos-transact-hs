@@ -23,7 +23,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.Prelude
+import Prelude
 import DBOS.Transact (EngineOnly, Error, StartOptions (..), Topic (..), WorkflowId (..), decodeWorkflowValue, encodeWorkflowValue, getWorkflowEvent, sendWorkflowMessage, startDBOSWorkflowRef, startOptionsDefault)
 import Demo.Http (RouteHandler, runAppOr500, throwRouteError)
 import Hasql.Session qualified as Session
@@ -85,7 +85,7 @@ startCheckout :: WidgetApp -> Text -> RouteHandler (Either Text Text)
 startCheckout app key = do
   started <- liftIO (startCheckoutWorkflow app key)
   case started of
-    Left message -> pure (Left (showText message))
+    Left message -> pure (Left (Text.pack (show message)))
     Right () -> do
       paymentId <- awaitEvent app (WorkflowId key) paymentIdEvent
       pure $ case paymentId of
@@ -98,7 +98,7 @@ settlePayment :: WidgetApp -> Text -> Text -> RouteHandler (Either Text Order)
 settlePayment app paymentId status = do
   sent <- liftIO (sendWorkflowMessage app.waDbos (WorkflowId paymentId) (Just (Topic paymentStatusTopic)) Nothing (encodeWorkflowValue status))
   case sent of
-    Left err -> pure (Left (showText err))
+    Left err -> pure (Left (Text.pack (show err)))
     Right () -> do
       orderId <- awaitEvent app (WorkflowId paymentId) orderIdEvent
       case orderId of
@@ -129,10 +129,10 @@ awaitEvent :: WidgetApp -> WorkflowId -> Text -> RouteHandler (Either Text Text)
 awaitEvent app workflow key = do
   found <- liftIO (getWorkflowEvent app.waDbos workflow key paymentTimeout)
   pure $ case found of
-    Left err -> Left (showText err)
+    Left err -> Left (Text.pack (show err))
     Right Nothing -> Left ("event " <> key <> " was never published")
     Right (Just value) -> case decodeWorkflowValue key (Just value) of
-      Left err      -> Left (showText err)
+      Left err      -> Left (Text.pack (show err))
       Right decoded -> Right decoded
 
 freshIdempotencyKey :: IO Text

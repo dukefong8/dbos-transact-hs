@@ -7,7 +7,7 @@
 -- under @/widget-store@ next to the starter.
 module WidgetStore.Run (start) where
 
-import DBOS.Prelude
+import Prelude
 import DBOS.Transact
   ( Config (..),
     acquireAppDataSourceInFromEnv,
@@ -57,22 +57,22 @@ start = do
   -- directly; this schema must stay in step with them.
   app <- acquireAppDataSourceInFromEnv "widget_store" config0.configDatabaseUrl 5
   created <- runAppSession app createSchemaSession
-  either (die . showText) pure created
+  either (die . Text.pack . show) pure created
   verified <- verifyAppDataSource app
-  either (die . showText) pure verified
+  either (die . Text.pack . show) pure verified
   dbos <- newDBOS config
   let ds = toDataSource app
-  _ <- registerDBOSDataSource dbos ds >>= either (die . showText) pure
+  _ <- registerDBOSDataSource dbos ds >>= either (die . Text.pack . show) pure
   -- Registered before launch, because recovery starts inside it: a workflow
   -- the registry does not know by name is one the recovering executor
   -- cannot resume.
   dispatchRef <-
     registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchWorkflow ds)
-      >>= either (die . showText) pure
+      >>= either (die . Text.pack . show) pure
   checkoutRef <-
     registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutWorkflow ds dispatchRef)
-      >>= either (die . showText) pure
-  exec <- launch dbos >>= either (die . showText) pure
+      >>= either (die . Text.pack . show) pure
+  exec <- launch dbos >>= either (die . Text.pack . show) pure
   let widget = WidgetApp {waDbos = dbos, waExec = exec, waApp = app, waCheckout = checkoutRef}
       application = routeTrieMiddleware (widgetRouteTrie (dispatchWidget widget)) widgetNotFound
   pure (application, shutdown dbos >> releaseAppDataSource app)

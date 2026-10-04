@@ -37,7 +37,6 @@ import DBOS.Transact
     firstStepStatus,
     nextWorkflowMarker,
     nextWorkflowStepId,
-    pendingStepId,
     pendingWorkflowStep,
     renderTransactError,
     runNestedStep,
@@ -48,6 +47,7 @@ import DBOS.Transact
     withStep,
     withWorkflow,
   )
+import DBOS.Transact.Checkpoint (pendingStepId)
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 

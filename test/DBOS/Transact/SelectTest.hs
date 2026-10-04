@@ -22,10 +22,12 @@ import DBOS.Transact
     Error (..),
     PendingStep (..),
     Racing (..),
-    checkSelect,
+    nullTracer,
+  )
+import DBOS.Transact.Select
+  ( checkSelect,
     controlError,
     newBranches,
-    nullTracer,
     pushBranch,
     recordSelect,
   )

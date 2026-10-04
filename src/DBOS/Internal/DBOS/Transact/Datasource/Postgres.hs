@@ -44,7 +44,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Data.Functor.Contravariant (contramap)
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput, renderError)
-import DBOS.SystemDB.Postgres qualified as SystemPostgres (classifyUsageError)
+import DBOS.SystemDB.Postgres.Backend qualified as SystemPostgres (classifyUsageError)
 import DBOS.Transact.Config qualified as Config
 import DBOS.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), Tx (..))
 import DBOS.SystemDB.Types (WorkflowId (..))

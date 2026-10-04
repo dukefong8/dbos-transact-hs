@@ -13,7 +13,7 @@ import Control.Monad.Class.MonadTime (MonadTime)
 import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
 import Data.Int (Int64)
 import System.Log.FastLogger (ToLogStr (..))
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Context (Ctx, WorkflowCtx, contextTracer, nextStepId, stepId, withSystemDB, workflowId, workflowCtxInner)

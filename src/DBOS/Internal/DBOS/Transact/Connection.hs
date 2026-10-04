@@ -49,9 +49,9 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word32)
 import DBOS.Prelude
-import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Postgres (Settings (..))
-import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.SystemDB.Class qualified as SystemDB
+import DBOS.SystemDB.Postgres.Backend (Settings (..))
+import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.SystemDB.Types (Duration)
 import DBOS.Tracer (SomeTracer)

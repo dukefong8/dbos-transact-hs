@@ -8,14 +8,13 @@ import DBOS.Prelude
 import DBOS.Transact
   ( Config (..),
     configNew,
-    databaseUrlEnv,
     durationAsMillis,
     millisDuration,
-    outcomePollInterval,
     secondsDuration,
     serializerName,
     validateConfig,
   )
+import DBOS.Transact.Config (databaseUrlEnv, outcomePollInterval)
 import Data.Text qualified as Text
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))

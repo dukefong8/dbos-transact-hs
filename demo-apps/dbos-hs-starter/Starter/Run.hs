@@ -6,7 +6,8 @@
 module Starter.Run (start) where
 
 import Data.Text (pack)
-import DBOS.Prelude
+import Control.Concurrent.Class.MonadSTM.Strict (newTVarIO)
+import Prelude
 import DBOS.Transact (Config (..), Environment (..), QueueConflict (..), QueueOptions (..), configFromEnv, defaultQueueOptions, launchWithEnvironment, newDBOS, registerQueue, shutdown)
 import IHP.Router.WAI (routeTrieMiddleware)
 import Network.Wai (Application)

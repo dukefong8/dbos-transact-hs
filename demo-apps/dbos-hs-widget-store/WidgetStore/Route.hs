@@ -19,8 +19,10 @@ module WidgetStore.Route
   )
 where
 
-import DBOS.Prelude
-import Data.Text (Text)
+import Control.Monad.Class.MonadFork (forkIO)
+import Control.Monad.Class.MonadTimer (threadDelay)
+import Prelude
+import Data.Text (Text, pack)
 import IHP.Router.WAI (HasPath (..), UrlCapture (..), routes)
 import Network.HTTP.Types (StdMethod (..), status200, status404, status500)
 import Network.Wai (Application, Response, responseLBS)
@@ -94,7 +96,7 @@ checkoutApiResponse outcome = case outcome of
 
 paymentApiResponse :: Either Text Order -> Response
 paymentApiResponse outcome = case outcome of
-  Right order -> textResponse status200 (showText order.orderId)
+  Right order -> textResponse status200 (pack (show order.orderId))
   Left _ -> textResponse status500 "Checkout failed"
 
 -- | Crashes the application. For demonstration purposes only :) The pause is

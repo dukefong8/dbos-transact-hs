@@ -24,8 +24,8 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import System.Log.FastLogger (ToLogStr (..))
 import Data.Word (Word32, Word64)
-import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Error (BackendError (..), Error (..))
+import DBOS.SystemDB.Class qualified as SystemDB
+import DBOS.SystemDB.Error (BackendError (..), Error (..), renderError)
 import DBOS.SystemDB.Types
   ( Applications (..),
     Duration (..),
@@ -34,6 +34,7 @@ import DBOS.SystemDB.Types
     ResolvedLimits (..),
     Serialization (..),
     SerializedWorkflowValue (..),
+    Submission (..),
     WorkflowFilter (..),
     WorkflowId (..),
     WorkflowRecord (..),
@@ -293,19 +294,19 @@ pollOnce conn identity workflows tasks running queue = do
 
 -- | Turns a failed dequeue into the "was it contention" answer the caller
 -- backs off on. A peer mid-dequeue is the system working, not a failure.
-reportDequeueError :: Monad m => SomeTracer m -> SystemDB.Error -> m Bool
+reportDequeueError :: Monad m => SomeTracer m -> Error -> m Bool
 reportDequeueError tracer err
   | isContention err = do
       runTracer tracer DequeueBackoff
       pure True
   | otherwise = do
-      runTracer tracer (DequeueFailed (SystemDB.renderError err))
+      runTracer tracer (DequeueFailed (renderError err))
       pure False
 
 -- | Whether a failed dequeue means a peer was mid-dequeue rather than
 -- something being wrong. @55P03@ by code, not by class: a @NOWAIT@
 -- conflict is @lock_not_available@ and never reaches the retry layer.
-isContention :: SystemDB.Error -> Bool
+isContention :: Error -> Bool
 isContention (Backend backend) = backend.backendSqlState == Just "55P03"
 isContention _ = False
 
@@ -350,7 +351,7 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed
         Left err -> do
           -- The rows stay PENDING with this executor's id on them, which
           -- is what recovery is for.
-          runTracer conn.connTracer (ClaimedWorkflowsUnreadable (SystemDB.renderError err))
+          runTracer conn.connTracer (ClaimedWorkflowsUnreadable (renderError err))
         Right rows -> do
           when (length rows /= length claimed) $
             runTracer conn.connTracer (ClaimedWorkflowsMissing (length claimed) (length rows))
@@ -374,7 +375,7 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed
                     spawnRegisteredWorkflowWithRow
                       tasks
                       (releaseSlot slot)
-                      SystemDB.Dequeue
+                      Dequeue
                       conn
                       identity
                       workflows
@@ -396,7 +397,7 @@ refreshQueueSet conn identity queues warnedInternal listenQueues = do
   listed <- runSystemDB conn.connSysdb (\db -> SystemDB.listQueues db Unset)
   case listed of
     Left err -> do
-      runTracer conn.connTracer (QueueListFailed (SystemDB.renderError err))
+      runTracer conn.connTracer (QueueListFailed (renderError err))
       Map.keys <$> readTVarIO queues
     Right records -> do
       warned <- readTVarIO warnedInternal
@@ -475,7 +476,7 @@ superviseForever tasks conn identity workflows listenQueues = do
       transitioned <- runSystemDB conn.connSysdb (\db -> SystemDB.transitionDelayedWorkflows db)
       case transitioned of
         Left err ->
-          runTracer conn.connTracer (DelayedTransitionFailed (SystemDB.renderError err))
+          runTracer conn.connTracer (DelayedTransitionFailed (renderError err))
         Right 0 -> pure ()
         Right moved -> runTracer conn.connTracer (DelayedWorkflowsEnqueued moved)
       names <- refreshQueueSet conn identity queues warnedInternal listenQueues

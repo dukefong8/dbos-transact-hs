@@ -11,9 +11,11 @@ import DBOS.Transact
   ( Config (..),
     Environment (..),
     Identity (..),
-    appVersionEnv,
-    cloudAppNameEnv,
     configNew,
+  )
+import DBOS.Transact.Identity
+  ( appVersionEnv,
+    cloudAppNameEnv,
     resolve,
     validateAppName,
   )

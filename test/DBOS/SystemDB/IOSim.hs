@@ -108,18 +108,20 @@ import DBOS.SystemDB
     zeroRowCounts,
   )
 import DBOS.Transact
-  ( Connection,
-    DBOS,
+  ( DBOS,
     Executor,
     Identity (..),
-    Owner (..),
     Serializer (..),
-    SomeSystemDB (..),
     SomeTracer (..),
     configNew,
     launchOn,
-    newConnection,
     newDBOS,
+  )
+import DBOS.Transact.Connection
+  ( Connection,
+    Owner (..),
+    SomeSystemDB (..),
+    newConnection
   )
 import DBOS.Transact.ContextSimData
   ( mockEvent,

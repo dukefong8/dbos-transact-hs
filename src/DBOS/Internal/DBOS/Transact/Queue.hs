@@ -29,7 +29,7 @@ import DBOS.Prelude
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Control.Concurrent.Class.MonadMVar (MonadMVar)
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types
   ( Change (..),
     Applications (..),
@@ -37,8 +37,9 @@ import DBOS.SystemDB.Types
     OnExistingQueue (..),
     QueueName (..),
     QueueRecord (..),
+    VersionInfo (..),
     QueueUpdate (..),
-    RateLimit,
+    RateLimit (..),
     ResolvedLimits (..),
     Duration,
     defaultQueueUpdate,

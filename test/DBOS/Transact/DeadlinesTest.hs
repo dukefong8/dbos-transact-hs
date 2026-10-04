@@ -17,9 +17,7 @@ import DBOS.Transact
   (
     EngineOnly, CodecError,
     Config (..),
-    Ctx,
     WorkflowCtx,
-    workflowCtxInner,
     DBOS,
     Executor,
     Environment (..),

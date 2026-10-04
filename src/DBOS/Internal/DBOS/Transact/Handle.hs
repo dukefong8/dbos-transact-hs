@@ -34,9 +34,9 @@ import Data.Text qualified as Text
 import Control.Monad.Class.MonadTime (MonadTime)
 import Control.Monad.Class.MonadTimer (MonadDelay)
 import Control.Monad.Class.MonadThrow qualified as MThrow
-import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowStatus, getResultStepName, timestampNow)
+import DBOS.SystemDB.Types (AwaitedOutcome (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowRecord (..), WorkflowStatus, getResultStepName, timestampNow)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)

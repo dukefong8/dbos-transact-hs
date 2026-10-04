@@ -45,7 +45,6 @@ import DBOS.Transact
     pendingGetEvent,
     pendingSetEvent,
     pendingSleep,
-    pendingStepId,
     pendingWorkflowStep,
     registerDBOSWorkflowRef,
     runDBOSWorkflowRef,
@@ -62,6 +61,7 @@ import DBOS.Transact
     runWorkflowStep,
     setEvent,
   )
+import DBOS.Transact.Checkpoint (pendingStepId)
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
