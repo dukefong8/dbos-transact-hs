@@ -50,6 +50,7 @@ import DBOS.Transact
     ClientConfig (..),
     Config (..),
     DBOS,
+    Executor,
     Ctx,
     Enqueue (..),
     Environment (..),
@@ -124,12 +125,12 @@ tests =
           other -> fail ("expected a not-launched refusal, got: " <> show other),
       testCase "cancelling a workflow that does not exist is not an error" $
         withInstance "mgmt-cancel-missing" $ \dbos _suffix -> do
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           cancelled <- cancelWorkflows dbos [WorkflowId "never-existed"] False
           assertEqual "a missing row cancels to nothing" (Right []) cancelled,
       testCase "resuming a workflow that does not exist is an error" $
         withInstance "mgmt-resume-missing" $ \dbos _suffix -> do
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           resumed <- resumeWorkflows dbos [WorkflowId "never-existed"] Nothing
           case resumed of
             Left (ErrorSystemDatabase (SystemDB.NonExistentWorkflow {workflowIds})) ->
@@ -146,10 +147,10 @@ tests =
               workflowText = "hs-l2-mgmt-cancel-resume-" <> suffix
               workflowId = WorkflowId workflowText
           ref <- registerRefOrFail dbos key body
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           started <-
             startWfRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
               (Just (encodeWorkflowValue (0 :: Int)))
@@ -180,14 +181,14 @@ tests =
               workflowText = "hs-l2-mgmt-resume-queue-" <> suffix
               workflowId = WorkflowId workflowText
           ref <- registerRefOrFail dbos key body
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           case queueRegistered of
             Left err -> fail (show err)
             Right _ -> pure ()
           started <-
             startWfRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
               (Just (encodeWorkflowValue (7 :: Int)))
@@ -231,8 +232,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
-          ran <- runWf dbos parentKey parentId Nothing
+          exec <- launchOrFail dbos
+          ran <- runWf exec parentKey parentId Nothing
           childId <- case ran of
             Left err -> fail (show err)
             Right (Just output) -> case decodeSerializedChildId output of
@@ -257,8 +258,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
-          ran <- runWf dbos key workflowId (Just (encodeWorkflowValue (1 :: Int)))
+          exec <- launchOrFail dbos
+          ran <- runWf exec key workflowId (Just (encodeWorkflowValue (1 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -278,8 +279,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
-          ran <- runWf dbos key workflowId (Just (encodeWorkflowValue (2 :: Int)))
+          exec <- launchOrFail dbos
+          ran <- runWf exec key workflowId (Just (encodeWorkflowValue (2 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -307,8 +308,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
-          first <- runWf dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+          exec <- launchOrFail dbos
+          first <- runWf exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           assertBool "the source was supposed to fail" (isLeft first)
           forked <- forkWorkflows dbos [forkNew sourceText] defaultForkOptions
           forkedIds <- case forked of
@@ -338,12 +339,12 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           case queueRegistered of
             Left err -> fail (show err)
             Right _ -> pure ()
-          ran <- runWf dbos key sourceId (Just (encodeWorkflowValue (4 :: Int)))
+          ran <- runWf exec key sourceId (Just (encodeWorkflowValue (4 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -376,8 +377,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
-          first <- runWf dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+          exec <- launchOrFail dbos
+          first <- runWf exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           case first of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -404,7 +405,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           let first = WorkflowId ("hs-l2-mgmt-bulk-1-" <> suffix)
               second = WorkflowId ("hs-l2-mgmt-bulk-2-" <> suffix)
               enqueueOne wid = do
@@ -442,9 +443,9 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           let runOne wid input = do
-                ran <- runWf dbos key wid (Just (encodeWorkflowValue input))
+                ran <- runWf exec key wid (Just (encodeWorkflowValue input))
                 case ran of
                   Right _ -> pure ()
                   other -> fail ("expected the source to run, got: " <> show other)
@@ -475,7 +476,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           enqueued <-
             enqueueDBOSWorkflow
               dbos
@@ -500,7 +501,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           enqueued <-
             enqueueDBOSWorkflow
               dbos
@@ -543,8 +544,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
-          first <- runWf dbos key sourceId (Just (encodeWorkflowValue ("hi" :: Text)))
+          exec <- launchOrFail dbos
+          first <- runWf exec key sourceId (Just (encodeWorkflowValue ("hi" :: Text)))
           case first of
             Left (StepFailed step _) -> step @?= "two"
             other -> fail ("expected the step failure, got: " <> show other)
@@ -572,8 +573,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
-          ran <- runWf dbos key wid Nothing
+          exec <- launchOrFail dbos
+          ran <- runWf exec key wid Nothing
           case ran of
             Right _ -> pure ()
             other -> fail ("expected the workflow to run, got: " <> show other)
@@ -612,10 +613,10 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           ran <-
             runWf
-              dbos
+              exec
               key
               wid
               (Just (encodeWorkflowValue ("hs-l2-mgmt-self-" <> suffix :: Text)))
@@ -651,10 +652,10 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           ran <-
             runWf
-              dbos
+              exec
               parentKey
               (WorkflowId rootText)
               (Just (encodeWorkflowValue (rootText :: Text)))
@@ -695,7 +696,7 @@ tests =
           case registeredOperator of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           enqueued <-
             enqueueDBOSWorkflow
               dbos
@@ -708,7 +709,7 @@ tests =
             Right _ -> pure ()
           ran <-
             runWf
-              dbos
+              exec
               operatorKey
               (WorkflowId operatorText)
               (Just (encodeWorkflowValue (targetText :: Text)))
@@ -759,21 +760,18 @@ tests =
           case operatorRegistered of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
-          ranSource <- runWf dbos sourceKey (WorkflowId sourceText) (Just (encodeWorkflowValue (21 :: Int)))
+          exec <- launchOrFail dbos
+          ranSource <- runWf exec sourceKey (WorkflowId sourceText) (Just (encodeWorkflowValue (21 :: Int)))
           case ranSource of
             Right _ -> pure ()
             other -> fail ("expected the source to run, got: " <> show other)
-          first <- try (runWf dbos operatorKey (WorkflowId operatorText) (Just (encodeWorkflowValue (sourceText :: Text)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+          first <- try (runWf exec operatorKey (WorkflowId operatorText) (Just (encodeWorkflowValue (sourceText :: Text)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
           case first of
             Left exception -> assertBool "the crash escapes" ("forked then crashed" `Text.isInfixOf` Text.pack (show exception))
             Right other -> fail ("expected the crash, got: " <> show other)
           shutdown dbos
           writeIORef shouldCrash False
-          relaunched <- launchWithEnvironment dbos isolatedEnvironment
-          case relaunched of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          _ <- launchWithEnvironment dbos isolatedEnvironment
           settled <- timeout 10000000 (waitForWorkflow dbos (WorkflowId operatorText))
           case settled of
             Just (Right (AwaitedSucceeded (Just output) _)) -> do
@@ -816,7 +814,7 @@ tests =
           case registeredOperator of
             Left err -> fail (show err)
             Right () -> pure ()
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           queueRegistered <- registerQueue dbos runQueue defaultQueueOptions AlwaysUpdate
           case queueRegistered of
             Left err -> fail (show err)
@@ -833,7 +831,7 @@ tests =
             Right _ -> pure ()
           ran <-
             runWf
-              dbos
+              exec
               operatorKey
               (WorkflowId operatorText)
               (Just (encodeWorkflowValue (targetText :: Text)))
@@ -879,8 +877,8 @@ tests =
                 case registered of
                   Left err -> fail (show err)
                   Right () -> pure ()
-                launchOrFail dbos
-                ran <- runWf dbos operatorKey (WorkflowId operatorText) Nothing
+                exec <- launchOrFail dbos
+                ran <- runWf exec operatorKey (WorkflowId operatorText) Nothing
                 case ran of
                   Right _ -> pure ()
                   other -> fail ("expected the operator to run, got: " <> show other)
@@ -947,14 +945,14 @@ tests =
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
-          launchOrFail dbos
+          exec <- launchOrFail dbos
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           case queueRegistered of
             Left err -> fail (show err)
             Right _ -> pure ()
           started <-
             startWfRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just ("hs-l2-delayed-" <> suffix), startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 3600)})})
               Nothing
@@ -985,10 +983,10 @@ tests =
 -- for the compiler to guess. Local copies are deliberate — this module
 -- carries only the aliases it uses, and a sibling test module repeats
 -- the ones it needs.
-runWf :: DBOS IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runDBOSWorkflow
 
-startWfRef :: DBOS IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
+startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
 startWfRef = startDBOSWorkflowRef
 
 retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
@@ -1038,7 +1036,7 @@ instanceFor label = do
 withInstance :: Text -> (DBOS IO -> Text -> IO a) -> IO a
 withInstance label action = bracket (instanceFor label) (shutdown . fst) (uncurry action)
 
-launchOrFail :: DBOS IO -> IO ()
+launchOrFail :: DBOS IO -> IO (Executor IO)
 launchOrFail dbos = do
   started <- launchWithEnvironment dbos isolatedEnvironment
   either (fail . show) pure started

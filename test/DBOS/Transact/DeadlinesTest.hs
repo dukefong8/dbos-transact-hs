@@ -19,6 +19,7 @@ import DBOS.Transact
     Config (..),
     Ctx,
     DBOS,
+    Executor,
     Environment (..),
     Error (..),
     RunOptions (..),
@@ -44,6 +45,14 @@ import DBOS.Transact
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertEqual, testCase, (@?=))
 
+-- | Launch over the isolated environment and hand back the executor.
+launchDeadlinesExec :: DBOS IO -> Environment -> IO (Executor IO)
+launchDeadlinesExec dbos env = do
+  started <- launchWithEnvironment dbos env
+  case started of
+    Left err -> fail (show err)
+    Right executor -> pure executor
+
 tests :: TestTree
 tests =
   withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
@@ -64,13 +73,10 @@ tests =
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchDeadlinesExec dbos isolatedEnvironment
           ran <-
             runWfRef
-              dbos
+              exec
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
               Nothing
@@ -104,13 +110,10 @@ tests =
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchDeadlinesExec dbos isolatedEnvironment
           ran <-
             runWfRef
-              dbos
+              exec
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (millisDuration 100)})
               Nothing
@@ -141,14 +144,11 @@ tests =
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchDeadlinesExec dbos isolatedEnvironment
           worker <-
             async
               ( runWfRef
-                  dbos
+                  exec
                   ref
                   (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
                   Nothing
@@ -156,16 +156,13 @@ tests =
           first <- waitForDeadline getBackend (WorkflowId workflowText)
           shutdown dbos
           cancel worker
-          relaunched <- launchWithEnvironment dbos isolatedEnvironment
-          case relaunched of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchDeadlinesExec dbos isolatedEnvironment
           second <- waitForDeadline getBackend (WorkflowId workflowText)
           second @?= first
           putMVar gate ()
           ran <-
             runWfRef
-              dbos
+              exec
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
               Nothing
@@ -190,14 +187,11 @@ tests =
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchDeadlinesExec dbos isolatedEnvironment
           worker <-
             async
               ( runWfRef
-                  dbos
+                  exec
                   ref
                   (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
                   Nothing
@@ -222,13 +216,10 @@ tests =
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchDeadlinesExec dbos isolatedEnvironment
           first <-
             runWfRef
-              dbos
+              exec
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (secondsDuration 30)})
               Nothing
@@ -239,7 +230,7 @@ tests =
             other -> fail (show other)
           again <-
             runWfRef
-              dbos
+              exec
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (millisDuration 1)})
               Nothing
@@ -262,7 +253,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWfRef :: DBOS IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWfRef = runDBOSWorkflowRef
 
 retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))

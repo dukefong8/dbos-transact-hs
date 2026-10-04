@@ -5,10 +5,11 @@
 module WidgetStore.App (WidgetApp (..)) where
 
 import DBOS.Prelude
-import DBOS.Transact (AppDataSource, DBOS, EngineOnly, WorkflowRef)
+import DBOS.Transact (AppDataSource, DBOS, EngineOnly, Executor, WorkflowRef)
 
 data WidgetApp = WidgetApp
   { waDbos     :: DBOS IO,
+    waExec     :: Executor IO,
     waApp      :: AppDataSource,
     waCheckout :: WorkflowRef IO EngineOnly
   }

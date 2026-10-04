@@ -27,7 +27,7 @@ import DBOS.Prelude
 import DBOS.SystemDB (AwaitedOutcome (..), Outcome (..), StepRecord (..), Timestamp (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, defaultWorkflowFilter, getWorkflow, listWorkflowSteps)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simEntropy, simGeneratedId, simIdentity, simInstance)
-import DBOS.Transact (CodecError, Ctx, DBOS, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), SomeSystemDB (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, cancellationToken, childWorkflowId, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, handleWorkflowId, millisDuration, newWorkflowKey, nextStepMarker, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflow, registerDBOSWorkflowRef, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, tokenCancelled, waitForWorkflow, withAttempt, withSystemDB, workflowId)
+import DBOS.Transact (CodecError, Ctx, DBOS, Executor, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), SomeSystemDB (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, cancellationToken, childWorkflowId, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, handleWorkflowId, millisDuration, newWorkflowKey, nextStepMarker, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflow, registerDBOSWorkflowRef, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, tokenCancelled, waitForWorkflow, withAttempt, withSystemDB, workflowId)
 import DBOS.Transact.WorkflowTest
   ( JoinOutcome (..),
     WfFixture (..),
@@ -101,7 +101,7 @@ import DBOS.Transact.WorkflowTest
     scenarioAssignedChildAdopted,
     scenarioRootNoParent,
     scenarioRowBeforeBody,
-    scenarioRunBeforeLaunch,
+    scenarioRetrieveBeforeLaunch,
     scenarioSelectStepRaces,
     scenarioStaleAwaitRefused,
     scenarioStepIdPairs,
@@ -215,7 +215,7 @@ tests =
                           Left _  -> pure (Left (StepFailed "parent" "bad child output"))
                       Right _ -> pure (Left (StepFailed "parent" "no child output"))
           orFail =<< registerWfSim dbos parentKey parentBody
-          memLaunchOn mem simTracer dbos
+          exec <- memLaunchOn mem simTracer dbos
           -- The holder parks on its queue with the key held; nothing runs
           -- it here, so the test stages what the queue runner would do and
           -- records its completion directly. (Live parks it on a delay
@@ -223,7 +223,7 @@ tests =
           -- same.)
           holderStarted <-
             startWfRefSim
-              dbos
+              exec
               childRef
               (startOptionsDefault {startWorkflowId = Just holderText, startQueue = Just (enqueueNew queueName) {deduplication_id = Just dedupKey}})
               Nothing
@@ -231,7 +231,7 @@ tests =
             Left err -> throwIO (userError (show err))
             Right _  -> pure ()
           orFailSys =<< SystemDB.recordWorkflowOutcome mem (WorkflowId holderText) (OutcomeOutput (Just "9"))
-          outcome <- runWfSim dbos parentKey (WorkflowId parentText) Nothing
+          outcome <- runWfSim exec parentKey (WorkflowId parentText) Nothing
           derived <- getWorkflow mem (WorkflowId derivedText)
           listed <- SystemDB.listWorkflowSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
           children <- SystemDB.getWorkflowChildren mem (WorkflowId parentText)
@@ -263,7 +263,7 @@ tests =
       simCase "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
       simCase "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
       simCase "a panicking workflow leaves its row pending" scenarioPanic checkPanic tracePanic,
-      simCase "running before launch is refused" scenarioRunBeforeLaunch checkRunBeforeLaunch traceRunBeforeLaunch,
+      simCase "retrieving before launch is refused" scenarioRetrieveBeforeLaunch checkRunBeforeLaunch traceRunBeforeLaunch,
       simCase "an application error round-trips as itself" scenarioAppErrorRoundtrip checkAppErrorRoundtrip traceAppErrorRoundtrip,
       simCase "a database failure is not the workflow outcome" scenarioDbFailureNotOutcome checkDbFailureNotOutcome traceDbFailureNotOutcome,
       simCase "a workflow records the steps it took" scenarioStepsTaken checkStepsTaken traceStepsTaken,
@@ -280,12 +280,12 @@ tests =
               body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
               body () _ = threadDelay 1000000 >> pure (Right 7)
           ref <- registerUnitRef dbos key body
-          memLaunchOn mem simTracer dbos
+          exec <- memLaunchOn mem simTracer dbos
           -- A millisecond budget against a second-long body: the clock
           -- wins on virtual time, deterministically.
           ran <-
             runWfRefSim
-              dbos
+              exec
               ref
               (runOptionsDefault {runWorkflowId = Just workflowText, runTimeout = Explicit (millisDuration 1)})
               Nothing
@@ -718,13 +718,13 @@ traceStaleAwaitRefused tr = do
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWfSim :: DBOS (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfSim :: Executor (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWfSim = runDBOSWorkflow
 
-runWfRefSim :: DBOS (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfRefSim :: Executor (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWfRefSim = runDBOSWorkflowRef
 
-startWfRefSim :: DBOS (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
+startWfRefSim :: Executor (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
 startWfRefSim = startDBOSWorkflowRef
 
 retrieveWfSim :: DBOS (IOSim s) -> WorkflowId -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))

@@ -72,9 +72,8 @@ start = do
   checkoutRef <-
     registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutWorkflow ds dispatchRef)
       >>= either (die . showText) pure
-  launched <- launch dbos
-  either (die . showText) pure launched
-  let widget = WidgetApp {waDbos = dbos, waApp = app, waCheckout = checkoutRef}
+  exec <- launch dbos >>= either (die . showText) pure
+  let widget = WidgetApp {waDbos = dbos, waExec = exec, waApp = app, waCheckout = checkoutRef}
       application = routeTrieMiddleware (widgetRouteTrie (dispatchWidget widget)) widgetNotFound
   pure (application, shutdown dbos >> releaseAppDataSource app)
 

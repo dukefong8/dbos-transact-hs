@@ -18,7 +18,7 @@ import Hasql.Statement qualified as Statement
 import DBOS.Prelude
 import DBOS.SystemDB (AwaitedOutcome (..), Change (..), NewQueue (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), RateLimit (..), SystemDB (getQueue, upsertQueue), WorkflowFilter (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter, getWorkflow, internalQueueName, newQueue, secondsDuration)
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (CodecError, Config (..), Ctx, DBOS, DuplicationPolicy (..), EngineOnly, Enqueue (..), Environment (..), Error (..), Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), Serialization (..), SerializedWorkflowValue (..),     RunOptions (..),
+import DBOS.Transact (CodecError, Config (..), Ctx, DBOS, Executor, DuplicationPolicy (..), EngineOnly, Enqueue (..), Environment (..), Error (..), Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), Serialization (..), SerializedWorkflowValue (..),     RunOptions (..),
     StartOptions (..), Timeout (..),     WorkflowId (..),
     WorkflowKey,
     WorkflowRef,
@@ -28,6 +28,15 @@ import DBOS.Transact (CodecError, Config (..), Ctx, DBOS, DuplicationPolicy (..)
     listWorkflows, newDBOS, newWorkflowKey, nullTracer, queue, queueFromRecord, queueIsPartitioned, registerDBOSWorkflow, registerDBOSWorkflowRef, registerQueue, renderTransactError, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault,     shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, updateQueue, waitForWorkflow)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
+
+-- | Launch over the isolated environment and hand back the executor:
+-- the one-call form of @launchWithEnvironment@ plus unwrap.
+launchQueueExec :: DBOS IO -> Environment -> IO (Executor IO)
+launchQueueExec dbos env = do
+  started <- launchWithEnvironment dbos env
+  case started of
+    Left err -> fail (show err)
+    Right executor -> pure executor
 
 tests :: TestTree
 tests =
@@ -78,10 +87,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           let options =
                 QueueOptions
                   { concurrency = Nothing,
@@ -111,7 +117,7 @@ tests =
                   decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
               assertEqual "the queue supervisor executes the registered body" (Right 7) decoded
             Right other -> fail (show other)
-          completed <- runWf dbos key workflowId (Just input)
+          completed <- runWf exec key workflowId (Just input)
           case completed of
             Right (Just output) -> do
               let decoded = decodeWorkflowValue "result" (Just output) :: Either CodecError Int
@@ -167,10 +173,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           enqueued <- enqueueDBOSWorkflow dbos key workflowId (Just (encodeWorkflowValue (21 :: Int))) queueName
           case enqueued of
             Left err -> fail (show err)
@@ -241,10 +244,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           let options =
                 QueueOptions
                   { concurrency = Nothing,
@@ -309,10 +309,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           mapM_
             ( \queueName -> do
                 queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
@@ -368,10 +365,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos ignoredQueue defaultQueueOptions AlwaysUpdate
           case queueRegistered of
             Left err -> fail (show err)
@@ -421,10 +415,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           enqueued <- enqueueDBOSWorkflow dbos key (WorkflowId internalText) (Just (encodeWorkflowValue (4 :: Int))) internalName
           case enqueued of
             Left err -> fail (show err)
@@ -443,10 +434,7 @@ tests =
         base <- configFromEnv appName
         let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           refused <- registerQueue dbos internalName defaultQueueOptions AlwaysUpdate
           case refused of
             Left (ErrorConfig message) -> assertBool "names the reservation" ("reserved" `Text.isInfixOf` message)
@@ -505,10 +493,7 @@ tests =
                 )
               ]
         bracket (newDBOS config) shutdown $ \dbos -> do
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           mapM_
             ( \(what, options, fragment) -> do
                 refused <- registerQueue dbos queueName options AlwaysUpdate
@@ -534,10 +519,7 @@ tests =
                   worker_concurrency = Just 2
                 }
         bracket (newDBOS config) shutdown $ \dbos -> do
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           registered <- registerQueue dbos queueName coherent AlwaysUpdate
           case registered of
             Left err -> fail (show err)
@@ -580,10 +562,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
@@ -594,7 +573,7 @@ tests =
                     startQueue = Just (enqueueNew queueName),
                     startTimeout = Explicit (secondsDuration 300)
                   }
-          startedRun <- startDBOSWorkflowRef dbos ref options Nothing
+          startedRun <- startDBOSWorkflowRef exec ref options Nothing
           handle <- case startedRun of
             Left err     -> fail (show (err :: Error EngineOnly))
             Right handle -> pure handle
@@ -628,10 +607,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           let options =
                 startOptionsDefault
                   { startWorkflowId = Just workflowText,
@@ -640,7 +616,7 @@ tests =
                   }
           -- No register_queue anywhere: the row must stay as the enqueue
           -- left it, so the read follows the start at once.
-          startedRun <- startDBOSWorkflowRef dbos ref options Nothing
+          startedRun <- startDBOSWorkflowRef exec ref options Nothing
           case startedRun of
             Left err -> fail (show (err :: Error EngineOnly))
             Right _  -> pure ()
@@ -668,10 +644,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
@@ -681,7 +654,7 @@ tests =
                   { startWorkflowId = Just workflowText,
                     startQueue = Just ((enqueueNew queueName) {partition_key = Just "tenant-7", priority = Just 4})
                   }
-          startedRun <- startDBOSWorkflowRef dbos ref options Nothing
+          startedRun <- startDBOSWorkflowRef exec ref options Nothing
           case startedRun of
             Left err -> fail (show (err :: Error EngineOnly))
             Right _  -> pure ()
@@ -708,10 +681,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
@@ -721,7 +691,7 @@ tests =
                   { startWorkflowId = Just workflowText,
                     startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 30)})
                   }
-          startedRun <- startDBOSWorkflowRef dbos ref options Nothing
+          startedRun <- startDBOSWorkflowRef exec ref options Nothing
           case startedRun of
             Left err -> fail (show (err :: Error EngineOnly))
             Right _  -> pure ()
@@ -747,17 +717,14 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
             Right _  -> pure ()
           -- Past what the priority column holds: i32 max plus one.
           let bad = (enqueueNew queueName) {priority = Just 2147483648}
-          startedRun <- startDBOSWorkflowRef dbos ref (startOptionsDefault {startQueue = Just bad}) Nothing
+          startedRun <- startDBOSWorkflowRef exec ref (startOptionsDefault {startQueue = Just bad}) Nothing
           case startedRun of
             Left (ErrorConfig message) -> assertBool "refuses the priority" ("`priority` must be at most 2147483647" `Text.isInfixOf` message)
             other -> fail ("expected a priority refusal, got: " <> show (other :: Either (Error EngineOnly) (WorkflowHandle IO EngineOnly)))
@@ -787,10 +754,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
@@ -800,7 +764,7 @@ tests =
                   { startWorkflowId = Just workflowText,
                     startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 3)})
                   }
-          startedRun <- startDBOSWorkflowRef dbos ref options Nothing
+          startedRun <- startDBOSWorkflowRef exec ref options Nothing
           handle <- case startedRun of
             Left err     -> fail (show (err :: Error EngineOnly))
             Right handle -> pure handle
@@ -836,10 +800,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
@@ -849,7 +810,7 @@ tests =
           let held = (enqueueNew queueName) {deduplication_id = Just "order-42", delay = Just (secondsDuration 3)}
           firstRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just firstText, startQueue = Just held})
               Nothing
@@ -858,7 +819,7 @@ tests =
             Right handle -> pure handle
           secondRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just secondText, startQueue = Just held})
               Nothing
@@ -874,7 +835,7 @@ tests =
           -- Finishing released the key, so the same one is enqueueable again.
           thirdRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just thirdText, startQueue = Just ((enqueueNew queueName) {deduplication_id = Just "order-42"})})
               Nothing
@@ -898,10 +859,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
@@ -910,7 +868,7 @@ tests =
           let joining = (enqueueNew queueName) {deduplication_id = Just "order-42", delay = Just (secondsDuration 3), duplication_policy = ReturnExisting}
           firstRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just firstText, startQueue = Just joining})
               Nothing
@@ -919,7 +877,7 @@ tests =
             Right handle -> pure handle
           secondRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just secondText, startQueue = Just joining})
               Nothing
@@ -945,7 +903,7 @@ tests =
           -- claims it rather than joining.
           thirdRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just thirdText, startQueue = Just ((enqueueNew queueName) {deduplication_id = Just "order-42", duplication_policy = ReturnExisting})})
               Nothing
@@ -973,17 +931,14 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           -- Enqueued before the queue is registered, which is what holds
           -- the backlog back: no worker exists for a queue with no row.
           handles <- flip mapM submitted $ \(name, priority) -> do
             let workflowText = name <> "-" <> suffix
             startedRun <-
               startDBOSWorkflowRef
-                dbos
+                exec
                 ref
                 (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {priority = priority})})
                 (Just (encodeWorkflowValue name))
@@ -1030,10 +985,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <-
             registerQueue
               dbos
@@ -1047,7 +999,7 @@ tests =
             let workflowText = "fanned-" <> Text.pack (show n) <> "-" <> suffix
             startedRun <-
               startDBOSWorkflowRef
-                dbos
+                exec
                 ref
                 (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew queueName)})
                 Nothing
@@ -1104,10 +1056,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <-
             registerQueue
               dbos
@@ -1122,7 +1071,7 @@ tests =
               let workflowText = partition <> "-" <> Text.pack (show n) <> "-" <> suffix
               startedRun <-
                 startDBOSWorkflowRef
-                  dbos
+                  exec
                   ref
                   (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {partition_key = Just partition})})
                   (Just (encodeWorkflowValue partition))
@@ -1169,10 +1118,7 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <-
             registerQueue
               dbos
@@ -1187,7 +1133,7 @@ tests =
               let workflowText = partition <> "-" <> Text.pack (show n) <> "-" <> suffix
               startedRun <-
                 startDBOSWorkflowRef
-                  dbos
+                  exec
                   ref
                   (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {partition_key = Just partition})})
                   (Just (encodeWorkflowValue partition))
@@ -1228,13 +1174,10 @@ tests =
           case written of
             Left err -> fail ("could not write the queue row: " <> show err)
             Right _  -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           startedRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew internalText)})
               Nothing
@@ -1277,13 +1220,10 @@ tests =
           case written of
             Left err -> fail ("could not write the queue row: " <> show err)
             Right _  -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           startedRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew queueName)})
               Nothing
@@ -1330,10 +1270,7 @@ tests =
         base <- configFromEnv appName
         let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           forM_ cases $ \(what, options, expected) -> do
             refused <- registerQueue dbos queueName options UpdateIfLatestVersion
             case refused of
@@ -1362,10 +1299,7 @@ tests =
         base <- configFromEnv appName
         let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           registered <-
             registerQueue
               dbos
@@ -1394,10 +1328,7 @@ tests =
           case written of
             Left err -> fail ("could not write the legacy row: " <> show err)
             Right _  -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           stored <- queue dbos queueName
           case stored of
             Right (Just receipt) -> do
@@ -1425,17 +1356,14 @@ tests =
           ref <- case refRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
             Right _  -> pure ()
           startedRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew queueName)})
               Nothing
@@ -1474,13 +1402,10 @@ tests =
           case written of
             Left err -> fail ("could not write the queue row: " <> show err)
             Right _  -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           startedRun <-
             startDBOSWorkflowRef
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew queueName)})
               Nothing
@@ -1525,16 +1450,13 @@ tests =
           parentRef <- case parentRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           -- The child is enqueued onto a queue nothing polls: the
           -- assertion is about what the enqueue wrote, so the row has to
           -- stay as the enqueue left it.
           ran <-
             runDBOSWorkflowRef
-              dbos
+              exec
               parentRef
               (runOptionsDefault {runWorkflowId = Just parentText, runTimeout = Explicit (secondsDuration 300)})
               (Just (encodeWorkflowValue ()))
@@ -1558,10 +1480,7 @@ tests =
         base <- configFromEnv appName
         let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           registered <-
             registerQueue
               dbos
@@ -1594,10 +1513,7 @@ tests =
         base <- configFromEnv appName
         let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           registered <-
             registerQueue
               dbos
@@ -1639,10 +1555,7 @@ tests =
         base <- configFromEnv appName
         let config = base {configAppVersion = Just ("hs-l2-version-" <> suffix), configExecutorId = Just ("hs-l2-executor-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchQueueExec dbos isolatedEnvironment
           first <-
             registerQueue
               dbos
@@ -1671,7 +1584,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWf :: DBOS IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runDBOSWorkflow
 
 retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))

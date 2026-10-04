@@ -18,6 +18,7 @@ import DBOS.Transact
     Config (..),
     Ctx,
     DBOS,
+    Executor,
     Environment (..),
     Error (..),
     PendingStep (..),
@@ -55,6 +56,14 @@ import DBOS.Transact
 import DBOS.Transact.ContextTest (ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
+
+-- | Launch over the isolated environment and hand back the executor.
+launchEventExec :: DBOS IO -> Environment -> IO (Executor IO)
+launchEventExec dbos env = do
+  started <- launchWithEnvironment dbos env
+  case started of
+    Left err -> fail (show err)
+    Right executor -> pure executor
 
 tests :: TestTree
 tests =
@@ -209,20 +218,14 @@ tests =
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          worker <- async (runWfRef dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing)
+          exec <- launchEventExec dbos isolatedEnvironment
+          worker <- async (runWfRef exec ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing)
           waitForPublish dbos (WorkflowId workflowText)
           shutdown dbos
           cancel worker
           putMVar release ()
-          relaunched <- launchWithEnvironment dbos isolatedEnvironment
-          case relaunched of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runWfRef dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing
+          _ <- launchEventExec dbos isolatedEnvironment
+          ran <- runWfRef exec ref (runOptionsDefault {runWorkflowId = Just workflowText}) Nothing
           case ran of
             Right (Just stored) -> do
               let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
@@ -270,19 +273,13 @@ tests =
             inStepRef <- case inStepRegistered of
               Left err  -> fail (show err)
               Right ref -> pure ref
-            launchedOther <- launchWithEnvironment other isolatedEnvironment
-            case launchedOther of
-              Left err -> fail (show err)
-              Right () -> pure ()
-            launchedOwner <- launchWithEnvironment owner isolatedEnvironment
-            case launchedOwner of
-              Left err -> fail (show err)
-              Right () -> pure ()
-            ran <- runDBOSWorkflowRef owner readerRef runOptionsDefault (Just (encodeWorkflowValue ()))
+            execOther <- launchEventExec other isolatedEnvironment
+            execOwner <- launchEventExec owner isolatedEnvironment
+            ran <- runDBOSWorkflowRef execOwner readerRef runOptionsDefault (Just (encodeWorkflowValue ()))
             case ran of
               Left (WrongInstance _) -> pure ()
               other                  -> fail ("expected a wrong-instance refusal, got: " <> show other)
-            ranInStep <- runDBOSWorkflowRef owner inStepRef runOptionsDefault (Just (encodeWorkflowValue ()))
+            ranInStep <- runDBOSWorkflowRef execOwner inStepRef runOptionsDefault (Just (encodeWorkflowValue ()))
             case ranInStep of
               Right (Just stored) -> do
                 let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError (Maybe Int)
@@ -323,11 +320,8 @@ tests =
           ref <- case registered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runDBOSWorkflowRef dbos ref (runOptionsDefault {runWorkflowId = Just workflowText}) (Just (encodeWorkflowValue ()))
+          exec <- launchEventExec dbos isolatedEnvironment
+          ran <- runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just workflowText}) (Just (encodeWorkflowValue ()))
           case ran of
             Right _ -> pure ()
             other   -> fail ("the workflow failed: " <> show other)
@@ -344,7 +338,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWfRef :: DBOS IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWfRef = runDBOSWorkflowRef
 
 -- | Wait until a workflow has published its event: the row appears before

@@ -20,6 +20,7 @@ import DBOS.Transact
     CodecError,
     Config (..),
     DBOS,
+    Executor,
     DuplicationPolicy (..),
     Enqueue (..),
     EnqueueOptions (..),
@@ -80,6 +81,14 @@ import DBOS.Transact
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
+-- | Launch over the isolated environment and hand back the executor.
+launchClientExec :: DBOS IO -> Environment -> IO (Executor IO)
+launchClientExec dbos env = do
+  started <- launchWithEnvironment dbos env
+  case started of
+    Left err -> fail (show err)
+    Right executor -> pure executor
+
 tests :: TestTree
 tests =
   withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
@@ -107,10 +116,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           case queueRegistered of
             Left err -> fail (show err)
@@ -168,10 +174,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           case queueRegistered of
             Left err -> fail (show err)
@@ -210,11 +213,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          exec <- launchClientExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -348,10 +348,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
           -- The queue needs its table row before anything can dequeue
           -- from it; an enqueue alone only names it on the workflow row.
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
@@ -407,10 +404,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           case queueRegistered of
             Left err -> fail (show err)
@@ -457,11 +451,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          exec <- launchClientExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -489,11 +480,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          exec <- launchClientExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -522,10 +510,7 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
@@ -552,11 +537,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          exec <- launchClientExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -581,10 +563,7 @@ tests =
         let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
         bracket (connectOrFail clientConfig) closeClient $ \client -> do
           bracket (newDBOS configA) shutdown $ \dbosA -> do
-            launchedA <- launchWithEnvironment dbosA isolatedEnvironment
-            case launchedA of
-              Left err -> fail (show err)
-              Right () -> pure ()
+            exec <- launchClientExec dbosA isolatedEnvironment
             listed <- clientListApplicationVersions client
             case listed of
               Left err -> fail (show err)
@@ -596,10 +575,7 @@ tests =
                 -- names none of this test's business.
                 assertAppLatest appName versionA versions
             bracket (newDBOS configB) shutdown $ \dbosB -> do
-              launchedB <- launchWithEnvironment dbosB isolatedEnvironment
-              case launchedB of
-                Left err -> fail (show err)
-                Right () -> pure ()
+              exec <- launchClientExec dbosB isolatedEnvironment
               -- Settle past DB-vs-app clock skew before promoting: launches
               -- stamp versions with the database clock while promotion
               -- stamps with the application clock, and the two have been
@@ -631,12 +607,9 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          _ <- runWf dbos key (WorkflowId firstText) (Just (encodeWorkflowValue (1 :: Int)))
-          _ <- runWf dbos key (WorkflowId secondText) (Just (encodeWorkflowValue (2 :: Int)))
+          exec <- launchClientExec dbos isolatedEnvironment
+          _ <- runWf exec key (WorkflowId firstText) (Just (encodeWorkflowValue (1 :: Int)))
+          _ <- runWf exec key (WorkflowId secondText) (Just (encodeWorkflowValue (2 :: Int)))
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
@@ -652,7 +625,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWf :: DBOS IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runDBOSWorkflow
 
 resultWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))

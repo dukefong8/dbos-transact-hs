@@ -31,6 +31,7 @@ import DBOS.Transact
     Ctx,
     DataSource (..),
     EngineOnly,
+    Executor,
     Error (..),
     RecordedOutcome (..),
     SerializedWorkflowValue (..),
@@ -207,9 +208,9 @@ scenarioCheckout payment = do
   store <- newWidgetStore 5
   dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs store)
   checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs store dispatchRef)
-  memLaunchOn mem simTracer dbos
+  exec <- memLaunchOn mem simTracer dbos
   let wid = WorkflowId "widget-wf-1"
-  _ <- startDBOSWorkflowRef dbos checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-1"}) Nothing
+  _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-1"}) Nothing
   paymentId <- getWorkflowEvent dbos wid "payment_id" (millisDuration 1000)
   case payment of
     Just decision -> do
@@ -245,9 +246,9 @@ scenarioPaidStepFails = do
   calls <- newTVarIO 0
   dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs store)
   checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody (failingWidgetDs calls) store dispatchRef)
-  memLaunchOn mem simTracer dbos
+  exec <- memLaunchOn mem simTracer dbos
   let wid = WorkflowId "widget-wf-fail"
-  _ <- startDBOSWorkflowRef dbos checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-fail"}) Nothing
+  _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-fail"}) Nothing
   paymentId <- getWorkflowEvent dbos wid "payment_id" (millisDuration 1000)
   case paymentId of
     Right (Just _) -> do

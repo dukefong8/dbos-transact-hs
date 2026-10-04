@@ -106,6 +106,7 @@ import DBOS.SystemDB
 import DBOS.Transact
   ( Connection,
     DBOS,
+    Executor,
     Identity (..),
     Owner (..),
     Serializer (..),
@@ -300,7 +301,7 @@ simIdentity =
 
 -- | Freezes the registry and installs the sim executor over the snapshot:
 -- the sim equivalent of a launch, with no database behind it.
-simLaunchWith :: SomeTracer (IOSim s) -> DBOS (IOSim s) -> IOSim s ()
+simLaunchWith :: SomeTracer (IOSim s) -> DBOS (IOSim s) -> IOSim s (Executor (IOSim s))
 simLaunchWith tracer dbos = do
   conn <- simConnectionWith tracer
   launchOn dbos conn simIdentity
@@ -403,7 +404,7 @@ memConnectionOn mem tracer = do
     tracer
 
 -- | Launch carrying the given tracer over simulated data.
-memLaunchOn :: MemSystemDB s -> SomeTracer (IOSim s) -> DBOS (IOSim s) -> IOSim s ()
+memLaunchOn :: MemSystemDB s -> SomeTracer (IOSim s) -> DBOS (IOSim s) -> IOSim s (Executor (IOSim s))
 memLaunchOn mem tracer dbos = do
   conn <- memConnectionOn mem tracer
   launchOn dbos conn simIdentity

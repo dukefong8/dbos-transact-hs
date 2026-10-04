@@ -6,11 +6,12 @@
 module Starter.App (StarterApp (..)) where
 
 import DBOS.Prelude
-import DBOS.Transact (DBOS, WorkflowId)
+import DBOS.Transact (DBOS, Executor, WorkflowId)
 import Starter.Workflows (StarterRefs)
 
 data StarterApp = StarterApp
   { staDbos :: DBOS IO,
+    staExec :: Executor IO,
     staOrderId :: StrictTVar IO (Maybe WorkflowId),
     staRefs :: StarterRefs
   }

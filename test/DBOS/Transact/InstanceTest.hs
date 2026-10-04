@@ -21,6 +21,7 @@ import DBOS.Transact
   (
     EngineOnly, Config (..),
     DBOS,
+    Executor,
     Environment (..),
     Error (..),
     Serializer (..),
@@ -48,6 +49,14 @@ import DBOS.Transact
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
+-- | Launch over the isolated environment and hand back the executor.
+launchInstanceExec :: DBOS IO -> Environment -> IO (Executor IO)
+launchInstanceExec dbos env = do
+  started <- launchWithEnvironment dbos env
+  case started of
+    Left err -> fail (Text.unpack (renderTransactError err))
+    Right executor -> pure executor
+
 tests :: TestTree
 tests =
   withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
@@ -65,11 +74,11 @@ tests =
         first <- launchWithEnvironment dbos isolatedEnvironment
         case first of
           Left err -> fail (Text.unpack (renderTransactError err))
-          Right () -> pure ()
+          Right _ -> pure ()
         second <- launchWithEnvironment dbos isolatedEnvironment
         case second of
           Left err -> fail ("a second launch should be a no-op, got: " <> Text.unpack (renderTransactError err))
-          Right () -> pure ()
+          Right _ -> pure ()
         assertEqual "the executor survives the second launch" True =<< isLaunched dbos
         shutdown dbos
         assertEqual "shutdown still lands" False =<< isLaunched dbos,
@@ -85,7 +94,7 @@ tests =
         first <- launchWithEnvironment dbos isolatedEnvironment
         case first of
           Left err -> fail (Text.unpack (renderTransactError err))
-          Right () -> pure ()
+          Right _ -> pure ()
         firstId <- dbosExecutorId dbos
         firstId @?= Right executorId
         shutdown dbos
@@ -95,7 +104,7 @@ tests =
         relaunched <- launchWithEnvironment dbos isolatedEnvironment
         case relaunched of
           Left err -> fail (Text.unpack (renderTransactError err))
-          Right () -> pure ()
+          Right _ -> pure ()
         secondId <- dbosExecutorId dbos
         secondId @?= firstId
         shutdown dbos
@@ -121,7 +130,7 @@ tests =
         started <- launchWithEnvironment dbos isolatedEnvironment
         case started of
           Left err -> assertBool "names the missing database URL" ("database URL" `Text.isInfixOf` renderTransactError err)
-          Right () -> fail "expected an empty database URL to be refused"
+          Right _ -> fail "expected an empty database URL to be refused"
         assertEqual "failed launch does not install an executor" False =<< isLaunched dbos,
       testCase "a failed launch leaves registration open" $ do
         base <- configFromEnv "ab"
@@ -132,7 +141,7 @@ tests =
         started <- launchWithEnvironment dbos isolatedEnvironment
         case started of
           Left _ -> pure ()
-          Right () -> fail "expected a short application name to be refused"
+          Right _ -> fail "expected a short application name to be refused"
         reopened <- registerDBOSWorkflow dbos (newWorkflowKey "late") echoWorkflow
         case reopened of
           Left err -> fail (Text.unpack (renderTransactError err))
@@ -148,13 +157,13 @@ tests =
         failed <- launchWithEnvironment badDbos isolatedEnvironment
         case failed of
           Left _ -> pure ()
-          Right () -> fail "expected a short application name to be refused"
+          Right _ -> fail "expected a short application name to be refused"
         shutdown badDbos
         bracket (newDBOS goodConfigured) shutdown $ \goodDbos -> do
           retried <- launchWithEnvironment goodDbos isolatedEnvironment
           case retried of
             Left err -> fail (Text.unpack (renderTransactError err))
-            Right () -> pure ()
+            Right _ -> pure ()
           assertEqual "the good launch installs its executor" True =<< isLaunched goodDbos,
       testCase "an invalid application name is refused at launch" $ do
         base <- configFromEnv "ab"
@@ -163,7 +172,7 @@ tests =
         started <- launchWithEnvironment dbos isolatedEnvironment
         case started of
           Left err -> assertBool "names the short name rule" ("at least 3 characters" `Text.isInfixOf` renderTransactError err)
-          Right () -> fail "expected a short application name to be refused"
+          Right _ -> fail "expected a short application name to be refused"
         assertEqual "failed launch does not install an executor" False =<< isLaunched dbos,
       testCase "relaunching registers the same version once" $ do
         fresh <- UUID.V4.nextRandom
@@ -177,12 +186,12 @@ tests =
         first <- launchWithEnvironment dbos isolatedEnvironment
         case first of
           Left err -> fail (Text.unpack (renderTransactError err))
-          Right () -> pure ()
+          Right _ -> pure ()
         shutdown dbos
         second <- launchWithEnvironment dbos isolatedEnvironment
         case second of
           Left err -> fail (Text.unpack (renderTransactError err))
-          Right () -> pure ()
+          Right _ -> pure ()
         shutdown dbos
         ours <- readAppVersions getBackend appName appVersion
         ours @?= [appVersion],
@@ -202,11 +211,8 @@ tests =
         case registered of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right () -> pure ()
-        started <- launchWithEnvironment dbos isolatedEnvironment
-        case started of
-          Left err -> fail (Text.unpack (renderTransactError err))
-          Right () -> pure ()
-        ran <- runWf dbos (newWorkflowKey "greeting") workflowId (Just (encodeWorkflowValue ("hi" :: Text)))
+        exec <- launchInstanceExec dbos isolatedEnvironment
+        ran <- runWf exec (newWorkflowKey "greeting") workflowId (Just (encodeWorkflowValue ("hi" :: Text)))
         case ran of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right _ -> pure ()
@@ -227,13 +233,13 @@ tests =
         launchedA <- launchWithEnvironment dbosA isolatedEnvironment
         case launchedA of
           Left err -> fail (Text.unpack (renderTransactError err))
-          Right () -> pure ()
+          Right _ -> pure ()
         shutdown dbosA
         dbosB <- newDBOS (baseB {configAppVersion = Just versionB})
         launchedB <- launchWithEnvironment dbosB isolatedEnvironment
         case launchedB of
           Left err -> fail (Text.unpack (renderTransactError err))
-          Right () -> pure ()
+          Right _ -> pure ()
         shutdown dbosB
         oursA <- readAppVersions getBackend appA versionA
         oursA @?= [versionA]
@@ -258,7 +264,7 @@ tests =
         started <- launchWithEnvironment dbos isolatedEnvironment
         case started of
           Left err -> fail (Text.unpack (renderTransactError err))
-          Right () -> pure ()
+          Right _ -> pure ()
         assertEqual "launch installs the executor" True =<< isLaunched dbos
         missing <- waitForWorkflow dbos (WorkflowId ("hs-l2-missing-" <> suffix))
         case missing of
@@ -290,7 +296,7 @@ tests =
           started <- launchWithEnvironment dbos isolatedEnvironment
           case started of
             Left err -> fail (Text.unpack (renderTransactError err))
-            Right () -> pure ()
+            Right _ -> pure ()
           enqueued <-
             enqueueDBOSWorkflow
               dbos
@@ -320,7 +326,7 @@ tests =
           holderStarted <- launchWithEnvironment holder isolatedEnvironment
           case holderStarted of
             Left err -> fail (Text.unpack (renderTransactError err))
-            Right () -> pure ()
+            Right _ -> pure ()
           -- A second application claiming the same version name: version
           -- registration is refused, which happens after the connect and
           -- before the executor exists.
@@ -337,7 +343,7 @@ tests =
               case loserStarted of
                 Left (ErrorSystemDatabase _) -> pure ()
                 Left other -> fail ("attempt " <> show attempt <> ": expected a system-database refusal, got: " <> show other)
-                Right () -> fail ("attempt " <> show attempt <> ": a conflicting launch succeeded")
+                Right _ -> fail ("attempt " <> show attempt <> ": a conflicting launch succeeded")
           -- The server drops a session shortly after its client goes away,
           -- so this is a bounded wait rather than a single look. A leak
           -- never converges; a close does, immediately.
@@ -357,7 +363,7 @@ tests =
           started <- launchWithEnvironment dbos isolatedEnvironment
           case started of
             Left err -> fail (Text.unpack (renderTransactError err))
-            Right () -> pure ()
+            Right _ -> pure ()
           assertEqual "launched" True =<< isLaunched dbos
           executorId <- dbosExecutorId dbos
           executorId @?= Right "local"
@@ -369,7 +375,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWf :: DBOS IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runDBOSWorkflow
 
 -- | One backend for the whole group: pools are per-backend, so sharing

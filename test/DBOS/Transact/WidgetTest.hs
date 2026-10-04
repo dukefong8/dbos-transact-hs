@@ -25,6 +25,7 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.Transact
   ( AppDataSource,
+    Executor,
     Config (..),
     Ctx,
     DBOS,
@@ -307,7 +308,7 @@ isolatedEnvironment =
       environmentExecutorId = Nothing
     }
 
-launchWidget :: WidgetFixture -> IO ()
+launchWidget :: WidgetFixture -> IO (Executor IO)
 launchWidget wf = do
   launched <- launchWithEnvironment wf.wfDbos isolatedEnvironment
   either (fail . show) pure launched
@@ -364,9 +365,9 @@ tests =
   testGroup
     "Widget store (live)"
     [ testCase "a paid checkout over app tables dispatches the order" $ withWidgetFixture $ \wf -> do
-        launchWidget wf
+        exec <- launchWidget wf
         let widText = "hs-widget-paid-" <> wf.wfSchema
-        _ <- startDBOSWorkflowRef wf.wfDbos wf.wfCheckout (startOptionsDefault {startWorkflowId = Just widText}) Nothing
+        _ <- startDBOSWorkflowRef exec wf.wfCheckout (startOptionsDefault {startWorkflowId = Just widText}) Nothing
         waitEvent wf widText "payment_id"
         _ <- sendWorkflowMessage wf.wfDbos (WorkflowId widText) (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("paid" :: Text))
         waitEvent wf widText "order_id"
@@ -378,9 +379,9 @@ tests =
         assertEqual "the order is dispatched with no progress left" [(1, 1, 0)] orders
         assertBool "the datasource recorded checkpoints" (checkpoints > 0),
       testCase "a refused payment restores inventory and cancels the order" $ withWidgetFixture $ \wf -> do
-        launchWidget wf
+        exec <- launchWidget wf
         let widText = "hs-widget-refused-" <> wf.wfSchema
-        _ <- startDBOSWorkflowRef wf.wfDbos wf.wfCheckout (startOptionsDefault {startWorkflowId = Just widText}) Nothing
+        _ <- startDBOSWorkflowRef exec wf.wfCheckout (startOptionsDefault {startWorkflowId = Just widText}) Nothing
         waitEvent wf widText "payment_id"
         _ <- sendWorkflowMessage wf.wfDbos (WorkflowId widText) (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("failed" :: Text))
         waitEvent wf widText "order_id"
@@ -390,14 +391,14 @@ tests =
         assertEqual "the order is cancelled" [(1, -1, 3)] orders,
       -- IO only: crash-and-relaunch recovery sweep (ADR-0020).
       testCase "a crash while waiting for payment replays the reserved steps" $ withWidgetFixture $ \wf -> do
-        launchWidget wf
+        exec <- launchWidget wf
         let widText = "hs-widget-crash-wait-" <> wf.wfSchema
-        _ <- startDBOSWorkflowRef wf.wfDbos wf.wfCheckout (startOptionsDefault {startWorkflowId = Just widText}) Nothing
+        _ <- startDBOSWorkflowRef exec wf.wfCheckout (startOptionsDefault {startWorkflowId = Just widText}) Nothing
         waitEvent wf widText "payment_id"
         before <- (,,) <$> readInventory wf <*> readOrders wf <*> readCheckpoints wf widText
         assertEqual "reserved before the crash" (4, [(1, 0, 3)]) (let (i, o, _) = before in (i, o))
         shutdown wf.wfDbos
-        launchWidget wf
+        _ <- launchWidget wf
         threadDelay 1000000
         afterRecovery <- (,,) <$> readInventory wf <*> readOrders wf <*> readCheckpoints wf widText
         assertEqual "the replay did not duplicate the order or the reservation" before afterRecovery
@@ -410,9 +411,9 @@ tests =
         assertEqual "the order is dispatched" [(1, 1, 0)] orders,
       -- IO only: crash-and-relaunch recovery sweep (ADR-0020).
       testCase "a crash mid-dispatch resumes the remaining ticks" $ withWidgetFixture $ \wf -> do
-        launchWidget wf
+        exec <- launchWidget wf
         let widText = "hs-widget-crash-dispatch-" <> wf.wfSchema
-        _ <- startDBOSWorkflowRef wf.wfDbos wf.wfCheckout (startOptionsDefault {startWorkflowId = Just widText}) Nothing
+        _ <- startDBOSWorkflowRef exec wf.wfCheckout (startOptionsDefault {startWorkflowId = Just widText}) Nothing
         waitEvent wf widText "payment_id"
         _ <- sendWorkflowMessage wf.wfDbos (WorkflowId widText) (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("paid" :: Text))
         waitEvent wf widText "order_id"
@@ -421,7 +422,7 @@ tests =
             orders <- readOrders wf
             pure (any (\(_, status, progress) -> status == 2 && progress <= 2) orders)
         shutdown wf.wfDbos
-        launchWidget wf
+        _ <- launchWidget wf
         waitDispatched wf
         inventory <- readInventory wf
         orders <- readOrders wf

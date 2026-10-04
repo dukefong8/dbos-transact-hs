@@ -248,7 +248,7 @@ fetchQueueWorkerConcurrency dbos name = do
 -- running rather than failing.
 startBackground :: StarterApp -> WorkflowRef IO EngineOnly -> WorkflowId -> IO WorkflowId
 startBackground app ref (WorkflowId widText) = do
-  _ <- startDBOSWorkflowRef app.staDbos ref (startOptionsDefault {startWorkflowId = Just widText}) Nothing
+  _ <- startDBOSWorkflowRef app.staExec ref (startOptionsDefault {startWorkflowId = Just widText}) Nothing
   pure (WorkflowId widText)
 
 freshId :: Text -> IO WorkflowId

@@ -119,7 +119,7 @@ settlePayment app paymentId status = do
 -- for a payment, and no HTTP request should be held open for that.
 startCheckoutWorkflow :: WidgetApp -> Text -> IO (Either (Error EngineOnly) ())
 startCheckoutWorkflow app key = do
-  started <- startDBOSWorkflowRef app.waDbos app.waCheckout (startOptionsDefault {startWorkflowId = Just key}) Nothing
+  started <- startDBOSWorkflowRef app.waExec app.waCheckout (startOptionsDefault {startWorkflowId = Just key}) Nothing
   pure (void started)
 
 -- | Wait for one published event, decoded to 'Text'. The same deadline the

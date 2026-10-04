@@ -101,6 +101,7 @@ data DBOS m = DBOS
 data Executor m = Executor
   { conn          :: Connection m,
     identity      :: Identity,
+    datasources   :: DataSourceRegistry m,
     workflows     :: Snapshot m,
     listen_queues :: Maybe [Text],
     tasks         :: Tasks m,
@@ -164,18 +165,18 @@ dbosAppId dbos =
 -- | Resolve identity, connect, verify and prepare the backend before
 -- installing the executor. A failed start thaws the registry so the caller
 -- can correct configuration or registration and retry.
-launch :: DBOS IO -> IO (Either (TransactError.Error TransactError.EngineOnly) ())
+launch :: DBOS IO -> IO (Either (TransactError.Error TransactError.EngineOnly) (Executor IO))
 launch dbos = readEnvironment >>= launchWithEnvironment dbos
 
 -- | Launch against an explicit environment snapshot. The ordinary entry
 -- point reads the process environment; this form keeps environment
 -- resolution deterministic for hosted runtimes and live tests.
-launchWithEnvironment :: DBOS IO -> Environment -> IO (Either (TransactError.Error TransactError.EngineOnly) ())
+launchWithEnvironment :: DBOS IO -> Environment -> IO (Either (TransactError.Error TransactError.EngineOnly) (Executor IO))
 launchWithEnvironment dbos environment =
   withMVar dbos.dbos_lifecycle $ \_ -> do
     existing <- readMVar dbos.dbos_executor
     case existing of
-      Just _ -> pure (Right ())
+      Just executor -> pure (Right executor)
       Nothing -> case Config.validateConfig dbos.dbos_config of
         Left err -> pure (Left err)
         Right () -> case resolve dbos.dbos_config environment of
@@ -185,7 +186,7 @@ launchWithEnvironment dbos environment =
             freezeDataSourceRegistry dbos.dbos_datasources
             (backend, releaseFastLogger) <- acquireLoggerBackend
             let tracer = ioTracer backend
-            started <- startExecutor dbos.dbos_config resolved snapshot tracer releaseFastLogger `onException` (releaseFastLogger >> thawRegistry dbos.dbos_registry)
+            started <- startExecutor dbos.dbos_config resolved snapshot dbos.dbos_datasources tracer releaseFastLogger `onException` (releaseFastLogger >> thawRegistry dbos.dbos_registry)
             case started of
               Left err -> releaseFastLogger >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources >> pure (Left err)
               Right executor -> do
@@ -206,7 +207,7 @@ launchWithEnvironment dbos environment =
                     )
                     `onException` (closeConnection executor.conn >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources)
                 modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
-                pure (Right ())
+                pure (Right executor)
 
 -- | Shutdown is idempotent and reopens registration for a later launch.
 -- Tasks are aborted and waited for before the connection closes, so a
@@ -229,49 +230,37 @@ shutdown dbos =
         thawRegistry dbos.dbos_registry
         thawDataSourceRegistry dbos.dbos_datasources
 
-runDBOSWorkflow :: forall m e. (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => DBOS m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runDBOSWorkflow dbos key workflowId input = do
-  running <- requireExecutor dbos "run_workflow"
-  case running of
-    Left err -> pure (Left (TransactError.liftEngine err))
-    Right executor -> do
-      outcome <-
-        runRegisteredWorkflow
-          executor.tasks
-          executor.conn
-          executor.identity
-          executor.workflows
-          key
-          workflowId
-          input
-      _ <- MThrow.try (clearDBOSCheckpoints dbos workflowId) :: m (Either SomeException ())
-      pure outcome
+runDBOSWorkflow :: forall m e. (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runDBOSWorkflow executor key workflowId input = do
+  outcome <-
+    runRegisteredWorkflow
+      executor.tasks
+      executor.conn
+      executor.identity
+      executor.workflows
+      key
+      workflowId
+      input
+  _ <- MThrow.try (clearDatasourceCheckpoints executor.datasources workflowId) :: m (Either SomeException ())
+  pure outcome
 
 -- | Starts the referenced workflow via the launched executor: what
 -- @WorkflowRef::start_with@ becomes when the call site holds a reference.
-startDBOSWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => DBOS m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
-startDBOSWorkflowRef dbos ref options input = do
-  running <- requireExecutor dbos "start a workflow"
-  case running of
-    Left err -> pure (Left (TransactError.liftEngine err))
-    Right executor ->
-      startWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
+startDBOSWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Executor m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startDBOSWorkflowRef executor ref options input =
+  startWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
 
 -- | Runs the referenced workflow via the launched executor and waits: a
 -- start followed by an await under the same id.
-runDBOSWorkflowRef :: forall m e. (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => DBOS m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runDBOSWorkflowRef dbos ref options input = do
-  running <- requireExecutor dbos "run a workflow"
-  case running of
-    Left err -> pure (Left (TransactError.liftEngine err))
-    Right executor -> do
-      outcome <-
-        runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
-      case options.runWorkflowId of
-        Just workflowText -> do
-          _ <- MThrow.try (clearDBOSCheckpoints dbos (WorkflowId workflowText)) :: m (Either SomeException ())
-          pure outcome
-        Nothing -> pure outcome
+runDBOSWorkflowRef :: forall m e. (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Executor m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runDBOSWorkflowRef executor ref options input = do
+  outcome <-
+    runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
+  case options.runWorkflowId of
+    Just workflowText -> do
+      _ <- MThrow.try (clearDatasourceCheckpoints executor.datasources (WorkflowId workflowText)) :: m (Either SomeException ())
+      pure outcome
+    Nothing -> pure outcome
 
 enqueueDBOSWorkflow :: (MonadMVar m, Monad m) => DBOS m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
 enqueueDBOSWorkflow dbos key workflowId input queueName = do
@@ -482,18 +471,19 @@ clearDBOSCheckpoints dbos wid = clearDatasourceCheckpoints dbos.dbos_datasources
 -- launch arbitrary backends through. The snapshot is taken from the
 -- instance's own registry, the task registry is fresh, and no queues are
 -- listened on.
-launchOn :: (MonadSTM m, MonadMVar m) => DBOS m -> Connection m -> Identity -> m ()
+launchOn :: (MonadSTM m, MonadMVar m) => DBOS m -> Connection m -> Identity -> m (Executor m)
 launchOn dbos conn identity = do
   -- The reference's registry learns which connection this launch installed,
   -- so a child start can tell another instance's reference apart.
   bindRegistryInstance dbos.dbos_registry conn.connInstanceId
   workflows <- snapshotRegistry dbos.dbos_registry
   tasks <- newTasks
-  let executor = Executor {conn = conn, identity = identity, workflows = workflows, listen_queues = Nothing, tasks = tasks, releaseTracer = pure ()}
+  let executor = Executor {conn = conn, identity = identity, datasources = dbos.dbos_datasources, workflows = workflows, listen_queues = Nothing, tasks = tasks, releaseTracer = pure ()}
   modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
+  pure executor
 
-startExecutor :: Config -> Identity -> Snapshot IO -> SomeTracer IO -> IO () -> IO (Either (TransactError.Error TransactError.EngineOnly) (Executor IO))
-startExecutor config' identity' workflowsSnapshot tracer releaseTracer = do
+startExecutor :: Config -> Identity -> Snapshot IO -> DataSourceRegistry IO -> SomeTracer IO -> IO () -> IO (Either (TransactError.Error TransactError.EngineOnly) (Executor IO))
+startExecutor config' identity' workflowsSnapshot sources tracer releaseTracer = do
   when (snapshotSize workflowsSnapshot == 0) $
     runTracer tracer EngineNoWorkflows
   acquired <- try (forApplication config' identity' tracer) :: IO (Either SystemDBError.Error (Connection IO))
@@ -511,6 +501,7 @@ startExecutor config' identity' workflowsSnapshot tracer releaseTracer = do
                   { conn = conn',
                     identity = identity',
                     workflows = workflowsSnapshot,
+                    datasources = sources,
                     listen_queues = config'.configListenQueues,
                     tasks = tasks',
                     releaseTracer = releaseTracer

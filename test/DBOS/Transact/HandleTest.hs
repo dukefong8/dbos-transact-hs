@@ -14,6 +14,7 @@ import DBOS.Transact
     EngineOnly, CodecError,
     Config (..),
     DBOS,
+    Executor,
     Environment (..),
     Error (..),
     Ctx,
@@ -39,6 +40,14 @@ import DBOS.Transact
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertEqual, testCase, (@?=))
 
+-- | Launch over the isolated environment and hand back the executor.
+launchHandleExec :: DBOS IO -> Environment -> IO (Executor IO)
+launchHandleExec dbos env = do
+  started <- launchWithEnvironment dbos env
+  case started of
+    Left err -> fail (show err)
+    Right executor -> pure executor
+
 tests :: TestTree
 tests =
   testGroup
@@ -60,11 +69,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          exec <- launchHandleExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -94,11 +100,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          exec <- launchHandleExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -127,11 +130,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
+          exec <- launchHandleExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
           case ran of
             Left _ -> pure ()
             Right other -> fail ("expected the run to fail, got: " <> show other)
@@ -164,11 +164,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          ran <- runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
+          exec <- launchHandleExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -197,11 +194,8 @@ tests =
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
-          started <- launchWithEnvironment dbos isolatedEnvironment
-          case started of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          worker <- async (runWf dbos key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int))))
+          exec <- launchHandleExec dbos isolatedEnvironment
+          worker <- async (runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int))))
           -- Retrieved and immediately dropped while the run is in flight.
           _ <- retrieveWf dbos (WorkflowId workflowText)
           outcome <- wait worker
@@ -224,7 +218,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWf :: DBOS IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runDBOSWorkflow
 
 retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))

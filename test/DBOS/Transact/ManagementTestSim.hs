@@ -41,6 +41,7 @@ import DBOS.Transact
     CodecError,
     Ctx,
     DBOS,
+    Executor,
     Error (..),
     ManagementEvent (..),
     QueueConflict (..),
@@ -119,10 +120,10 @@ tests =
               workflowText = "sim-mgmt-cancel-resume"
               workflowId = WorkflowId workflowText
           ref <- registerIntRef dbos key body
-          simLaunchWith simTracer dbos
+          exec <- simLaunchWith simTracer dbos
           _ <-
             startWfRefSim
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
               (Just (encodeWorkflowValue (0 :: Int)))
@@ -151,11 +152,11 @@ tests =
               workflowId = WorkflowId workflowText
               queueName = "sim-mgmt-queue"
           ref <- registerIntRef dbos key body
-          simLaunchWith simTracer dbos
+          exec <- simLaunchWith simTracer dbos
           queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
           _ <-
             startWfRefSim
-              dbos
+              exec
               ref
               (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just (enqueueNew "no-runner-here")})
               (Just (encodeWorkflowValue (7 :: Int)))
@@ -182,8 +183,8 @@ tests =
                 started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
                 pure (fmap handleWorkflowId started)
           _ <- registerTextWorkflow dbos parentKey parentBody
-          simLaunchWith simTracer dbos
-          ran <- runWfSim dbos parentKey parentId (Just (encodeWorkflowValue (0 :: Int)))
+          exec <- simLaunchWith simTracer dbos
+          ran <- runWfSim exec parentKey parentId (Just (encodeWorkflowValue (0 :: Int)))
           childId <- case ran of
             Left err -> throwIO (userError (show err))
             Right (Just output) -> either (throwIO . userError . show) pure (decodeChildId output)
@@ -207,8 +208,8 @@ tests =
               workflowText = "sim-mgmt-delete"
               workflowId = WorkflowId workflowText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracer dbos
-          _ <- runWfSim dbos key workflowId (Just (encodeWorkflowValue (1 :: Int)))
+          exec <- simLaunchWith simTracer dbos
+          _ <- runWfSim exec key workflowId (Just (encodeWorkflowValue (1 :: Int)))
           deleted <- deleteWorkflows dbos [workflowId] True
           handle <- orFail =<< retrieveWfSim dbos workflowId
           status <- statusWfSim handle
@@ -227,8 +228,8 @@ tests =
               workflowText = "sim-mgmt-retrieve"
               workflowId = WorkflowId workflowText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracer dbos
-          _ <- runWfSim dbos key workflowId (Just (encodeWorkflowValue (2 :: Int)))
+          exec <- simLaunchWith simTracer dbos
+          _ <- runWfSim exec key workflowId (Just (encodeWorkflowValue (2 :: Int)))
           handle <- orFail =<< retrieveWfSim dbos workflowId
           status <- statusWfSim handle
           result <- resultWfSim handle
@@ -252,8 +253,8 @@ tests =
               sourceText = "sim-mgmt-fork-source"
               sourceId = WorkflowId sourceText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracer dbos
-          first <- runWfSim dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+          exec <- simLaunchWith simTracer dbos
+          first <- runWfSim exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           forked <- forkWorkflows dbos [forkNew sourceText] defaultForkOptions
           waited <- waitForWorkflow dbos sourceId
           count <- readTVarIO attempts
@@ -276,9 +277,9 @@ tests =
               queueName = "sim-mgmt-fork-queue"
               sourceId = WorkflowId sourceText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracer dbos
+          exec <- simLaunchWith simTracer dbos
           _ <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
-          _ <- runWfSim dbos key sourceId (Just (encodeWorkflowValue (4 :: Int)))
+          _ <- runWfSim exec key sourceId (Just (encodeWorkflowValue (4 :: Int)))
           forked <-
             forkWorkflows
               dbos
@@ -306,8 +307,8 @@ tests =
               sourceText = "sim-mgmt-fork-step-source"
               sourceId = WorkflowId sourceText
           _ <- registerIntWorkflow dbos key body
-          simLaunchWith simTracer dbos
-          first <- runWfSim dbos key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+          exec <- simLaunchWith simTracer dbos
+          first <- runWfSim exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           forked <- forkFrom dbos [sourceId] (ForkStep 1) defaultForkOptions
           waited <- waitForWorkflow dbos sourceId
           names <- readTVarIO ran
@@ -350,10 +351,10 @@ demoTrace = do
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWfSim :: DBOS (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfSim :: Executor (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWfSim = runDBOSWorkflow
 
-startWfRefSim :: DBOS (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
+startWfRefSim :: Executor (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
 startWfRefSim = startDBOSWorkflowRef
 
 retrieveWfSim :: DBOS (IOSim s) -> WorkflowId -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))

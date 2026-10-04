@@ -42,8 +42,7 @@ start = do
           }
   dbos <- newDBOS config
   refs <- registerStarterWorkflows dbos >>= either (fail . show) pure
-  launched <- launchWithEnvironment dbos isolatedEnvironment
-  either (fail . show) pure launched
+  exec <- launchWithEnvironment dbos isolatedEnvironment >>= either (fail . show) pure
   registeredQueue <-
     registerQueue
       dbos
@@ -52,6 +51,6 @@ start = do
       NeverUpdate
   _ <- either (fail . show) pure registeredQueue
   orderId <- newTVarIO Nothing
-  let app = StarterApp {staDbos = dbos, staOrderId = orderId, staRefs = refs}
+  let app = StarterApp {staDbos = dbos, staExec = exec, staOrderId = orderId, staRefs = refs}
       application = routeTrieMiddleware (starterRouteTrie (dispatchStarter app)) starterNotFound
   pure (application, shutdown dbos)
