@@ -37,6 +37,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Text.Read (readMaybe)
 import Data.Text qualified as Text
 import Data.Word (Word32)
 import DBOS.SystemDB
@@ -88,6 +89,7 @@ import DBOS.SystemDB
     dequeueSweepCap,
     durationAsMillis,
     getEventStepName,
+    invalidInput,
     getResultStepName,
     initialStatus,
     isQueueUpdateEmpty,
@@ -97,10 +99,12 @@ import DBOS.SystemDB
     recvStepName,
     secondsDuration,
     sendBulkStepName,
+    sleepStepName,
     sendStepName,
     setEventStepName,
     timestampFromEpochMs,
     timestampNow,
+    timestampToEpochMs,
     zeroRowCounts,
   )
 import DBOS.Transact
@@ -727,7 +731,30 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   writeStream _ = writeStream MockSystemDB
   closeStream _ = closeStream MockSystemDB
   close _ = close MockSystemDB
-  recordSleep _ = recordSleep MockSystemDB
+  recordSleep db wid stepId duration = do
+    now <- timestampNow
+    case addTimeout now duration of
+      Nothing -> pure (Left (invalidInput "duration" "does not resolve to a representable wake time"))
+      Just wakeAt -> do
+        existing <- checkStep db wid stepId sleepStepName
+        case existing of
+          Left err -> pure (Left err)
+          Right (Just step) -> case step.stepRecordOutput >>= readMaybe . Text.unpack of
+            Just millis -> pure (Right (timestampFromEpochMs millis))
+            Nothing -> pure (Right wakeAt)
+          Right Nothing -> do
+            recorded <-
+              recordStep
+                db
+                wid
+                stepId
+                sleepStepName
+                (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
+                Nothing
+                (Just (StepTiming now wakeAt))
+            case recorded of
+              Left err -> pure (Left err)
+              Right () -> pure (Right wakeAt)
   setEvent db wid stepId key value serialization = do
     now <- timestampNow
     atomically $ do

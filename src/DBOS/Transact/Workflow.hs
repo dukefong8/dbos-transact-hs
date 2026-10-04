@@ -72,11 +72,11 @@ import DBOS.SystemDB.Types (ApplicationVersion, AwaitedOutcome (..), Duration, E
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeWorkflowValue)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, nextExecutionIdentity, runSystemDB)
-import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..), TaskSpawner (..), currentConnection, currentIdentity, deadline, insideAStep, newCtx, newWorkflowState, nextStepId, spawnLocal, taskSpawner, withTaskSpawner, workflowId)
+import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..), TaskSpawner (..), currentConnection, currentIdentity, deadline, insideAStep, newCtx, newWorkflowState, nextStepId, spawnLocal, taskSpawner, withTaskSpawner, withWorkflow, withWorkflowTaskSpawner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Registry (ErasedWorkflow, Snapshot, WorkflowKey (..), WorkflowRef, lookupRegistryWorkflow, lookupSnapshotWorkflow, refKey, refName, refRegistry, registryInstanceId, renderWorkflowKey)
+import DBOS.Transact.Registry (ErasedWorkflow (..), Snapshot, WorkflowKey (..), WorkflowRef, lookupRegistryWorkflow, lookupSnapshotWorkflow, refKey, refName, refRegistry, registryInstanceId, renderWorkflowKey)
 import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Tracer (runTracer)
 import Data.Text (Text, pack)
@@ -209,10 +209,7 @@ adoptRecordedOutcome conn (WorkflowId workflowText) = do
 -- into the same registry and hands its own children the same capability.
 executeRegisteredWorkflow :: (MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => TaskSpawner m -> Connection m -> Identity -> WorkflowId -> ErasedWorkflow m -> Maybe SerializedWorkflowValue -> Maybe Timestamp -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
 executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowText) workflow input deadline = do
-  executionId <- nextExecutionIdentity conn
-  state <- newWorkflowState workflowText deadline executionId
-  ctx <- withTaskSpawner <$> newCtx conn identity state <*> pure spawner
-  attempted <- MThrow.try (runBody ctx)
+  attempted <- MThrow.try (runBody)
   case attempted of
     -- Shutdown aborts the task: the row stays PENDING on purpose, with no
     -- panic line — a kill is not a bug. Anything else escaping the body is
@@ -226,31 +223,37 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
         MThrow.throwIO se
     Right value -> pure value
   where
-    runBody context = do
-      -- The row's stored deadline is the run's budget: the body races the clock,
-      -- and losing it cancels the workflow durably, as Rust's deadline does.
-      raced <- case deadline of
-        Nothing -> Just <$> workflow input context
-        Just due -> do
-          now <- timestampNow
-          let remainingMillis = max 0 (timestampToEpochMs due - timestampToEpochMs now)
-          timeout (fromIntegral remainingMillis * 1000) (workflow input context)
-      case raced of
-        Nothing -> deadlineLost
-        Just outcome -> case outcome of
-          Left failure
-            -- A control signal is not the workflow's outcome: the execution
-            -- records nothing of its own. Warned, because the caller may
-            -- have dropped its future and this is the only evidence.
-            | isControlFailure failure -> do
-                runTracer conn.connTracer (WorkflowControlEnded (TransactError.renderTransactError (failureControl failure)))
-                pure (Left failure)
-            | otherwise -> case failure of
-                TransactError.FailureRecorded payload -> recordOutcome (OutcomeError payload) (Left failure)
-                -- Unreachable by construction: only control failures are
-                -- `Control`, and those were handled above.
-                TransactError.FailureControl err -> recordOutcome (OutcomeError (TransactError.encodeErrorText (TransactError.liftEngine err :: (TransactError.Error TransactError.EngineOnly)))) (Left failure)
-          Right output -> recordOutcome (OutcomeOutput ((.serializedText) <$> output)) (Right output)
+    -- The scope the body runs in: fresh counters, the row's deadline, and
+    -- the executor's task spawner, so a converted body's scoped entries
+    -- reach the same machinery the context-level ones did. The row's stored
+    -- deadline is the run's budget: the body races the clock, and losing it
+    -- cancels the workflow durably, as Rust's deadline does.
+    runBody =
+      withWorkflow conn identity workflowId deadline $ \wctx -> do
+        let scoped = withWorkflowTaskSpawner spawner wctx
+            ErasedWorkflow body = workflow
+        raced <- case deadline of
+          Nothing -> Just <$> body input scoped
+          Just due -> do
+            now <- timestampNow
+            let remainingMillis = max 0 (timestampToEpochMs due - timestampToEpochMs now)
+            timeout (fromIntegral remainingMillis * 1000) (body input scoped)
+        case raced of
+          Nothing -> deadlineLost
+          Just outcome -> case outcome of
+            Left failure
+              -- A control signal is not the workflow's outcome: the execution
+              -- records nothing of its own. Warned, because the caller may
+              -- have dropped its future and this is the only evidence.
+              | isControlFailure failure -> do
+                  runTracer conn.connTracer (WorkflowControlEnded (TransactError.renderTransactError (failureControl failure)))
+                  pure (Left failure)
+              | otherwise -> case failure of
+                  TransactError.FailureRecorded payload -> recordOutcome (OutcomeError payload) (Left failure)
+                  -- Unreachable by construction: only control failures are
+                  -- `Control`, and those were handled above.
+                  TransactError.FailureControl err -> recordOutcome (OutcomeError (TransactError.encodeErrorText (TransactError.liftEngine err :: (TransactError.Error TransactError.EngineOnly)))) (Left failure)
+            Right output -> recordOutcome (OutcomeOutput ((.serializedText) <$> output)) (Right output)
     -- Records one outcome and reports what the write decided: recording a
     -- second outcome behind a finished row is a supersede, not a write, and
     -- the recorded outcome is the answer.

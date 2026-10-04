@@ -89,12 +89,14 @@ module DBOS.Transact.Context
     stepCtxAt,
     stepCtxTracer,
     workflowCtxInner,
+    withWorkflowTaskSpawner,
   )
 where
 
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Monad.Class.MonadThrow qualified as MThrow
+import Data.Kind (Type)
 import Data.Text (Text)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Timestamp, WorkflowId, workflowIdText)
@@ -443,7 +445,7 @@ withSystemDB ctx action = runSystemDB ctx.ctxConn.connSysdb action
 -- | One execution's workflow context: the connection, identity, and fresh
 -- workflow state a body runs with. Built only by 'withWorkflow', which
 -- mints the state new — the inner context always starts outside any step.
-data WorkflowCtx exec m = WorkflowCtx
+data WorkflowCtx (exec :: Type) m = WorkflowCtx
   { workflowCtx :: Ctx m
   }
 
@@ -451,7 +453,7 @@ data WorkflowCtx exec m = WorkflowCtx
 -- attempt's scope. Built only by 'withStep'. Readers expose the id and
 -- the status — never a counter and never the inner context, so only
 -- 'WorkflowCtx' allocates.
-data StepCtx exec m = StepCtx
+data StepCtx (exec :: Type) m = StepCtx
   { stepCtxWorkflow :: WorkflowCtx exec m,
     stepCtxInner :: Ctx m
   }
@@ -498,6 +500,12 @@ stepCtxId sctx = workflowId sctx.stepCtxInner
 -- delegate to the context-level machinery.
 workflowCtxInner :: WorkflowCtx exec m -> Ctx m
 workflowCtxInner wctx = wctx.workflowCtx
+
+-- | Rebind a workflow view's execution to a task spawner: what the run
+-- path installs before handing the view to a body, so child starts reach
+-- the executor's task registry.
+withWorkflowTaskSpawner :: TaskSpawner m -> WorkflowCtx exec m -> WorkflowCtx exec m
+withWorkflowTaskSpawner spawner wctx = wctx {workflowCtx = withTaskSpawner wctx.workflowCtx spawner}
 
 -- | Rebuild the narrowed view around an attempt's inner context: what the
 -- engine's step runner hands a body, built from the scope it is about to

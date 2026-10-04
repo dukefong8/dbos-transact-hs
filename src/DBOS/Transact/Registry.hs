@@ -18,13 +18,15 @@ module DBOS.Transact.Registry
     refName,
     refRegistry,
     registerWorkflowRef,
-    ErasedWorkflow,
+    registerWorkflowRefScoped,
+    ErasedWorkflow (..),
     Registry,
     Snapshot,
     newRegistry,
     bindRegistryInstance,
     registryInstanceId,
     registerTypedWorkflow,
+    registerTypedWorkflowScoped,
     registerErasedWorkflow,
     snapshotRegistry,
     thawRegistry,
@@ -44,7 +46,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Types (Serialization (..), SerializedWorkflowValue, WorkflowId, WorkflowName (..))
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Context (Ctx)
+import DBOS.Transact.Context (Ctx, WorkflowCtx, workflowCtxInner)
 import DBOS.Transact.Error qualified as TransactError
 
 -- | The identity stored in @workflow_status@: a workflow name, optionally
@@ -124,24 +126,44 @@ registerWorkflowRef registry key body = do
   registered <- registerTypedWorkflow registry key body
   pure ((\() -> WorkflowRef registry key) <$> registered)
 
+-- | 'registerWorkflowRef' for a body taking the scoped workflow view.
+registerWorkflowRefScoped :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
+registerWorkflowRefScoped registry key body = do
+  registered <- registerTypedWorkflowScoped registry key body
+  pure ((\() -> WorkflowRef registry key) <$> registered)
+
 -- | The type-erased workflow body the engine resolves from a stored key.
 -- Application values and the application error channel have already been
 -- serialized by the registration boundary; the body takes the explicit
 -- context it runs in. Mirrors the oracle's @ErasedWorkflow@, whose failure
 -- channel is @Failure@ for the same reason: recovery and dequeue resolve
 -- bodies by name and have no application error type to name.
-type ErasedWorkflow m = Maybe SerializedWorkflowValue -> Ctx m -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
+newtype ErasedWorkflow m = ErasedWorkflow
+  { -- | The stored body, run at whatever execution the caller's scope
+    -- names: the rank-2 field is why converted and unconverted bodies can
+    -- share one registry.
+    runErasedWorkflow :: forall exec. Maybe SerializedWorkflowValue -> WorkflowCtx exec m -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
+  }
 
 -- | Register a typed workflow and erase its JSON input and output types at
 -- the registry boundary. The stored representation is the same serialized
 -- value used by workflow rows and operation checkpoints.
 registerTypedWorkflow :: forall argument result e m. (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => Registry m -> WorkflowKey -> (argument -> Ctx m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 registerTypedWorkflow registry key body =
-  registerErasedWorkflow registry key $ \input ctx ->
+  registerTypedWorkflowScoped registry key (\argument wctx -> body argument (workflowCtxInner wctx))
+
+-- | Register a typed workflow whose body takes the scoped workflow view:
+-- the converted shape, where the body can only reach the scoped entries
+-- and must downgrade explicitly (via 'workflowCtxInner') at call sites not
+-- yet converted. The type-erased form is the same either way, so converted
+-- and unconverted bodies coexist in one registry and convert one at a time.
+registerTypedWorkflowScoped :: forall argument result e m. (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+registerTypedWorkflowScoped registry key body =
+  registerErasedWorkflow registry key $ ErasedWorkflow $ \input wctx ->
     case decodeWorkflowValue "argument" input of
       Left err -> pure (Left (TransactError.failureOf (codecError "argument" err)))
       Right argument -> do
-        result <- body argument ctx
+        result <- body argument wctx
         pure $ case result of
           Left err -> Left (TransactError.failureOf err)
           Right value -> Right (Just (encodeWorkflowValue value))

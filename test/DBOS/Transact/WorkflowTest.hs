@@ -19,6 +19,7 @@ module DBOS.Transact.WorkflowTest
     scenarioAwaitInsideStep,
     scenarioChildIdsInBuildOrder,
     scenarioStepIdPairs,
+    scenarioScopedBody,
     scenarioScopedSelect,
     scenarioSelectStepRaces,
     scenarioControlSelect,
@@ -58,6 +59,7 @@ module DBOS.Transact.WorkflowTest
     checkAwaitInsideStep,
     checkChildIdsInBuildOrder,
     checkStepIdPairs,
+    checkScopedBody,
     checkScopedSelect,
     checkSelectStepRaces,
     checkControlSelect,
@@ -138,6 +140,7 @@ import DBOS.Transact
     Connection,
     Ctx,
     DBOS,
+    WorkflowCtx,
     Executor,
     Enqueue (..),
     Identity (..),
@@ -170,6 +173,7 @@ import DBOS.Transact
     newWorkflowKey,
     registerDBOSWorkflow,
     registerDBOSWorkflowRef,
+    registerDBOSWorkflowScoped,
     WorkflowKey,
     WorkflowRef,
     registerQueue,
@@ -186,7 +190,9 @@ import DBOS.Transact
     pendingWorkflowStepScoped,
     pendingWorkflowStepWith,
     runWorkflowStep,
+    runWorkflowStepScoped,
     runWorkflowStepWith,
+    sleepWorkflowStepScoped,
     selectWorkflow,
     spawnTracked,
     spawnLocal,
@@ -361,6 +367,7 @@ tests =
       liveCase getBackend (ioTracer . fst <$> getLogger) "runs claim their pairs of step ids adjacently" scenarioStepIdPairs checkStepIdPairs,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a select step races a step against a child's result" scenarioSelectStepRaces checkSelectStepRaces,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a scoped select races two pending steps" scenarioScopedSelect checkScopedSelect,
+      liveCase getBackend (ioTracer . fst <$> getLogger) "a converted body runs through the scoped entries" scenarioScopedBody checkScopedBody,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a control signal winning a select records no winner" scenarioControlSelect checkControlSelect,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a losing step has its cancellation token fired" scenarioLosingTokenFired checkLosingTokenFired,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a cancelled child is an awaited cancellation in the parent" scenarioCancelledChildAwaited checkCancelledChildAwaited,
@@ -2119,6 +2126,51 @@ scenarioCancelledChildAwaited fx = do
     parentRow <- fx.wfReadRow wid
     childRow <- fx.wfReadRow (WorkflowId childText)
     pure (ran, steps, (.workflowRecordStatus) <$> parentRow, (.workflowRecordStatus) <$> childRow, childText)
+
+-- | A converted body: registered through the scoped entry, it runs with
+-- the scoped step runner and the scoped sleep through the real run path —
+-- the erased transition hands the body a WorkflowCtx. Returns the decoded
+-- result and the recorded step names.
+scenarioScopedBody ::
+  forall m.
+  (MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m) =>
+  WfFixture m ->
+  m (Either (Error EngineOnly) Int, [(Int, Text)])
+scenarioScopedBody fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    let key = newWorkflowKey "scoped-body"
+        body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        body value wctx = do
+          stepped <- runWorkflowStepScoped wctx "double" (\_ -> pure (value * 2))
+          case stepped of
+            Left err -> pure (Left err)
+            Right doubled -> do
+              slept <- sleepWorkflowStepScoped wctx (millisDuration 1)
+              pure (doubled <$ slept)
+    registered <- registerDBOSWorkflowScoped dbos key body
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.wfLaunch dbos
+    wid <- fx.wfFreshId "scoped-body-wf"
+    (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
+      runDBOSWorkflow exec key wid (Just (encodeWorkflowValue (21 :: Int)))
+    decoded <- case ran of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+        Right value -> pure (Right value)
+        Left err -> pure (Left (ErrorDeserialization "result" (Text.pack (show err))))
+      Right Nothing -> pure (Right 0)
+      Left err -> pure (Left err)
+    steps <- fx.wfListSteps wid
+    pure (decoded, map (\row -> (row.stepRecordStepId, row.stepRecordStepName)) steps)
+
+-- | The converted body's value is the doubled input and its rows are the
+-- step and the sleep, in order.
+checkScopedBody :: (Either (Error EngineOnly) Int, [(Int, Text)]) -> Either String ()
+checkScopedBody (outcome, steps)
+  | outcome /= Right 42 = Left ("expected the doubled value, got: " <> show outcome)
+  | steps /= [(0, "double"), (1, "DBOS.sleep")] = Left ("unexpected rows: " <> show steps)
+  | otherwise = Right ()
 
 -- | The scoped select: two pending steps built through the workflow view,
 -- raced by 'selectStepScoped' over the same view. The fast arm wins, the

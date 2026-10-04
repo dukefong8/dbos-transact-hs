@@ -64,6 +64,7 @@ import DBOS.Transact.WorkflowTest
     checkRootNoParent,
     checkRowBeforeBody,
     checkRunBeforeLaunch,
+    checkScopedBody,
     checkScopedSelect,
     checkSelectStepRaces,
     checkStaleAwaitRefused,
@@ -103,6 +104,7 @@ import DBOS.Transact.WorkflowTest
     scenarioRootNoParent,
     scenarioRowBeforeBody,
     scenarioRetrieveBeforeLaunch,
+    scenarioScopedBody,
     scenarioScopedSelect,
     scenarioSelectStepRaces,
     scenarioStaleAwaitRefused,
@@ -160,6 +162,7 @@ tests =
       simCase "runs claim their pairs of step ids adjacently" scenarioStepIdPairs checkStepIdPairs traceStepIdPairs,
       simCase "a select step races a step against a child's result" scenarioSelectStepRaces checkSelectStepRaces traceSelectStepRaces,
       simCase "a scoped select races two pending steps" scenarioScopedSelect checkScopedSelect traceScopedSelect,
+      simCase "a converted body runs through the scoped entries" scenarioScopedBody checkScopedBody traceScopedBody,
       simCase "a control signal winning a select records no winner" scenarioControlSelect checkControlSelect traceControlSelect,
       simCase "a losing step has its cancellation token fired" scenarioLosingTokenFired checkLosingTokenFired traceLosingTokenFired,
       simCase "a cancelled child is an awaited cancellation in the parent" scenarioCancelledChildAwaited checkCancelledChildAwaited traceCancelledChildAwaited,
@@ -666,6 +669,12 @@ traceControlSelect tr = do
 
 -- The child settles, the select wins on the await arm, the parent
 -- completes.
+-- The converted body's run path: the scoped step runner announces the
+-- run and its recorded output; the recorded sleep stays silent.
+traceScopedBody :: forall a. SimTrace a -> IO ()
+traceScopedBody tr = do
+  selectTraceEventsDynamic tr @?= [StepRunning "double" 0, StepOutputRecorded "double" 0, WorkflowCompleted "sim-scoped-body-wf"]
+
 -- The fast arm records under its branch id; the select's own position
 -- records silently, and the loser leaves no trace.
 traceScopedSelect :: forall a. SimTrace a -> IO ()

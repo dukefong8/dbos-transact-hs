@@ -8,7 +8,9 @@ import DBOS.Transact
   (
     EngineOnly, CodecError,
     Ctx,
-    ErasedWorkflow,
+    ErasedWorkflow (..),
+    Identity (..),
+    WorkflowId (..),
     Error,
     Failure (..),
     SerializedWorkflowValue (..),
@@ -29,14 +31,25 @@ import DBOS.Transact
     snapshotRegistry,
     snapshotSize,
     thawRegistry,
+    withWorkflow,
     workflowKeyFromRow,
   )
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.ContextTest (ctxOver)
+import DBOS.Transact.ContextTest (connOver, ctxOver)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
+
+-- | The application identity the scoped registry probes install.
+registryTestIdentity :: Identity
+registryTestIdentity =
+  Identity
+    { identityAppName = "test-app",
+      identityAppVersion = "1.0.0",
+      identityExecutorId = "test-executor",
+      identityAppId = ""
+    }
 
 -- | One backend for the whole group: contexts build real connections
 -- over it, though registry checks never reach the database.
@@ -58,7 +71,7 @@ tests =
         registry <- newRegistry
         let key = newWorkflowKey "same"
             body :: ErasedWorkflow IO
-            body _ _ = pure (Right Nothing)
+            body = ErasedWorkflow (\_ _ -> pure (Right Nothing))
         first <- registerErasedWorkflow registry key body
         case first of
           Right () -> pure ()
@@ -71,7 +84,7 @@ tests =
         registry <- newRegistry
         let key = newWorkflowKey "before"
             body :: ErasedWorkflow IO
-            body _ _ = pure (Right Nothing)
+            body = ErasedWorkflow (\_ _ -> pure (Right Nothing))
         _ <- registerErasedWorkflow registry key body
         snapshot <- snapshotRegistry registry
         snapshotSize snapshot @?= 1
@@ -104,8 +117,10 @@ tests =
         snapshot <- snapshotRegistry registry
         workflow <- maybe (fail "registered workflow missing from snapshot") pure (lookupSnapshotWorkflow key snapshot)
         backend <- getBackend
-        ctx <- ctxOver backend nullTracer "wf-1"
-        result <- workflow (Just (encodeWorkflowValue (21 :: Int))) ctx
+        conn <- connOver backend nullTracer
+        result <-
+          withWorkflow conn registryTestIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
+            case workflow of ErasedWorkflow body -> body (Just (encodeWorkflowValue (21 :: Int))) wctx
         case result of
           Right (Just output) -> decodeWorkflowValue "result" (Just output) @?= Right (42 :: Int)
           other -> fail (show other),
@@ -121,8 +136,10 @@ tests =
         snapshot <- snapshotRegistry registry
         workflow <- maybe (fail "registered workflow missing from snapshot") pure (lookupSnapshotWorkflow key snapshot)
         backend <- getBackend
-        ctx <- ctxOver backend nullTracer "wf-1"
-        result <- workflow (Just (SerializedWorkflowValue "\"not a number\"" Nothing)) ctx
+        conn <- connOver backend nullTracer
+        result <-
+          withWorkflow conn registryTestIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
+            case workflow of ErasedWorkflow body -> body (Just (SerializedWorkflowValue "\"not a number\"" Nothing)) wctx
         case result of
           Left (FailureRecorded payload) -> assertBool "names the argument" ("argument" `Text.isInfixOf` payload)
           Left (FailureControl _) -> fail "expected a recorded argument failure"
@@ -163,8 +180,10 @@ tests =
         snapshot <- snapshotRegistry registry
         workflow <- maybe (fail "registered workflow missing from snapshot") pure (lookupSnapshotWorkflow key snapshot)
         backend <- getBackend
-        ctx <- ctxOver backend nullTracer "wf-1"
-        result <- workflow Nothing ctx
+        conn <- connOver backend nullTracer
+        result <-
+          withWorkflow conn registryTestIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
+            case workflow of ErasedWorkflow body -> body Nothing wctx
         case result of
           Right (Just output) -> do
             let decoded = decodeWorkflowValue "result" (Just output) :: Either CodecError Text
