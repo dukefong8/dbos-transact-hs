@@ -18,6 +18,9 @@ import DBOS.Transact
     Config (..),
     Ctx,
     WorkflowCtx,
+    Identity (..),
+    withWorkflow,
+    withStep,
     stepCtxInner,
     workflowCtxInner,
     DBOS,
@@ -40,6 +43,7 @@ import DBOS.Transact
     newWorkflowKey,
     nextStepId,
     nextStepMarker,
+    nextWorkflowMarker,
     nullTracer,
     pendingGetEvent,
     pendingSetEvent,
@@ -51,6 +55,7 @@ import DBOS.Transact
     runOptionsDefault,
     runWorkflowStep,
     runWorkflowStepWith,
+    runWorkflowStepWithScoped,
     setEvent,
     shutdown,
     stepOptionsDefault,
@@ -62,7 +67,7 @@ import DBOS.Transact
     runWorkflowStepScoped,
     setEventScoped,
   )
-import DBOS.Transact.ContextTest (ctxOver)
+import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
@@ -73,6 +78,16 @@ launchEventExec dbos env = do
   case started of
     Left err -> fail (show err)
     Right executor -> pure executor
+
+-- | The application identity the scoped event cases install.
+eventTestIdentity :: Identity
+eventTestIdentity =
+  Identity
+    { identityAppName = "test-app",
+      identityAppVersion = "1.0.0",
+      identityExecutorId = "test-executor",
+      identityAppId = ""
+    }
 
 tests :: TestTree
 tests =
@@ -88,18 +103,19 @@ tests =
           case created of
             Left err -> fail (show err)
             Right _ -> pure ()
-          let action ctx = do
-                published <- setEvent ctx "progress" ("ready" :: Text)
+          let action :: forall exec. WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Text))
+              action wctx = do
+                published <- setEventScoped wctx "progress" ("ready" :: Text)
                 case published of
                   Left err -> pure (Left err)
-                  Right () -> getEvent ctx (WorkflowId workflowText) "progress" (millisDuration 100)
-          firstContext <- ctxOver backend nullTracer workflowText
-          first <- action firstContext
+                  Right () -> getEventScoped wctx (WorkflowId workflowText) "progress" (millisDuration 100)
+          conn <- connOver backend nullTracer
+          first <- withWorkflow conn eventTestIdentity (WorkflowId workflowText) Nothing action
           case first of
             Right (Just value) -> assertEqual "the event is visible to a workflow reader" ("ready" :: Text) value
             other -> fail (show other)
-          replayContext <- ctxOver backend nullTracer workflowText
-          replay <- action replayContext
+          replayConn <- connOver backend nullTracer
+          replay <- withWorkflow replayConn eventTestIdentity (WorkflowId workflowText) Nothing action
           case replay of
             Right (Just value) -> assertEqual "the event read replays the recorded value" ("ready" :: Text) value
             other -> fail (show other),
@@ -117,16 +133,19 @@ tests =
           case created of
             [Right _, Right _, Right _] -> pure ()
             other -> fail (show other)
-          publisherContext <- ctxOver backend nullTracer publisherText
-          published <- setEvent publisherContext "answer" (42 :: Int)
+          publisherConn <- connOver backend nullTracer
+          published <- withWorkflow publisherConn eventTestIdentity (WorkflowId publisherText) Nothing $ \wctx ->
+            setEventScoped wctx "answer" (42 :: Int)
           published @?= Right ()
-          readerContext <- ctxOver backend nullTracer readerText
-          readOutside <- (getEvent readerContext (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int)))
+          readerConn <- connOver backend nullTracer
+          readOutside <- (withWorkflow readerConn eventTestIdentity (WorkflowId readerText) Nothing $ \wctx ->
+            getEventScoped wctx (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int)))
           readOutside @?= Right (Just 42)
           outsideSteps <- stepNames backend readerText
           outsideSteps @?= [(0, getEventStepName), (1, sleepStepName)]
-          inStepContext <- ctxOver backend nullTracer inStepText
-          readInside <- (runWorkflowStepWith stepOptionsDefault inStepContext "read" (\inner -> getEvent inner (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either (Error EngineOnly) (Maybe Int)))
+          inStepConn <- connOver backend nullTracer
+          readInside <- (withWorkflow inStepConn eventTestIdentity (WorkflowId inStepText) Nothing $ \wctx ->
+            runWorkflowStepWithScoped stepOptionsDefault wctx "read" (\inner -> getEvent (stepCtxInner inner) (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either (Error EngineOnly) (Maybe Int)))
           readInside @?= Right (Just 42)
           insideSteps <- stepNames backend inStepText
           insideSteps @?= [(0, "read")]
@@ -142,13 +161,15 @@ tests =
           case created of
             Left err -> fail (show err)
             Right _ -> pure ()
-          context <- ctxOver backend nullTracer workflowText
-          marker <- nextStepMarker context
-          (refused, before, after) <- withAttempt context marker (firstStepStatus 0) $ \inner -> do
-            before <- nextStepId inner
-            refused <- setEvent inner "progress" ("ready" :: Text)
-            after <- nextStepId inner
-            pure (refused, before, after)
+          conn <- connOver backend nullTracer
+          (refused, before, after) <-
+            withWorkflow conn eventTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
+              marker <- nextWorkflowMarker wctx
+              withStep wctx marker (firstStepStatus 0) $ \sctx -> do
+                before <- nextStepId (stepCtxInner sctx)
+                refused <- setEvent (stepCtxInner sctx) "progress" ("ready" :: Text)
+                after <- nextStepId (stepCtxInner sctx)
+                pure (refused, before, after)
           refused @?= Left (InsideStep "set_event")
           after @?= before + 1,
       testCase "a getEvent through a captured parent is plain and moves no ids" $ do
@@ -164,16 +185,19 @@ tests =
           case created of
             [Right _, Right _] -> pure ()
             other -> fail (show other)
-          publisherContext <- ctxOver backend nullTracer publisherText
-          published <- setEvent publisherContext "answer" (42 :: Int)
+          publisherConn <- connOver backend nullTracer
+          published <- withWorkflow publisherConn eventTestIdentity (WorkflowId publisherText) Nothing $ \wctx ->
+            setEventScoped wctx "answer" (42 :: Int)
           published @?= Right ()
-          readerContext <- ctxOver backend nullTracer readerText
-          marker <- nextStepMarker readerContext
-          (readCaptured, before, after) <- withAttempt readerContext marker (firstStepStatus 0) $ \_stepped -> do
-            before <- nextStepId readerContext
-            readCaptured <- getEvent readerContext (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int))
-            after <- nextStepId readerContext
-            pure (readCaptured, before, after)
+          readerConn <- connOver backend nullTracer
+          (readCaptured, before, after) <-
+            withWorkflow readerConn eventTestIdentity (WorkflowId readerText) Nothing $ \wctx -> do
+              marker <- nextWorkflowMarker wctx
+              withStep wctx marker (firstStepStatus 0) $ \sctx -> do
+                before <- nextStepId (stepCtxInner sctx)
+                readCaptured <- getEvent (stepCtxInner sctx) (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int))
+                after <- nextStepId (stepCtxInner sctx)
+                pure (readCaptured, before, after)
           readCaptured @?= Right (Just 42)
           -- The probe's own counter read moves one; the plain read moves none.
           after @?= before + 1,
@@ -186,21 +210,24 @@ tests =
           case created of
             Left err -> fail (show err)
             Right _ -> pure ()
-          firstContext <- ctxOver backend nullTracer workflowText
-          first <- setEvent firstContext "progress" ("first" :: Text)
+          firstConn <- connOver backend nullTracer
+          first <- withWorkflow firstConn eventTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+            setEventScoped wctx "progress" ("first" :: Text)
           first @?= Right ()
           -- A replay reaches the same slot with a different value and does not
           -- republish: the recorded step wins.
-          replayContext <- ctxOver backend nullTracer workflowText
-          replayed <- setEvent replayContext "progress" ("second" :: Text)
+          replayConn <- connOver backend nullTracer
+          replayed <- withWorkflow replayConn eventTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+            setEventScoped wctx "progress" ("second" :: Text)
           replayed @?= Right ()
           let readerText = workflowText <> "-reader"
           readerCreated <- SystemDB.initWorkflow backend ((newWorkflow readerText) {newWorkflowName = Just "L2EventReplayReader"}) Nothing Fresh Nothing
           case readerCreated of
             Left err -> fail (show err)
             Right _ -> pure ()
-          readerContext <- ctxOver backend nullTracer readerText
-          readBack <- (getEvent readerContext (WorkflowId workflowText) "progress" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Text)))
+          readerConn <- connOver backend nullTracer
+          readBack <- (withWorkflow readerConn eventTestIdentity (WorkflowId readerText) Nothing $ \wctx ->
+            getEventScoped wctx (WorkflowId workflowText) "progress" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Text)))
           readBack @?= Right (Just "first"),
       testCase "progress events survive recovery without republishing" $ do
         fresh <- UUID.V4.nextRandom

@@ -17,11 +17,14 @@ import DBOS.Transact
     Error (..),
     Identity (..),
     TransactionEvent (..),
+    WorkflowCtx,
+    WorkflowId (..),
     application,
     newCtx,
     newWorkflowState,
     nextExecutionIdentity,
     renderTransactError,
+    withWorkflow,
   )
 import DBOS.Transact.DatasourceTest
   ( DsFixture (..),
@@ -57,27 +60,23 @@ simDsIdentity =
 simDsFixture :: forall s. DsFixture (IOSim s)
 simDsFixture =
   DsFixture
-    { dsFixtureMkCtx = dsSimCtx,
+    { dsFixtureRun = dsSimRun,
       dsFixtureMkDs = mkFakeDs
     }
 
-dsSimCtx :: Text -> IOSim s (Ctx (IOSim s))
-dsSimCtx name = do
+dsSimRun :: Text -> (forall exec. WorkflowCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
+dsSimRun name action = do
   conn <- simConnectionWith simTracer
-  identity <- nextExecutionIdentity conn
-  state <- newWorkflowState name Nothing identity
-  newCtx conn simDsIdentity state
+  withWorkflow conn simDsIdentity (WorkflowId name) Nothing action
 
 -- | A mem-backed fixture for cases that stage system rows: 'MockSystemDB'
 -- answers canned rows, so only 'MemSystemDB' can hold a staged owner.
 memDsFixture :: MemSystemDB s -> DsFixture (IOSim s)
 memDsFixture mem =
   DsFixture
-    { dsFixtureMkCtx = \name -> do
+    { dsFixtureRun = \name action -> do
         conn <- memConnectionOn mem simTracer
-        identity <- nextExecutionIdentity conn
-        state <- newWorkflowState name Nothing identity
-        newCtx conn simDsIdentity state,
+        withWorkflow conn simDsIdentity (WorkflowId name) Nothing action,
       dsFixtureMkDs = mkFakeDs
     }
 

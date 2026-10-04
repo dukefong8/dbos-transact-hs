@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Message send/receive behavior through the workflow API and live SystemDB.
@@ -15,26 +16,49 @@ import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
     EngineOnly, Ctx,
+    StepCtx,
+    stepCtxInner,
     Error (..),
     Forks (..),
     SendOptions (..),
     Topic (..),
     WorkflowId (..),
+    Identity (..),
+    WorkflowCtx,
     firstStepStatus,
     nextStepId,
     nextStepMarker,
+    nextWorkflowMarker,
+    nextWorkflowStepId,
     nullTracer,
     recv,
+    recvScoped,
     runWorkflowStep,
+    runWorkflowStepScoped,
     send,
+    sendScoped,
     sendOptionsDefault,
     sendWith,
+    sendWithScoped,
     withAttempt,
+    withStep,
+    withWorkflow,
+    workflowCtxId,
     workflowId,
   )
-import DBOS.Transact.ContextTest (ctxOver)
+import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertEqual, testCase, (@?=))
+
+-- | The application identity the scoped message cases install.
+messageTestIdentity :: Identity
+messageTestIdentity =
+  Identity
+    { identityAppName = "test-app",
+      identityAppVersion = "1.0.0",
+      identityExecutorId = "test-executor",
+      identityAppId = ""
+    }
 
 tests :: TestTree
 tests =
@@ -57,21 +81,21 @@ tests =
             (Right _, Right _) -> pure ()
             (Left err, _) -> fail (show err)
             (_, Left err) -> fail (show err)
-          senderContext <- ctxOver backend nullTracer sourceText
-          let sendAction ctx = send ctx destinationId (Just (Topic "approval")) Nothing ("approved" :: Text)
-          firstSend <- sendAction senderContext
+          senderConn <- connOver backend nullTracer
+          let sendAction :: forall exec. WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
+              sendAction wctx = sendScoped wctx destinationId (Just (Topic "approval")) Nothing ("approved" :: Text)
+          firstSend <- withWorkflow senderConn messageTestIdentity (WorkflowId sourceText) Nothing sendAction
           assertEqual "message send succeeds" (Right ()) firstSend
-          receiverContext <- ctxOver backend nullTracer destinationText
-          let receiveAction ctx = recv ctx (Just (Topic "approval")) (millisDuration 100)
-          firstReceive <- receiveAction receiverContext
+          receiverConn <- connOver backend nullTracer
+          let receiveAction :: forall exec. WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Text))
+              receiveAction wctx = recvScoped wctx (Just (Topic "approval")) (millisDuration 100)
+          firstReceive <- withWorkflow receiverConn messageTestIdentity (WorkflowId destinationText) Nothing receiveAction
           case firstReceive of
             Right (Just value) -> assertEqual "the addressed workflow receives the value" ("approved" :: Text) value
             other -> fail (show other)
-          replaySenderContext <- ctxOver backend nullTracer sourceText
-          replaySend <- sendAction replaySenderContext
+          replaySend <- withWorkflow senderConn messageTestIdentity (WorkflowId sourceText) Nothing sendAction
           assertEqual "send replay succeeds" (Right ()) replaySend
-          replayReceiverContext <- ctxOver backend nullTracer destinationText
-          replayReceive <- receiveAction replayReceiverContext
+          replayReceive <- withWorkflow receiverConn messageTestIdentity (WorkflowId destinationText) Nothing receiveAction
           case replayReceive of
             Right (Just value) -> assertEqual "receive replay returns its recorded message" ("approved" :: Text) value
             other -> fail (show other),
@@ -93,7 +117,7 @@ tests =
           case settled of
             Left err -> fail (show err)
             Right _ -> pure ()
-          senderContext <- ctxOver backend nullTracer senderText
+          senderConn <- connOver backend nullTracer
           forked <-
             SystemDB.forkFrom
               backend
@@ -111,20 +135,26 @@ tests =
             Left err -> fail (show err)
             Right [fork] -> pure fork
             other -> fail (show other)
-          -- The default addresses the destination alone.
-          skipped <- sendWith senderContext (WorkflowId originalText) ("skipped" :: Text) sendOptionsDefault
+          -- Both sends share one scope: separate scopes would restart the
+          -- step counter and the second send would replay the first. The
+          -- counts are read between the sends, while the scope is open.
+          (skipped, originalOnce, forkOnce, included) <-
+            withWorkflow senderConn messageTestIdentity (WorkflowId senderText) Nothing $ \senderContext -> do
+              -- The default addresses the destination alone.
+              skipped <- sendWithScoped senderContext (WorkflowId originalText) ("skipped" :: Text) sendOptionsDefault
+              originalOnce <- notificationCount backend (WorkflowId originalText)
+              forkOnce <- notificationCount backend forkId
+              -- Asking for the fan-out reaches both.
+              included <-
+                sendWithScoped
+                  senderContext
+                  (WorkflowId originalText)
+                  ("included" :: Text)
+                  sendOptionsDefault {forks = ForksInclude}
+              pure (skipped, originalOnce, forkOnce, included)
           skipped @?= Right ()
-          originalOnce <- notificationCount backend (WorkflowId originalText)
-          forkOnce <- notificationCount backend forkId
           originalOnce @?= 1
           forkOnce @?= 0
-          -- Asking for the fan-out reaches both.
-          included <-
-            sendWith
-              senderContext
-              (WorkflowId originalText)
-              ("included" :: Text)
-              sendOptionsDefault {forks = ForksInclude}
           included @?= Right ()
           originalTwice <- notificationCount backend (WorkflowId originalText)
           forkTwice <- notificationCount backend forkId
@@ -132,64 +162,65 @@ tests =
           forkTwice @?= 1,
       testCase "a message from another workflow reaches its destination" $
         withPair getBackend "third-party" $ \backend sender receiver destination -> do
-          sent <- send sender destination (Just (Topic "approval")) Nothing ("hello" :: Text)
+          sent <- sendScoped sender destination (Just (Topic "approval")) Nothing ("hello" :: Text)
           sent @?= Right ()
-          received <- recv receiver (Just (Topic "approval")) (millisDuration 100)
+          received <- recvScoped receiver (Just (Topic "approval")) (millisDuration 100)
           case received of
             Right (Just value) -> assertEqual "a third party's send is delivered" ("hello" :: Text) value
             other -> fail (show other),
       testCase "topics do not cross and absence is a value" $
         withPair getBackend "topics" $ \backend sender receiver destination -> do
-          sent <- send sender destination (Just (Topic "a")) Nothing ("for-a" :: Text)
+          sent <- sendScoped sender destination (Just (Topic "a")) Nothing ("for-a" :: Text)
           sent @?= Right ()
-          missed <- recv receiver (Just (Topic "b")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
+          missed <- recvScoped receiver (Just (Topic "b")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
           missed @?= Right Nothing
-          found <- recv receiver (Just (Topic "a")) (millisDuration 100)
+          found <- recvScoped receiver (Just (Topic "a")) (millisDuration 100)
           case found of
             Right (Just value) -> assertEqual "the addressed topic delivers" ("for-a" :: Text) value
             other -> fail (show other),
       testCase "a replay takes the recorded message and sends once" $
         withPair getBackend "replay-takes" $ \backend sender receiver destination -> do
-          firstSend <- send sender destination (Just (Topic "approval")) Nothing ("one" :: Text)
+          senderConn <- connOver backend nullTracer
+          receiverConn <- connOver backend nullTracer
+          firstSend <- sendScoped sender destination (Just (Topic "approval")) Nothing ("one" :: Text)
           firstSend @?= Right ()
-          firstReceive <- recv receiver (Just (Topic "approval")) (millisDuration 100)
+          firstReceive <- recvScoped receiver (Just (Topic "approval")) (millisDuration 100)
           case firstReceive of
             Right (Just value) -> assertEqual "first take reads the message" ("one" :: Text) value
             other -> fail (show other)
-          secondSend <- send sender destination (Just (Topic "approval")) Nothing ("two" :: Text)
+          secondSend <- sendScoped sender destination (Just (Topic "approval")) Nothing ("two" :: Text)
           secondSend @?= Right ()
-          replayReceiver <- ctxOver backend nullTracer (workflowId receiver)
-          replayed <- recv replayReceiver (Just (Topic "approval")) (millisDuration 100)
+          replayed <- withWorkflow receiverConn messageTestIdentity (WorkflowId (workflowCtxId receiver)) Nothing $ \replayReceiver ->
+            recvScoped replayReceiver (Just (Topic "approval")) (millisDuration 100)
           case replayed of
             Right (Just value) -> assertEqual "replay returns the recorded message" ("one" :: Text) value
             other -> fail (show other)
-          secondReceive <- recv receiver (Just (Topic "approval")) (millisDuration 100)
+          secondReceive <- recvScoped receiver (Just (Topic "approval")) (millisDuration 100)
           case secondReceive of
             Right (Just value) -> assertEqual "the second message is still queued" ("two" :: Text) value
             other -> fail (show other)
-          replaySender <- ctxOver backend nullTracer (workflowId sender)
-          replaySend <- send replaySender destination (Just (Topic "approval")) Nothing ("one" :: Text)
+          replaySend <- withWorkflow senderConn messageTestIdentity (WorkflowId (workflowCtxId sender)) Nothing $ \replaySender ->
+            sendScoped replaySender destination (Just (Topic "approval")) Nothing ("one" :: Text)
           replaySend @?= Right ()
           total <- notificationCount backend destination
           total @?= 2,
       testCase "a step may send but may not receive" $
         withPair getBackend "step-send" $ \backend sender _ destination -> do
-          senderContext <- ctxOver backend nullTracer (workflowId sender)
-          outcome <- (runWorkflowStep senderContext "probe" (probeSendRecv destination) :: IO (Either (Error EngineOnly) Text))
+          outcome <- (runWorkflowStepScoped sender "probe" (\sctx -> probeSendRecv destination sctx) :: IO (Either (Error EngineOnly) Text))
           outcome @?= Right "sent recv",
       testCase "a send through a captured parent is plain and moves no id" $
         withPair getBackend "captured-send" $ \_backend sender _ destination -> do
-          marker <- nextStepMarker sender
-          sent <- withAttempt sender marker (firstStepStatus 0) $ \_stepped ->
-            send sender destination (Just (Topic "approval")) Nothing ("ping" :: Text)
+          marker <- nextWorkflowMarker sender
+          sent <- withStep sender marker (firstStepStatus 0) $ \_stepped ->
+            sendScoped sender destination (Just (Topic "approval")) Nothing ("ping" :: Text)
           sent @?= Right ()
-          counter <- nextStepId sender
+          counter <- nextWorkflowStepId sender
           counter @?= 0,
       testCase "a recv through a captured parent is refused" $
         withPair getBackend "captured-recv" $ \_backend sender _ _ -> do
-          marker <- nextStepMarker sender
-          received <- withAttempt sender marker (firstStepStatus 0) $ \_stepped ->
-            recv sender (Just (Topic "approval")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
+          marker <- nextWorkflowMarker sender
+          received <- withStep sender marker (firstStepStatus 0) $ \_stepped ->
+            recvScoped sender (Just (Topic "approval")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
           received @?= Left (InsideStep "recv")
     ]
 
@@ -214,7 +245,7 @@ withSuiteBackend getBackend action = getBackend >>= action
 
 -- | A sender and receiver workflow over the suite backend: the message
 -- tests' shared setup, with both contexts at step zero.
-withPair :: IO Postgres.PostgresSystemDB -> Text -> (Postgres.PostgresSystemDB -> Ctx IO -> Ctx IO -> WorkflowId -> IO a) -> IO a
+withPair :: IO Postgres.PostgresSystemDB -> Text -> (forall execA execB. Postgres.PostgresSystemDB -> WorkflowCtx execA IO -> WorkflowCtx execB IO -> WorkflowId -> IO a) -> IO a
 withPair getBackend label action = do
   backend <- getBackend
   freshId <- UUID.V4.nextRandom
@@ -230,16 +261,18 @@ withPair getBackend label action = do
     (Right _, Right _) -> pure ()
     (Left err, _) -> fail (show err)
     (_, Left err) -> fail (show err)
-  sender <- ctxOver backend nullTracer sourceText
-  receiver <- ctxOver backend nullTracer destinationText
-  action backend sender receiver (WorkflowId destinationText)
+  senderConn <- connOver backend nullTracer
+  receiverConn <- connOver backend nullTracer
+  withWorkflow senderConn messageTestIdentity (WorkflowId sourceText) Nothing $ \sender ->
+    withWorkflow receiverConn messageTestIdentity (WorkflowId destinationText) Nothing $ \receiver ->
+      action backend sender receiver (WorkflowId destinationText)
 
 -- | Inside a step body a send succeeds and a receive is refused: the
 -- oracle's leaf rule for messages, observed as one Text line.
-probeSendRecv :: WorkflowId -> Ctx IO -> IO Text
-probeSendRecv destination ctx = do
-  sent <- send ctx destination (Just (Topic "approval")) Nothing ("ping" :: Text)
-  received <- recv ctx (Just (Topic "approval")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
+probeSendRecv :: WorkflowId -> StepCtx exec IO -> IO Text
+probeSendRecv destination sctx = do
+  sent <- send (stepCtxInner sctx) destination (Just (Topic "approval")) Nothing ("ping" :: Text)
+  received <- recv (stepCtxInner sctx) (Just (Topic "approval")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
   pure (render sent received)
   where
     render (Right ()) (Left (InsideStep operation)) = "sent " <> operation

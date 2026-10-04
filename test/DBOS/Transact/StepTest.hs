@@ -22,6 +22,8 @@ import DBOS.Transact
     PendingStep (..),
     StepOptions (..),
     StepStatus (..),
+    StepCtx,
+    WorkflowCtx,
     WorkflowId (..),
     Identity (..),
     acquireLoggerBackend,
@@ -35,15 +37,19 @@ import DBOS.Transact
     runWorkflowStep,
     runWorkflowStepScoped,
     runWorkflowStepWith,
+    runWorkflowStepWithScoped,
     stepCtxStatus,
     sleepWorkflowStep,
+    sleepWorkflowStepScoped,
     stepId,
+    stepCtxInner,
     stepStatus,
     stepStatusCurrentAttempt,
     stepStatusId,
     stepStatusMaxAttempts,
     stepOptionsDefault,
     withWorkflow,
+    workflowCtxInner,
   )
 import DBOS.Transact.ContextTest (connOver, ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -88,17 +94,18 @@ tests =
           -- Each execution gets a fresh context: a new counter and a new
           -- execution identity over the same workflow id, exactly as a
           -- recovered run does.
-          firstContext <- ctxOver backend nullTracer workflowText
-          let body :: Ctx IO -> IO Int
-              body ctx = do
-                writeIORef observedStepId (stepId ctx)
+          conn <- connOver backend nullTracer
+          let body :: forall exec. StepCtx exec IO -> IO Int
+              body sctx = do
+                writeIORef observedStepId (stepId (stepCtxInner sctx))
                 modifyIORef' calls (+ 1)
                 pure 42
-          first <- runStep firstContext "test_step" body
+          first <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+            runStep wctx "test_step" body
           assertEqual "first execution returns the body's result" (Right 42) first
           assertEqual "the body runs inside step zero" (Just 0) =<< readIORef observedStepId
-          replayContext <- ctxOver backend nullTracer workflowText
-          second <- runStep replayContext "test_step" body
+          second <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+            runStep wctx "test_step" body
           assertEqual "replay returns the recorded result" (Right 42) second
           assertEqual "replay does not run the body again" 1 =<< readIORef calls,
       testCase "a step inside a step body runs plainly and takes no id" $ do
@@ -113,16 +120,17 @@ tests =
         -- The nested run announces through FastLogger, so the run proves
         -- the trace seam as well as the checkpoint it skips.
         (logger, cleanup) <- acquireLoggerBackend
-        firstContext <- ctxOver backend (ioTracer logger) workflowText
-        let innerBody :: Ctx IO -> IO Int
+        conn <- connOver backend (ioTracer logger)
+        let innerBody :: forall exec. StepCtx exec IO -> IO Int
             innerBody _ = pure 7
-            outerBody :: Ctx IO -> IO Int
-            outerBody ctx = do
-              inner <- runStep ctx "inner" innerBody
+            outerBody :: forall exec. StepCtx exec IO -> IO Int
+            outerBody sctx = do
+              inner <- runNestedStep sctx "inner" innerBody :: IO (Either (Error EngineOnly) Int)
               case inner of
                 Right n -> pure (n + 1)
                 Left err -> fail (show err)
-        outer <- runStep firstContext "outer" outerBody
+        outer <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+          runStep wctx "outer" outerBody
         cleanup
         assertEqual "the outer body sees the inner result" (Right 8) outer
         placed <- checkStep backend (WorkflowId workflowText) 0 "outer"
@@ -222,11 +230,12 @@ tests =
         case created of
           Left err -> fail (show err)
           Right _ -> pure ()
-        firstContext <- ctxOver backend nullTracer workflowText
-        first <- sleepWorkflowStep firstContext (millisDuration 25)
+        conn <- connOver backend nullTracer
+        first <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+          sleepWorkflowStepScoped wctx (millisDuration 25)
         assertEqual "first sleep succeeds" (Right ()) first
-        replayContext <- ctxOver backend nullTracer workflowText
-        replay <- sleepWorkflowStep replayContext (millisDuration 25)
+        replay <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+          sleepWorkflowStepScoped wctx (millisDuration 25)
         assertEqual "replay adopts the original wake time" (Right ()) replay,
       testCase "a nested step reports the step that encloses it" $ do
         backend <- getBackend
@@ -237,29 +246,31 @@ tests =
         case created of
           Left err -> fail (show err)
           Right _ -> pure ()
-        firstContext <- ctxOver backend nullTracer workflowText
+        conn <- connOver backend nullTracer
         seen <- newIORef ([] :: [(Maybe StepStatus, Maybe StepStatus, Maybe Int)])
         attempts <- newIORef (0 :: Int)
-        first <- runStep firstContext "first" (\_ -> pure ())
+        (first, outcome) <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
+          first <- runStep wctx "first" (\_ -> pure ())
+          let outerBody :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) ())
+              outerBody sctx = do
+                let outer = stepStatus (stepCtxInner sctx)
+                inner <- runNestedStep sctx "inner" (\innerSctx -> do
+                  let innerStatus = stepStatus (stepCtxInner innerSctx)
+                      innerId = stepId (stepCtxInner innerSctx)
+                  modifyIORef' seen (++ [(outer, innerStatus, innerId)])
+                  pure ())
+                case inner of
+                  Left err -> pure (Left err)
+                  Right () -> do
+                    attempt <- readIORef attempts
+                    modifyIORef' attempts (+ 1)
+                    if attempt == 0
+                      then pure (Left (StepFailed "outer" "boom"))
+                      else pure (Right ())
+              options = stepOptionsDefault {max_attempts = 2, interval = millisDuration 1}
+          outcome <- runWorkflowStepWithScoped options wctx "outer" outerBody
+          pure (first, outcome)
         assertEqual "the leading step runs" (Right ()) first
-        let outerBody :: Ctx IO -> IO (Either (Error EngineOnly) ())
-            outerBody ctx = do
-              let outer = stepStatus ctx
-              inner <- runStep ctx "inner" (\innerCtx -> do
-                let innerStatus = stepStatus innerCtx
-                    innerId = stepId innerCtx
-                modifyIORef' seen (++ [(outer, innerStatus, innerId)])
-                pure ())
-              case inner of
-                Left err -> pure (Left err)
-                Right () -> do
-                  attempt <- readIORef attempts
-                  modifyIORef' attempts (+ 1)
-                  if attempt == 0
-                    then pure (Left (StepFailed "outer" "boom"))
-                    else pure (Right ())
-            options = stepOptionsDefault {max_attempts = 2, interval = millisDuration 1}
-        outcome <- runWorkflowStepWith options firstContext "outer" outerBody
         assertEqual "the outer step succeeds on its retry" (Right ()) outcome
         assertEqual "the outer body ran twice" 2 =<< readIORef attempts
         observed <- readIORef seen
@@ -293,14 +304,17 @@ tests =
         case created of
           Left err -> fail (show err)
           Right _ -> pure ()
-        ctx <- ctxOver backend nullTracer workflowText
-        outside <- cancellationToken ctx
+        conn <- connOver backend nullTracer
+        (outside, body, abandoned) <-
+          withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
+            outside <- cancellationToken (workflowCtxInner wctx)
+            body <- cancellationToken (workflowCtxInner wctx)
+            let hanging :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) ())
+                hanging _ = threadDelay 1000000 >> pure (Right ())
+                options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 20)}
+            abandoned <- runWorkflowStepWithScoped options wctx "times-out" hanging
+            pure (outside, body, abandoned)
         assertBool "outside a workflow there is no attempt to abandon" =<< stayedQuiet outside
-        body <- cancellationToken ctx
-        let hanging :: Ctx IO -> IO (Either (Error EngineOnly) ())
-            hanging _ = threadDelay 1000000 >> pure (Right ())
-            options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 20)}
-        abandoned <- runWorkflowStepWith options ctx "times-out" hanging
         case abandoned of
           Left StepTimeout {} -> pure ()
           other -> fail ("expected the step to blow its deadline, got: " <> show other)
@@ -318,5 +332,5 @@ stayedQuiet token = do
 
 -- | The simple step runner at the engine-only channel: top-level test
 -- calls do not sit in an annotated body, so the channel needs pinning.
-runStep :: (FromJSON value, ToJSON value) => Ctx IO -> Text -> (Ctx IO -> IO value) -> IO (Either (Error EngineOnly) value)
-runStep ctx name body = runWorkflowStep ctx name body
+runStep :: (FromJSON value, ToJSON value) => WorkflowCtx exec IO -> Text -> (StepCtx exec IO -> IO value) -> IO (Either (Error EngineOnly) value)
+runStep wctx name body = runWorkflowStepScoped wctx name body

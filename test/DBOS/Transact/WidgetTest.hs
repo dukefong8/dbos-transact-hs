@@ -182,8 +182,8 @@ widgetConfig :: TransactionConfig
 widgetConfig = TransactionConfig {txName = Just "widget_step", txIsolation = Nothing}
 
 -- | One app transaction at the engine's engine-only channel.
-widgetStep :: DataSource IO -> Ctx IO -> (Tx IO -> IO ()) -> IO (Either (Error EngineOnly) ())
-widgetStep ds ctx action = runTransaction ds ctx widgetConfig (\tx -> Right <$> action tx)
+widgetStep :: DataSource IO -> WorkflowCtx exec IO -> (Tx IO -> IO ()) -> IO (Either (Error EngineOnly) ())
+widgetStep ds wctx action = runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> action tx)
 
 createOrderTx :: WidgetTables -> Tx IO -> IO Int
 createOrderTx tables (Tx run) = fromIntegral <$> run tables.wtCreateOrder ()
@@ -215,20 +215,20 @@ checkoutBody ds dispatchRef tables () wctx = runExceptT $ do
   onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> reserveInventoryTx tables tx))
   if not onShelf
     then do
-      _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> setStatusTx tables orderId (-1) tx))
+      _ <- ExceptT (widgetStep ds wctx (\tx -> setStatusTx tables orderId (-1) tx))
       _ <- ExceptT (setEventScoped wctx "payment_id" (Nothing :: Maybe Text))
       pure "no-inventory"
     else do
       _ <- ExceptT (setEventScoped wctx "payment_id" (Just (Text.pack (show orderId))))
       ExceptT (recvScoped wctx (Just (Topic "payment_status")) (millisDuration 30000) :: IO (Either (Error EngineOnly) (Maybe Text))) >>= \case
         Just status | status == "paid" -> do
-          _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> setStatusTx tables orderId 2 tx))
+          _ <- ExceptT (widgetStep ds wctx (\tx -> setStatusTx tables orderId 2 tx))
           _ <- ExceptT (startChildWorkflowScoped wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
           _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "paid"
         _ -> do
-          _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> undoReserveTx tables tx))
-          _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> setStatusTx tables orderId (-1) tx))
+          _ <- ExceptT (widgetStep ds wctx (\tx -> undoReserveTx tables tx))
+          _ <- ExceptT (widgetStep ds wctx (\tx -> setStatusTx tables orderId (-1) tx))
           _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "cancelled"
 
@@ -243,7 +243,7 @@ dispatchBody ds tables orderId wctx = go (3 :: Int)
       case slept of
         Left err -> pure (Left err)
         Right () -> do
-          _ <- widgetStep ds (workflowCtxInner wctx) (\tx -> tickOrderTx tables orderId tx)
+          _ <- widgetStep ds wctx (\tx -> tickOrderTx tables orderId tx)
           go (n - 1)
 
 -- * Fixture
