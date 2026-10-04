@@ -42,7 +42,7 @@ setEvent ctx key value = placeCall ctx >>= driveSetEvent ctx key value
 -- | A publish built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the write runs when the
 -- pending value is awaited or raced.
-pendingSetEvent :: (ToJSON value, MonadSTM m) => Ctx m -> Text -> value -> m (PendingStep m (Either (TransactError.Error TransactError.EngineOnly) ()))
+pendingSetEvent :: forall exec value m. (ToJSON value, MonadSTM m) => Ctx m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
 pendingSetEvent ctx key value = do
   placement <- placeCall ctx
   pure (PendingStep setEventStepName (Just placement) (driveSetEvent ctx key value placement))
@@ -83,7 +83,7 @@ setEventScoped :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> va
 setEventScoped wctx key value = setEvent (workflowCtxInner wctx) key value
 
 -- | 'pendingSetEvent' over the scoped workflow view.
-pendingSetEventScoped :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (PendingStep m (Either (TransactError.Error TransactError.EngineOnly) ()))
+pendingSetEventScoped :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
 pendingSetEventScoped wctx key value = pendingSetEvent (workflowCtxInner wctx) key value
 
 -- | 'getEvent' over the scoped workflow view.
@@ -99,7 +99,7 @@ pendingGetEventScoped ::
   WorkflowId ->
   Text ->
   Duration ->
-  m (PendingStep m (Either (TransactError.Error c) (Maybe value)))
+  m (PendingStep exec m (Either (TransactError.Error c) (Maybe value)))
 pendingGetEventScoped wctx dbos destination key timeout =
   pendingGetEvent dbos (workflowCtxInner wctx) destination key timeout
 
@@ -170,7 +170,7 @@ pendingGetEvent ::
   WorkflowId ->
   Text ->
   Duration ->
-  m (PendingStep m (Either (TransactError.Error c) (Maybe value)))
+  m (PendingStep exec m (Either (TransactError.Error c) (Maybe value)))
 pendingGetEvent dbos ctx destination key timeout = do
   running <- requireExecutor dbos "get_event"
   case running of

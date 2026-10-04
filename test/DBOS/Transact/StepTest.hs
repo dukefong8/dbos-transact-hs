@@ -201,7 +201,7 @@ tests =
             runScoped = do
               conn <- connOver backend nullTracer
               withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
-                (pending :: PendingStep IO (Either (Error EngineOnly) Int)) <-
+                (pending :: PendingStep exec IO (Either (Error EngineOnly) Int)) <-
                   pendingWorkflowStepScoped wctx "pending_step" $ \_ -> do
                     modifyIORef' calls (+ 1)
                     pure (Right 42)

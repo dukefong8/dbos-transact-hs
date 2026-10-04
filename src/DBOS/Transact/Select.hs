@@ -99,7 +99,7 @@ newBranches = Branches []
 
 -- | Records what this branch is called and which id it claimed. Mirrors
 -- Rust @Branches::push@.
-pushBranch :: PendingStep m a -> Branches -> Branches
+pushBranch :: PendingStep exec m a -> Branches -> Branches
 pushBranch branch (Branches identities) =
   Branches (identities <> [(branch.name, pendingStepId branch)])
 
@@ -217,16 +217,16 @@ controlError outcome = case outcome of
 -- | One arm of a race: the pending branch that claimed a step, and what to
 -- run with its outcome if it wins. The result type is existential because
 -- branches disagree about what they return.
-data SelectArm m r = forall a. SelectArm
+data SelectArm exec m r = forall a. SelectArm
   { armName :: Text,
-    armPending :: PendingStep m (Either (TransactError.Error TransactError.EngineOnly) a),
+    armPending :: PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) a),
     armContinue :: Either (TransactError.Error TransactError.EngineOnly) a -> m (Either (TransactError.Error TransactError.EngineOnly) r)
   }
 
 -- | The winner of a race: which branch, its outcome, and the continuation
 -- the arm declared — packaged together so a list of heterogeneous arms can
 -- be raced as one typed value.
-data Winner m r = forall a. Winner
+data Winner exec m r = forall a. Winner
   { winnerIndex :: Int,
     winnerOutcome :: Either (TransactError.Error TransactError.EngineOnly) a,
     winnerContinue :: Either (TransactError.Error TransactError.EngineOnly) a -> m (Either (TransactError.Error TransactError.EngineOnly) r)
@@ -248,14 +248,15 @@ data Winner m r = forall a. Winner
 selectStepScoped ::
   (MonadAsync m, MonadTime m) =>
   WorkflowCtx exec m ->
-  [SelectArm m r] ->
+  [SelectArm exec m r] ->
   m (Either (TransactError.Error TransactError.EngineOnly) r)
 selectStepScoped wctx arms = selectStep (workflowCtxInner wctx) arms
 
 selectStep ::
+  forall exec m r.
   (MonadAsync m, MonadTime m) =>
   Ctx m ->
-  [SelectArm m r] ->
+  [SelectArm exec m r] ->
   m (Either (TransactError.Error TransactError.EngineOnly) r)
 selectStep _ [] =
   pure (Left (TransactError.ErrorConfig "selectStep races two or more durable steps; one branch is not a race"))
@@ -299,7 +300,7 @@ selectStep ctx arms = do
 -- | Races every arm in source order: earlier branches win ties, and the
 -- losers are cancelled at their next suspension point — which fires a
 -- losing step's cancellation token, as dropping one does in the oracle.
-raceArms :: (MonadAsync m) => Int -> [SelectArm m r] -> m (Winner m r)
+raceArms :: (MonadAsync m) => Int -> [SelectArm exec m r] -> m (Winner exec m r)
 raceArms startIndex arms = case arms of
   [arm] -> participant startIndex arm
   (arm : rest@(_ : _)) -> do
@@ -308,7 +309,7 @@ raceArms startIndex arms = case arms of
   -- The public entry refuses fewer than two, so this is unreachable.
   [] -> error "selectStep raced no branches"
 
-participant :: (Monad m) => Int -> SelectArm m r -> m (Winner m r)
+participant :: (Monad m) => Int -> SelectArm exec m r -> m (Winner exec m r)
 participant at (SelectArm _ pending cont) = do
   outcome <- pending.pendingRun
   pure (Winner at outcome cont)

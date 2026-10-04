@@ -159,7 +159,7 @@ pendingAwaitScoped ::
   (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
   WorkflowCtx exec m ->
   WorkflowHandle m e ->
-  m (PendingStep m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
+  m (PendingStep exec m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
 pendingAwaitScoped wctx handle = pendingAwait (workflowCtxInner wctx) handle
 
 -- | An await built at its position and not yet run: the @DBOS.getResult@
@@ -171,7 +171,7 @@ pendingAwait ::
   (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
   Ctx m ->
   WorkflowHandle m e ->
-  m (PendingStep m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
+  m (PendingStep exec m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
 pendingAwait ctx handle = do
   placement <- placeCall ctx
   pure

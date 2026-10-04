@@ -363,7 +363,7 @@ pendingWorkflowStepWithScoped ::
   WorkflowCtx exec m ->
   Text ->
   (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
-  m (PendingStep m (Either (TransactError.Error e) value))
+  m (PendingStep exec m (Either (TransactError.Error e) value))
 pendingWorkflowStepWithScoped options wctx name body =
   pendingWorkflowStepWith options (workflowCtxInner wctx) name (\inner -> body (stepCtxAt wctx inner))
 
@@ -373,7 +373,7 @@ pendingWorkflowStepScoped ::
   WorkflowCtx exec m ->
   Text ->
   (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
-  m (PendingStep m (Either (TransactError.Error e) value))
+  m (PendingStep exec m (Either (TransactError.Error e) value))
 pendingWorkflowStepScoped = pendingWorkflowStepWithScoped stepOptionsDefault
 
 -- | 'driveWorkflowStepWith' over the scoped workflow view: the race and
@@ -401,7 +401,7 @@ pendingWorkflowStepWith ::
   Ctx m ->
   Text ->
   (Ctx m -> m (Either (TransactError.Error e) value)) ->
-  m (PendingStep m (Either (TransactError.Error e) value))
+  m (PendingStep exec m (Either (TransactError.Error e) value))
 pendingWorkflowStepWith options ctx name body = do
   placement <- placeCall ctx
   pure
@@ -417,7 +417,7 @@ pendingWorkflowStep ::
   Ctx m ->
   Text ->
   (Ctx m -> m (Either (TransactError.Error e) value)) ->
-  m (PendingStep m (Either (TransactError.Error e) value))
+  m (PendingStep exec m (Either (TransactError.Error e) value))
 pendingWorkflowStep = pendingWorkflowStepWith stepOptionsDefault
 
 -- | Drives a placed call: check where it stands, replay its recorded row,

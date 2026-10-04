@@ -300,8 +300,8 @@ tests =
                 -- counter in, and the order a replay builds them in again.
                 a <- pendingSleep ctx (millisDuration 1)
                 b <- pendingSetEvent ctx "b" (1 :: Int)
-                c <- (pendingGetEvent dbos ctx (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: IO (PendingStep IO (Either (Error EngineOnly) (Maybe Int))))
-                d <- (pendingWorkflowStep ctx "after" (\_ -> pure (Right (1 :: Int))) :: IO (PendingStep IO (Either (Error EngineOnly) Int)))
+                c <- (pendingGetEvent dbos ctx (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: IO (PendingStep exec IO (Either (Error EngineOnly) (Maybe Int))))
+                d <- (pendingWorkflowStep ctx "after" (\_ -> pure (Right (1 :: Int))) :: IO (PendingStep exec IO (Either (Error EngineOnly) Int)))
                 idsOk <- case (pendingStepId a, pendingStepId b, pendingStepId c, pendingStepId d) of
                   (Just 0, Just 1, Just 2, Just 4) -> pure True
                   _                                -> pure False

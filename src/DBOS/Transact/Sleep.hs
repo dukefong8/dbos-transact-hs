@@ -47,7 +47,7 @@ sleepWorkflowStep ctx duration = placeCall ctx >>= driveSleep ctx duration
 -- | A sleep built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the wait runs when the
 -- pending value is awaited or raced.
-pendingSleep :: (MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> Duration -> m (PendingStep m (Either (TransactError.Error TransactError.EngineOnly) ()))
+pendingSleep :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> Duration -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
 pendingSleep ctx duration = do
   placement <- placeCall ctx
   pure (PendingStep sleepStepName (Just placement) (driveSleep ctx duration placement))
@@ -57,7 +57,7 @@ sleepWorkflowStepScoped :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCt
 sleepWorkflowStepScoped wctx duration = sleepWorkflowStep (workflowCtxInner wctx) duration
 
 -- | 'pendingSleep' over the scoped workflow view.
-pendingSleepScoped :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (PendingStep m (Either (TransactError.Error TransactError.EngineOnly) ()))
+pendingSleepScoped :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
 pendingSleepScoped wctx duration = pendingSleep (workflowCtxInner wctx) duration
 
 -- | Drives a placed sleep: a plain wait inside a step or outside a

@@ -61,7 +61,7 @@ data StepDurability m
 -- the id a replay checks — and 'pendingRun' is the deferred call itself,
 -- driven when the pending value is awaited or raced. 'Nothing' is a build
 -- that failed before it reached the counter and claims no position anywhere.
-data PendingStep m a = PendingStep
+data PendingStep exec m a = PendingStep
   { name :: Text,
     placement :: Maybe (StepPlacement m),
     pendingRun :: m a
@@ -146,7 +146,7 @@ placementStepId placement =
     ClientConnection -> Nothing
 
 -- | The id this pending call claimed when built, or 'Nothing' if none.
-pendingStepId :: PendingStep m a -> Maybe Int
+pendingStepId :: PendingStep exec m a -> Maybe Int
 pendingStepId pending =
   case pending.placement of
     Just placement -> placementStepId placement
