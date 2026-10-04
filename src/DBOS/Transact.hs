@@ -350,6 +350,7 @@ module DBOS.Transact
     refName,
     registerWorkflowRef,
     registerWorkflowRefScoped,
+    registerTypedWorkflowScoped,
     ErasedWorkflow (..),
     Registry,
     Snapshot,

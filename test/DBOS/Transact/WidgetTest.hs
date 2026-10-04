@@ -28,6 +28,8 @@ import DBOS.Transact
     Executor,
     Config (..),
     Ctx,
+    WorkflowCtx,
+    workflowCtxInner,
     DBOS,
     DataSource,
     EngineOnly,
@@ -51,6 +53,7 @@ import DBOS.Transact
     recv,
     registerDBOSDataSource,
     registerDBOSWorkflowRef,
+    registerDBOSWorkflowRefScoped,
     releaseAppDataSource,
     runAppSession,
     runTransaction,
@@ -202,8 +205,8 @@ tickOrderTx tables orderId (Tx run) = do
 -- | The checkout workflow: create, reserve, publish the payment id, wait
 -- for the payment, then dispatch or compensate. Mirrors the oracle's
 -- @checkout_workflow@.
-checkoutBody :: DataSource IO -> WorkflowRef IO EngineOnly -> WidgetTables -> () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
-checkoutBody ds dispatchRef tables () ctx = runExceptT $ do
+checkoutBody :: forall exec. DataSource IO -> WorkflowRef IO EngineOnly -> WidgetTables -> () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+checkoutBody ds dispatchRef tables () wctx = let ctx = workflowCtxInner wctx in runExceptT $ do
   orderId <- ExceptT (runTransaction ds ctx widgetConfig (\tx -> Right <$> createOrderTx tables tx))
   onShelf <- ExceptT (runTransaction ds ctx widgetConfig (\tx -> Right <$> reserveInventoryTx tables tx))
   if not onShelf
@@ -227,9 +230,10 @@ checkoutBody ds dispatchRef tables () ctx = runExceptT $ do
 
 -- | The dispatch workflow: three one-second ticks, the oracle's durable
 -- sleep loop.
-dispatchBody :: DataSource IO -> WidgetTables -> Int -> Ctx IO -> IO (Either (Error EngineOnly) Text)
-dispatchBody ds tables orderId ctx = go (3 :: Int)
+dispatchBody :: forall exec. DataSource IO -> WidgetTables -> Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+dispatchBody ds tables orderId wctx = go (3 :: Int)
   where
+    ctx = workflowCtxInner wctx
     go 0 = pure (Right "dispatched")
     go n = do
       slept <- sleepWorkflowStep ctx (millisDuration 1000)
@@ -275,10 +279,10 @@ acquireWidgetFixture = do
   let ds = toDataSource app
   _ <- registerDBOSDataSource dbos ds >>= either (fail . show) pure
   dispatchRef <-
-    registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds tables)
+    registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds tables)
       >>= either (fail . show) pure
   checkoutRef <-
-    registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds dispatchRef tables)
+    registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds dispatchRef tables)
       >>= either (fail . show) pure
   pure
     WidgetFixture

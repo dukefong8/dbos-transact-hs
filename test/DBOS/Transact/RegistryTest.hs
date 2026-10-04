@@ -8,6 +8,7 @@ import DBOS.Transact
   (
     EngineOnly, CodecError,
     Ctx,
+    WorkflowCtx,
     ErasedWorkflow (..),
     Identity (..),
     WorkflowId (..),
@@ -24,8 +25,10 @@ import DBOS.Transact
     refKey,
     refName,
     registerTypedWorkflow,
+    registerTypedWorkflowScoped,
     registerErasedWorkflow,
     registerWorkflowRef,
+    registerWorkflowRefScoped,
     renderTransactError,
     renderWorkflowKey,
     snapshotRegistry,
@@ -108,9 +111,9 @@ tests =
       testCase "an erased workflow round-trips through json" $ do
         registry <- newRegistry
         let key = newWorkflowKey "double"
-            double :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+            double :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             double value _ = pure (Right (value * 2))
-        registered <- registerTypedWorkflow registry key double
+        registered <- registerTypedWorkflowScoped registry key double
         case registered of
           Left err -> fail (show err)
           Right () -> pure ()
@@ -127,9 +130,9 @@ tests =
       testCase "a malformed argument is reported rather than panicking" $ do
         registry <- newRegistry
         let key = newWorkflowKey "double"
-            double :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+            double :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             double value _ = pure (Right (value * 2))
-        registered <- registerTypedWorkflow registry key double
+        registered <- registerTypedWorkflowScoped registry key double
         case registered of
           Left err -> fail (show err)
           Right () -> pure ()
@@ -147,9 +150,9 @@ tests =
       testCase "a reference holds the identity it registered under" $ do
         registry <- newRegistry
         let key = instanceWorkflowKey "checkout" "Checkout" "eu"
-            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value _ = pure (Right (value * 2))
-        registered <- registerWorkflowRef registry key body
+        registered <- registerWorkflowRefScoped registry key body
         case registered of
           Left err -> fail (show err)
           Right ref -> do
@@ -158,22 +161,22 @@ tests =
       testCase "a reference to a duplicate identity is refused" $ do
         registry <- newRegistry
         let key = newWorkflowKey "same"
-            body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value _ = pure (Right value)
-        first <- registerWorkflowRef registry key body
+        first <- registerWorkflowRefScoped registry key body
         case first of
           Left err -> fail (show err)
           Right _ -> pure ()
-        second <- registerWorkflowRef registry key body
+        second <- registerWorkflowRefScoped registry key body
         case second of
           Left err -> renderTransactError err @?= "a workflow is already registered as same"
           Right _ -> fail "expected duplicate registration to be refused",
       testCase "a zero argument workflow is called with no input at all" $ do
         registry <- newRegistry
         let key = newWorkflowKey "nothing"
-            nothing :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
+            nothing :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             nothing () _ = pure (Right "nothing")
-        registered <- registerTypedWorkflow registry key nothing
+        registered <- registerTypedWorkflowScoped registry key nothing
         case registered of
           Left err -> fail (show err)
           Right () -> pure ()

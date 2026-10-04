@@ -27,7 +27,7 @@ import DBOS.Prelude
 import DBOS.SystemDB (AwaitedOutcome (..), Outcome (..), StepRecord (..), Timestamp (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, defaultWorkflowFilter, getWorkflow, listWorkflowSteps)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simEntropy, simGeneratedId, simIdentity, simInstance)
-import DBOS.Transact (CodecError, Ctx, DBOS, Executor, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), SomeSystemDB (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, cancellationToken, childWorkflowId, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, handleWorkflowId, millisDuration, newWorkflowKey, nextStepMarker, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflow, registerDBOSWorkflowRef, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, tokenCancelled, waitForWorkflow, withAttempt, withSystemDB, workflowId)
+import DBOS.Transact (CodecError, Ctx, DBOS, Executor, WorkflowCtx, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), SomeSystemDB (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, cancellationToken, childWorkflowId, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, handleWorkflowId, millisDuration, newWorkflowKey, nextStepMarker, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflow, registerDBOSWorkflowRef, registerDBOSWorkflowRefScoped, registerDBOSWorkflowScoped, workflowCtxInner, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, tokenCancelled, waitForWorkflow, withAttempt, withSystemDB, workflowId)
 import DBOS.Transact.WorkflowTest
   ( JoinOutcome (..),
     WfFixture (..),
@@ -204,23 +204,9 @@ tests =
                   { deduplication_id = Just dedupKey,
                     duplication_policy = ReturnExisting
                   }
-              childBody :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              childBody () _ = pure (Right 9)
+              childBody = joinChildBody
           childRef <- registerUnitRef dbos childKey childBody
-          let parentBody () ctx = do
-                started <- startChildWorkflow ctx childRef (startOptionsDefault {startQueue = Just joinQueue}) Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right handle -> do
-                    result <- awaitWfSim ctx handle
-                    case result of
-                      Left err -> pure (Left err)
-                      Right (Just stored) ->
-                        case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-                          Right n -> pure (Right n)
-                          Left _  -> pure (Left (StepFailed "parent" "bad child output"))
-                      Right _ -> pure (Left (StepFailed "parent" "no child output"))
-          orFail =<< registerWfSim dbos parentKey parentBody
+          orFail =<< registerWfSim dbos parentKey (joinParentBody childRef joinQueue)
           exec <- memLaunchOn mem simTracer dbos
           -- The holder parks on its queue with the key held; nothing runs
           -- it here, so the test stages what the queue runner would do and
@@ -283,9 +269,7 @@ tests =
           dbos <- simInstance
           let key = newWorkflowKey "slow"
               workflowText = "sim-budget-id"
-              body :: () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-              body () _ = threadDelay 1000000 >> pure (Right 7)
-          ref <- registerUnitRef dbos key body
+          ref <- registerUnitRef dbos key budgetBody
           exec <- memLaunchOn mem simTracer dbos
           -- A millisecond budget against a second-long body: the clock
           -- wins on virtual time, deterministically.
@@ -732,6 +716,32 @@ traceStaleAwaitRefused tr = do
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
+-- | The join case's bodies, top-level so their rank-2 signatures can
+-- name the simulation: the parent's view carries the ref and queue it
+-- captured.
+joinChildBody :: forall exec s. () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+joinChildBody () _ = pure (Right 9)
+
+joinParentBody :: forall s. WorkflowRef (IOSim s) EngineOnly -> Enqueue -> forall exec. () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+joinParentBody childRef joinQueue () wctx = do
+  let ctx = workflowCtxInner wctx
+  started <- startChildWorkflow ctx childRef (startOptionsDefault {startQueue = Just joinQueue}) Nothing
+  case started of
+    Left err -> pure (Left err)
+    Right handle -> do
+      result <- awaitWfSim ctx handle
+      case result of
+        Left err -> pure (Left err)
+        Right (Just stored) ->
+          case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+            Right n -> pure (Right n)
+            Left _ -> pure (Left (StepFailed "parent" "bad child output"))
+        Right _ -> pure (Left (StepFailed "parent" "no child output"))
+
+-- | The budget case's body: no captures, so a bare polymorphic name.
+budgetBody :: forall exec s. () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+budgetBody () _ = threadDelay 1000000 >> pure (Right 7)
+
 -- * Engine-only driver aliases
 
 -- | The engine-only driver aliases the tree above reads through. Local
@@ -760,11 +770,11 @@ statusWfSim = handleStatus
 -- | The sim-side registration aliases: a locally defined body has no
 -- signature, so the channel's @e@ stays ambiguous; these pin it while
 -- leaving @s@ universally quantified.
-registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (a -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
-registerWfSim = registerDBOSWorkflow
+registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
+registerWfSim = registerDBOSWorkflowScoped
 
-registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (a -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
-registerWfRefSim = registerDBOSWorkflowRef
+registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
+registerWfRefSim = registerDBOSWorkflowRefScoped
 
 -- * Helpers
 
@@ -788,19 +798,19 @@ waitForRow dbos wid = go (20 :: Int)
 
 -- | Register a @() -> Int@ body under IOSim, pinning the JSON types the
 -- polymorphic registration cannot infer from a local binding.
-registerUnitRef :: DBOS (IOSim s) -> WorkflowKey -> (() -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
+registerUnitRef :: DBOS (IOSim s) -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
 registerUnitRef dbos key body = orFail =<< registerWfRefSim dbos key body
 
 -- | Register an @Int -> Int@ body under IOSim, pinning the JSON types the
 -- polymorphic registration cannot infer from a local binding.
-registerIntRef :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
+registerIntRef :: DBOS (IOSim s) -> WorkflowKey -> (forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
 registerIntRef dbos key body = orFail =<< registerWfRefSim dbos key body
 
 -- | Register a body at its own error channel, leaving @s@ and @e@ to the
 -- call site: the polymorphic registration cannot infer them from a local
 -- binding, and a locally written channel is the point of the lift case.
-registerRefOf :: forall e s a r. (FromJSON a, ToJSON r, ToJSON e) => DBOS (IOSim s) -> WorkflowKey -> (a -> Ctx (IOSim s) -> IOSim s (Either (Error e) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) e))
-registerRefOf = registerDBOSWorkflowRef
+registerRefOf :: forall e s a r. (FromJSON a, ToJSON r, ToJSON e) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error e) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) e))
+registerRefOf = registerDBOSWorkflowRefScoped
 
 orFail :: Either (Error EngineOnly) a -> IOSim s a
 orFail result = case result of

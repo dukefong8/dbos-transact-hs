@@ -18,14 +18,14 @@ import Hasql.Statement qualified as Statement
 import DBOS.Prelude
 import DBOS.SystemDB (AwaitedOutcome (..), Change (..), NewQueue (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), RateLimit (..), SystemDB (getQueue, upsertQueue), WorkflowFilter (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter, getWorkflow, internalQueueName, newQueue, secondsDuration)
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (CodecError, Config (..), Ctx, DBOS, Executor, DuplicationPolicy (..), EngineOnly, Enqueue (..), Environment (..), Error (..), Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), Serialization (..), SerializedWorkflowValue (..),     RunOptions (..),
+import DBOS.Transact (CodecError, Config (..), Ctx, DBOS, WorkflowCtx, workflowCtxInner, Executor, DuplicationPolicy (..), EngineOnly, Enqueue (..), Environment (..), Error (..), Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), Serialization (..), SerializedWorkflowValue (..),     RunOptions (..),
     StartOptions (..), Timeout (..),     WorkflowId (..),
     WorkflowKey,
     WorkflowRef,
     WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueChange, defaultQueueOptions, deleteQueue, encodeWorkflowValue, enqueueDBOSWorkflow, enqueueNew, handleResult, handleStatus, handleWorkflowId, isLaunched,
     launchWithEnvironment,
     listQueues,
-    listWorkflows, newDBOS, newWorkflowKey, nullTracer, queue, queueFromRecord, queueIsPartitioned, registerDBOSWorkflow, registerDBOSWorkflowRef, registerQueue, renderTransactError, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault,     shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, updateQueue, waitForWorkflow)
+    listWorkflows, newDBOS, newWorkflowKey, nullTracer, queue, queueFromRecord, queueIsPartitioned, registerDBOSWorkflow, registerDBOSWorkflowRef, registerDBOSWorkflowRefScoped, registerDBOSWorkflowScoped, registerQueue, renderTransactError, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault,     shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, updateQueue, waitForWorkflow)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
@@ -81,9 +81,9 @@ tests =
         let config = base {configAppVersion = Just version}
         bracket (newDBOS config) shutdown $ \dbos -> do
           let key = newWorkflowKey "queued"
-              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -167,9 +167,9 @@ tests =
         let config = base {configAppVersion = Just version}
         bracket (newDBOS config) shutdown $ \dbos -> do
           let key = newWorkflowKey "doubles"
-              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right (input * 2))
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -227,7 +227,7 @@ tests =
           gate <- newTVarIO False
           active <- newTVarIO (0 :: Int)
           peak <- newTVarIO (0 :: Int)
-          let body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+          let body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = do
                 atomically $ do
                   now <- readTVar active
@@ -240,7 +240,7 @@ tests =
                   if open then pure () else retry
                 atomically (modifyTVar active (subtract 1))
                 pure (Right input)
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -303,9 +303,9 @@ tests =
                 }
         bracket (newDBOS config) shutdown $ \dbos -> do
           let key = newWorkflowKey "either"
-              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -359,9 +359,9 @@ tests =
                 }
         bracket (newDBOS config) shutdown $ \dbos -> do
           let key = newWorkflowKey "nothing"
-              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -409,9 +409,9 @@ tests =
                 }
         bracket (newDBOS config) shutdown $ \dbos -> do
           let key = newWorkflowKey "internal"
-              body :: Int -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -746,7 +746,7 @@ tests =
         let config = base {configAppVersion = Just version}
         bracket (newDBOS config) shutdown $ \dbos -> do
           ran <- newTVarIO (0 :: Int)
-          let body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+          let body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body () _ = do
                 atomically (modifyTVar ran (+ 1))
                 pure (Right 7)
@@ -923,7 +923,7 @@ tests =
         let config = base {configAppVersion = Just version}
         bracket (newDBOS config) shutdown $ \dbos -> do
           order <- newTVarIO []
-          let body :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
+          let body :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
               body name _ = do
                 atomically (modifyTVar order (++ [name]))
                 pure (Right name)
@@ -969,7 +969,7 @@ tests =
         bracket (newDBOS config) shutdown $ \dbos -> do
           active <- newTVarIO (0 :: Int)
           peak <- newTVarIO (0 :: Int)
-          let body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+          let body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body () _ = do
                 now <- atomically $ do
                   running <- readTVar active
@@ -1033,7 +1033,7 @@ tests =
           live <- newTVarIO Map.empty
           perKeyPeak <- newTVarIO (0 :: Int)
           overlapPeak <- newTVarIO (0 :: Int)
-          let body :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
+          let body :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
               body partition _ = do
                 atomically $ do
                   counts <- readTVar live
@@ -1098,7 +1098,7 @@ tests =
         bracket (newDBOS config) shutdown $ \dbos -> do
           live <- newTVarIO Map.empty
           perKeyPeak <- newTVarIO (0 :: Int)
-          let body :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
+          let body :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
               body partition _ = do
                 atomically $ do
                   counts <- readTVar live
@@ -1203,7 +1203,7 @@ tests =
         let config = base {configAppVersion = Just version}
         bracket (newDBOS config) shutdown $ \dbos -> do
           ran <- newTVarIO (0 :: Int)
-          let body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+          let body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body () _ = do
                 atomically (modifyTVar ran (+ 1))
                 pure (Right 1)
@@ -1435,8 +1435,9 @@ tests =
           childRef <- case childRegistered of
             Left err  -> fail (show err)
             Right ref -> pure ref
-          let parentBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
-              parentBody () ctx = do
+          let parentBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+              parentBody () wctx = do
+                let ctx = workflowCtxInner wctx
                 startedChild <-
                   startChildWorkflow
                     ctx
@@ -1627,13 +1628,13 @@ acquireSuiteBackend = do
 
 -- | Register a body at the engine-only channel: the polymorphic
 -- registration cannot infer the JSON types from a local binding.
-registerRefOf :: DBOS IO -> WorkflowKey -> (() -> Ctx IO -> IO (Either (Error EngineOnly) Int)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
-registerRefOf = registerDBOSWorkflowRef
+registerRefOf :: DBOS IO -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
+registerRefOf = registerDBOSWorkflowRefScoped
 
 -- | Register a @Text -> Text@ body at the engine-only channel.
-registerTextRefOf :: DBOS IO -> WorkflowKey -> (Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
-registerTextRefOf = registerDBOSWorkflowRef
+registerTextRefOf :: DBOS IO -> WorkflowKey -> (forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
+registerTextRefOf = registerDBOSWorkflowRefScoped
 
 -- | Register a @() -> Text@ body at the engine-only channel.
-registerUnitTextRefOf :: DBOS IO -> WorkflowKey -> (() -> Ctx IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
-registerUnitTextRefOf = registerDBOSWorkflowRef
+registerUnitTextRefOf :: DBOS IO -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
+registerUnitTextRefOf = registerDBOSWorkflowRefScoped

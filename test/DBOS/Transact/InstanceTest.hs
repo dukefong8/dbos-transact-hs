@@ -27,6 +27,8 @@ import DBOS.Transact
     Serializer (..),
     SerializedWorkflowValue (..),
     Ctx,
+    WorkflowCtx,
+    workflowCtxInner,
     WorkflowId (..),
     WorkflowKey,
     cancelWorkflows,
@@ -41,6 +43,7 @@ import DBOS.Transact
     newWorkflowKey,
     nullTracer,
     registerDBOSWorkflow,
+    registerDBOSWorkflowScoped,
     renderTransactError,
     runDBOSWorkflow,
     shutdown,
@@ -135,14 +138,14 @@ tests =
       testCase "a failed launch leaves registration open" $ do
         base <- configFromEnv "ab"
         let configured = base {configAppVersion = Just "hs-l2-open-v1", configExecutorId = Just "hs-l2-open-exec"}
-            echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
+            echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         dbos <- newDBOS configured
         started <- launchWithEnvironment dbos isolatedEnvironment
         case started of
           Left _ -> pure ()
           Right _ -> fail "expected a short application name to be refused"
-        reopened <- registerDBOSWorkflow dbos (newWorkflowKey "late") echoWorkflow
+        reopened <- registerDBOSWorkflowScoped dbos (newWorkflowKey "late") echoWorkflow
         case reopened of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right () -> pure (),
@@ -204,10 +207,10 @@ tests =
             workflowId = WorkflowId ("hs-l2-ids-wf-" <> suffix)
         base <- configFromEnv appName
         let configured = base {configAppVersion = Just appVersion, configExecutorId = Just executorId}
-            echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
+            echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         dbos <- newDBOS configured
-        registered <- registerDBOSWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
+        registered <- registerDBOSWorkflowScoped dbos (newWorkflowKey "greeting") echoWorkflow
         case registered of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right () -> pure ()
@@ -254,9 +257,9 @@ tests =
         base <- configFromEnv appName
         let configured = base {configAppVersion = Just appVersion, configExecutorId = Just executorId}
         dbos <- newDBOS configured
-        let echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
+        let echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
-        beforeLaunch <- registerDBOSWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
+        beforeLaunch <- registerDBOSWorkflowScoped dbos (newWorkflowKey "greeting") echoWorkflow
         case beforeLaunch of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right () -> pure ()
@@ -270,7 +273,7 @@ tests =
         case missing of
           Left err -> assertBool "reports the missing workflow" ("no such workflow" `Text.isInfixOf` renderTransactError err)
           Right _ -> fail "expected waiting for a missing workflow to fail"
-        afterLaunch <- registerDBOSWorkflow dbos (newWorkflowKey "late") echoWorkflow
+        afterLaunch <- registerDBOSWorkflowScoped dbos (newWorkflowKey "late") echoWorkflow
         case afterLaunch of
           Left err -> assertBool "names the lifecycle boundary" ("after DBOS is launched" `Text.isInfixOf` renderTransactError err)
           Right () -> fail "expected registration after launch to be refused"
@@ -286,10 +289,10 @@ tests =
             workflowId = WorkflowId ("hs-l2-cancel-wf-" <> suffix)
         base <- configFromEnv appName
         let configured = base {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just []}
-            echoWorkflow :: Text -> Ctx IO -> IO (Either (Error EngineOnly) Text)
+            echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         bracket (newDBOS configured) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos (newWorkflowKey "queued") echoWorkflow
+          registered <- registerDBOSWorkflowScoped dbos (newWorkflowKey "queued") echoWorkflow
           case registered of
             Left err -> fail (Text.unpack (renderTransactError err))
             Right () -> pure ()

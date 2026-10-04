@@ -18,6 +18,8 @@ import DBOS.Transact
     EngineOnly, CodecError,
     Config (..),
     Ctx,
+    WorkflowCtx,
+    workflowCtxInner,
     DBOS,
     Executor,
     Environment (..),
@@ -37,6 +39,7 @@ import DBOS.Transact
     newWorkflowKey,
     nullTracer,
     registerDBOSWorkflowRef,
+    registerDBOSWorkflowRefScoped,
     retrieveWorkflow,
     runDBOSWorkflowRef,
     runOptionsDefault,
@@ -66,10 +69,10 @@ tests =
             key = newWorkflowKey "quick"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+            body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () _ = pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRef dbos key body
+          registered <- registerDBOSWorkflowRefScoped dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -101,12 +104,12 @@ tests =
             key = newWorkflowKey "runs-forever"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+            body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () _ = do
               threadDelay 30000000
               pure (Right 1)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRef dbos key body
+          registered <- registerDBOSWorkflowRefScoped dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -137,10 +140,10 @@ tests =
         gate <- newEmptyMVar
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+            body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () _ = takeMVar gate >> pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRef dbos key body
+          registered <- registerDBOSWorkflowRefScoped dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -180,10 +183,10 @@ tests =
         gate <- newEmptyMVar
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+            body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () _ = takeMVar gate >> pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRef dbos key body
+          registered <- registerDBOSWorkflowRefScoped dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -209,10 +212,10 @@ tests =
             key = newWorkflowKey "quick"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
-            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
+            body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () _ = pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRef dbos key body
+          registered <- registerDBOSWorkflowRefScoped dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref

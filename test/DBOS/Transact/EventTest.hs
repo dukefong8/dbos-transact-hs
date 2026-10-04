@@ -17,6 +17,8 @@ import DBOS.Transact
     EngineOnly, CodecError,
     Config (..),
     Ctx,
+    WorkflowCtx,
+    workflowCtxInner,
     DBOS,
     Executor,
     Environment (..),
@@ -44,6 +46,7 @@ import DBOS.Transact
     pendingStepId,
     pendingWorkflowStep,
     registerDBOSWorkflowRef,
+    registerDBOSWorkflowRefScoped,
     runDBOSWorkflowRef,
     runOptionsDefault,
     runWorkflowStep,
@@ -206,15 +209,16 @@ tests =
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             -- The second execution finds the offer taken: only a replayed
             -- set step keeps the published value at "first".
-            body :: () -> Ctx IO -> IO (Either (Error EngineOnly) Int)
-            body () ctx = do
+            body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body () wctx = do
+              let ctx = workflowCtxInner wctx
               proposal <- tryTakeMVar offer
               published <- setEvent ctx "progress" (maybe "republished" id proposal)
               case published of
                 Left err -> pure (Left err)
                 Right () -> takeMVar release >> pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRef dbos key body
+          registered <- registerDBOSWorkflowRefScoped dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -250,26 +254,28 @@ tests =
             ownerConfig = ownerConfig0 {configAppVersion = Just ("owner-v-" <> suffix), configExecutorId = Just ("owner-exec-" <> suffix)}
         bracket (newDBOS otherConfig) shutdown $ \other ->
           bracket (newDBOS ownerConfig) shutdown $ \owner -> do
-            let body :: () -> Ctx IO -> IO (Either (Error EngineOnly) (Maybe Int))
-                body () ctx = do
+            let body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Int))
+                body () wctx = do
+                  let ctx = workflowCtxInner wctx
                   built <- pendingGetEvent other ctx (WorkflowId "wf-1") "answer" (millisDuration 0)
                   built.pendingRun
-            ownerRegistered <- registerDBOSWorkflowRef owner readerKey body
+            ownerRegistered <- registerDBOSWorkflowRefScoped owner readerKey body
             readerRef <- case ownerRegistered of
               Left err  -> fail (show err)
               Right ref -> pure ref
             -- From inside a step the read is plain: nothing is checkpointed,
             -- so the two halves are never combined and there is nothing to
             -- refuse.
-            let inStepBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) (Maybe Int))
-                inStepBody () ctx = do
+            let inStepBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Int))
+                inStepBody () wctx = do
+                  let ctx = workflowCtxInner wctx
                   stepped <- runWorkflowStep ctx "read" $ \inner -> do
                     built <- pendingGetEvent other inner (WorkflowId "wf-1") "answer" (millisDuration 0)
                     built.pendingRun
                   pure $ case stepped of
                     Left err  -> Left err
                     Right read -> read
-            inStepRegistered <- registerDBOSWorkflowRef owner inStepKey inStepBody
+            inStepRegistered <- registerDBOSWorkflowRefScoped owner inStepKey inStepBody
             inStepRef <- case inStepRegistered of
               Left err  -> fail (show err)
               Right ref -> pure ref
@@ -294,8 +300,9 @@ tests =
         base <- configFromEnv appName
         let config = base {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          let body :: () -> Ctx IO -> IO (Either (Error EngineOnly) ())
-              body () ctx = do
+          let body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
+              body () wctx = do
+                let ctx = workflowCtxInner wctx
                 -- Built a, b, c, d: the order their ids come from the
                 -- counter in, and the order a replay builds them in again.
                 a <- pendingSleep ctx (millisDuration 1)
@@ -316,7 +323,7 @@ tests =
                     pure $ case (dResult, cResult, bResult, aResult) of
                       (Right _, Right Nothing, Right _, Right _) -> Right ()
                       _ -> Left (StepFailed "joins" "a branch answered wrong")
-          registered <- registerDBOSWorkflowRef dbos key body
+          registered <- registerDBOSWorkflowRefScoped dbos key body
           ref <- case registered of
             Left err  -> fail (show err)
             Right ref -> pure ref

@@ -29,6 +29,8 @@ import DBOS.Transact
   ( BackendError (..),
     CodecError,
     Ctx,
+    WorkflowCtx,
+    workflowCtxInner,
     DataSource (..),
     EngineOnly,
     Executor,
@@ -51,6 +53,7 @@ import DBOS.Transact
     nextWorkflowMarker,
     recv,
     registerDBOSWorkflowRef,
+    registerDBOSWorkflowRefScoped,
     runDBOSWorkflow,
     runTransaction,
     sendWorkflowMessage,
@@ -282,8 +285,8 @@ widgetStep ds ctx action = runTransaction ds ctx widgetConfig (\tx -> Right <$> 
 -- for the payment, then dispatch or compensate. Mirrors the oracle's
 -- @checkout_workflow@ (create before reserve; the payment id event is the
 -- workflow's own id in the oracle — here the order id names the order).
-checkoutBody :: forall s. DataSource (IOSim s) -> WidgetStore (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> () -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
-checkoutBody ds store dispatchRef () ctx = runExceptT $ do
+checkoutBody :: forall s exec. DataSource (IOSim s) -> WidgetStore (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
+checkoutBody ds store dispatchRef () wctx = let ctx = workflowCtxInner wctx in runExceptT $ do
   orderId <- ExceptT (runTransaction ds ctx widgetConfig (\tx -> Right <$> createOrder store tx))
   onShelf <- ExceptT (runTransaction ds ctx widgetConfig (\tx -> Right <$> reserveInventory store tx))
   if not onShelf
@@ -307,9 +310,10 @@ checkoutBody ds store dispatchRef () ctx = runExceptT $ do
 
 -- | The dispatch workflow: three ticks 50ms apart (the oracle runs ten
 -- one-second ticks; shortened so the simulation stays fast).
-dispatchBody :: forall s. DataSource (IOSim s) -> WidgetStore (IOSim s) -> Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
-dispatchBody ds store orderId ctx = go (3 :: Int)
+dispatchBody :: forall s exec. DataSource (IOSim s) -> WidgetStore (IOSim s) -> Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
+dispatchBody ds store orderId wctx = go (3 :: Int)
   where
+    ctx = workflowCtxInner wctx
     go 0 = pure (Right "dispatched")
     go n = do
       slept <- sleepWorkflowStep ctx (millisDuration 50)
@@ -364,8 +368,8 @@ scenarioCheckout payment = do
   mem <- newMemDB
   dbos <- simInstance
   store <- newWidgetStore 5
-  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs store)
-  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs store dispatchRef)
+  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs store)
+  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs store dispatchRef)
   exec <- memLaunchOn mem simTracer dbos
   let wid = WorkflowId "widget-wf-1"
   _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-1"}) Nothing
@@ -402,8 +406,8 @@ scenarioPaidStepFails = do
   dbos <- simInstance
   store <- newWidgetStore 5
   calls <- newTVarIO 0
-  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs store)
-  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody (failingWidgetDs calls) store dispatchRef)
+  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs store)
+  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody (failingWidgetDs calls) store dispatchRef)
   exec <- memLaunchOn mem simTracer dbos
   let wid = WorkflowId "widget-wf-fail"
   _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-fail"}) Nothing

@@ -40,6 +40,8 @@ import DBOS.Transact
     EngineOnly,
     CodecError,
     Ctx,
+    WorkflowCtx,
+    workflowCtxInner,
     DBOS,
     Executor,
     Error (..),
@@ -63,7 +65,9 @@ import DBOS.Transact
     handleWorkflowId,
     newWorkflowKey,
     registerDBOSWorkflow,
+    registerDBOSWorkflowScoped,
     registerDBOSWorkflowRef,
+    registerDBOSWorkflowRefScoped,
     registerQueue,
     resumeWorkflows,
     retrieveWorkflow,
@@ -114,12 +118,9 @@ tests =
           dbos <- simInstance
           ran <- newTVarIO (0 :: Int)
           let key = newWorkflowKey "cancellable"
-              body input _ = do
-                atomically (modifyTVar ran (+ 1))
-                pure (Right (input + 5))
               workflowText = "sim-mgmt-cancel-resume"
               workflowId = WorkflowId workflowText
-          ref <- registerIntRef dbos key body
+          ref <- registerIntRef dbos key (countingBody ran)
           exec <- simLaunchWith simTracer dbos
           _ <-
             startWfRefSim
@@ -147,7 +148,7 @@ tests =
         (outcome, tr) <- runSimCase $ do
           dbos <- simInstance
           let key = newWorkflowKey "resumable"
-              body input _ = pure (Right input)
+              body = echoIntBody
               workflowText = "sim-mgmt-resume-queue"
               workflowId = WorkflowId workflowText
               queueName = "sim-mgmt-queue"
@@ -179,10 +180,7 @@ tests =
               parentText = "sim-mgmt-tree-parent"
               parentId = WorkflowId parentText
           childRef <- registerIntRef dbos childKey childBody
-          let parentBody _ ctx = do
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
-                pure (fmap handleWorkflowId started)
-          _ <- registerTextWorkflow dbos parentKey parentBody
+          _ <- registerTextWorkflow dbos parentKey (treeParentBody childRef)
           exec <- simLaunchWith simTracer dbos
           ran <- runWfSim exec parentKey parentId (Just (encodeWorkflowValue (0 :: Int)))
           childId <- case ran of
@@ -204,7 +202,7 @@ tests =
         (outcome, tr) <- runSimCase $ do
           dbos <- simInstance
           let key = newWorkflowKey "deletable"
-              body input _ = pure (Right input)
+              body = echoIntBody
               workflowText = "sim-mgmt-delete"
               workflowId = WorkflowId workflowText
           _ <- registerIntWorkflow dbos key body
@@ -224,7 +222,7 @@ tests =
         (outcome, tr) <- runSimCase $ do
           dbos <- simInstance
           let key = newWorkflowKey "retrievable"
-              body input _ = pure (Right (input * 3))
+              body = tripleIntBody
               workflowText = "sim-mgmt-retrieve"
               workflowId = WorkflowId workflowText
           _ <- registerIntWorkflow dbos key body
@@ -244,15 +242,9 @@ tests =
           dbos <- simInstance
           attempts <- newTVarIO (0 :: Int)
           let key = newWorkflowKey "forkable"
-              body _ _ = do
-                attempt <- readTVarIO attempts
-                atomically (modifyTVar attempts (+ 1))
-                if attempt == 0
-                  then pure (Left (ErrorConfig "the first attempt fails"))
-                  else pure (Right 8)
               sourceText = "sim-mgmt-fork-source"
               sourceId = WorkflowId sourceText
-          _ <- registerIntWorkflow dbos key body
+          _ <- registerIntWorkflow dbos key (forkableBody attempts)
           exec <- simLaunchWith simTracer dbos
           first <- runWfSim exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           forked <- forkWorkflows dbos [forkNew sourceText] defaultForkOptions
@@ -271,7 +263,7 @@ tests =
         (outcome, tr) <- runSimCase $ do
           dbos <- simInstance
           let key = newWorkflowKey "placed"
-              body input _ = pure (Right input)
+              body = echoIntBody
               sourceText = "sim-mgmt-fork-placed-source"
               forkedText = "sim-mgmt-fork-placed-fork"
               queueName = "sim-mgmt-fork-queue"
@@ -298,15 +290,9 @@ tests =
           dbos <- simInstance
           ran <- newTVarIO ([] :: [Text])
           let key = newWorkflowKey "staged"
-              body _ ctx = do
-                outcomes <-
-                  mapM
-                    (\name -> runWorkflowStep ctx name (const (atomically (modifyTVar ran (<> [name])) >> pure (0 :: Int))))
-                    ["one", "two", "three"]
-                pure (fmap (const 0) (sequence outcomes))
               sourceText = "sim-mgmt-fork-step-source"
               sourceId = WorkflowId sourceText
-          _ <- registerIntWorkflow dbos key body
+          _ <- registerIntWorkflow dbos key (stagedBody ran)
           exec <- simLaunchWith simTracer dbos
           first <- runWfSim exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
           forked <- forkFrom dbos [sourceId] (ForkStep 1) defaultForkOptions
@@ -347,6 +333,42 @@ demoTrace = do
   runTracer simTracer (WorkflowDelayMoveAsked "sim-mgmt-delayed")
   runTracer simTracer (WorkflowAttributesReplaceAsked "sim-mgmt-attributed")
 
+-- | The sim case bodies, top-level so their rank-2 signatures can name
+-- the simulation: captured state and refs arrive as parameters.
+echoIntBody :: forall exec s. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+echoIntBody input _ = pure (Right input)
+
+tripleIntBody :: forall exec s. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+tripleIntBody input _ = pure (Right (input * 3))
+
+countingBody :: forall s. StrictTVar (IOSim s) Int -> forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+countingBody ran input _ = do
+  atomically (modifyTVar ran (+ 1))
+  pure (Right (input + 5))
+
+forkableBody :: forall s. StrictTVar (IOSim s) Int -> forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+forkableBody attempts _ _ = do
+  attempt <- readTVarIO attempts
+  atomically (modifyTVar attempts (+ 1))
+  if attempt == 0
+    then pure (Left (ErrorConfig "the first attempt fails"))
+    else pure (Right 8)
+
+stagedBody :: forall s. StrictTVar (IOSim s) [Text] -> forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+stagedBody ran _ wctx = do
+  let ctx = workflowCtxInner wctx
+  outcomes <-
+    mapM
+      (\name -> runWorkflowStep ctx name (const (atomically (modifyTVar ran (<> [name])) >> pure (0 :: Int))))
+      ["one", "two", "three"]
+  pure (fmap (const 0) (sequence outcomes))
+
+treeParentBody :: forall s. WorkflowRef (IOSim s) EngineOnly -> forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
+treeParentBody childRef _ wctx = do
+  let ctx = workflowCtxInner wctx
+  started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
+  pure (fmap handleWorkflowId started)
+
 -- * Engine-only driver aliases
 
 -- | The engine-only driver aliases the tree above reads through. Local
@@ -369,11 +391,11 @@ statusWfSim = handleStatus
 -- | The sim-side registration aliases: a locally defined body has no
 -- signature, so the channel's @e@ stays ambiguous; these pin it while
 -- leaving @s@ universally quantified.
-registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (a -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
-registerWfSim = registerDBOSWorkflow
+registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
+registerWfSim = registerDBOSWorkflowScoped
 
-registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (a -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
-registerWfRefSim = registerDBOSWorkflowRef
+registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
+registerWfRefSim = registerDBOSWorkflowRefScoped
 
 -- * Helpers
 
@@ -384,13 +406,13 @@ simSayDBOS = simDBOSWith simTracer
 
 -- | Register an @Int -> Int@ body under IOSim, pinning the JSON types the
 -- polymorphic registration cannot infer from a local binding.
-registerIntRef :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
+registerIntRef :: DBOS (IOSim s) -> WorkflowKey -> (forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
 registerIntRef dbos key body = orFail =<< registerWfRefSim dbos key body
 
-registerIntWorkflow :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s ()
+registerIntWorkflow :: DBOS (IOSim s) -> WorkflowKey -> (forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s ()
 registerIntWorkflow dbos key body = orFail =<< registerWfSim dbos key body
 
-registerTextWorkflow :: DBOS (IOSim s) -> WorkflowKey -> (Int -> Ctx (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)) -> IOSim s ()
+registerTextWorkflow :: DBOS (IOSim s) -> WorkflowKey -> (forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)) -> IOSim s ()
 registerTextWorkflow dbos key body = orFail =<< registerWfSim dbos key body
 
 orFail :: Either (Error EngineOnly) a -> IOSim s a
