@@ -29,8 +29,7 @@ import DBOS.Transact
     Error (..),
     StepOptions (..),
     acquireLoggerBackend,
-    cancellationToken,
-    stepCtxInner,
+    stepCtxCancellationToken,
     ioTracer,
     stepOptionsDefault,
     nullTracer,
@@ -236,7 +235,7 @@ tests =
         seen <- newIORef True
         let body :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body ctx = do
-              token <- cancellationToken (stepCtxInner ctx)
+              token <- stepCtxCancellationToken ctx
               fired <- tokenCancelled token
               writeIORef seen fired
               pure (Right (1 :: Int))
@@ -249,7 +248,7 @@ tests =
         probe <- newIORef (pure False)
         let body :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body ctx = do
-              token <- cancellationToken (stepCtxInner ctx)
+              token <- stepCtxCancellationToken ctx
               writeIORef probe (tokenCancelled token)
               takeMVar gate >> pure (Right (1 :: Int))
             options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 50)}
@@ -267,7 +266,7 @@ tests =
         probe <- newIORef (pure False)
         let body :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body ctx = do
-              token <- cancellationToken (stepCtxInner ctx)
+              token <- stepCtxCancellationToken ctx
               writeIORef probe (tokenCancelled token)
               putMVar started ()
               takeMVar gate >> pure (Right (1 :: Int))

@@ -90,6 +90,7 @@ module DBOS.Transact.Context
     stepCtxInner,
     stepCtxTracer,
     stepCtxWorkflow,
+    stepCtxCancellationToken,
     workflowCtxInner,
     withWorkflowTaskSpawner,
   )
@@ -537,6 +538,13 @@ stepCtxInner sctx = sctx.stepCtxInner
 -- through the view's execution without widening it.
 stepCtxTracer :: StepCtx exec m -> SomeTracer m
 stepCtxTracer sctx = contextTracer sctx.stepCtxInner
+
+-- | The cancellation token behind a step view: the token that fires
+-- when the step running here is abandoned. The view-taking twin of
+-- 'cancellationToken', for step bodies that poll their own abandonment
+-- without widening to the inner context.
+stepCtxCancellationToken :: MonadSTM m => StepCtx exec m -> m (StrictTVar m Bool)
+stepCtxCancellationToken sctx = cancellationToken (stepCtxInner sctx)
 
 -- | What this attempt may read about itself, or 'Nothing' outside any
 -- attempt — which a handed 'StepCtx' never is. Kept 'Maybe' like the

@@ -141,6 +141,7 @@ import DBOS.Transact
     Ctx,
     DBOS,
     WorkflowCtx,
+    stepCtxCancellationToken,
     stepCtxInner,
     workflowCtxInner,
     Executor,
@@ -2243,7 +2244,7 @@ scenarioLosingTokenFired fx = do
         parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
           slow <- pendingWorkflowStep wctx "slow" $ \inner -> do
-            token <- cancellationToken (stepCtxInner inner)
+            token <- stepCtxCancellationToken inner
             _ <- async $ do
               let watch = do
                     cancelled <- tokenCancelled token

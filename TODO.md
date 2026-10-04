@@ -150,13 +150,17 @@ the last module flips.
       `stepCtxWorkflow` projector (same brand; backstop still applies).
       Gates: full suite 650/650, every converted sim re-run pair-green,
       probes 8/8.
-- [ ] C5a remaining scoped surface for body code: scoped reader twins —
-      StepCtx: `cancellationToken`/`cancelToken`/`tokenCancelled`/`stepId`/
-      `stepStatus`/`stepMarker`/`raceCancel`; WorkflowCtx: `deadline`/
-      `currentConnection`/`currentIdentity`/`withSystemDB`. Decide naming
-      (view-prefixed twins vs documented `stepCtxInner`/`workflowCtxInner`
-      downgrades) before the bulk pass. (`runWorkflowStepWithScoped` landed
-      in C1a/C1c.)
+- [x] C5a reader twins — decided minimal (338bb97 follow-up): exactly one
+      twin, `stepCtxCancellationToken`, the `stepCtxX` mirror of the raw
+      stem. Rationale: it is the only reader with app-body demand (token
+      polling is contract-level); observation/scaffolding readers
+      (`stepId`/`stepStatus`/`withSystemDB`/`workflowId`, 7 test-only
+      sites) keep the documented downgrade; engine-only readers need
+      nothing. Rejected: full twin set (shallow), `stepCtxCancelToken`
+      (verb-stem collision with the firing function), `cancellingToken`
+      (near-miss with the raw reader), typeclass overloading. 4 body
+      sites swapped; StepTest's 2 workflow-scope checks stay downgraded
+      by design (documented asymmetry). Gates: 650/650, probes 8/8.
 - [ ] C5b delete the old entries, the downgrades, and `Ctx` from the body
       surface; enqueue/start `WorkflowCtx`-only (closes the
       `currentConnection` hole); permanent tree-level `-fno-code` probes
