@@ -79,19 +79,39 @@ the last module flips.
       shared `scenarioScopedSelect` races two pending steps (rows
       `[(1,"fast"),(2,"DBOS.selectStep")]`, sim trace pinned); WfFixture
       gains `wfConn`/`wfIdentity` for scope-building scenarios; 649/649.
-- [ ] C2c `PendingStep exec` — **blocked on the body rewire (C4)**: the
-      brand must come from the scope, and the producers are called inside
-      registry bodies which still hold `Ctx`; branding the type before
-      bodies hold `WorkflowCtx` would let an unbranded producer mint any
-      brand. Lands with C4/C5.
-- [ ] C4 body rewire (next session's opening slice): `ErasedWorkflow`
-      becomes rank-2 over `exec` (`forall exec. Maybe SerializedWorkflowValue
-      -> WorkflowCtx exec m -> ...`), `registerWorkflowRef` bodies take
-      `WorkflowCtx`, the run path builds the scope; unconverted calls
-      downgrade explicitly via `workflowCtxInner` (greppable, converted
-      one by one); then `PendingStep exec`, then the enqueue/start
-      `WorkflowCtx`-only move and the Ctx-entry deletion.
-- [ ] C5 rest + `Ctx` removal.
+- [x] C2c `PendingStep`/`SelectArm`/`Winner` carry `exec` (814b6cb):
+      scoped producers tie the brand to their view, so a cross-execution
+      arm is a compile error (verified with a temporary in-tree negative:
+      "Couldn't match type 'exec1' with 'exec'"); old producers keep the
+      parameter call-site-quantified for unconverted call sites.
+- [x] C4a scoped registry bodies (34c406f): `ErasedWorkflow` is a rank-2
+      newtype; the run path builds the scope with `withWorkflow` and
+      installs the task spawner; `registerTypedWorkflowScoped` /
+      `registerWorkflowRefScoped` (+ Instance twins) register converted
+      bodies; old entries wrap with an explicit downgrade so converted and
+      unconverted bodies share one registry. `WorkflowCtx`/`StepCtx` pin
+      `(exec :: Type)`. Mem backend's `recordSleep` now composes
+      check+record like Postgres.
+- [x] C4b scoped entries for the rest of the body surface (429e8c8):
+      `startChildWorkflowScoped`, `sendScoped`/`sendWithScoped`/
+      `sendBulkScoped`/`sendBulkWithScoped`/`recvScoped`,
+      `runTransactionScoped`, six management `...Scoped` wrappers. Two
+      bodies converted as the pattern (the capture-refusal body now uses
+      `withStep` + `startChildWorkflowScoped` and still refuses).
+- [ ] C4c bulk body conversion (mechanical once C5a lands): every
+      registered body swaps to the scoped entry, takes `WorkflowCtx`,
+      and replaces its calls with the scoped twins.
+- [ ] C5a remaining scoped surface for body code: `runWorkflowStepWithScoped`
+      (options variant); scoped reader twins — StepCtx:
+      `cancellationToken`/`cancelToken`/`tokenCancelled`/`stepId`/
+      `stepStatus`/`stepMarker`/`raceCancel`; WorkflowCtx: `deadline`/
+      `currentConnection`/`currentIdentity`/`withSystemDB`. Decide naming
+      (view-prefixed twins vs documented `stepCtxInner`/`workflowCtxInner`
+      downgrades) before the bulk pass.
+- [ ] C5b delete the old entries, the downgrades, and `Ctx` from the body
+      surface; enqueue/start `WorkflowCtx`-only (closes the
+      `currentConnection` hole); permanent tree-level `-fno-code` probes
+      (negative + witness) for the exec brand.
 - [ ] C2 Handle: awaits over scoped views.
 - [ ] C3 Select/Event/Sleep: scoped arms/reads/sleeps.
 - [ ] C4 Workflow execute path: `startChildWorkflow` takes `WorkflowCtx`;
