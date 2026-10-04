@@ -24,7 +24,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (BackendErrorKind (..))
-import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simInstance)
+import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simConnectionWith, simInstance)
 import DBOS.Transact
   ( BackendError (..),
     CodecError,
@@ -33,6 +33,8 @@ import DBOS.Transact
     EngineOnly,
     Executor,
     Error (..),
+    Identity (..),
+    StepCtx,
     RecordedOutcome (..),
     SerializedWorkflowValue (..),
     Topic (..),
@@ -42,9 +44,11 @@ import DBOS.Transact
     WorkflowRef,
     decodeWorkflowValue,
     encodeWorkflowValue,
+    firstStepStatus,
     getWorkflowEvent,
     millisDuration,
     newWorkflowKey,
+    nextWorkflowMarker,
     recv,
     registerDBOSWorkflowRef,
     runDBOSWorkflow,
@@ -56,9 +60,163 @@ import DBOS.Transact
     startDBOSWorkflowRef,
     startOptionsDefault,
     StartOptions (..),
+    withStep,
+    withWorkflow,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
+
+-- * Step tables (A3)
+
+-- | The checkout's transactional capabilities: every field is one step and
+-- one 'atomically' block, mirroring the Postgres handler's one transaction
+-- per step. The 'StepCtx' parameter is the capability that scopes each
+-- call to a step — implementations do not read it.
+newtype OrderId = OrderId Int
+  deriving stock (Eq, Show)
+
+data CheckoutOps exec m = CheckoutOps
+  { coCreate :: StepCtx exec m -> m OrderId,
+    coReserve :: StepCtx exec m -> m Bool,
+    coUndo :: StepCtx exec m -> m (),
+    coSetStatus :: StepCtx exec m -> OrderId -> Int -> m ()
+  }
+
+-- | The dispatch's capabilities: the tick loop's decrement and the status
+-- writes. 'coSetStatus' is repeated from the checkout table per the
+-- share-by-two rule (records are cheap; embed at three).
+data DispatchOps exec m = DispatchOps
+  { doTick :: StepCtx exec m -> OrderId -> m (),
+    doSetStatus :: StepCtx exec m -> OrderId -> Int -> m ()
+  }
+
+-- | The STM handler: one atomic block per op. The split read-then-write of
+-- the old fakes is closed — concurrent checkouts cannot mint one id or
+-- oversell one unit.
+stmCheckoutOps :: WidgetStore (IOSim s) -> CheckoutOps exec (IOSim s)
+stmCheckoutOps store =
+  CheckoutOps
+    { coCreate = \_ -> atomically $ do
+        oid <- readTVar store.wsNextOrder
+        writeTVar store.wsNextOrder (oid + 1)
+        modifyTVar store.wsOrders (Map.insert oid (0, 3))
+        pure (OrderId oid),
+      coReserve = \_ -> atomically $ do
+        stock <- readTVar store.wsInventory
+        if stock > 0
+          then writeTVar store.wsInventory (stock - 1) >> pure True
+          else pure False,
+      coUndo = \_ -> atomically (modifyTVar store.wsInventory (+ 1)),
+      coSetStatus = \_ (OrderId oid) status -> atomically $
+        modifyTVar store.wsOrders (Map.adjust (\(_, progress) -> (status, progress)) oid)
+    }
+
+stmDispatchOps :: WidgetStore (IOSim s) -> DispatchOps exec (IOSim s)
+stmDispatchOps store =
+  DispatchOps
+    { doTick = \_ (OrderId oid) -> atomically $
+        modifyTVar store.wsOrders $
+          Map.adjust
+            (\(status, progress) -> if progress <= 1 then (1, 0) else (status, progress - 1))
+            oid,
+      doSetStatus = \_ (OrderId oid) status -> atomically $
+        modifyTVar store.wsOrders (Map.adjust (\(_, progress) -> (status, progress)) oid)
+    }
+
+-- | The deterministic seed-8 shape: the table counts its calls and the
+-- third (the paid write) aborts via 'throwSTM', so the whole block —
+-- including anything it wrote — vanishes. Replaces the old
+-- 'BackendError'-injection fake with a domain-level refusal.
+failingCheckoutOps :: StrictTVar (IOSim s) Int -> WidgetStore (IOSim s) -> CheckoutOps exec (IOSim s)
+failingCheckoutOps calls store =
+  CheckoutOps
+    { coCreate = \s -> do
+        _ <- atomically (modifyTVar calls (+ 1))
+        (stmCheckoutOps store).coCreate s,
+      coReserve = \s -> do
+        _ <- atomically (modifyTVar calls (+ 1))
+        (stmCheckoutOps store).coReserve s,
+      coUndo = (stmCheckoutOps store).coUndo,
+      coSetStatus = \s oid status -> do
+        n <- atomically (modifyTVar calls (+ 1) >> readTVar calls)
+        if n == 3
+          then atomically (throwSTM (userError "mark_order_paid refused"))
+          else (stmCheckoutOps store).coSetStatus s oid status
+    }
+
+-- | A sim identity for the direct table cases.
+tableIdentity :: Identity
+tableIdentity =
+  Identity
+    { identityAppName = "sim-app",
+      identityAppVersion = "0.0.0",
+      identityExecutorId = "sim-executor",
+      identityAppId = ""
+    }
+
+-- | Run one table op under a real step scope: the workflow view, then a
+-- step view, exactly the shape the workflows will use.
+withTableStep :: WidgetStore (IOSim s) -> (forall exec. StepCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
+withTableStep _ body = do
+  conn <- simConnectionWith simTracer
+  withWorkflow conn tableIdentity (WorkflowId "widget-tables") Nothing $ \wctx -> do
+    marker <- nextWorkflowMarker wctx
+    withStep wctx marker (firstStepStatus 0) body
+
+scenarioTableCreate :: IOSim s ([Int], Map Int (Int, Int))
+scenarioTableCreate = do
+  store <- newWidgetStore 5
+  -- The table is built inside the scope's continuation so its phantom
+  -- execution unifies with the scope it is spent in.
+  ids <- withTableStep store $ \s -> do
+    let ops = stmCheckoutOps store
+    mapM (\_ -> ops.coCreate s) [1 :: Int, 2, 3]
+  orders <- readTVarIO store.wsOrders
+  pure ([oid | OrderId oid <- ids], orders)
+
+scenarioTableReserveRace :: IOSim s (Int, Int)
+scenarioTableReserveRace = do
+  store <- newWidgetStore 1
+  first <- async (withTableStep store (\s -> (stmCheckoutOps store).coReserve s))
+  second <- async (withTableStep store (\s -> (stmCheckoutOps store).coReserve s))
+  a <- wait first
+  b <- wait second
+  stock <- readTVarIO store.wsInventory
+  pure (length (filter id [a, b]), stock)
+
+scenarioTableFailing :: IOSim s (Bool, Map Int (Int, Int), Int)
+scenarioTableFailing = do
+  calls <- newTVarIO 0
+  store <- newWidgetStore 5
+  threw <-
+    withTableStep store $ \s -> do
+      let ops = failingCheckoutOps calls store
+      oid <- ops.coCreate s
+      reserved <- ops.coReserve s
+      if not reserved
+        then pure False
+        else do
+          result <- try (ops.coSetStatus s oid 2)
+          pure (either (const True) (const False) (result :: Either SomeException ()))
+  orders <- readTVarIO store.wsOrders
+  stock <- readTVarIO store.wsInventory
+  pure (threw, orders, stock)
+
+scenarioTableStatusCodes :: IOSim s (Int, Int)
+scenarioTableStatusCodes = do
+  store <- newWidgetStore 5
+  withTableStep store $ \s -> do
+    let checkout = stmCheckoutOps store
+        dispatch = stmDispatchOps store
+    oid <- checkout.coCreate s
+    reserved <- checkout.coReserve s
+    if not reserved
+      then pure ()
+      else do
+        checkout.coSetStatus s oid 2
+        mapM_ (\_ -> dispatch.doTick s oid) [1 :: Int, 2, 3]
+  orders <- readTVarIO store.wsOrders
+  pure (Map.findWithDefault (0, 0) 1 orders)
 
 -- * Application tables (the fake's state)
 
@@ -281,5 +439,28 @@ tests =
       testCase "a failed paid write stops the checkout instead of dispatching" $ do
         (res, tr) <- runSimCase scenarioPaidStepFails
         printSimTrace tr
-        res @?= (False, Map.singleton 1 (0, 3), 4)
+        res @?= (False, Map.singleton 1 (0, 3), 4),
+      -- * Step tables (A3): direct handler cases over the same store, no
+      -- engine — the table ops are what the workflows will spend once the
+      -- rewire lands. See docs/widget-step-tables.md.
+      testCase "the create op mints ids in order" $ do
+        ((ids, orders), tr) <- runSimCase scenarioTableCreate
+        printSimTrace tr
+        ids @?= [1, 2, 3]
+        Map.keys orders @?= [1, 2, 3],
+      testCase "the reserve op never oversells under a race" $ do
+        ((winners, stock), tr) <- runSimCase scenarioTableReserveRace
+        printSimTrace tr
+        winners @?= 1
+        stock @?= 0,
+      testCase "the failing table's third call aborts whole" $ do
+        ((threw, orders, stock), tr) <- runSimCase scenarioTableFailing
+        printSimTrace tr
+        threw @?= True
+        orders @?= Map.singleton 1 (0, 3)
+        stock @?= 4,
+      testCase "the table status codes match the live assertions" $ do
+        (order, tr) <- runSimCase scenarioTableStatusCodes
+        printSimTrace tr
+        order @?= (1, 0)
     ]
