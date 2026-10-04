@@ -69,11 +69,29 @@ the last module flips.
       (step view, plain, no allocation possible); context seam readers
       `stepCtxAt`/`stepCtxTracer`/`workflowCtxInner`; live+sim tests with
       exact trace asserts; 646/646.
-- [ ] C1b `PendingStep exec`: deferred to the pending-layer slice (the
-      type is shared by Checkpoint/Event/Handle/Sleep/Select producers,
-      so branding it forces their conversion — lands with C2/C3).
-- [ ] C1c flip call sites to the scoped runners and delete the Ctx
-      entries (after the pending layer converts).
+- [x] C2a scoped pending pair (0bc1852): `pendingWorkflowStepWithScoped`/
+      `pendingWorkflowStepScoped`/`driveWorkflowStepWithScoped`;
+      `awaitChildScoped`/`pendingAwaitScoped`; live+sim tests (StepSim
+      pins the drive trace: `StepOutputRecorded` only).
+- [x] C2b scoped sleep/event/select (0adf014): `sleepWorkflowStepScoped`/
+      `pendingSleepScoped`, `setEventScoped`/`pendingSetEventScoped`/
+      `getEventScoped`/`pendingGetEventScoped`, `selectStepScoped`; the
+      shared `scenarioScopedSelect` races two pending steps (rows
+      `[(1,"fast"),(2,"DBOS.selectStep")]`, sim trace pinned); WfFixture
+      gains `wfConn`/`wfIdentity` for scope-building scenarios; 649/649.
+- [ ] C2c `PendingStep exec` — **blocked on the body rewire (C4)**: the
+      brand must come from the scope, and the producers are called inside
+      registry bodies which still hold `Ctx`; branding the type before
+      bodies hold `WorkflowCtx` would let an unbranded producer mint any
+      brand. Lands with C4/C5.
+- [ ] C4 body rewire (next session's opening slice): `ErasedWorkflow`
+      becomes rank-2 over `exec` (`forall exec. Maybe SerializedWorkflowValue
+      -> WorkflowCtx exec m -> ...`), `registerWorkflowRef` bodies take
+      `WorkflowCtx`, the run path builds the scope; unconverted calls
+      downgrade explicitly via `workflowCtxInner` (greppable, converted
+      one by one); then `PendingStep exec`, then the enqueue/start
+      `WorkflowCtx`-only move and the Ctx-entry deletion.
+- [ ] C5 rest + `Ctx` removal.
 - [ ] C2 Handle: awaits over scoped views.
 - [ ] C3 Select/Event/Sleep: scoped arms/reads/sleeps.
 - [ ] C4 Workflow execute path: `startChildWorkflow` takes `WorkflowCtx`;
@@ -87,10 +105,11 @@ the last module flips.
       boundary, `setStatus` repeated per the ≤2 rule), STM handlers
       (single-`atomically`, split-race fixes), failing variant, status
       codes, live contract specified for C-phase.
-- [ ] D1 tables + STM handlers + failing variant land, with direct
-      handler tests (no engine needed): mint sequence, oversell race,
-      bomb rollback, failing stops-before-dispatch, status codes vs
-      `WidgetTest` assertions.
+- [x] D1 tables + STM handlers + failing variant + direct handler tests
+      (ca71aac): mint sequence, oversell race (one winner, stock 0),
+      failing third call aborts whole, status codes `(1,0)` matching the
+      live assertions; tables built inside the scope continuation so the
+      phantom unifies; watcher Widget pair green (live 4, sim 7).
 - [ ] D2 engine integration, post-C Step slice (bodies have no `StepCtx`
       until runners accept it): flip `WidgetSim` call sites, retire the
       `Tx`-ignoring fakes, PG tables behind the held connection, one
