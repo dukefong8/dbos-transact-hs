@@ -52,7 +52,6 @@ import DBOS.Transact
     newWorkflowKey,
     recv,
     registerDBOSDataSource,
-    registerDBOSWorkflowRef,
     registerDBOSWorkflowRefScoped,
     releaseAppDataSource,
     runAppSession,

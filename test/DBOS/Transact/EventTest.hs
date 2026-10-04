@@ -46,7 +46,6 @@ import DBOS.Transact
     pendingSleep,
     pendingStepId,
     pendingWorkflowStep,
-    registerDBOSWorkflowRef,
     registerDBOSWorkflowRefScoped,
     runDBOSWorkflowRef,
     runOptionsDefault,

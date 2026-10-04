@@ -173,8 +173,6 @@ import DBOS.Transact
     newDBOS,
     newTasks,
     newWorkflowKey,
-    registerDBOSWorkflow,
-    registerDBOSWorkflowRef,
     registerDBOSWorkflowRefScoped,
     registerDBOSWorkflowScoped,
     WorkflowKey,

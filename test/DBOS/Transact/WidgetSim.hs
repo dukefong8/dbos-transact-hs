@@ -52,7 +52,6 @@ import DBOS.Transact
     newWorkflowKey,
     nextWorkflowMarker,
     recv,
-    registerDBOSWorkflowRef,
     registerDBOSWorkflowRefScoped,
     runDBOSWorkflow,
     runTransaction,

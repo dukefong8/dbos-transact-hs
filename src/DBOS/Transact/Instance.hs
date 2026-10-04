@@ -13,7 +13,7 @@ module DBOS.Transact.Instance
     Executor (..),
     newDBOS,
     config,
-    registerDBOSWorkflow,
+    registerDBOSWorkflowScoped,
     isLaunched,
     dbosExecutorId,
     dbosAppVersion,
@@ -23,8 +23,6 @@ module DBOS.Transact.Instance
     launchOn,
     shutdown,
     requireExecutor,
-    registerDBOSWorkflowRef,
-    registerDBOSWorkflowScoped,
     registerDBOSWorkflowRefScoped,
     registerDBOSDataSource,
     clearDBOSCheckpoints,
@@ -80,7 +78,7 @@ import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
 import DBOS.Transact.Datasource (DataSource (..))
 import DBOS.Transact.Datasource.Registry (DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, registerDataSource, thawDataSourceRegistry)
-import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflow, registerTypedWorkflowScoped, registerWorkflowRef, registerWorkflowRefScoped, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
+import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflowScoped, registerWorkflowRefScoped, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
 import DBOS.Transact.Workflow (RunOptions (..), StartOptions, Tasks, abortAll, enqueueWorkflow, newTasks, runRegisteredWorkflow, runWorkflowRef, spawnTracked, startWorkflowRef)
 
 -- | An instance is the application's stable configuration and registry;
@@ -131,14 +129,6 @@ config dbos = dbos.dbos_config
 -- | Register one typed workflow under its full identity triple. The registry
 -- lock makes registration and launch's snapshot mutually exclusive. The body
 -- takes the explicit context it runs in.
-registerDBOSWorkflow :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (argument -> Ctx m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-registerDBOSWorkflow dbos key body = registerTypedWorkflow dbos.dbos_registry key body
-
--- | Register one typed workflow and hand back a reference to it: what
--- registration returns and what a call site holds.
-registerDBOSWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (argument -> Ctx m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
-registerDBOSWorkflowRef dbos key body = registerWorkflowRef dbos.dbos_registry key body
-
 -- | Register one typed workflow whose body takes the scoped workflow view:
 -- the converted shape. The body can only reach the scoped entries and must
 -- downgrade explicitly at call sites not yet converted; converted and

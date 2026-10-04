@@ -39,7 +39,7 @@ import Data.Text (Text, pack)
 import Data.Word (Word64)
 import DBOS.Prelude
 import DBOS.SystemDB (Topic (..), millisDuration)
-import DBOS.Transact (Ctx, DBOS, EngineOnly, Error, WorkflowRef, newWorkflowKey, recv, registerDBOSWorkflow, registerDBOSWorkflowRef, runWorkflowStep, setEvent, sleepWorkflowStep)
+import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowCtx, WorkflowRef, newWorkflowKey, recvScoped, registerDBOSWorkflowScoped, registerDBOSWorkflowRefScoped, runWorkflowStepScoped, setEventScoped, sleepWorkflowStepScoped)
 
 -- * Durations and keys
 
@@ -93,71 +93,71 @@ queueListLimit = 200
 
 -- * Bodies
 
-exampleWorkflowBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
-exampleWorkflowBody () ctx = do
-  first <- stepSleep ctx "step_one" stepDurationMs
+exampleWorkflowBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+exampleWorkflowBody () wctx = do
+  first <- stepSleep wctx "step_one" stepDurationMs
   case first of
     Left err -> pure (Left err)
     Right () -> do
-      published <- setEvent ctx stepsEventKey (1 :: Int)
+      published <- setEventScoped wctx stepsEventKey (1 :: Int)
       case published of
         Left err -> pure (Left err)
-        Right () -> continue ctx
+        Right () -> continue wctx
   where
-    continue innerCtx = do
-      second <- stepSleep innerCtx "step_two" stepDurationMs
+    continue innerWctx = do
+      second <- stepSleep innerWctx "step_two" stepDurationMs
       case second of
         Left err -> pure (Left err)
         Right () -> do
-          published <- setEvent innerCtx stepsEventKey (2 :: Int)
+          published <- setEventScoped innerWctx stepsEventKey (2 :: Int)
           case published of
             Left err -> pure (Left err)
             Right () -> do
-              third <- stepSleep innerCtx "step_three" stepDurationMs
+              third <- stepSleep innerWctx "step_three" stepDurationMs
               case third of
                 Left err -> pure (Left err)
                 Right () -> do
-                  lastPublished <- setEvent innerCtx stepsEventKey (3 :: Int)
+                  lastPublished <- setEventScoped innerWctx stepsEventKey (3 :: Int)
                   pure (lastPublished >> Right "Workflow completed")
 
-orderWorkflowBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
-orderWorkflowBody () ctx = do
+orderWorkflowBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+orderWorkflowBody () wctx = do
   published <- mapM publish (zip [1 ..] orderKeys)
   pure (sequence_ published >> Right "Order complete")
   where
     publish (stage, key) = do
-      slept <- sleepWorkflowStep ctx (millisDuration orderStepMs)
+      slept <- sleepWorkflowStepScoped wctx (millisDuration orderStepMs)
       case slept of
         Left err -> pure (Left err)
-        Right () -> setEvent ctx key (key <> " at step " <> pack (show (stage :: Int)))
+        Right () -> setEventScoped wctx key (key <> " at step " <> pack (show (stage :: Int)))
 
-approvalWorkflowBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
-approvalWorkflowBody () ctx = do
-  decision <- recv ctx (Just approvalTopic) (millisDuration approvalTimeoutMs)
+approvalWorkflowBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+approvalWorkflowBody () wctx = do
+  decision <- recvScoped wctx (Just approvalTopic) (millisDuration approvalTimeoutMs)
   case (decision :: Either (Error EngineOnly) (Maybe Text)) of
     Left err -> pure (Left err)
     Right stored -> do
       let outcome = fromMaybe "expired" stored
-      published <- setEvent ctx decisionEventKey outcome
+      published <- setEventScoped wctx decisionEventKey outcome
       pure (published >> Right outcome)
 
-enqueuedWorkflowBody :: () -> Ctx IO -> IO (Either (Error EngineOnly) Text)
-enqueuedWorkflowBody () ctx = do
-  slept <- sleepWorkflowStep ctx (millisDuration queueSleepMs)
+enqueuedWorkflowBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+enqueuedWorkflowBody () wctx = do
+  slept <- sleepWorkflowStepScoped wctx (millisDuration queueSleepMs)
   pure (slept >> Right "Enqueued workflow completed")
 
-stepSleep :: Ctx IO -> Text -> Word64 -> IO (Either (Error EngineOnly) ())
-stepSleep ctx name milliseconds =
-  runWorkflowStep ctx name (const (threadDelay (fromIntegral milliseconds * 1000) >> pure ()))
+stepSleep :: WorkflowCtx exec IO -> Text -> Word64 -> IO (Either (Error EngineOnly) ())
+stepSleep wctx name milliseconds =
+  runWorkflowStepScoped wctx name (const (threadDelay (fromIntegral milliseconds * 1000) >> pure ()))
 
 -- * Registration
 
 registerStarterWorkflows :: DBOS IO -> IO (Either (Error EngineOnly) StarterRefs)
 registerStarterWorkflows dbos = do
-  example <- registerDBOSWorkflowRef dbos (newWorkflowKey "ExampleWorkflow") exampleWorkflowBody
-  order <- registerDBOSWorkflowRef dbos (newWorkflowKey "OrderWorkflow") orderWorkflowBody
-  approval <- registerDBOSWorkflowRef dbos (newWorkflowKey approvalWorkflowName) approvalWorkflowBody
-  enqueued <- registerDBOSWorkflow dbos (newWorkflowKey enqueuedWorkflowName) enqueuedWorkflowBody
+  example <- registerDBOSWorkflowRefScoped dbos (newWorkflowKey "ExampleWorkflow") exampleWorkflowBody
+  order <- registerDBOSWorkflowRefScoped dbos (newWorkflowKey "OrderWorkflow") orderWorkflowBody
+  approval <- registerDBOSWorkflowRefScoped dbos (newWorkflowKey approvalWorkflowName) approvalWorkflowBody
+  enqueued <- registerDBOSWorkflowScoped dbos (newWorkflowKey enqueuedWorkflowName) enqueuedWorkflowBody
   pure (StarterRefs <$> example <*> order <*> approval <* enqueued)
 
 -- | The refs the handlers start through. Starting by ref persists the

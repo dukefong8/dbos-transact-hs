@@ -38,7 +38,6 @@ import DBOS.Transact
     newDBOS,
     newWorkflowKey,
     nullTracer,
-    registerDBOSWorkflow,
     registerDBOSWorkflowScoped,
     renderTransactError,
     retrieveWorkflow,

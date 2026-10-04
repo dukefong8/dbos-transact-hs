@@ -25,7 +25,7 @@ import DBOS.Transact (CodecError, Config (..), Ctx, DBOS, WorkflowCtx, workflowC
     WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueChange, defaultQueueOptions, deleteQueue, encodeWorkflowValue, enqueueDBOSWorkflow, enqueueNew, handleResult, handleStatus, handleWorkflowId, isLaunched,
     launchWithEnvironment,
     listQueues,
-    listWorkflows, newDBOS, newWorkflowKey, nullTracer, queue, queueFromRecord, queueIsPartitioned, registerDBOSWorkflow, registerDBOSWorkflowRef, registerDBOSWorkflowRefScoped, registerDBOSWorkflowScoped, registerQueue, renderTransactError, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault,     shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, updateQueue, waitForWorkflow)
+    listWorkflows, newDBOS, newWorkflowKey, nullTracer, queue, queueFromRecord, queueIsPartitioned, registerDBOSWorkflowRefScoped, registerDBOSWorkflowScoped, registerQueue, renderTransactError, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault,     shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, updateQueue, waitForWorkflow)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 

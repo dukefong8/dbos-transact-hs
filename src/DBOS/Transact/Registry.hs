@@ -17,7 +17,6 @@ module DBOS.Transact.Registry
     refKey,
     refName,
     refRegistry,
-    registerWorkflowRef,
     registerWorkflowRefScoped,
     ErasedWorkflow (..),
     Registry,
@@ -25,7 +24,6 @@ module DBOS.Transact.Registry
     newRegistry,
     bindRegistryInstance,
     registryInstanceId,
-    registerTypedWorkflow,
     registerTypedWorkflowScoped,
     registerErasedWorkflow,
     snapshotRegistry,
@@ -121,12 +119,10 @@ refName ref = case ref.refKey of WorkflowKey name _ _ -> name
 
 -- | Register a typed workflow and hand back a reference to it. Only before
 -- launch snapshots the registry; a duplicate identity is refused.
-registerWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => Registry m -> WorkflowKey -> (argument -> Ctx m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
-registerWorkflowRef registry key body = do
-  registered <- registerTypedWorkflow registry key body
-  pure ((\() -> WorkflowRef registry key) <$> registered)
-
--- | 'registerWorkflowRef' for a body taking the scoped workflow view.
+--
+-- Bodies take the scoped workflow view: the converted shape, where a body
+-- can only reach the scoped entries. The old context-level entry was
+-- deleted once every caller converted (C5b).
 registerWorkflowRefScoped :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
 registerWorkflowRefScoped registry key body = do
   registered <- registerTypedWorkflowScoped registry key body
@@ -148,10 +144,6 @@ newtype ErasedWorkflow m = ErasedWorkflow
 -- | Register a typed workflow and erase its JSON input and output types at
 -- the registry boundary. The stored representation is the same serialized
 -- value used by workflow rows and operation checkpoints.
-registerTypedWorkflow :: forall argument result e m. (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => Registry m -> WorkflowKey -> (argument -> Ctx m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-registerTypedWorkflow registry key body =
-  registerTypedWorkflowScoped registry key (\argument wctx -> body argument (workflowCtxInner wctx))
-
 -- | Register a typed workflow whose body takes the scoped workflow view:
 -- the converted shape, where the body can only reach the scoped entries
 -- and must downgrade explicitly (via 'workflowCtxInner') at call sites not

@@ -64,7 +64,6 @@ import DBOS.Transact
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
-    registerDBOSWorkflow,
     registerDBOSWorkflowScoped,
     registerQueue,
     retrieveClientWorkflow,
