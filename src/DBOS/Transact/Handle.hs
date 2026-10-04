@@ -22,7 +22,9 @@ module DBOS.Transact.Handle
     handleStatus,
     handleResult,
     awaitChild,
+    awaitChildScoped,
     pendingAwait,
+    pendingAwaitScoped,
   )
 where
 
@@ -40,7 +42,7 @@ import DBOS.SystemDB.Types (AwaitedOutcome (..), Outcome (..), Serialization (..
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..))
+import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..), WorkflowCtx, workflowCtxInner)
 import DBOS.Transact.Context qualified as Context (workflowId)
 import DBOS.Transact.Error qualified as TransactError
 
@@ -140,6 +142,25 @@ awaitChild ::
   WorkflowHandle m e ->
   m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 awaitChild ctx handle = placeCall ctx >>= driveAwait ctx handle
+
+-- | 'awaitChild' over the scoped workflow view: the recorded await at the
+-- workflow-scope entry. The body-less call needs no narrowed view, so this
+-- is a pure delegation to the context-level machinery.
+awaitChildScoped ::
+  (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
+  WorkflowCtx exec m ->
+  WorkflowHandle m e ->
+  m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+awaitChildScoped wctx handle = awaitChild (workflowCtxInner wctx) handle
+
+-- | 'pendingAwait' over the scoped workflow view: the pending await built
+-- through the workflow context, for the race and await paths.
+pendingAwaitScoped ::
+  (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
+  WorkflowCtx exec m ->
+  WorkflowHandle m e ->
+  m (PendingStep m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
+pendingAwaitScoped wctx handle = pendingAwait (workflowCtxInner wctx) handle
 
 -- | An await built at its position and not yet run: the @DBOS.getResult@
 -- step claims its id here, where the call is written, and 'pendingRun'

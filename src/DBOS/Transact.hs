@@ -21,6 +21,9 @@ module DBOS.Transact
     runWorkflowStep,
     runWorkflowStepScoped,
     runNestedStep,
+    pendingWorkflowStepScoped,
+    pendingWorkflowStepWithScoped,
+    driveWorkflowStepWithScoped,
     runWorkflowStepWith,
     pendingWorkflowStep,
     pendingWorkflowStepWith,
@@ -195,7 +198,9 @@ module DBOS.Transact
     handleStatus,
     handleResult,
     awaitChild,
+    awaitChildScoped,
     pendingAwait,
+    pendingAwaitScoped,
     -- * Durable races (select.rs)
     Racing (..),
     Recording (..),
@@ -407,7 +412,7 @@ import DBOS.Transact.Config
   )
 import DBOS.Transact.Error (DurableError, EngineOnly, Error (..), Error, Failure (..), application, controlOf, decodeErrorText, encodeErrorText, liftEngine, mapApplication, renderTransactError)
 import DBOS.Transact.Event (getEvent, pendingGetEvent, pendingSetEvent, setEvent)
-import DBOS.Transact.Handle (Provenance (..), WorkflowHandle (..), awaitChild, handleResult, handleStatus, handleWorkflowId, pendingAwait, pollingHandle)
+import DBOS.Transact.Handle (Provenance (..), WorkflowHandle (..), awaitChild, awaitChildScoped, handleResult, handleStatus, handleWorkflowId, pendingAwait, pendingAwaitScoped, pollingHandle)
 import DBOS.Transact.Identity (Environment (..), Identity (..), appIdEnv, appVersionEnv, cloudAppNameEnv, cloudEnv, defaultExecutorId, executorIdEnv, readEnvironment, resolve, validateAppName)
 import DBOS.Transact.Instance (DBOS, Executor, cancelWorkflows, clearDBOSCheckpoints, dbosAppId, dbosAppVersion, dbosExecutorId, dequeueDBOSWorkflows, deleteWorkflows, enqueueDBOSWorkflow, fetchWorkflowStatuses, forkFrom, forkWorkflows, getWorkflowEvent, isLaunched, launch, launchOn, launchWithEnvironment, listWorkflowIdsByName, listWorkflows, newDBOS, registerDBOSDataSource, registerDBOSWorkflow, registerDBOSWorkflowRef, resumeWorkflows, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, sendWorkflowMessage, sendWorkflowMessages, setWorkflowDelay, shutdown, startDBOSWorkflowRef, updateWorkflowAttributes)
 import DBOS.Transact.Management (ManagementEvent (..), cancelWorkflowsInWorkflow, deleteWorkflowsInWorkflow, forkFromInWorkflow, forkWorkflowsInWorkflow, listWorkflowsInWorkflow, resumeWorkflowsInWorkflow)
@@ -455,7 +460,7 @@ import DBOS.Transact.Queue
     deleteQueue,
   )
 import DBOS.Transact.Select (Branches (..), Racing (..), Recording (..), SelectArm (..), Winner (..), checkSelect, controlError, newBranches, pushBranch, recordSelect, selectStep)
-import DBOS.Transact.Step (StepError (..), StepOptions (..), ShouldRetry, WorkflowEvent (..), pendingWorkflowStep, pendingWorkflowStepWith, runNestedStep, runWorkflowStep, runWorkflowStepScoped, runWorkflowStepWith, stepBackoff, stepOptionsDefault)
+import DBOS.Transact.Step (StepError (..), StepOptions (..), ShouldRetry, WorkflowEvent (..), driveWorkflowStepWithScoped, pendingWorkflowStep, pendingWorkflowStepScoped, pendingWorkflowStepWith, pendingWorkflowStepWithScoped, runNestedStep, runWorkflowStep, runWorkflowStepScoped, runWorkflowStepWith, stepBackoff, stepOptionsDefault)
 import DBOS.Transact.Sleep (SleepEvent (..), pendingSleep, sleepPlain, sleepWorkflowStep)
 import DBOS.Transact.Wait (WaitEvent (..), joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
 import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Tasks, Timeout (..), abortAll, childWorkflowId, enqueueNew, enqueueWorkflow, newTasks, resolveEnqueueCollision, resolveTimeoutDeadline, runOptionsDefault, runOptionsToStartOptions, runRegisteredWorkflow, runRegisteredWorkflowWithRow, runRegisteredWorkflowWithSubmission, runWorkflowRef, spawnTracked, startChildWorkflow, startOptionsDefault, startWorkflowRef, storedPriority, tasksSpawner, timeoutBudget, validateEnqueue)

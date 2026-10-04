@@ -19,6 +19,7 @@ import DBOS.Transact
     EngineOnly,
     Ctx,
     Error (..),
+    PendingStep (..),
     StepOptions (..),
     StepStatus (..),
     WorkflowId (..),
@@ -28,6 +29,8 @@ import DBOS.Transact
     firstStepStatus,
     ioTracer,
     nullTracer,
+    pendingStepId,
+    pendingWorkflowStepScoped,
     runNestedStep,
     runWorkflowStep,
     runWorkflowStepScoped,
@@ -184,6 +187,32 @@ tests =
         case free of
           Right Nothing -> pure ()
           _ -> fail "expected no checkpoint for the nested call",
+      testCase "a pending scoped step claims its id at build and replays" $ do
+        backend <- getBackend
+        freshId <- UUID.V4.nextRandom
+        let workflowText = "hs-l2-step-pending-scoped-" <> Text.pack (UUID.toString freshId)
+            initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2StepPendingScopedTest"}
+        created <- initWorkflow backend initialWorkflow Nothing Fresh Nothing
+        case created of
+          Left err -> fail (show err)
+          Right _ -> pure ()
+        calls <- newIORef (0 :: Int)
+        let runScoped :: IO (Either (Error EngineOnly) Int, Maybe Int)
+            runScoped = do
+              conn <- connOver backend nullTracer
+              withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
+                (pending :: PendingStep IO (Either (Error EngineOnly) Int)) <-
+                  pendingWorkflowStepScoped wctx "pending_step" $ \_ -> do
+                    modifyIORef' calls (+ 1)
+                    pure (Right 42)
+                outcome <- pending.pendingRun
+                pure (outcome, pendingStepId pending)
+        (first, claimed) <- runScoped
+        assertEqual "the pending step returns the body's result" (Right 42) first
+        assertEqual "the id is claimed when the pending is built" (Just 0) claimed
+        (replay, _) <- runScoped
+        assertEqual "replay returns the recorded result" (Right 42) replay
+        assertEqual "replay does not run the body again" 1 =<< readIORef calls,
       testCase "durable sleep reuses its recorded wake time" $ do
         backend <- getBackend
         freshId <- UUID.V4.nextRandom

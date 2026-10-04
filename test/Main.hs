@@ -70,8 +70,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty DeadlinesTest.tests
 --- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests
---- $> tasty HandleTest.tests
---- $> tasty HandleSim.tests
+-- $> tasty HandleTest.tests
+-- $> tasty HandleSim.tests
 --- $> tasty IdentityTest.tests
 --- $> tasty InstanceTest.tests
 --- $> tasty ManagementTest.tests
@@ -86,8 +86,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SleepTest.tests
 --- $> tasty SleepSim.tests
 --- $> tasty StepRetryTest.tests
--- $> tasty StepTest.tests
--- $> tasty StepSim.tests
+--- $> tasty StepTest.tests
+--- $> tasty StepSim.tests
 --- $> tasty WaitTest.tests
 --- $> tasty WaitSim.tests
 --- $> tasty WorkflowTest.tests

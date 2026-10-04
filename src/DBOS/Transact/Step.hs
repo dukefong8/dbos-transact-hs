@@ -14,6 +14,9 @@ module DBOS.Transact.Step
     runWorkflowStepScoped,
     runNestedStep,
     runWorkflowStepWith,
+    pendingWorkflowStepScoped,
+    pendingWorkflowStepWithScoped,
+    driveWorkflowStepWithScoped,
     pendingWorkflowStep,
     pendingWorkflowStepWith,
     driveWorkflowStepWith,
@@ -350,6 +353,41 @@ runWorkflowStepWith ::
   m (Either (TransactError.Error e) value)
 runWorkflowStepWith options ctx name body =
   placeCall ctx >>= \placement -> driveWorkflowStepWith options ctx name placement body
+
+-- | 'pendingWorkflowStepWith' over the scoped workflow view: the id is
+-- claimed through the workflow context and the body is handed the narrowed
+-- step view when the pending is driven.
+pendingWorkflowStepWithScoped ::
+  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
+  StepOptions e ->
+  WorkflowCtx exec m ->
+  Text ->
+  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
+  m (PendingStep m (Either (TransactError.Error e) value))
+pendingWorkflowStepWithScoped options wctx name body =
+  pendingWorkflowStepWith options (workflowCtxInner wctx) name (\inner -> body (stepCtxAt wctx inner))
+
+-- | 'pendingWorkflowStepWithScoped' with the default options: a plain step.
+pendingWorkflowStepScoped ::
+  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
+  WorkflowCtx exec m ->
+  Text ->
+  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
+  m (PendingStep m (Either (TransactError.Error e) value))
+pendingWorkflowStepScoped = pendingWorkflowStepWithScoped stepOptionsDefault
+
+-- | 'driveWorkflowStepWith' over the scoped workflow view: the race and
+-- await paths drive a pending built through the same view.
+driveWorkflowStepWithScoped ::
+  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
+  StepOptions e ->
+  WorkflowCtx exec m ->
+  Text ->
+  StepPlacement m ->
+  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
+  m (Either (TransactError.Error e) value)
+driveWorkflowStepWithScoped options wctx name placement body =
+  driveWorkflowStepWith options (workflowCtxInner wctx) name placement (\inner -> body (stepCtxAt wctx inner))
 
 -- | A durable step built at its position and not yet run: the call claims
 -- its id here, where it is written, and 'pendingRun' drives exactly what

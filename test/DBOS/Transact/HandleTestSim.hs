@@ -23,9 +23,9 @@ import Control.Monad.IOSim (IOSim)
 import Data.Text (Text)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (SerializedWorkflowValue (..), WorkflowId (..), WorkflowStatus (..))
-import DBOS.SystemDB.IOSim (simDBOSWith)
+import DBOS.SystemDB.IOSim (simConnectionWith, simDBOSWith)
 import DBOS.Transact (
-    EngineOnly,DBOS, Error, WorkflowHandle, handleResult, handleStatus, handleWorkflowId, retrieveWorkflow)
+    EngineOnly,DBOS, Error, Identity (..), WorkflowHandle, awaitChildScoped, handleResult, handleStatus, handleWorkflowId, retrieveWorkflow, withWorkflow)
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 
@@ -59,7 +59,13 @@ tests =
       testCase "a handle over a deleted row reports its absence" $ do
         (outcome, tr) <- runSimCase (retrieveAndCheck "missing")
         printSimTrace tr
-        outcome @?= Right Nothing
+        outcome @?= Right Nothing,
+      testCase "a scoped await adopts the settled child" $ do
+        (outcome, tr) <- runSimCase scopedAwait
+        printSimTrace tr
+        case outcome of
+          Right (Just SerializedWorkflowValue {serializedText = storedText}) -> storedText @?= "mock-output"
+          other -> fail (show other)
     ]
 
 -- * Engine-only driver aliases
@@ -74,6 +80,29 @@ resultWfSim = handleResult
 
 statusWfSim :: WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe WorkflowStatus))
 statusWfSim = handleStatus
+
+-- | The scoped await over the stateless mock: the retrieved handle's
+-- settle answers with the canned outcome, and the await records under the
+-- awaiter's own workflow id.
+scopedAwait :: IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+scopedAwait = do
+  dbos <- simSayDBOS
+  retrieved <- retrieveWfSim dbos (WorkflowId "sim-handle-await")
+  case retrieved of
+    Left err -> pure (Left err)
+    Right handle -> do
+      conn <- simConnectionWith simTracer
+      withWorkflow conn simIdentity (WorkflowId "sim-awaiter") Nothing $ \wctx ->
+        awaitChildScoped wctx handle
+
+simIdentity :: Identity
+simIdentity =
+  Identity
+    { identityAppName = "sim-app",
+      identityAppVersion = "0.0.0",
+      identityExecutorId = "sim-executor",
+      identityAppId = ""
+    }
 
 retrieveAndStatus :: Text -> IOSim s (Either (Error EngineOnly) (Text, Either (Error EngineOnly) (Maybe WorkflowStatus)))
 retrieveAndStatus wid = do

@@ -29,9 +29,12 @@ import DBOS.Transact
     Identity (..),
     StepOptions (..),
     StepStatus (..),
+    PendingStep (..),
     WorkflowEvent (..),
     WorkflowId (..),
     firstStepStatus,
+    pendingStepId,
+    pendingWorkflowStepScoped,
     newCtx,
     newWorkflowState,
     nextExecutionIdentity,
@@ -171,7 +174,14 @@ tests =
         (outcome, tr) <- runSimCase scopedNested
         printSimTrace tr
         outcome @?= Right 8
-        traceEvents tr @?= [StepRunning "outer" 0, StepPlain "inner", StepOutputRecorded "outer" 0]
+        traceEvents tr @?= [StepRunning "outer" 0, StepPlain "inner", StepOutputRecorded "outer" 0],
+      testCase "a pending scoped step claims its id at build" $ do
+        (outcome, tr) <- runSimCase scopedPending
+        printSimTrace tr
+        outcome @?= (Right 42, Just 0)
+        -- The drive path announces the recorded output; the run-path
+        -- StepRunning announce belongs to runWorkflowStep, not to drives.
+        traceEvents tr @?= [StepOutputRecorded "pending" 0]
     ]
 
 traceEvents :: SimTrace a -> [WorkflowEvent]
@@ -193,6 +203,18 @@ scopedRun = do
         pure 42
   seen <- readTVarIO observed
   pure (result, seen)
+
+-- | The scoped pending pair: the id is claimed when the pending is built
+-- and the drive records under it.
+scopedPending :: IOSim s (Either (Error EngineOnly) Int, Maybe Int)
+scopedPending = do
+  conn <- simConnectionWith simTracer
+  withWorkflow conn simIdentity (WorkflowId "sim-step-pending-scoped") Nothing $ \wctx -> do
+    pending <-
+      pendingWorkflowStepScoped wctx "pending" $ \_ ->
+        pure (Right (42 :: Int))
+    outcome <- pending.pendingRun
+    pure (outcome, pendingStepId pending)
 
 -- | The step-scope runner: the nested call is plain by construction.
 scopedNested :: forall s. IOSim s (Either (Error EngineOnly) Int)
