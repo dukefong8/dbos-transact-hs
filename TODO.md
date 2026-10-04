@@ -165,10 +165,14 @@ the last module flips.
       failing third call aborts whole, status codes `(1,0)` matching the
       live assertions; tables built inside the scope continuation so the
       phantom unifies; watcher Widget pair green (live 4, sim 7).
-- [ ] D2 engine integration, post-C Step slice (bodies have no `StepCtx`
-      until runners accept it): flip `WidgetSim` call sites, retire the
-      `Tx`-ignoring fakes, PG tables behind the held connection, one
-      mixed live+canned test.
+- [x] D2 engine integration (1f9d630 sim + live half): the
+      `runTransactionScoped` bridge hands bodies `(StepCtx, Tx)`;
+      `WidgetSim` bodies spend `stmCheckoutOps`/`stmDispatchOps`,
+      `Tx`-ignoring fakes and `failingWidgetDs` retired; live bodies spend
+      `pgCheckoutOps`/`pgDispatchOps` closing over the held `Tx`; the mixed
+      live+canned case (`failingPgCheckoutOps` refuses the paid mark)
+      asserts no `order_id`, order `(1,0,3)`, inventory `4`, PENDING row
+      with no dispatch child. Gates: full suite 651/651, Widget pair 5/7.
 - [ ] D3 follow-up domains after the pilot proves the pattern.
 
 ## Standing gates (every slice)

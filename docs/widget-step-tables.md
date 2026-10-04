@@ -1,9 +1,9 @@
 # Widget step tables (A3 sketch, STM side)
 
-Status: sketch — tables + STM handlers specified exactly; direct handler
-tests can land pre-rewire; engine integration waits on the C-phase bridge
-(see §5). Store shape unchanged (`wsInventory`, `wsOrders :: Map Int
-(Int, Int)`, `wsNextOrder`); only bodies migrate, never tables.
+Status: landed (D2, 2026-10-04) — tables + STM handlers + engine
+integration on both stacks. Store shape unchanged (`wsInventory`,
+`wsOrders :: Map Int (Int, Int)`, `wsNextOrder`); only bodies migrated,
+never tables.
 
 Status codes (verify against `WidgetTest` assertions during migration):
 `0` open, `2` paid, `-1` refused/cancelled, `1` dispatched; progress `3→0`.
@@ -92,25 +92,27 @@ Direct handler tests need no engine: build a store + `withWorkflow` over
 state (create mints 1,2,3; race keeps stock ≥ 0; bomb leaves state
 untouched; failing variant stops before dispatch). These land pre-rewire.
 
-Engine integration (replay rows, stub retirement) waits on the C-phase
-Step slice: `Ctx`-holding bodies have no `StepCtx` to spend, and
-`runTransaction` bodies receive `Tx` but no scope — there is no bridge
-until runners accept `StepCtx`. The stubs (`createOrder`,
-`reserveInventory`, … taking ignored `Tx`) retire when call sites flip;
-until then both coexist without conflict (different names, no shared code).
+Engine integration landed (D2): `runTransactionScoped` hands the body the
+step view beside the transaction handle, so the workflows spend the tables
+directly and the stubs are deleted. The `Tx`-ignoring fakes
+(`createOrder`, `reserveInventory`, …) and the `BackendError`-injection
+datasource (`failingWidgetDs`) are retired; the seed-8 case runs the
+domain-level `failingCheckoutOps` over the plain fake datasource.
 
-## 5. Live contract (for C-phase, specified not designed)
+## 5. Live contract (landed as specified)
 
-Post-rewire `runTransaction` (or its transactional-step successor)
-supplies **both** scope and connection to its body —
-`(StepCtx exec m -> Tx m -> m …)` shape to be fixed in the Step slice —
-so Postgres tables close over the per-step `Tx` exactly where the STM
-tables close over nothing:
+`runTransactionScoped` supplies **both** scope and connection to its body —
+`(StepCtx exec m -> Tx m -> m …)` — so Postgres tables close over the
+per-step `Tx` exactly where the STM tables close over nothing:
 
 ```haskell
--- live call shape (target; engine API pending):
-runTransaction ds ctx cfg (\tx s -> coReserve (pgCheckoutOps tx) s ...)
+-- live call shape (WidgetTest):
+runTransactionScoped ds wctx cfg (\sctx tx -> coReserve (pgCheckoutOps tables tx) s)
 ```
+
+Table types (`CheckoutOps`/`DispatchOps`/`OrderId`) are shared across stacks
+(dup'd between the sim and live trees per the test convention); only the
+builders differ (store-closed vs Tx-closed).
 
 Until then PG tables keep today's `Tx`-only shape; table-type sharing
 across stacks arrives with the bridge, not before. Do not fake it with
@@ -118,11 +120,15 @@ dummy `Tx` in new code.
 
 ## 6. Migration checklist
 
-- [ ] Tables + STM handlers + failing variant land (this sketch).
-- [ ] Direct handler tests: mint sequence, oversell race, bomb rollback,
+- [x] Tables + STM handlers + failing variant land (this sketch).
+- [x] Direct handler tests: mint sequence, oversell race, bomb rollback,
       failing stops-before-dispatch, status codes vs `WidgetTest`
       assertions (`(1,1,0)` dispatched, `(1,-1,3)` refused).
-- [ ] C-phase: Step slice accepts `StepCtx` in runners; runTransaction
+- [x] C-phase: Step slice accepts `StepCtx` in runners; runTransaction
       supplies scope+connection.
-- [ ] Flip `WidgetSim` call sites; delete the `Tx`-ignoring fakes.
-- [ ] PG tables + live flip; one mixed live+canned test.
+- [x] Flip `WidgetSim` call sites; delete the `Tx`-ignoring fakes.
+- [x] PG tables + live flip; one mixed live+canned test (D2, 2026-10-04:
+      `pgCheckoutOps`/`pgDispatchOps` close over the held `Tx`;
+      `failingPgCheckoutOps` refuses the paid mark; the canned-fail case
+      asserts no `order_id`, order `(1,0,3)`, inventory `4`, and the
+      workflow row stays `PENDING` with no dispatch child).

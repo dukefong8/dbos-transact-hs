@@ -28,6 +28,7 @@ import DBOS.Transact
     Executor,
     Config (..),
     Ctx,
+    StepCtx,
     WorkflowCtx,
     workflowCtxInner,
     DBOS,
@@ -180,61 +181,95 @@ dropWidgetSchema app tables = do
 widgetConfig :: TransactionConfig
 widgetConfig = TransactionConfig {txName = Just "widget_step", txIsolation = Nothing}
 
--- | One app transaction at the engine's engine-only channel.
-widgetStep :: DataSource IO -> WorkflowCtx exec IO -> (Tx IO -> IO ()) -> IO (Either (Error EngineOnly) ())
-widgetStep ds wctx action = runTransactionScoped ds wctx widgetConfig (\_sctx tx -> Right <$> action tx)
+-- * Step tables (live twin of WidgetSim's A3 tables, dup'd on purpose)
 
-createOrderTx :: WidgetTables -> Tx IO -> IO Int
-createOrderTx tables (Tx run) = fromIntegral <$> run tables.wtCreateOrder ()
+-- | Order ids cross the ops boundary as a newtype; PG columns stay 'Int'
+-- (no table migration).
+newtype OrderId = OrderId Int
+  deriving stock (Eq, Show)
 
-reserveInventoryTx :: WidgetTables -> Tx IO -> IO Bool
-reserveInventoryTx tables (Tx run) = do
-  affected <- run tables.wtReserve ()
-  pure (affected > 0)
+-- | The checkout's transactional capabilities: one step per field. The
+-- 'StepCtx' parameter is the capability that scopes each call — the live
+-- handlers close over the held 'Tx' and do not read it.
+data CheckoutOps exec m = CheckoutOps
+  { coCreate :: StepCtx exec m -> m OrderId,
+    coReserve :: StepCtx exec m -> m Bool,
+    coUndo :: StepCtx exec m -> m (),
+    coSetStatus :: StepCtx exec m -> OrderId -> Int -> m ()
+  }
 
-undoReserveTx :: WidgetTables -> Tx IO -> IO ()
-undoReserveTx tables (Tx run) = run tables.wtUndoReserve ()
+-- | The dispatch's capabilities. 'coSetStatus' is repeated per the
+-- share-by-two rule (records are cheap; embed at three).
+data DispatchOps exec m = DispatchOps
+  { doTick :: StepCtx exec m -> OrderId -> m (),
+    doSetStatus :: StepCtx exec m -> OrderId -> Int -> m ()
+  }
 
-setStatusTx :: WidgetTables -> Int -> Int -> Tx IO -> IO ()
-setStatusTx tables orderId status (Tx run) =
-  run tables.wtSetStatus (fromIntegral orderId, fromIntegral status)
+-- | PG handlers behind the held connection: each op runs on the step's own
+-- 'Tx', so the application writes share the step's commit.
+pgCheckoutOps :: WidgetTables -> Tx IO -> CheckoutOps exec IO
+pgCheckoutOps tables (Tx run) =
+  CheckoutOps
+    { coCreate = \_ -> OrderId . fromIntegral <$> run tables.wtCreateOrder (),
+      coReserve = \_ -> (> 0) <$> run tables.wtReserve (),
+      coUndo = \_ -> run tables.wtUndoReserve (),
+      coSetStatus = \_ (OrderId oid) status -> run tables.wtSetStatus (fromIntegral oid, fromIntegral status)
+    }
 
-tickOrderTx :: WidgetTables -> Int -> Tx IO -> IO ()
-tickOrderTx tables orderId (Tx run) = do
-  remaining <- run tables.wtTick (fromIntegral orderId)
-  when (remaining <= 0) $
-    run tables.wtSetStatus (fromIntegral orderId, 1)
+pgDispatchOps :: WidgetTables -> Tx IO -> DispatchOps exec IO
+pgDispatchOps tables (Tx run) =
+  DispatchOps
+    { doTick = \_ (OrderId oid) -> do
+        remaining <- run tables.wtTick (fromIntegral oid)
+        when (remaining <= 0) $
+          run tables.wtSetStatus (fromIntegral oid, 1),
+      doSetStatus = \_ (OrderId oid) status -> run tables.wtSetStatus (fromIntegral oid, fromIntegral status)
+    }
+
+-- | The canned paid-write refusal for the mixed live test: the paid mark
+-- throws instead of committing, so the checkout stops before the dispatch
+-- child exactly like the sim's seed-8 variant.
+failingPgCheckoutOps :: WidgetTables -> Tx IO -> CheckoutOps exec IO
+failingPgCheckoutOps tables tx =
+  (pgCheckoutOps tables tx)
+    { coSetStatus = \s (OrderId oid) status ->
+        if status == 2
+          then throwIO (userError "mark_order_paid refused")
+          else (pgCheckoutOps tables tx).coSetStatus s (OrderId oid) status
+    }
 
 -- | The checkout workflow: create, reserve, publish the payment id, wait
 -- for the payment, then dispatch or compensate. Mirrors the oracle's
 -- @checkout_workflow@.
-checkoutBody :: forall exec. DataSource IO -> WorkflowRef IO EngineOnly -> WidgetTables -> () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
-checkoutBody ds dispatchRef tables () wctx = runExceptT $ do
-  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\_sctx tx -> Right <$> createOrderTx tables tx))
-  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\_sctx tx -> Right <$> reserveInventoryTx tables tx))
+checkoutBody :: forall exec. DataSource IO -> (Tx IO -> CheckoutOps exec IO) -> WorkflowRef IO EngineOnly -> () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+checkoutBody ds mkCheckout dispatchRef () wctx = runExceptT $ do
+  -- The checkpoint payload stays a plain Int (as before the flip); the
+  -- OrderId boundary is the ops table, unwrapped at the transaction edge.
+  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right . (\(OrderId oid) -> oid) <$> (mkCheckout tx).coCreate sctx))
+  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coReserve sctx))
   if not onShelf
     then do
-      _ <- ExceptT (widgetStep ds wctx (\tx -> setStatusTx tables orderId (-1) tx))
+      _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) (-1)))
       _ <- ExceptT (setEventScoped wctx "payment_id" (Nothing :: Maybe Text))
       pure "no-inventory"
     else do
       _ <- ExceptT (setEventScoped wctx "payment_id" (Just (Text.pack (show orderId))))
       ExceptT (recvScoped wctx (Just (Topic "payment_status")) (millisDuration 30000) :: IO (Either (Error EngineOnly) (Maybe Text))) >>= \case
         Just status | status == "paid" -> do
-          _ <- ExceptT (widgetStep ds wctx (\tx -> setStatusTx tables orderId 2 tx))
+          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) 2))
           _ <- ExceptT (startChildWorkflowScoped wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
           _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "paid"
         _ -> do
-          _ <- ExceptT (widgetStep ds wctx (\tx -> undoReserveTx tables tx))
-          _ <- ExceptT (widgetStep ds wctx (\tx -> setStatusTx tables orderId (-1) tx))
+          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coUndo sctx))
+          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) (-1)))
           _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "cancelled"
 
 -- | The dispatch workflow: three one-second ticks, the oracle's durable
 -- sleep loop.
-dispatchBody :: forall exec. DataSource IO -> WidgetTables -> Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
-dispatchBody ds tables orderId wctx = go (3 :: Int)
+dispatchBody :: forall exec. DataSource IO -> (Tx IO -> DispatchOps exec IO) -> Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+dispatchBody ds mkDispatch orderId wctx = go (3 :: Int)
   where
     go 0 = pure (Right "dispatched")
     go n = do
@@ -242,7 +277,7 @@ dispatchBody ds tables orderId wctx = go (3 :: Int)
       case slept of
         Left err -> pure (Left err)
         Right () -> do
-          _ <- widgetStep ds wctx (\tx -> tickOrderTx tables orderId tx)
+          _ <- runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkDispatch tx).doTick sctx (OrderId orderId)) :: IO (Either (Error EngineOnly) ())
           go (n - 1)
 
 -- * Fixture
@@ -281,10 +316,10 @@ acquireWidgetFixture = do
   let ds = toDataSource app
   _ <- registerDBOSDataSource dbos ds >>= either (fail . show) pure
   dispatchRef <-
-    registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds tables)
+    registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (pgDispatchOps tables))
       >>= either (fail . show) pure
   checkoutRef <-
-    registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds dispatchRef tables)
+    registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds (pgCheckoutOps tables) dispatchRef)
       >>= either (fail . show) pure
   pure
     WidgetFixture
@@ -395,6 +430,33 @@ tests =
         orders <- readOrders wf
         assertEqual "inventory is restored" 5 inventory
         assertEqual "the order is cancelled" [(1, -1, 3)] orders,
+      -- Mixed live+canned: the live engine and PG framing run a checkout
+      -- whose paid write is a canned refusal. The checkout must stop before
+      -- the dispatch child and publish no order id — the live shape of the
+      -- sim's seed-8 variant.
+      testCase "a refused paid write stops the checkout instead of dispatching" $ withWidgetFixture $ \wf -> do
+        let ds = toDataSource wf.wfApp
+        dispatchRef <-
+          registerDBOSWorkflowRefScoped wf.wfDbos (newWorkflowKey "DispatchOrderCannedFailWorkflow") (dispatchBody ds (pgDispatchOps wf.wfTables))
+            >>= either (fail . show) pure
+        checkoutRef <-
+          registerDBOSWorkflowRefScoped wf.wfDbos (newWorkflowKey "CheckoutCannedFailWorkflow") (checkoutBody ds (failingPgCheckoutOps wf.wfTables) dispatchRef)
+            >>= either (fail . show) pure
+        exec <- launchWidget wf
+        let widText = "hs-widget-canned-fail-" <> wf.wfSchema
+        _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just widText}) Nothing
+        waitEvent wf widText "payment_id"
+        _ <- sendWorkflowMessage wf.wfDbos (WorkflowId widText) (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("paid" :: Text))
+        -- Give a swallow regression time to publish order_id and dispatch.
+        threadDelay 2000000
+        orderIdResult <- getWorkflowEvent wf.wfDbos (WorkflowId widText) "order_id" (millisDuration 0)
+        case orderIdResult of
+          Right Nothing -> pure ()
+          other -> fail ("the failed checkout published an order id: " <> show other)
+        inventory <- readInventory wf
+        orders <- readOrders wf
+        assertEqual "the reservation stands without the paid mark" 4 inventory
+        assertEqual "the order is still pending with full progress" [(1, 0, 3)] orders,
       -- IO only: crash-and-relaunch recovery sweep (ADR-0020).
       testCase "a crash while waiting for payment replays the reserved steps" $ withWidgetFixture $ \wf -> do
         exec <- launchWidget wf
