@@ -112,10 +112,17 @@ the last module flips.
       bodies and MessageTest's helpers convert with the step-runner call
       sites (runWorkflowStep(With) -> scoped twins) when the step bodies
       take `StepCtx`; `runNestedStep` covers the nested shape.
-- [ ] C5b cleanup: delete the old registration entries, the `let ctx =`
-      aliases, and the helper downgrades by twin-swapping each body's
-      calls; enqueue/start `WorkflowCtx`-only; permanent `-fno-code`
-      probes (negative + witness) for the exec brand.
+- [x] C5b registration + twin-swap (4eb040f, 2785fee): every body's
+      alias deleted and calls moved to the scoped twins; the old
+      registration entries (`registerTypedWorkflow`, `registerWorkflowRef`,
+      `registerDBOSWorkflow`, `registerDBOSWorkflowRef`) and their facade
+      exports deleted; demo apps converted and registered scoped. Gates:
+      650/650, sim trees individually green, demo apps load clean.
+- [ ] C5c remaining: enqueue/start `WorkflowCtx`-only (the `Connection`-
+      taking enqueue paths); permanent `-fno-code` probes (negative +
+      witness) for the exec brand; hide `workflowCtxInner`/`stepCtxInner`
+      from the facade once the last helper downgrades (EventTest's
+      `action`, WidgetSim/WidgetTest's `widgetStep`) convert.
 - [ ] C5a remaining scoped surface for body code: `runWorkflowStepWithScoped`
       (options variant); scoped reader twins — StepCtx:
       `cancellationToken`/`cancelToken`/`tokenCancelled`/`stepId`/
