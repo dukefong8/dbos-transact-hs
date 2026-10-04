@@ -68,3 +68,13 @@ executable neg-step-cross-stack
   default-language: Haskell2010
   default-extensions: OverloadedStrings
   ghc-options:      -fno-code -w
+
+-- Witness control: the negative with the one illegal token fixed. MUST
+-- BUILD CLEAN; if it stops compiling, the negative is vacuous.
+executable w-sim-scope
+  main-is:          W_SimScope.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dual-store-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, io-sim, text
+  default-language: Haskell2010
+  default-extensions: OverloadedStrings
+  ghc-options:      -fno-code -w

@@ -81,3 +81,27 @@ executable neg-cross-exec
   build-depends:    base, dbos-steps-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
   default-language: Haskell2010
   ghc-options:      -fno-code -w
+
+-- Witness controls: each is its negative with the one illegal token
+-- fixed. MUST BUILD CLEAN (and W2 must run); if one stops compiling,
+-- its negative is vacuous.
+executable w-op-in-step
+  main-is:          W1_OpInStep.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-steps-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable w-shared-body
+  main-is:          W2_SharedBody.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-steps-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, io-sim, text
+  default-language: Haskell2010
+  ghc-options:      -w
+
+executable w-same-exec
+  main-is:          W3_SameExec.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-steps-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w

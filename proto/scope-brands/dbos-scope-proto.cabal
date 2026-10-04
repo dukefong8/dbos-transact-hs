@@ -94,6 +94,44 @@ executable neg-n7-pin-cross-exec
   default-language: Haskell2010
   ghc-options:      -fno-code -w
 
+-- Witness controls: each is its negative with the one illegal token
+-- fixed. MUST BUILD CLEAN; if one stops compiling, its negative is
+-- vacuous. -fno-code: typecheck only, matching the negatives.
+executable w-n2-start-with-ctx
+  main-is:          W_N2_StartWithCtx.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable w-n4-nextid-on-ctx
+  main-is:          W_N4_NextIdOnCtx.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable w-n5-same-exec-drive
+  main-is:          W_N5_SameExecDrive.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable w-n6-same-run
+  main-is:          W_N6_SameRun.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, io-sim, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
+executable w-n7-same-exec-pin
+  main-is:          W_N7_SameExecPin.hs
+  hs-source-dirs:   neg
+  build-depends:    base, dbos-scope-proto, io-classes, io-classes:strict-mvar, io-classes:strict-stm, text
+  default-language: Haskell2010
+  ghc-options:      -fno-code -w
+
 executable proto-backstop
   main-is:          Main.hs
   hs-source-dirs:   app-backstop

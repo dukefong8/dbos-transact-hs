@@ -28,6 +28,17 @@ for t in neg-n2-step-start neg-n4-nextid-on-step neg-n5-cross-exec-drive \
   fi
 done
 
+echo "=== witness controls (must BUILD CLEAN — else the negative is vacuous) ==="
+for w in w-n2-start-with-ctx w-n4-nextid-on-ctx w-n5-same-exec-drive \
+         w-n6-same-run w-n7-same-exec-pin; do
+  if cabal build exe:$w >/dev/null 2>&1; then
+    ok "witness $w builds"
+  else
+    bad "witness $w does not build — its negative is suspect"
+    cabal build exe:$w 2>&1 | grep -m1 "error" || true
+  fi
+done
+
 echo "=== runtime backstop (capture compiles; refusal must fire) ==="
 out=$(cabal run proto-backstop 2>/dev/null)
 echo "$out"

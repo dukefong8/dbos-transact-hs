@@ -48,5 +48,13 @@ for t in neg-step-cross-stack; do
   fi
 done
 
+echo "=== witness control (must BUILD CLEAN — else the negative is vacuous) ==="
+if cabal build exe:w-sim-scope >/dev/null 2>&1; then
+  ok "witness w-sim-scope builds"
+else
+  bad "witness w-sim-scope does not build — its negative is suspect"
+  cabal build exe:w-sim-scope 2>&1 | grep -m1 "error" || true
+fi
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

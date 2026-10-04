@@ -48,5 +48,21 @@ for t in neg-op-in-workflow neg-raw-io neg-cross-exec; do
   fi
 done
 
+echo "=== witness controls (must BUILD CLEAN — else the negative is vacuous) ==="
+for w in w-op-in-step w-shared-body w-same-exec; do
+  if cabal build exe:$w >/dev/null 2>&1; then
+    ok "witness $w builds"
+  else
+    bad "witness $w does not build — its negative is suspect"
+    cabal build exe:$w 2>&1 | grep -m1 "error" || true
+  fi
+done
+echo "=== witness W2 runs (shared body under IOSim) ==="
+if [ "$(cabal run w-shared-body 2>/dev/null)" = "8" ]; then
+  ok "witness w-shared-body runs (7 + 1)"
+else
+  bad "witness w-shared-body did not produce the expected result"
+fi
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0
