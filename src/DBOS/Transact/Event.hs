@@ -6,9 +6,13 @@
 -- from the explicit context and decodes their serialized values.
 module DBOS.Transact.Event
   ( setEvent,
+    setEventScoped,
     getEvent,
+    getEventScoped,
     pendingGetEvent,
+    pendingGetEventScoped,
     pendingSetEvent,
+    pendingSetEventScoped,
   )
 where
 
@@ -25,7 +29,7 @@ import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Se
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (Ctx, insideAStep, nextStepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (Ctx, WorkflowCtx, insideAStep, nextStepId, withSystemDB, workflowId, workflowCtxInner)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 
@@ -73,6 +77,31 @@ driveSetEvent ctx key value placement =
       pure $ case written of
         Left err -> Left (TransactError.ErrorSystemDatabase err)
         Right () -> Right ()
+
+-- | 'setEvent' over the scoped workflow view.
+setEventScoped :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+setEventScoped wctx key value = setEvent (workflowCtxInner wctx) key value
+
+-- | 'pendingSetEvent' over the scoped workflow view.
+pendingSetEventScoped :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (PendingStep m (Either (TransactError.Error TransactError.EngineOnly) ()))
+pendingSetEventScoped wctx key value = pendingSetEvent (workflowCtxInner wctx) key value
+
+-- | 'getEvent' over the scoped workflow view.
+getEventScoped :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
+getEventScoped wctx destination key timeout = getEvent (workflowCtxInner wctx) destination key timeout
+
+-- | 'pendingGetEvent' over the scoped workflow view: the named instance
+-- still serves the read, the scope comes from the caller's execution.
+pendingGetEventScoped ::
+  (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m) =>
+  WorkflowCtx exec m ->
+  DBOS m ->
+  WorkflowId ->
+  Text ->
+  Duration ->
+  m (PendingStep m (Either (TransactError.Error c) (Maybe value)))
+pendingGetEventScoped wctx dbos destination key timeout =
+  pendingGetEvent dbos (workflowCtxInner wctx) destination key timeout
 
 -- | Read an event of another workflow, waiting up to the polling duration.
 -- The read belongs to the destination, the checkpoint to the caller. Outside

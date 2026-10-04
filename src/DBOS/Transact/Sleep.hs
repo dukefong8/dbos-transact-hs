@@ -5,7 +5,7 @@
 -- wait until it, and on replay wait only what is left of the original wait.
 -- The recorded wake time is the step output and @completed_at@ is stamped at
 -- the wake time, so an hour's sleep reads as an hour rather than an instant.
-module DBOS.Transact.Sleep (sleepWorkflowStep, pendingSleep, sleepPlain, SleepEvent (..)) where
+module DBOS.Transact.Sleep (sleepWorkflowStep, sleepWorkflowStepScoped, pendingSleep, pendingSleepScoped, sleepPlain, SleepEvent (..)) where
 
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
@@ -16,7 +16,7 @@ import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
-import DBOS.Transact.Context (Ctx, contextTracer, nextStepId, stepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (Ctx, WorkflowCtx, contextTracer, nextStepId, stepId, withSystemDB, workflowId, workflowCtxInner)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Error qualified as TransactError
 
@@ -51,6 +51,14 @@ pendingSleep :: (MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> Duration -> 
 pendingSleep ctx duration = do
   placement <- placeCall ctx
   pure (PendingStep sleepStepName (Just placement) (driveSleep ctx duration placement))
+
+-- | 'sleepWorkflowStep' over the scoped workflow view.
+sleepWorkflowStepScoped :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sleepWorkflowStepScoped wctx duration = sleepWorkflowStep (workflowCtxInner wctx) duration
+
+-- | 'pendingSleep' over the scoped workflow view.
+pendingSleepScoped :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (PendingStep m (Either (TransactError.Error TransactError.EngineOnly) ()))
+pendingSleepScoped wctx duration = pendingSleep (workflowCtxInner wctx) duration
 
 -- | Drives a placed sleep: a plain wait inside a step or outside a
 -- workflow, otherwise the recorded wake-time wait under the claimed id.

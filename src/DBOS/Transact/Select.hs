@@ -43,6 +43,7 @@ module DBOS.Transact.Select
     SelectArm (..),
     Winner (..),
     selectStep,
+    selectStepScoped,
   )
 where
 
@@ -58,7 +59,7 @@ import DBOS.SystemDB.Types (Outcome (..), Serialization (..), SerializedWorkflow
 import DBOS.Transact.Checkpoint (PendingStep (..), StepPlacement (..), pendingStepId, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (Ctx, currentConnection, workflowId)
+import DBOS.Transact.Context (Ctx, WorkflowCtx, currentConnection, workflowId, workflowCtxInner)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Serialization (CodecError, decodeWorkflowValue, encodeWorkflowValue)
 
@@ -241,6 +242,16 @@ data Winner m r = forall a. Winner
 -- 'DBOS.Transact.Step.pendingWorkflowStep' or
 -- 'DBOS.Transact.Handle.pendingAwait' — so every branch has claimed its id
 -- before the race's own id follows them.
+-- | 'selectStep' over the scoped workflow view: the race's id and the
+-- recorded winner are claimed through the workflow context, and the arms
+-- are pendings built through the same view.
+selectStepScoped ::
+  (MonadAsync m, MonadTime m) =>
+  WorkflowCtx exec m ->
+  [SelectArm m r] ->
+  m (Either (TransactError.Error TransactError.EngineOnly) r)
+selectStepScoped wctx arms = selectStep (workflowCtxInner wctx) arms
+
 selectStep ::
   (MonadAsync m, MonadTime m) =>
   Ctx m ->

@@ -19,6 +19,7 @@ module DBOS.Transact.WorkflowTest
     scenarioAwaitInsideStep,
     scenarioChildIdsInBuildOrder,
     scenarioStepIdPairs,
+    scenarioScopedSelect,
     scenarioSelectStepRaces,
     scenarioControlSelect,
     scenarioLosingTokenFired,
@@ -57,6 +58,7 @@ module DBOS.Transact.WorkflowTest
     checkAwaitInsideStep,
     checkChildIdsInBuildOrder,
     checkStepIdPairs,
+    checkScopedSelect,
     checkSelectStepRaces,
     checkControlSelect,
     checkLosingTokenFired,
@@ -181,6 +183,7 @@ import DBOS.Transact
     runOptionsToStartOptions,
     nullTracer,
     pendingAwait,
+    pendingWorkflowStepScoped,
     pendingWorkflowStepWith,
     runWorkflowStep,
     runWorkflowStepWith,
@@ -192,12 +195,14 @@ import DBOS.Transact
     millisDuration,
     secondsDuration,
     selectStep,
+    selectStepScoped,
     shutdown,
     startDBOSWorkflowRef,
     startOptionsDefault,
     stepOptionsDefault,
     tokenCancelled,
     withAttempt,
+    withWorkflow,
     timeoutBudget,
     waitForWorkflow,
     withSystemDB,
@@ -355,6 +360,7 @@ tests =
       liveCase getBackend (ioTracer . fst <$> getLogger) "child starts and awaits keep their ids in build order" scenarioChildIdsInBuildOrder checkChildIdsInBuildOrder,
       liveCase getBackend (ioTracer . fst <$> getLogger) "runs claim their pairs of step ids adjacently" scenarioStepIdPairs checkStepIdPairs,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a select step races a step against a child's result" scenarioSelectStepRaces checkSelectStepRaces,
+      liveCase getBackend (ioTracer . fst <$> getLogger) "a scoped select races two pending steps" scenarioScopedSelect checkScopedSelect,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a control signal winning a select records no winner" scenarioControlSelect checkControlSelect,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a losing step has its cancellation token fired" scenarioLosingTokenFired checkLosingTokenFired,
       liveCase getBackend (ioTracer . fst <$> getLogger) "a cancelled child is an awaited cancellation in the parent" scenarioCancelledChildAwaited checkCancelledChildAwaited,
@@ -696,6 +702,10 @@ data WfFixture m = WfFixture
     -- its own connection, registry, and identity (executor and version
     -- suffixed), for the cross-instance refusals.
     wfSecondInstance :: m (DBOS m, m (Executor m)),
+    -- | The fixture's connection and application identity, for scenarios
+    -- that build a workflow scope directly instead of through a runner.
+    wfConn :: m (Connection m),
+    wfIdentity :: Identity,
     -- | The backend the tree passed in, for scenarios that seed or read
     -- durable state directly (e.g. planting a stale await).
     wfSystemDB :: SomeSystemDB m
@@ -799,6 +809,8 @@ mkWfFixture config identity connApp nameScheme genId genEntropy sysdb tracer = d
         wfSecondInstance = do
           dbos2 <- newDBOS config2
           pure (dbos2, launchOn dbos2 secondConn identity2),
+        wfConn = pure conn,
+        wfIdentity = identity,
         wfSystemDB = sysdb
       }
 
@@ -2107,6 +2119,46 @@ scenarioCancelledChildAwaited fx = do
     parentRow <- fx.wfReadRow wid
     childRow <- fx.wfReadRow (WorkflowId childText)
     pure (ran, steps, (.workflowRecordStatus) <$> parentRow, (.workflowRecordStatus) <$> childRow, childText)
+
+-- | The scoped select: two pending steps built through the workflow view,
+-- raced by 'selectStepScoped' over the same view. The fast arm wins, the
+-- select records its own position after both branch ids, and the loser
+-- leaves no row. Returns the winner's value and the recorded steps.
+scenarioScopedSelect ::
+  forall m.
+  (MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m) =>
+  WfFixture m ->
+  m (Either (Error EngineOnly) Int, [(Int, Text)])
+scenarioScopedSelect fx = do
+  bracket fx.wfNewDBOS shutdown $ \_dbos -> do
+    wid <- fx.wfFreshId "scoped-select-parent"
+    let WorkflowId widText = wid
+    created <-
+      runSystemDB fx.wfSystemDB $ \db ->
+        SystemDB.initWorkflow db ((newWorkflow widText) {newWorkflowName = Just "L2ScopedSelect"}) Nothing Fresh Nothing
+    case created of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    conn <- fx.wfConn
+    outcome <-
+      withWorkflow conn fx.wfIdentity wid Nothing $ \wctx -> do
+        slow <- pendingWorkflowStepScoped wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (2 :: Int)))
+        fast <- pendingWorkflowStepScoped wctx "fast" (\_ -> pure (Right (1 :: Int)))
+        selectStepScoped
+          wctx
+          [ SelectArm "slow" slow (\armOutcome -> pure (armOutcome >>= \value -> Right value)),
+            SelectArm "fast" fast (\armOutcome -> pure (armOutcome >>= \value -> Right value))
+          ]
+    steps <- fx.wfListSteps wid
+    pure (outcome, map (\row -> (row.stepRecordStepId, row.stepRecordStepName)) steps)
+
+-- | The winner is the fast arm's value; the rows are the fast step under
+-- its branch id and the select's own position after both branches.
+checkScopedSelect :: (Either (Error EngineOnly) Int, [(Int, Text)]) -> Either String ()
+checkScopedSelect (outcome, steps)
+  | outcome /= Right 1 = Left ("expected the fast arm's value, got: " <> show outcome)
+  | steps /= [(1, "fast"), (2, "DBOS.selectStep")] = Left ("unexpected rows: " <> show steps)
+  | otherwise = Right ()
 
 -- | A losing step has its cancellation token fired: the loser registers
 -- a watcher on its token, then parks; the winner waits for that
