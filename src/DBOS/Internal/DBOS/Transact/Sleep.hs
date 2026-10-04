@@ -16,7 +16,7 @@ import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
-import DBOS.Transact.Context (Ctx, WorkflowCtx, contextTracer, nextStepId, stepId, withSystemDB, workflowId, workflowCtxInner)
+import DBOS.Transact.Context (WorkflowCtx, nextWorkflowStepId, stepCtxBoundary, withSystemDB, workflowCtxId, workflowTracer)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Error qualified as TransactError
 
@@ -42,40 +42,37 @@ instance ToLogStr SleepEvent where
   toLogStr = toLogStr . renderLine
 
 sleepWorkflowStep :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-sleepWorkflowStep wctx duration = placeCall ctx >>= driveSleep ctx duration
-  where
-    ctx = workflowCtxInner wctx
+sleepWorkflowStep wctx duration = placeCall wctx >>= driveSleep wctx duration
 
 -- | A sleep built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the wait runs when the
 -- pending value is awaited or raced.
 pendingSleep :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
 pendingSleep wctx duration = do
-  let ctx = workflowCtxInner wctx
-  placement <- placeCall ctx
-  pure (PendingStep sleepStepName (Just placement) (driveSleep ctx duration placement))
+  placement <- placeCall wctx
+  pure (PendingStep sleepStepName (Just placement) (driveSleep wctx duration placement))
 
 -- | Drives a placed sleep: a plain wait inside a step or outside a
 -- workflow, otherwise the recorded wake-time wait under the claimed id.
-driveSleep :: (MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> Duration -> StepPlacement m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-driveSleep ctx duration placement =
-  case checkHere placement sleepStepName (Just ctx) of
+driveSleep :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+driveSleep wctx duration placement =
+  case checkHere placement sleepStepName (Just (stepCtxBoundary wctx)) of
     Left err -> pure (Left err)
     Right DurabilityPlain -> do
       -- Inside a step the sleep is plain: the enclosing step's checkpoint
       -- stands for everything its body did, and taking an id here would shift
       -- every step after it on replay. Mirrors Rust's @InsideStep@ placement.
-      runTracer (contextTracer ctx) (SleepUncheckpointed (durationAsMillis duration))
+      runTracer (workflowTracer wctx) (SleepUncheckpointed (durationAsMillis duration))
       sleepPlain duration >> pure (Right ())
-    Right (DurabilityRecorded ctx' stepId') -> do
-      let workflowId' = WorkflowId (workflowId ctx')
-      recordedWake <- withSystemDB ctx' (\db -> SystemDB.recordSleep db workflowId' stepId' duration)
+    Right (DurabilityRecorded wctx' stepId') -> do
+      let workflowId' = WorkflowId (workflowCtxId wctx')
+      recordedWake <- withSystemDB wctx' (\db -> SystemDB.recordSleep db workflowId' stepId' duration)
       case recordedWake of
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
         Right wakeAt -> do
           now <- timestampNow
           let remainingMillis = max 0 (timestampToEpochMs wakeAt - timestampToEpochMs now)
-          runTracer (contextTracer ctx') (SleepUntilWake stepId' remainingMillis)
+          runTracer (workflowTracer wctx') (SleepUntilWake stepId' remainingMillis)
           threadDelay (millisToMicros remainingMillis)
           pure (Right ())
 

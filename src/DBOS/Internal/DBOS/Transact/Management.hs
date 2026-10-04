@@ -30,7 +30,7 @@ import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelWorkflowStepName, deleteWorkflowStepName, forkOptionsValidate, forkValidate, forkWorkflowStepName, listWorkflowsStepName, resumeWorkflowStepName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (WorkflowCtx, currentConnection, stepCtxId, stepCtxStatus, stepStatusId, workflowCtxInner)
+import DBOS.Transact.Context (WorkflowCtx, stepCtxId, stepCtxStatus, stepStatusId, workflowConnection)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runWorkflowStepWith, stepOptionsDefault)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
@@ -101,7 +101,7 @@ cancelWorkflowsInWorkflow wctx workflowIds cancelChildren =
     cancelWorkflowStepName
     (\_ -> cancelWorkflows conn workflowIds cancelChildren)
   where
-    conn = currentConnection (workflowCtxInner wctx)
+    conn = workflowConnection wctx
 
 resumeWorkflows :: Monad m => Connection m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflows conn workflowIds queueName = do
@@ -125,7 +125,7 @@ resumeWorkflowsInWorkflow wctx workflowIds queueName =
     resumeWorkflowStepName
     (\_ -> resumeWorkflows conn workflowIds queueName)
   where
-    conn = currentConnection (workflowCtxInner wctx)
+    conn = workflowConnection wctx
 
 deleteWorkflows :: Monad m => Connection m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflows conn workflowIds deleteChildren =
@@ -168,7 +168,7 @@ deleteWorkflowsInWorkflow wctx workflowIds deleteChildren =
         Nothing -> deleteWorkflows conn workflowIds deleteChildren
     )
   where
-    conn = currentConnection (workflowCtxInner wctx)
+    conn = workflowConnection wctx
 
 forkWorkflows :: Monad m => Connection m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkWorkflows conn forks options = do
@@ -196,7 +196,7 @@ forkWorkflowsInWorkflow wctx forks options =
         forkWorkflowStepName
         (\_ -> forkWorkflows conn forks options)
   where
-    conn = currentConnection (workflowCtxInner wctx)
+    conn = workflowConnection wctx
 
 forkFrom :: Monad m => Connection m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFrom conn workflowIds point options = do
@@ -229,7 +229,7 @@ forkFromInWorkflow wctx workflowIds point options =
         forkWorkflowStepName
         (\_ -> forkFrom conn workflowIds point options)
   where
-    conn = currentConnection (workflowCtxInner wctx)
+    conn = workflowConnection wctx
 
 -- | Replaces the attributes attached to a workflow, or clears them when
 -- given 'Nothing'. Mirrors Rust @DBOS::update_workflow_attributes@ outside
@@ -266,4 +266,4 @@ listWorkflowsInWorkflow wctx filters =
     listWorkflowsStepName
     (\_ -> listWorkflows conn filters)
   where
-    conn = currentConnection (workflowCtxInner wctx)
+    conn = workflowConnection wctx

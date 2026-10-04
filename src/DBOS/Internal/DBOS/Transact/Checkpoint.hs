@@ -14,6 +14,7 @@ module DBOS.Transact.Checkpoint
     placementAt,
     placementHere,
     placeCall,
+    placeNestedCall,
     takenPlacement,
     placementStepId,
     pendingStepId,
@@ -26,32 +27,36 @@ where
 
 import DBOS.Prelude
 import Data.Text (Text)
-import DBOS.Transact.Context (Ctx, StepMarker, currentConnection, inStep, nextStepId, stepDepth, stepId, stepMarker, workflowId)
+import DBOS.Transact.Context (StepCtx, WorkflowCtx, insideAStep, nextWorkflowStepId, stepCtxBoundary, stepCtxId, stepCtxWorkflow, stepId, stepMarker, workflowConnection, workflowCtxId)
 import DBOS.Transact.Connection (Connection (..), Owner (..))
 import DBOS.Transact.Error (Error (..))
 
 -- | Where a durable call stands: which of the execution's step ids it
 -- occupies, if any. One type for both user steps and library steps.
-data StepPlacement m
+-- Branded by execution (C2c): a placement built in one run cannot be
+-- driven in another. The carried views drive the call — the workflow view
+-- reaches the backend, the attempt view additionally carries the body it
+-- was built in, so a plain call hands back the scope it came from.
+data StepPlacement exec m
   = -- | Not inside a workflow. Nothing is recorded.
     Outside
   | -- | Inside a step body, a plain call by the leaf rule. Rust spells this
     -- @InsideStep@; the @Placement@ prefix is the collision deviation,
     -- because 'DBOS.Transact.Error' already owns @InsideStep@.
-    PlacementInsideStep (Ctx m)
+    PlacementInsideStep (StepCtx exec m)
   | -- | Reached through a client's connection: no counter to agree with,
     -- so the undurable version of the call.
     ClientConnection
   | -- | Inside a workflow at a step boundary: this call is a step.
-    Recorded (Ctx m) Int
+    Recorded (WorkflowCtx exec m) Int
   deriving stock (Eq, Show)
 
 -- | What 'checkHere' answers for a call it accepts. Constructors carry the
 -- @Durability@ prefix: Rust spells both this and 'StepPlacement' @Recorded@,
 -- and one module cannot hold the name twice.
-data StepDurability m
+data StepDurability exec m
   = -- | Durable: record it under this workflow and this id.
-    DurabilityRecorded (Ctx m) Int
+    DurabilityRecorded (WorkflowCtx exec m) Int
   | -- | Undurable, and rightly so: it claimed no id.
     DurabilityPlain
   deriving stock (Eq, Show)
@@ -63,17 +68,17 @@ data StepDurability m
 -- that failed before it reached the counter and claims no position anywhere.
 data PendingStep exec m a = PendingStep
   { name :: Text,
-    placement :: Maybe (StepPlacement m),
+    placement :: Maybe (StepPlacement exec m),
     pendingRun :: m a
   }
 
 -- | 'here' for a caller already holding the context. Inside a step body the
 -- call is plain; at a step boundary it records under the allocated id.
-placementAt :: Ctx m -> Int -> StepPlacement m
-placementAt ctx stepId' =
-  case stepId ctx of
-    Just _ -> PlacementInsideStep ctx
-    Nothing -> Recorded ctx stepId'
+placementAt :: StepCtx exec m -> Int -> StepPlacement exec m
+placementAt sctx stepId' =
+  case stepId sctx of
+    Just _ -> PlacementInsideStep sctx
+    Nothing -> Recorded (stepCtxWorkflow sctx) stepId'
 
 -- | Where a call served by the given connection stands, with the ambient
 -- context reconciled against it. Mirrors @StepPlacement::taken@: inside a
@@ -85,59 +90,57 @@ placementAt ctx stepId' =
 -- instance identities, which is what the two halves would disagree about.
 -- Callers check their own launch first, so a call to an unlaunched
 -- instance moves no counter.
-takenPlacement :: MonadSTM m => Connection m -> Text -> Ctx m -> m (Either (Error e) (StepPlacement m))
-takenPlacement conn operation ctx
-  | inStep ctx = pure (Right (PlacementInsideStep ctx))
-  | otherwise = do
-      depth <- stepDepth ctx
-      -- Ordered as the oracle orders it: inside a step nothing is
-      -- checkpointed whoever serves it, so the depth refusal comes before
-      -- the connection comparison — a captured parent under a foreign
-      -- connection is a plain call, not a 'WrongInstance'.
-      if depth > 0
-        then pure (Right (PlacementInsideStep ctx))
-        else
-          if conn.connInstanceId == (currentConnection ctx).connInstanceId
-            then do
-              stepId' <- nextStepId ctx
-              pure (Right (Recorded ctx stepId'))
-            else pure $ case conn.connOwner of
-              OwnerClient -> Right ClientConnection
-              OwnerApplication -> Left (WrongInstance {operation = operation})
+takenPlacement :: MonadSTM m => Connection m -> Text -> WorkflowCtx exec m -> m (Either (Error e) (StepPlacement exec m))
+takenPlacement conn operation wctx = do
+  stepped <- insideAStep wctx
+  -- Ordered as the oracle orders it: inside a step nothing is
+  -- checkpointed whoever serves it, so the depth refusal comes before
+  -- the connection comparison — a captured parent under a foreign
+  -- connection is a plain call, not a 'WrongInstance'.
+  if stepped
+    then pure (Right (PlacementInsideStep (stepCtxBoundary wctx)))
+    else
+      if conn.connInstanceId == (workflowConnection wctx).connInstanceId
+        then do
+          stepId' <- nextWorkflowStepId wctx
+          pure (Right (Recorded wctx stepId'))
+        else pure $ case conn.connOwner of
+          OwnerClient -> Right ClientConnection
+          OwnerApplication -> Left (WrongInstance {operation = operation})
 
 -- | Where a call being *built* stands: the id is claimed here, before
 -- anything the call does can fail, because the position of the call in the
 -- workflow has to be the same on the run as it was on the run. Mirrors
 -- the allocation half of Rust @StepPlacement::here@; 'placementHere' is the
 -- reader for a placement that already knows its id.
-placeCall :: MonadSTM m => Ctx m -> m (StepPlacement m)
-placeCall ctx
-  | inStep ctx = pure (PlacementInsideStep ctx)
-  | otherwise = do
-      depth <- stepDepth ctx
-      -- A call built while a step body runs is plain by the leaf rule,
-      -- whether the context in hand says so or not. The context says it
-      -- when it is the body's own ('inStep'); the depth says it when the
-      -- call reaches through a captured parent, whose own scope field
-      -- predates the body. Either way nothing is recorded and no id
-      -- moves — the oracle degrades the same way for whatever its ambient
-      -- context reports as in-step.
-      if depth > 0
-        then pure (PlacementInsideStep ctx)
-        else do
-          stepId' <- nextStepId ctx
-          pure (Recorded ctx stepId')
+placeCall :: MonadSTM m => WorkflowCtx exec m -> m (StepPlacement exec m)
+placeCall wctx = do
+  stepped <- insideAStep wctx
+  -- A call built while a step body runs is plain by the leaf rule. A
+  -- handed 'StepCtx' never reaches this entry (it builds through
+  -- 'placeNestedCall'); the depth says it when the call reaches through a
+  -- captured parent. Either way nothing is recorded and no id moves.
+  if stepped
+    then pure (PlacementInsideStep (stepCtxBoundary wctx))
+    else do
+      stepId' <- nextWorkflowStepId wctx
+      pure (Recorded wctx stepId')
 
 -- | Where a call stands given the ambient context, with the id its caller
 -- already allocated. Outside a workflow there is no counter to draw from.
-placementHere :: Maybe (Ctx m) -> Int -> StepPlacement m
+-- | Where a call inside a step body stands: plain by the leaf rule,
+-- carrying the attempt it was built in so the drive hands it back.
+placeNestedCall :: StepCtx exec m -> StepPlacement exec m
+placeNestedCall sctx = PlacementInsideStep sctx
+
+placementHere :: Maybe (StepCtx exec m) -> Int -> StepPlacement exec m
 placementHere ambient stepId' =
   case ambient of
     Nothing -> Outside
-    Just ctx -> placementAt ctx stepId'
+    Just sctx -> placementAt sctx stepId'
 
 -- | The id this call claimed, or 'Nothing' where it claimed none.
-placementStepId :: StepPlacement m -> Maybe Int
+placementStepId :: StepPlacement exec m -> Maybe Int
 placementStepId placement =
   case placement of
     Recorded _ stepId' -> Just stepId'
@@ -156,14 +159,14 @@ pendingStepId pending =
 -- scope, and what polling it there means. An id is a claim on one position
 -- in one workflow, so a call carried somewhere that cannot honour it is
 -- refused rather than run.
-checkHere :: StepPlacement m -> Text -> Maybe (Ctx m) -> Either (Error e) (StepDurability m)
+checkHere :: StepPlacement exec m -> Text -> Maybe (StepCtx exec m) -> Either (Error e) (StepDurability exec m)
 checkHere placement step ambient =
   case (placement, ambient) of
-    (Recorded ctx stepId', Just here)
-      | workflowId here == workflowId ctx && stepId here == Nothing ->
-          Right (DurabilityRecorded ctx stepId')
-    (PlacementInsideStep ctx, Just here)
-      | sameStepBody ctx here ->
+    (Recorded wctx stepId', Just here)
+      | stepCtxId here == workflowCtxId wctx && stepId here == Nothing ->
+          Right (DurabilityRecorded wctx stepId')
+    (PlacementInsideStep built, Just here)
+      | sameStepBody built here ->
           Right DurabilityPlain
     -- A call built through a captured parent while a step body runs
     -- carries no marker on either side: the depth said in-step where the
@@ -171,10 +174,10 @@ checkHere placement step ambient =
     -- shape — nothing is recorded and no id moves — so a step body's own
     -- calls and its parent's calls read together. Marker-bearing
     -- placements still mismatch below, as do cross-workflow ones.
-    (PlacementInsideStep ctx, Just here)
-      | stepMarker ctx == Nothing
+    (PlacementInsideStep built, Just here)
+      | stepMarker built == Nothing
       , stepMarker here == Nothing
-      , workflowId ctx == workflowId here ->
+      , stepCtxId built == stepCtxId here ->
           Right DurabilityPlain
     (Outside, Nothing) -> Right DurabilityPlain
     (ClientConnection, _) -> Right DurabilityPlain
@@ -190,44 +193,44 @@ checkHere placement step ambient =
     -- Compared by marker alone: a marker is unique within its workflow, so
     -- equal markers are the same body. The match keeps two absent markers
     -- from matching as the workflow proper twice.
-    sameStepBody context here =
-      case (stepMarker context, stepMarker here) of
+    sameStepBody built here =
+      case (stepMarker built, stepMarker here) of
         (Just outer, Just inner) ->
-          outer == inner && workflowId here == workflowId context
+          outer == inner && stepCtxId here == stepCtxId built
         _ -> False
 
 -- | How to describe the place a call is standing, given the context there.
-describePlacement :: Maybe (Ctx m) -> Text
+describePlacement :: Maybe (StepCtx exec m) -> Text
 describePlacement ambient =
   case ambient of
     Nothing -> "outside a workflow"
-    Just ctx -> case stepId ctx of
-      Just _ -> "inside a step of workflow " <> workflowId ctx
-      Nothing -> "in workflow " <> workflowId ctx
+    Just sctx -> case stepId sctx of
+      Just _ -> "inside a step of workflow " <> stepCtxId sctx
+      Nothing -> "in workflow " <> stepCtxId sctx
 
 -- | How to describe where a placement was built.
-placementWhereabouts :: StepPlacement m -> Text
+placementWhereabouts :: StepPlacement exec m -> Text
 placementWhereabouts placement =
   case placement of
-    Recorded ctx _ -> describePlacement (Just ctx)
-    PlacementInsideStep ctx -> describePlacement (Just ctx)
+    Recorded wctx _ -> describePlacement (Just (stepCtxBoundary wctx))
+    PlacementInsideStep sctx -> describePlacement (Just sctx)
     ClientConnection -> "on a client's connection"
     Outside -> describePlacement Nothing
 
 -- | How to describe where a refused call was polled. Two different step
 -- bodies of one workflow describe identically, so the marker is what told
 -- them apart and the message says so.
-describePolled :: StepPlacement m -> Maybe (Ctx m) -> Text
+describePolled :: StepPlacement exec m -> Maybe (StepCtx exec m) -> Text
 describePolled placement ambient =
   case (placement, ambient) of
     (PlacementInsideStep _, Just here) -> case stepMarker here of
-      Just _ -> "inside a different step of workflow " <> workflowId here
+      Just _ -> "inside a different step of workflow " <> stepCtxId here
       Nothing -> describePlacement ambient
     _ -> describePlacement ambient
 
 -- | Whether there is a surrounding workflow: true wherever a cancelled
 -- awaited workflow must be distinguished from this caller being cancelled.
-insideAWorkflow :: StepPlacement m -> Bool
+insideAWorkflow :: StepPlacement exec m -> Bool
 insideAWorkflow placement =
   case placement of
     Outside -> False

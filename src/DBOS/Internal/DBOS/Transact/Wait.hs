@@ -28,7 +28,7 @@ import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), Se
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (Ctx, contextTracer, currentConnection, nextStepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (WorkflowCtx, nextWorkflowStepId, withSystemDB, workflowConnection, workflowCtxId, workflowTracer)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 
@@ -56,13 +56,13 @@ instance ToLogStr WaitEvent where
 -- waits on has changed what this position of its code means. (Deviation: the
 -- step id is taken at the call, not at the build, as everywhere in this
 -- port.)
-selectWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m) => Ctx m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowId)
-selectWorkflow ctx workflowIds = do
-  let workflowText = workflowId ctx
+selectWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m) => WorkflowCtx exec m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowId)
+selectWorkflow wctx workflowIds = do
+  let workflowText = workflowCtxId wctx
       workflowId' = WorkflowId workflowText
-      interval = (currentConnection ctx).connOutcomePollInterval
-  stepId' <- nextStepId ctx
-  checked <- withSystemDB ctx (\db -> SystemDB.checkStep db workflowId' stepId' selectWorkflowStepName)
+      interval = (workflowConnection wctx).connOutcomePollInterval
+  stepId' <- nextWorkflowStepId wctx
+  checked <- withSystemDB wctx (\db -> SystemDB.checkStep db workflowId' stepId' selectWorkflowStepName)
   case checked of
     Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
     Right (Just recorded) ->
@@ -85,7 +85,7 @@ selectWorkflow ctx workflowIds = do
               Right winner ->
                 if WorkflowId winner `elem` workflowIds
                   then do
-                    runTracer (contextTracer ctx) (SelectWorkflowReplaying winner)
+                    runTracer (workflowTracer wctx) (SelectWorkflowReplaying winner)
                     pure (Right (WorkflowId winner))
                   else
                     pure
@@ -106,13 +106,13 @@ selectWorkflow ctx workflowIds = do
           let refused = TransactError.InvalidArgument "select_workflow" "no workflow ids to wait for" :: (TransactError.Error TransactError.EngineOnly)
           _ <-
             withSystemDB
-              ctx
+              wctx
               ( \db ->
                   SystemDB.recordStep db workflowId' stepId' selectWorkflowStepName (OutcomeError (TransactError.encodeErrorText refused)) Nothing (Just (StepTiming startedAt startedAt))
               )
           pure (Left refused)
         else do
-          winner <- withSystemDB ctx (\db -> SystemDB.awaitFirstWorkflowId db workflowIds interval)
+          winner <- withSystemDB wctx (\db -> SystemDB.awaitFirstWorkflowId db workflowIds interval)
           case winner of
             Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
             Right winnerId@(WorkflowId winnerText') -> do
@@ -123,7 +123,7 @@ selectWorkflow ctx workflowIds = do
                     Just (Serialization name) -> Just name
               _ <-
                 withSystemDB
-                  ctx
+                  wctx
                   ( \db ->
                       SystemDB.recordStep db workflowId' stepId' selectWorkflowStepName (OutcomeOutput (Just encoded.serializedText)) serialization (Just (StepTiming startedAt completedAt))
                   )
@@ -139,10 +139,10 @@ selectWorkflow ctx workflowIds = do
 -- | Wait for every workflow in a set to finish. The all-wait pins nothing
 -- worth a step id, so it is not checkpointed — the Rust @join_workflows@
 -- takes no placement either.
-joinWorkflows :: (MonadSTM m, MonadDelay m, MonadTime m) => Ctx m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-joinWorkflows ctx workflowIds = do
-  let interval = (currentConnection ctx).connOutcomePollInterval
-  result <- withSystemDB ctx (\db -> SystemDB.awaitWorkflowIds db workflowIds interval)
+joinWorkflows :: (MonadSTM m, MonadDelay m, MonadTime m) => WorkflowCtx exec m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+joinWorkflows wctx workflowIds = do
+  let interval = (workflowConnection wctx).connOutcomePollInterval
+  result <- withSystemDB wctx (\db -> SystemDB.awaitWorkflowIds db workflowIds interval)
   pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
 
 waitForWorkflow :: (MonadMVar m, MonadDelay m, MonadTime m) => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) AwaitedOutcome)

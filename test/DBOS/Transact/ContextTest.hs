@@ -73,24 +73,21 @@ import DBOS.Transact
     stepCtxStatus,
     withStep,
     withWorkflow,
-    workflowId,
+    workflowCtxId,
   )
 import DBOS.Transact.Context
-  ( Ctx,
-    newCtx,
+  ( newWorkflowCtx,
     newWorkflowState,
-    withAttempt,
-    nextStepId,
-    nextStepMarker,
     nextAttempt,
-    currentConnection,
-    currentIdentity,
+    insideAStep,
+    stepCtxBoundary,
+    workflowConnection,
+    workflowIdentity,
     deadline,
     raceCancel,
     cancelToken,
     tokenCancelled,
     isSameExecution,
-    inStep,
     stepId,
     stepStatus,
     stepMarker,
@@ -148,14 +145,15 @@ testIdentity =
       identityAppId = ""
     }
 
--- | A context over a live backend with an explicit tracer, for tests that
--- reach the database.
-ctxOver :: PostgresSystemDB -> SomeTracer IO -> Text -> IO (Ctx IO)
+-- | A workflow view over a live backend with an explicit tracer, for
+-- tests that reach the database. The brand is bound here, at the test's
+-- own scope; production code obtains views only through 'withWorkflow'.
+ctxOver :: PostgresSystemDB -> SomeTracer IO -> Text -> IO (WorkflowCtx exec IO)
 ctxOver backend tracer workflowText = do
   conn <- connOver backend tracer
   identity <- nextExecutionIdentity conn
   state <- newWorkflowState workflowText Nothing identity
-  newCtx conn testIdentity state
+  newWorkflowCtx conn testIdentity state
 
 -- | The shared tree over a real backend and a FastLogger tracer.
 liveFixture :: PostgresSystemDB -> SomeTracer IO -> Fixture IO
@@ -172,8 +170,13 @@ liveFixture backend tracer =
 -- | How a tree instantiation builds its world: contexts and connections
 -- over any backend, the identity they carry, and the application name the
 -- connection reports.
+-- | How a tree instantiation builds its world. The fixture binds the
+-- execution brand at the test's own scope (the phantom instantiates to
+-- @()@ — one brand per fixture is exactly what these scenarios drive);
+-- production code never does this, because 'withWorkflow'\'s rank-2
+-- binder is what keeps a run's brand from escaping its continuation.
 data Fixture m = Fixture
-  { fixtureMkCtx    :: Text -> m (Ctx m),
+  { fixtureMkCtx    :: Text -> m (WorkflowCtx () m),
     fixtureMkConn   :: m (Connection m),
     fixtureIdentity :: Identity,
     fixtureAppName  :: Text
@@ -182,41 +185,42 @@ data Fixture m = Fixture
 -- * Scenarios: each written once, returning a plain value the trees assert.
 
 scenarioWorkflowId :: MonadSTM m => Fixture m -> m Text
-scenarioWorkflowId fx = workflowId <$> fx.fixtureMkCtx "wf-1"
+scenarioWorkflowId fx = workflowCtxId <$> fx.fixtureMkCtx "wf-1"
 
 scenarioStepIds :: MonadSTM m => Fixture m -> m (Int, Int, Int)
 scenarioStepIds fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  (,,) <$> nextStepId ctx <*> nextStepId ctx <*> nextStepId ctx
+  (,,) <$> nextWorkflowStepId ctx <*> nextWorkflowStepId ctx <*> nextWorkflowStepId ctx
 
 scenarioDenseIds :: MonadSTM m => Fixture m -> m (Int, Int, Int)
 scenarioDenseIds fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  first <- nextStepId ctx
-  _ <- nextStepMarker ctx
-  second <- nextStepId ctx
-  _ <- nextStepMarker ctx
-  third <- nextStepId ctx
+  first <- nextWorkflowStepId ctx
+  _ <- nextWorkflowMarker ctx
+  second <- nextWorkflowStepId ctx
+  _ <- nextWorkflowMarker ctx
+  third <- nextWorkflowStepId ctx
   pure (first, second, third)
 
 scenarioAttemptScope :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe Int, Maybe Int, Maybe Int)
 scenarioAttemptScope fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  innerMarker <- nextStepMarker ctx
-  let outside = stepId ctx
-  inner <- withAttempt ctx innerMarker (firstStepStatus 4) (pure . stepId)
-  let after = stepId ctx
+  innerMarker <- nextWorkflowMarker ctx
+  let outside = stepId (stepCtxBoundary ctx)
+  inner <- withStep ctx innerMarker (firstStepStatus 4) (pure . stepId)
+  let after = stepId (stepCtxBoundary ctx)
   pure (outside, inner, after)
 
 scenarioScopeStatus :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe StepStatus, Bool, (Maybe StepStatus, Maybe Int, Bool))
 scenarioScopeStatus fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  marker <- nextStepMarker ctx
-  let proper = stepStatus ctx
-      properFlag = inStep ctx
+  marker <- nextWorkflowMarker ctx
+  let proper = stepStatus (stepCtxBoundary ctx)
+  properFlag <- insideAStep ctx
   scoped <-
-    withAttempt ctx marker (firstStepStatus 3) $ \stepped ->
-      pure (stepStatus stepped, stepId stepped, inStep stepped)
+    withStep ctx marker (firstStepStatus 3) $ \stepped -> do
+      steppedFlag <- insideAStep ctx
+      pure (stepStatus stepped, stepId stepped, steppedFlag)
   pure (proper, properFlag, scoped)
 
 scenarioFirstAttempt :: Applicative m => Fixture m -> m (Int, Word, Word)
@@ -232,7 +236,7 @@ scenarioRetryAttempt _ =
 scenarioTokenFire :: MonadSTM m => Fixture m -> m (Bool, Bool)
 scenarioTokenFire fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  token <- cancellationToken ctx
+  token <- cancellationToken (stepCtxBoundary ctx)
   quiet <- tokenCancelled token
   cancelToken token
   fired <- tokenCancelled token
@@ -241,10 +245,10 @@ scenarioTokenFire fx = do
 scenarioAttemptTokens :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Bool, Bool)
 scenarioAttemptTokens fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  firstMarker <- nextStepMarker ctx
-  secondMarker <- nextStepMarker ctx
-  first <- withAttempt ctx firstMarker (firstStepStatus 0) cancellationToken
-  second <- withAttempt ctx secondMarker (firstStepStatus 1) cancellationToken
+  firstMarker <- nextWorkflowMarker ctx
+  secondMarker <- nextWorkflowMarker ctx
+  first <- withStep ctx firstMarker (firstStepStatus 0) cancellationToken
+  second <- withStep ctx secondMarker (firstStepStatus 1) cancellationToken
   cancelToken first
   firstFired <- tokenCancelled first
   secondFired <- tokenCancelled second
@@ -258,9 +262,9 @@ scenarioSharedCounter fx = do
   conn <- fx.fixtureMkConn
   identity <- nextExecutionIdentity conn
   state <- newWorkflowState "wf-1" Nothing identity
-  first <- newCtx conn fx.fixtureIdentity state
-  second <- newCtx conn fx.fixtureIdentity state
-  (,) <$> nextStepId first <*> nextStepId second
+  first <- newWorkflowCtx conn fx.fixtureIdentity state
+  second <- newWorkflowCtx conn fx.fixtureIdentity state
+  (,) <$> nextWorkflowStepId first <*> nextWorkflowStepId second
 
 scenarioRerunIdentity :: MonadSTM m => Fixture m -> m (Bool, Bool)
 scenarioRerunIdentity fx = do
@@ -269,14 +273,14 @@ scenarioRerunIdentity fx = do
   secondId <- nextExecutionIdentity conn
   firstState <- newWorkflowState "wf-1" Nothing firstId
   secondState <- newWorkflowState "wf-1" Nothing secondId
-  first <- newCtx conn fx.fixtureIdentity firstState
-  second <- newCtx conn fx.fixtureIdentity secondState
+  first <- newWorkflowCtx conn fx.fixtureIdentity firstState
+  second <- newWorkflowCtx conn fx.fixtureIdentity secondState
   pure (isSameExecution first first, isSameExecution first second)
 
 scenarioTravelsWith :: MonadSTM m => Fixture m -> m (Identity, Maybe Text)
 scenarioTravelsWith fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  pure (currentIdentity ctx, (currentConnection ctx).connAppName)
+  pure (workflowIdentity ctx, (workflowConnection ctx).connAppName)
 
 scenarioNestedRunners :: MonadSTM m => Fixture m -> m (Text, Text, Bool)
 scenarioNestedRunners fx = do
@@ -285,9 +289,9 @@ scenarioNestedRunners fx = do
   innerId <- nextExecutionIdentity conn
   outerState <- newWorkflowState "wf-1" Nothing outerId
   innerState <- newWorkflowState "wf-1" Nothing innerId
-  outer <- newCtx conn fx.fixtureIdentity outerState
-  inner <- newCtx conn fx.fixtureIdentity innerState
-  pure (workflowId outer, workflowId inner, isSameExecution outer inner)
+  outer <- newWorkflowCtx conn fx.fixtureIdentity outerState
+  inner <- newWorkflowCtx conn fx.fixtureIdentity innerState
+  pure (workflowCtxId outer, workflowCtxId inner, isSameExecution outer inner)
 
 scenarioStateInterop :: MonadSTM m => Fixture m -> m Text
 scenarioStateInterop fx = do
@@ -300,7 +304,7 @@ scenarioStateInterop fx = do
 scenarioThrowEscape :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Either MThrow.SomeException Int)
 scenarioThrowEscape fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  MThrow.try (nextStepId ctx >> MThrow.throwIO (userError "boom") >> pure 0)
+  MThrow.try (nextWorkflowStepId ctx >> MThrow.throwIO (userError "boom") >> pure 0)
 
 scenarioCoopFlag :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m) => Fixture m -> m ()
 scenarioCoopFlag _ = do
@@ -314,26 +318,26 @@ scenarioCoopFlag _ = do
 scenarioForkCounter :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m) => Fixture m -> m (Int, Int)
 scenarioForkCounter fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  first <- nextStepId ctx
+  first <- nextWorkflowStepId ctx
   seen <- newEmptyMVar
-  _ <- forkIO (nextStepId ctx >>= putMVar seen)
+  _ <- forkIO (nextWorkflowStepId ctx >>= putMVar seen)
   second <- waitFor (takeMVar seen)
   pure (first, second)
 
 scenarioNestedScope :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe Int, Maybe Int, Bool)
 scenarioNestedScope fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  let outside = stepId ctx
-  marker <- nextStepMarker ctx
+  let outside = stepId (stepCtxBoundary ctx)
+  marker <- nextWorkflowMarker ctx
   (innerId, matches) <-
-    withAttempt ctx marker (firstStepStatus 0) $ \inner ->
+    withStep ctx marker (firstStepStatus 0) $ \inner ->
       pure (stepId inner, stepMarker inner == Just marker)
   pure (outside, innerId, matches)
 
 scenarioTokenOutsideStep :: MonadSTM m => Fixture m -> m Bool
 scenarioTokenOutsideStep fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  token <- cancellationToken ctx
+  token <- cancellationToken (stepCtxBoundary ctx)
   tokenCancelled token
 
 scenarioConcurrentIsolation :: (MonadMVar m, MonadAsync m) => Fixture m -> m (Text, Text)
@@ -344,8 +348,8 @@ scenarioConcurrentIsolation fx = do
         conn <- fx.fixtureMkConn
         identity <- nextExecutionIdentity conn
         state <- newWorkflowState name Nothing identity
-        ctx <- newCtx conn fx.fixtureIdentity state
-        putMVar box (workflowId ctx)
+        ctx <- newWorkflowCtx conn fx.fixtureIdentity state
+        putMVar box (workflowCtxId ctx)
   a <- async (child "a" first)
   b <- async (child "b" second)
   wait a
@@ -364,20 +368,21 @@ scenarioExecCounters fx = do
     nextWorkflowStepId wctx
   pure (first, second)
 
-scenarioRaceCompletes :: (MonadSTM m, MonadAsync m) => Fixture m -> m (Maybe Text)
+scenarioRaceCompletes :: (MonadSTM m, MonadAsync m, MonadCatch m) => Fixture m -> m (Maybe Text)
 scenarioRaceCompletes fx = do
   ctx <- fx.fixtureMkCtx "wf-race"
-  raceCancel ctx (pure "done")
+  marker <- nextWorkflowMarker ctx
+  withStep ctx marker (firstStepStatus 0) $ \sctx -> raceCancel sctx (pure "done")
 
 scenarioRaceCancelled :: (MonadSTM m, MonadAsync m, MonadMVar m, MonadCatch m) => Fixture m -> m (Maybe Text)
 scenarioRaceCancelled fx = do
   ctx <- fx.fixtureMkCtx "wf-race-cancel"
-  marker <- nextStepMarker ctx
-  withAttempt ctx marker (firstStepStatus 0) $ \inner -> do
-    token <- cancellationToken inner
+  marker <- nextWorkflowMarker ctx
+  withStep ctx marker (firstStepStatus 0) $ \sctx -> do
+    token <- cancellationToken sctx
     cancelToken token
     -- The action never completes; the already-fired token decides it.
-    raceCancel inner (takeMVar =<< newEmptyMVar)
+    raceCancel sctx (takeMVar =<< newEmptyMVar)
 
 scenarioStepView :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Text, Maybe StepStatus)
 scenarioStepView fx = do

@@ -26,8 +26,8 @@ import DBOS.Transact
     selectWorkflow,
   )
 import DBOS.Transact.Context
-  ( Ctx,
-    newCtx,
+  ( WorkflowCtx,
+    newWorkflowCtx,
     newWorkflowState
   )
 import DBOS.Transact.Connection
@@ -76,7 +76,7 @@ tests =
           let runOnce = do
                 identity <- nextExecutionIdentity conn
                 state <- newWorkflowState "sim-wait-replay" Nothing identity
-                context <- newCtx conn simIdentity state
+                context <- newWorkflowCtx conn simIdentity state
                 selectWorkflow context [WorkflowId "first", WorkflowId "second"]
           first <- runOnce
           second <- runOnce
@@ -93,9 +93,9 @@ tests =
         outcome @?= Right ()
     ]
   where
-    simCtx :: Text -> IOSim s (Ctx (IOSim s))
+    simCtx :: Text -> IOSim s (WorkflowCtx () (IOSim s))
     simCtx name = do
       conn <- simConnectionWith simTracer
       identity <- nextExecutionIdentity conn
       state <- newWorkflowState name Nothing identity
-      newCtx conn simIdentity state
+      newWorkflowCtx conn simIdentity state

@@ -26,7 +26,7 @@ import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Se
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (Ctx, WorkflowCtx, insideAStep, nextStepId, withSystemDB, workflowId, workflowCtxInner)
+import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextWorkflowStepId, stepCtxBoundary, withSystemDB, workflowCtxId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 
@@ -34,37 +34,34 @@ import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 -- operation and is refused from inside a step, where allocating another
 -- operation id would shift replay order.
 setEvent :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-setEvent wctx key value = placeCall ctx >>= driveSetEvent ctx key value
-  where
-    ctx = workflowCtxInner wctx
+setEvent wctx key value = placeCall wctx >>= driveSetEvent wctx key value
 
 -- | A publish built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the write runs when the
 -- pending value is awaited or raced.
 pendingSetEvent :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
 pendingSetEvent wctx key value = do
-  let ctx = workflowCtxInner wctx
-  placement <- placeCall ctx
-  pure (PendingStep setEventStepName (Just placement) (driveSetEvent ctx key value placement))
+  placement <- placeCall wctx
+  pure (PendingStep setEventStepName (Just placement) (driveSetEvent wctx key value placement))
 
 -- | Drives a placed publish: refused from inside a step, otherwise the
 -- checkpointed write under the claimed id.
-driveSetEvent :: (ToJSON value, MonadSTM m) => Ctx m -> Text -> value -> StepPlacement m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-driveSetEvent ctx key value placement =
-  case checkHere placement setEventStepName (Just ctx) of
+driveSetEvent :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+driveSetEvent wctx key value placement =
+  case checkHere placement setEventStepName (Just (stepCtxBoundary wctx)) of
     Left err -> pure (Left err)
     -- No plain form exists: a publish built in a step can never run, so
     -- driving it reports the refusal the eager call would have raised.
     Right DurabilityPlain -> pure (Left (TransactError.InsideStep "set_event"))
-    Right (DurabilityRecorded ctx' stepId') -> do
+    Right (DurabilityRecorded wctx' stepId') -> do
       let encoded = encodeWorkflowValue value
           serialization = case encoded.serializedSerialization of
             Nothing -> Nothing
             Just (Serialization name) -> Just name
-          workflowText = workflowId ctx'
+          workflowText = workflowCtxId wctx'
       written <-
         withSystemDB
-          ctx'
+          wctx'
           ( \db ->
               SystemDB.setEvent
                 db
@@ -86,17 +83,16 @@ driveSetEvent ctx key value placement =
 -- runs plainly. Mirrors Rust @get_event(workflow_id, key, timeout)@.
 getEvent :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
 getEvent wctx destination key timeout = do
-  let ctx = workflowCtxInner wctx
-      workflowText = workflowId ctx
+  let workflowText = workflowCtxId wctx
   -- Inside a step the enclosing checkpoint stands for the read — through
   -- the handed context or a captured parent, read together.
-  stepped <- insideAStep ctx
+  stepped <- insideAStep wctx
   caller <-
     if stepped
       then pure Nothing
       else do
-        readStep <- nextStepId ctx
-        timeoutStep <- nextStepId ctx
+        readStep <- nextWorkflowStepId wctx
+        timeoutStep <- nextWorkflowStepId wctx
         pure
           ( Just
               GetEventCaller
@@ -105,7 +101,7 @@ getEvent wctx destination key timeout = do
                   getEventCallerTimeoutStepId = timeoutStep
                 }
           )
-  found <- withSystemDB ctx (\db -> SystemDB.getEvent db destination key timeout caller)
+  found <- withSystemDB wctx (\db -> SystemDB.getEvent db destination key timeout caller)
   pure (adoptEventValue found)
 
 -- | The recorded form of a read answer: a system-database failure stays
@@ -148,18 +144,17 @@ pendingGetEvent ::
   Duration ->
   m (PendingStep exec m (Either (TransactError.Error c) (Maybe value)))
 pendingGetEvent dbos wctx destination key timeout = do
-  let ctx = workflowCtxInner wctx
   running <- requireExecutor dbos "get_event"
   case running of
     Left err -> pure (PendingStep getEventStepName Nothing (pure (Left (TransactError.liftEngine err))))
     Right executor -> do
-      placed <- takenPlacement executor.conn "get_event" ctx
+      placed <- takenPlacement executor.conn "get_event" wctx
       case placed of
         Left err -> pure (PendingStep getEventStepName Nothing (pure (Left err)))
         Right placement -> case placement of
-          Recorded ctx' readStep -> do
-            timeoutStep <- nextStepId ctx'
-            let caller = Just (GetEventCaller (WorkflowId (workflowId ctx')) readStep timeoutStep)
+          Recorded wctx' readStep -> do
+            timeoutStep <- nextWorkflowStepId wctx'
+            let caller = Just (GetEventCaller (WorkflowId (workflowCtxId wctx')) readStep timeoutStep)
             pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor caller destination key timeout))
           _ -> pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor Nothing destination key timeout))
 

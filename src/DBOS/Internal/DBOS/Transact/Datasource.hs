@@ -56,7 +56,7 @@ import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderErro
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..))
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Context (Ctx, StepCtx, WorkflowCtx, contextTracer, currentIdentity, firstStepStatus, insideAStep, nextStepId, nextStepMarker, stepCtxAt, withAttempt, withSystemDB, workflowCtxInner, workflowId)
+import DBOS.Transact.Context (StepCtx, WorkflowCtx, firstStepStatus, insideAStep, nextWorkflowMarker, nextWorkflowStepId, withStep, withSystemDB, workflowCtxId, workflowIdentity, workflowTracer)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
@@ -195,25 +195,25 @@ instance ToLogStr TransactionEvent where
 -- marker and token).
 runTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
 runTransaction ds wctx config body =
-  runTransactionWith ds (workflowCtxInner wctx) config (\inner tx -> body (stepCtxAt wctx inner) tx)
+  runTransactionWith ds wctx config body
 
 -- | The shared transaction path: the shaped body receives the attempt's
 -- context (the scoped entry turns it into the step view) and the
 -- transaction handle.
-runTransactionWith :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> TransactionConfig -> (Ctx m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
-runTransactionWith ds ctx config body = do
+runTransactionWith :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
+runTransactionWith ds wctx config body = do
   -- Refused through the handed context or a captured parent alike: a
   -- transaction inside a step would checkpoint under the wrong id.
-  stepped <- insideAStep ctx
+  stepped <- insideAStep wctx
   if stepped
     then pure (Left (InsideStep "transaction"))
     else do
       let stepName = fromMaybe "transaction" config.txName
-      stepId <- nextStepId ctx
-      let wid = WorkflowId (workflowId ctx)
-          tracer = contextTracer ctx
+      stepId <- nextWorkflowStepId wctx
+      let wid = WorkflowId (workflowCtxId wctx)
+          tracer = workflowTracer wctx
           DataSource {dsStepName = nameAt} = ds
-      runTracer tracer (TransactionRunning (workflowId ctx) stepName stepId)
+      runTracer tracer (TransactionRunning (workflowCtxId wctx) stepName stepId)
       prechecked <- checkWithRetry ds tracer wid stepName stepId
       case prechecked of
         Left err -> pure (Left (controlErr err))
@@ -226,9 +226,9 @@ runTransactionWith ds ctx config body = do
             Left err -> pure (Left (controlErr err))
             Right (Just other) | other /= stepName -> pure (Left (unexpectedTransaction wid stepName stepId other))
             _ -> do
-              runTracer tracer (TransactionReplaying (workflowId ctx) stepName stepId)
+              runTracer tracer (TransactionReplaying (workflowCtxId wctx) stepName stepId)
               pure (replayRecorded stepName recorded)
-        Right Nothing -> attemptTransaction ds ctx config.txIsolation body tracer wid stepName stepId 1 initialBackoffMs
+        Right Nothing -> attemptTransaction ds wctx config.txIsolation body tracer wid stepName stepId 1 initialBackoffMs
 
 -- | Pre-check with the oracle's retry: a transient read failure backs off
 -- and retries ('_check_execution_with_retry'); anything else is control.
@@ -252,15 +252,15 @@ checkWithRetry ds tracer wid stepName stepId = loop 1 initialBackoffMs
 -- | One attempt: body plus checkpoint insert in a single transaction. A
 -- held checkpoint throws 'TxConflict' to roll the attempt's application
 -- writes back; transport failures surface as 'Left' through the adapter.
-attemptTransaction :: forall a e m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> Maybe IsolationLevel -> (Ctx m -> Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
-attemptTransaction ds ctx isolation body tracer wid stepName stepId n waitMs = do
+attemptTransaction :: forall a e exec m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> Maybe IsolationLevel -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
+attemptTransaction ds wctx isolation body tracer wid stepName stepId n waitMs = do
   let DataSource {dsWithTransaction = withTx} = ds
       DataSource {dsRecordOutput = recordOutput} = ds
       DataSource {dsRecordError = recordError} = ds
-  marker <- nextStepMarker ctx
+  marker <- nextWorkflowMarker wctx
   outcome <-
     MThrow.try (withTx isolation $ \tx -> do
-      bodyOutcome <- withAttempt ctx marker (firstStepStatus stepId) (\inner -> body inner tx)
+      bodyOutcome <- withStep wctx marker (firstStepStatus stepId) (\sctx -> body sctx tx)
       case bodyOutcome of
         Left err -> do
           wrote <- recordError tx wid stepName stepId (encodeErrorText err)
@@ -269,7 +269,7 @@ attemptTransaction ds ctx isolation body tracer wid stepName stepId n waitMs = d
           wrote <- recordOutput tx wid stepName stepId (encodeWorkflowValue value).serializedText
           if wrote then pure (Right value) else MThrow.throwIO TxConflict)
   case outcome of
-    Left TxConflict -> adoptTransaction ds ctx tracer wid stepName stepId
+    Left TxConflict -> adoptTransaction ds wctx tracer wid stepName stepId
     Right (Left err) -> handleBackend err
     Right (Right answer) -> do
       case answer of
@@ -282,7 +282,7 @@ attemptTransaction ds ctx isolation body tracer wid stepName stepId n waitMs = d
       | isRetriable err = do
           runTracer tracer (TransactionSerializationRetry widText stepName stepId n (round waitMs) err.backendMessage)
           threadDelay (round (waitMs * 1000))
-          attemptTransaction ds ctx isolation body tracer wid stepName stepId (n + 1) (min (waitMs * 1.5) maxBackoffMs)
+          attemptTransaction ds wctx isolation body tracer wid stepName stepId (n + 1) (min (waitMs * 1.5) maxBackoffMs)
       | otherwise = pure (Left (controlErr err))
 
 -- | Adopt the recorded outcome after losing the race — unless another
@@ -292,9 +292,9 @@ attemptTransaction ds ctx isolation body tracer wid stepName stepId n waitMs = d
 -- executor) against the row: a missing or unowned row adopts; a row held
 -- by another executor rethrows, since per-execution tokens would provably
 -- differ there too. Same-executor races adopt (join, don't fail).
-adoptTransaction :: (FromJSON a, FromJSON e, MonadSTM m, MonadDelay m) => DataSource m -> Ctx m -> SomeTracer m -> WorkflowId -> Text -> Int -> m (Either (Error e) a)
-adoptTransaction ds ctx tracer wid@(WorkflowId widText) stepName stepId = do
-  ruling <- checkOwner ctx wid
+adoptTransaction :: (FromJSON a, FromJSON e, MonadSTM m, MonadDelay m) => DataSource m -> WorkflowCtx exec m -> SomeTracer m -> WorkflowId -> Text -> Int -> m (Either (Error e) a)
+adoptTransaction ds wctx tracer wid@(WorkflowId widText) stepName stepId = do
+  ruling <- checkOwner wctx wid
   case ruling of
     Left err -> pure (Left err)
     Right (Just owner) -> do
@@ -311,16 +311,16 @@ adoptTransaction ds ctx tracer wid@(WorkflowId widText) stepName stepId = do
 
 -- | 'Nothing' means adopt; 'Just owner' names the foreign executor the
 -- workflow row belongs to.
-checkOwner :: Monad m => Ctx m -> WorkflowId -> m (Either (Error e) (Maybe Text))
-checkOwner ctx wid = do
-  found <- withSystemDB ctx (\db -> SystemDB.getWorkflow db wid)
+checkOwner :: Monad m => WorkflowCtx exec m -> WorkflowId -> m (Either (Error e) (Maybe Text))
+checkOwner wctx wid = do
+  found <- withSystemDB wctx (\db -> SystemDB.getWorkflow db wid)
   pure $ case found of
     Left err -> Left (ErrorSystemDatabase err)
     Right Nothing -> Right Nothing
     Right (Just row) -> case row.workflowRecordOwnerXid of
       Nothing -> Right Nothing
       Just _ -> case row.workflowRecordExecutorId of
-        Just owner | owner /= (currentIdentity ctx).identityExecutorId -> Right (Just owner)
+        Just owner | owner /= (workflowIdentity wctx).identityExecutorId -> Right (Just owner)
         _ -> Right Nothing
 
 -- | Another executor owns the workflow: stop without recording, so the

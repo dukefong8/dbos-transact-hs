@@ -40,8 +40,7 @@ import DBOS.SystemDB.Types (AwaitedOutcome (..), Outcome (..), Serialization (..
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..), WorkflowCtx, workflowCtxInner)
-import DBOS.Transact.Context qualified as Context (workflowId)
+import DBOS.Transact.Context (LocalTaskOutcome (..), WorkflowCtx, stepCtxBoundary, workflowCtxId)
 import DBOS.Transact.Error qualified as TransactError
 
 -- | Where this handle's result comes from. The local channel carries the
@@ -139,9 +138,7 @@ awaitChild ::
   WorkflowCtx exec m ->
   WorkflowHandle m e ->
   m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-awaitChild wctx handle = placeCall ctx >>= driveAwait ctx handle
-  where
-    ctx = workflowCtxInner wctx
+awaitChild wctx handle = placeCall wctx >>= driveAwait wctx handle
 
 -- | An await built at its position and not yet run: the @DBOS.getResult@
 -- step claims its id here, where the call is written, and 'pendingRun'
@@ -154,13 +151,12 @@ pendingAwait ::
   WorkflowHandle m e ->
   m (PendingStep exec m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
 pendingAwait wctx handle = do
-  let ctx = workflowCtxInner wctx
-  placement <- placeCall ctx
+  placement <- placeCall wctx
   pure
     PendingStep
       { name = getResultStepName,
         placement = Just placement,
-        pendingRun = driveAwait ctx handle placement
+        pendingRun = driveAwait wctx handle placement
       }
 
 -- | Drives a placed await: adopt a recorded row, or wait and record the
@@ -168,22 +164,22 @@ pendingAwait wctx handle = do
 -- can build every branch before any of them waits.
 driveAwait ::
   (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
-  Ctx m ->
+  WorkflowCtx exec m ->
   WorkflowHandle m e ->
-  StepPlacement m ->
+  StepPlacement exec m ->
   m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-driveAwait ctx handle placement =
-  case checkHere placement getResultStepName (Just ctx) of
+driveAwait wctx handle placement =
+  case checkHere placement getResultStepName (Just (stepCtxBoundary wctx)) of
     Left err -> pure (Left err)
     Right DurabilityPlain -> fmap (>>= settledResult handle.workflow_id) (settleOutcome handle)
-    Right (DurabilityRecorded ctx' stepId') -> recordedAt ctx' stepId'
+    Right (DurabilityRecorded wctx' stepId') -> recordedAt wctx' stepId'
   where
-    recordedAt ctx' stepId' = do
-      let parent = WorkflowId (Context.workflowId ctx')
+    recordedAt wctx' stepId' = do
+      let parent = WorkflowId (workflowCtxId wctx')
       checked <- runSystemDB handle.conn.connSysdb (\db -> SystemDB.checkChildResult db parent stepId')
       case checked of
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
-        Right (Just recorded) -> pure (adoptRecordedAwait ctx' handle stepId' recorded)
+        Right (Just recorded) -> pure (adoptRecordedAwait wctx' handle stepId' recorded)
         Right Nothing -> do
           startedAt <- timestampNow
           settled <- settleOutcome handle
@@ -191,7 +187,7 @@ driveAwait ctx handle placement =
           case settled of
             Left err -> pure (Left err)
             Right outcome -> do
-              written <- recordAwait ctx' handle stepId' startedAt completedAt outcome
+              written <- recordAwait wctx' handle stepId' startedAt completedAt outcome
               pure (written >> settledResult handle.workflow_id outcome)
 
 -- | What an awaited workflow did, before it is mapped onto the error
@@ -272,14 +268,14 @@ settledResult workflowText settled =
 -- would outlive its own truth.
 recordAwait ::
   (MonadTime m, ToJSON e) =>
-  Ctx m ->
+  WorkflowCtx exec m ->
   WorkflowHandle m e ->
   Int ->
   Timestamp ->
   Timestamp ->
   Settled e ->
   m (Either (TransactError.Error e) ())
-recordAwait ctx handle stepId' startedAt completedAt settled =
+recordAwait wctx handle stepId' startedAt completedAt settled =
   case settled of
     SettledSucceeded output _ -> record (OutcomeOutput output)
     SettledFailed err -> record (OutcomeError (TransactError.encodeErrorText err))
@@ -292,7 +288,7 @@ recordAwait ctx handle stepId' startedAt completedAt settled =
         )
     SettledParked _ -> pure (Right ())
   where
-    parent = WorkflowId (Context.workflowId ctx)
+    parent = WorkflowId (workflowCtxId wctx)
     record outcome =
       fmap (either (Left . TransactError.ErrorSystemDatabase) Right) $
         runSystemDB handle.conn.connSysdb $ \db ->
@@ -307,8 +303,8 @@ recordAwait ctx handle stepId' startedAt completedAt settled =
 
 -- | The replayed form of an await: adopt the recorded row, and only when
 -- it names the workflow this handle stands for.
-adoptRecordedAwait :: FromJSON e => Ctx m -> WorkflowHandle m e -> Int -> StepRecord -> Either (TransactError.Error e) (Maybe SerializedWorkflowValue)
-adoptRecordedAwait ctx handle stepId' recorded =
+adoptRecordedAwait :: FromJSON e => WorkflowCtx exec m -> WorkflowHandle m e -> Int -> StepRecord -> Either (TransactError.Error e) (Maybe SerializedWorkflowValue)
+adoptRecordedAwait wctx handle stepId' recorded =
   case recorded.stepRecordChildWorkflowId of
     Just (WorkflowId recordedChild)
       | recordedChild == handle.workflow_id ->
@@ -326,7 +322,7 @@ adoptRecordedAwait ctx handle stepId' recorded =
       Left
         ( TransactError.ErrorSystemDatabase
             ( SystemDBError.UnexpectedStep
-                { workflowId = Context.workflowId ctx,
+                { workflowId = workflowCtxId wctx,
                   stepId = stepId',
                   expected = "an await of " <> handle.workflow_id,
                   recorded = case mismatched of

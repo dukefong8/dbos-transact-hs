@@ -195,15 +195,14 @@ import DBOS.Transact
     withWorkflow,
     timeoutBudget,
     waitForWorkflow,
-    workflowId,
     awaitChild,
     pendingAwait,
   )
 import DBOS.Transact.Context
-  ( workflowCtxInner,
-    withSystemDB,
+  ( withSystemDB,
     spawnLocal,
-    tokenCancelled
+    tokenCancelled,
+    workflowCtxId
   )
 import DBOS.Transact.Workflow (abortAll, childWorkflowId, newTasks, spawnTracked, tasksSpawner)
 import DBOS.Transact.Connection
@@ -1474,7 +1473,7 @@ scenarioRowBeforeBody fx = do
     let key = newWorkflowKey "sees-itself"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Bool)
         body () wctx = do
-          row <- withSystemDB (workflowCtxInner wctx) (\db -> SystemDB.getWorkflow db (WorkflowId (workflowId (workflowCtxInner wctx))))
+          row <- withSystemDB wctx (\db -> SystemDB.getWorkflow db (WorkflowId (workflowCtxId wctx)))
           pure (Right (case row of Right (Just _) -> True; _ -> False))
     registered <- registerDBOSWorkflow dbos key body
     case registered of

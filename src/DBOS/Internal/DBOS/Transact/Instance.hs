@@ -67,7 +67,7 @@ import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork, ForkOptions, Fork
 import DBOS.Transact.Config (Config (..))
 import DBOS.Transact.Config qualified as Config
 import DBOS.Transact.Connection (Connection (..), closeConnection, forApplication, runSystemDB)
-import DBOS.Transact.Context (Ctx, WorkflowCtx)
+import DBOS.Transact.Context (WorkflowCtx)
 import DBOS.Transact.Dequeue (dequeuePass, superviseForever)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)

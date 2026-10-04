@@ -20,12 +20,11 @@ import DBOS.Transact
     ioTracer,
     nullTracer,
     secondsDuration,
-    workflowId,
   )
 import DBOS.Transact.Context
-  ( withAttempt,
-    nextStepMarker,
-    cancellationToken,
+  ( stepCtxBoundary,
+    withStep,
+    nextWorkflowMarker,
     stepStatusCurrentAttempt,
     stepStatusId,
     stepStatusMaxAttempts
@@ -77,17 +76,17 @@ tests =
       testCase "at a step boundary the call records under the allocated id" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        let placement = placementAt ctx 0
+        let placement = placementAt (stepCtxBoundary ctx) 0
         placement @?= Recorded ctx 0
         placementStepId placement @?= Just 0
         pendingStepId (PendingStep "checkout" (Just placement) (pure () :: IO ())) @?= Just 0,
       testCase "a call built through a captured parent while a step body runs is plain" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        marker <- nextStepMarker ctx
-        withAttempt ctx marker (firstStepStatus 0) $ \_stepped -> do
+        marker <- nextWorkflowMarker ctx
+        withStep ctx marker (firstStepStatus 0) $ \_sctx -> do
           placement <- placeCall ctx
-          placement @?= PlacementInsideStep ctx,
+          placement @?= PlacementInsideStep (stepCtxBoundary ctx),
       testCase "a taken placement through a captured parent under another connection is plain" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
@@ -103,29 +102,29 @@ tests =
             uuidWorkflowId
             uuidEntropy
             nullTracer
-        marker <- nextStepMarker ctx
-        withAttempt ctx marker (firstStepStatus 0) $ \_stepped -> do
-          placed <- takenPlacement otherConn "get_event" ctx :: IO (Either (Error EngineOnly) (StepPlacement IO))
-          placed @?= Right (PlacementInsideStep ctx),
+        marker <- nextWorkflowMarker ctx
+        withStep ctx marker (firstStepStatus 0) $ \_sctx -> do
+          placed <- takenPlacement otherConn "get_event" ctx :: IO (Either (Error EngineOnly) (StepPlacement () IO))
+          placed @?= Right (PlacementInsideStep (stepCtxBoundary ctx)),
       testCase "inside a step body the call is plain by the leaf rule" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        marker <- nextStepMarker ctx
-        withAttempt ctx marker (firstStepStatus 3) $ \stepped -> do
-          let placement = placementAt stepped 1
-          placement @?= PlacementInsideStep stepped
+        marker <- nextWorkflowMarker ctx
+        withStep ctx marker (firstStepStatus 3) $ \sctx -> do
+          let placement = placementAt sctx 1
+          placement @?= PlacementInsideStep sctx
           placementStepId placement @?= Nothing,
       testCase "a recorded call polled at its boundary stays durable" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        (checkHere (Recorded ctx 0) "checkout" (Just ctx) :: Either (Error EngineOnly) (StepDurability IO))
+        (checkHere (Recorded ctx 0) "checkout" (Just (stepCtxBoundary ctx)) :: Either (Error EngineOnly) (StepDurability () IO))
           @?= Right (DurabilityRecorded ctx 0),
       testCase "a recorded call carried into a step is refused" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        marker <- nextStepMarker ctx
-        withAttempt ctx marker (firstStepStatus 0) $ \stepped ->
-          (checkHere (Recorded ctx 0) "checkout" (Just stepped) :: Either (Error EngineOnly) (StepDurability IO))
+        marker <- nextWorkflowMarker ctx
+        withStep ctx marker (firstStepStatus 0) $ \sctx ->
+          (checkHere (Recorded ctx 0) "checkout" (Just sctx) :: Either (Error EngineOnly) (StepDurability () IO))
             @?= Left
               ( StepBuiltElsewhere
                   { step = "checkout",
@@ -136,23 +135,23 @@ tests =
       testCase "a client's call stays plain wherever it is driven" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        (checkHere ClientConnection "DBOS.cancel" Nothing :: Either (Error EngineOnly) (StepDurability IO)) @?= Right DurabilityPlain
-        (checkHere ClientConnection "DBOS.cancel" (Just ctx) :: Either (Error EngineOnly) (StepDurability IO)) @?= Right DurabilityPlain,
+        (checkHere ClientConnection "DBOS.cancel" Nothing :: Either (Error EngineOnly) (StepDurability () IO)) @?= Right DurabilityPlain
+        (checkHere ClientConnection "DBOS.cancel" (Just (stepCtxBoundary ctx)) :: Either (Error EngineOnly) (StepDurability () IO)) @?= Right DurabilityPlain,
       testCase "an in-step call polled in its own body stays plain" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        marker <- nextStepMarker ctx
-        withAttempt ctx marker (firstStepStatus 3) $ \stepped ->
-          (checkHere (PlacementInsideStep stepped) "checkout" (Just stepped) :: Either (Error EngineOnly) (StepDurability IO))
+        marker <- nextWorkflowMarker ctx
+        withStep ctx marker (firstStepStatus 3) $ \sctx ->
+          (checkHere (PlacementInsideStep sctx) "checkout" (Just sctx) :: Either (Error EngineOnly) (StepDurability () IO))
             @?= Right DurabilityPlain,
       testCase "an in-step call carried to a sibling body is refused" $ do
         backend <- getBackend
         ctx <- ctxOver backend nullTracer "wf-1"
-        firstMarker <- nextStepMarker ctx
-        secondMarker <- nextStepMarker ctx
-        withAttempt ctx firstMarker (firstStepStatus 3) $ \first ->
-          withAttempt ctx secondMarker (firstStepStatus 3) $ \second ->
-            (checkHere (PlacementInsideStep first) "checkout" (Just second) :: Either (Error EngineOnly) (StepDurability IO))
+        firstMarker <- nextWorkflowMarker ctx
+        secondMarker <- nextWorkflowMarker ctx
+        withStep ctx firstMarker (firstStepStatus 3) $ \first ->
+          withStep ctx secondMarker (firstStepStatus 3) $ \second ->
+            (checkHere (PlacementInsideStep first) "checkout" (Just second) :: Either (Error EngineOnly) (StepDurability () IO))
               @?= Left
                 ( StepBuiltElsewhere
                     { step = "checkout",
@@ -167,6 +166,6 @@ tests =
         insideAWorkflow ClientConnection @?= True
         insideAWorkflow (Recorded ctx 0) @?= True
         describePlacement Nothing @?= "outside a workflow"
-        describePlacement (Just ctx) @?= "in workflow wf-1"
+        describePlacement (Just (stepCtxBoundary ctx)) @?= "in workflow wf-1"
         placementWhereabouts ClientConnection @?= "on a client's connection"
     ]

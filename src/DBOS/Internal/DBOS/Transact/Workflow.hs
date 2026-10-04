@@ -72,7 +72,7 @@ import DBOS.SystemDB.Types (ApplicationVersion, AwaitedOutcome (..), Duration, E
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeWorkflowValue)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, nextExecutionIdentity, runSystemDB)
-import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx, currentConnection, currentIdentity, deadline, insideAStep, newCtx, newWorkflowState, nextStepId, spawnLocal, taskSpawner, withTaskSpawner, withWorkflow, withWorkflowTaskSpawner, workflowCtxInner, workflowId)
+import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx, deadline, insideAStep, newWorkflowState, nextWorkflowStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowConnection, workflowCtxId, workflowIdentity, workflowSpawner)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
@@ -641,13 +641,12 @@ runWorkflowRef tasks conn identity snapshot ref options input = do
 -- onto the wrong replay slot.
 startChildWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startChildWorkflow wctx ref options input = do
-  let ctx = workflowCtxInner wctx
   -- A start inside a step body is refused — and a start through a captured
   -- parent while a step body runs is the same leaf violation with a scope
   -- field predating the body, which the shared depth counter reports. Read
   -- together, as the oracle reads its ambient scope: refused before
   -- anything is written and before the counter moves.
-  stepped <- insideAStep ctx
+  stepped <- insideAStep wctx
   if stepped
     then pure (Left (TransactError.InsideStep "starting a workflow"))
     else do
@@ -657,7 +656,7 @@ startChildWorkflow wctx ref options input = do
       -- see it. Refused before anything is written and before the counter
       -- moves, as the oracle's placement does.
       refInstance <- registryInstanceId (refRegistry ref)
-      let conn = currentConnection ctx
+      let conn = workflowConnection wctx
       case refInstance of
         Nothing -> pure (Left (TransactError.ErrorNotLaunched {operation = "start a workflow"}))
         Just instanceId
@@ -666,18 +665,17 @@ startChildWorkflow wctx ref options input = do
           | otherwise -> case traverse validateEnqueue options.startQueue of
               Left err -> pure (Left (TransactError.liftEngine err))
               Right _ -> do
-                parentStepId <- nextStepId ctx
+                parentStepId <- nextWorkflowStepId wctx
                 startChild parentStepId
   where
     key = refKey ref
     name = refName ref
-    ctx = workflowCtxInner wctx
-    conn = currentConnection ctx
-    identity = currentIdentity ctx
+    conn = workflowConnection wctx
+    identity = workflowIdentity wctx
     startChild parentStepId = do
       now <- timestampNow
       generated <- generatedWorkflowId conn
-      let parentText = workflowId ctx
+      let parentText = workflowCtxId wctx
           childText = childWorkflowId options.startWorkflowId (Just (parentText, parentStepId)) generated
       recorded <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db (WorkflowId parentText) parentStepId name)
       case recorded of
@@ -703,7 +701,7 @@ startChildWorkflow wctx ref options input = do
                   )
               )
         Right Nothing -> do
-          let childDeadline = resolveTimeoutDeadline options.startTimeout options.startQueue (deadline ctx) now
+          let childDeadline = resolveTimeoutDeadline options.startTimeout options.startQueue (deadline wctx) now
               base = workflowNewWorkflow conn identity key (WorkflowId childText) input ((.name) <$> options.startQueue)
               new =
                 base
@@ -725,7 +723,7 @@ startChildWorkflow wctx ref options input = do
           initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh (Just caller))
           case initialized of
             Right result -> do
-              spawned <- case (taskSpawner ctx, options.startQueue) of
+              spawned <- case (workflowSpawner wctx, options.startQueue) of
                 -- A fresh start is not a dequeue, so it holds no queue's
                 -- slot; an owned-elsewhere row is already running somewhere.
                 (Just spawner, Nothing) | result.initResultShouldExecute -> do

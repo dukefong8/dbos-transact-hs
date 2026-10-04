@@ -25,18 +25,24 @@
 --   contract without needing IO to mint one. The execution identity is the
 --   same move: a counter on the 'Connection' rather than Rust's pointer.
 module DBOS.Transact.Context
-  ( -- * The context
-    Ctx,
-    newCtx,
-    currentConnection,
-    currentIdentity,
+  ( -- * The context: one execution's view, one attempt's view
+    WorkflowCtx,
+    StepCtx,
+    withWorkflow,
+    withStep,
+    newWorkflowCtx,
+    stepCtxBoundary,
 
     -- * What outlives any one call
     WorkflowState,
     newWorkflowState,
-    workflowId,
+    workflowIdentity,
+    workflowConnection,
+    workflowTracer,
+    workflowSpawner,
+    withTracer,
+    withWorkflowTaskSpawner,
     deadline,
-    nextStepId,
     stepDepth,
     executionIdentityOf,
     isSameExecution,
@@ -45,7 +51,6 @@ module DBOS.Transact.Context
     StepScope,
     newStepScope,
     StepMarker (..),
-    nextStepMarker,
     StepStatus (..),
     stepStatusId,
     stepStatusCurrentAttempt,
@@ -55,9 +60,7 @@ module DBOS.Transact.Context
     stepId,
     stepMarker,
     stepStatus,
-    inStep,
     insideAStep,
-    withAttempt,
     cancellationToken,
     cancelToken,
     tokenCancelled,
@@ -66,33 +69,20 @@ module DBOS.Transact.Context
     -- * The engine's task seam
     TaskSpawner (..),
     LocalTaskOutcome (..),
-    withTaskSpawner,
-    taskSpawner,
     spawnLocal,
-
-    -- * The engine's tracer seam
-    withTracer,
-    contextTracer,
 
     -- * Backend access
     withSystemDB,
-    -- * Scoped workflow contexts
-    WorkflowCtx,
-    StepCtx,
-    withWorkflow,
-    withStep,
+
+    -- * Execution readers
     nextWorkflowStepId,
     nextWorkflowMarker,
     workflowCtxId,
     stepCtxId,
     stepCtxStatus,
-    stepCtxAt,
-    stepCtxInner,
     stepCtxTracer,
     stepCtxWorkflow,
     stepCtxCancellationToken,
-    workflowCtxInner,
-    withWorkflowTaskSpawner,
   )
 where
 
@@ -106,17 +96,6 @@ import DBOS.SystemDB.Types (Timestamp, WorkflowId, workflowIdText)
 import DBOS.Tracer (SomeTracer)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity, nextExecutionIdentity, runSystemDB)
 import DBOS.Transact.Identity (Identity)
-
--- | What a durable call knows about where it runs. The constructor is
--- private; 'newCtx' builds one and the readers below read it.
-data Ctx m = Ctx
-  { ctxConn     :: Connection m,
-    ctxIdentity :: Identity,
-    ctxWorkflow :: WorkflowState m,
-    ctxStep     :: Maybe (StepScope m),
-    ctxSpawner  :: Maybe (TaskSpawner m),
-    ctxTracer   :: SomeTracer m
-  }
 
 -- | What a locally spawned, tracked task left behind: its value, the
 -- cancellation shutdown performs, or the exception a panicking body threw.
@@ -149,16 +128,25 @@ data TaskSpawner m = TaskSpawner
 spawnLocal :: TaskSpawner m -> (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
 spawnLocal (TaskSpawner spawn) = spawn
 
--- | Two contexts are equal when they are the same execution and the same
--- step body — identity, not structure, because the mutable refs inside
--- cannot be compared. This is what a placement refusal names.
-instance Eq (Ctx m) where
+-- | Two views are equal when they are the same execution — identity, not
+-- structure, because the mutable refs inside cannot be compared. This is
+-- what a placement refusal names.
+instance Eq (WorkflowCtx exec m) where
   first == second =
-    first.ctxWorkflow.executionIdentity == second.ctxWorkflow.executionIdentity
-      && fmap (.scopeMarker) first.ctxStep == fmap (.scopeMarker) second.ctxStep
+    executionIdentityOf first == executionIdentityOf second
 
-instance Show (Ctx m) where
-  show ctx = "Ctx " <> show (workflowId ctx) <> " " <> show (stepId ctx)
+instance Show (WorkflowCtx exec m) where
+  show wctx = "WorkflowCtx " <> show (workflowCtxId wctx)
+
+-- | Two attempt views are equal when they are the same execution and the
+-- same step body.
+instance Eq (StepCtx exec m) where
+  first == second =
+    first.stepCtxWorkflow == second.stepCtxWorkflow
+      && fmap (.scopeMarker) first.stepCtxScope == fmap (.scopeMarker) second.stepCtxScope
+
+instance Show (StepCtx exec m) where
+  show sctx = "StepCtx " <> show (stepCtxId sctx) <> " " <> show (stepId sctx)
 
 -- | The parts of a workflow that outlive any one call within it. Mirrors
 -- Rust @WorkflowState@: the id, the deadline the database holds, the step
@@ -189,77 +177,46 @@ newWorkflowState workflowText deadlineAt identity = do
         executionIdentity = identity
       }
 
--- | The context a body runs in: the connection, the resolved identity, and
--- the workflow state. No step scope: this is the workflow proper. The
--- tracer rides in on the connection, so every execution announces through
--- its owner's backend unless a test rebinds it with 'withTracer'.
-newCtx :: MonadSTM m => Connection m -> Identity -> WorkflowState m -> m (Ctx m)
-newCtx conn identity state =
-  pure
-    Ctx
-      { ctxConn = conn,
-        ctxIdentity = identity,
-        ctxWorkflow = state,
-        ctxStep = Nothing,
-        ctxSpawner = Nothing,
-        ctxTracer = conn.connTracer
-      }
+-- | Rebinds a view to trace resource-lifetime events through the given
+-- backend: the engine's FastLogger backend in production, the io-sim
+-- trace in simulations, silence in tests that install nothing. Rebind
+-- rather than mutate, exactly like 'withWorkflowTaskSpawner'.
+withTracer :: SomeTracer m -> WorkflowCtx exec m -> WorkflowCtx exec m
+withTracer tracer wctx = wctx {wctxTracer = tracer}
 
--- | Rebinds the context to carry the executor's task spawner. The engine
--- calls this when it builds an execution's context; rebind rather than
--- mutate, exactly like 'withAttempt'.
-withTaskSpawner :: Ctx m -> TaskSpawner m -> Ctx m
-withTaskSpawner ctx spawner = ctx {ctxSpawner = Just spawner}
+-- | The tracer this execution's resource-lifetime events go through.
+workflowTracer :: WorkflowCtx exec m -> SomeTracer m
+workflowTracer wctx = wctx.wctxTracer
 
--- | Rebinds the context to trace resource-lifetime events through the
--- given backend. The engine calls this when it builds an execution's
--- context; rebind rather than mutate, exactly like 'withTaskSpawner'.
-withTracer :: SomeTracer m -> Ctx m -> Ctx m
-withTracer tracer ctx = ctx {ctxTracer = tracer}
+-- | The spawner the run path installed on this execution, if any: what
+-- lets a child a body starts reach the executor's task registry.
+workflowSpawner :: WorkflowCtx exec m -> Maybe (TaskSpawner m)
+workflowSpawner wctx = wctx.wctxSpawner
 
--- | The tracer this execution's resource-lifetime events go through: the
--- engine's FastLogger backend in production, the io-sim trace in
--- simulations, silence in tests that install nothing.
-contextTracer :: Ctx m -> SomeTracer m
-contextTracer ctx = ctx.ctxTracer
+-- | The connection this execution reaches the system database through.
+-- Engine-internal (never on the client facade): reaching the backend goes
+-- through 'withSystemDB' or the scoped entries, never a bare connection.
+workflowConnection :: WorkflowCtx exec m -> Connection m
+workflowConnection wctx = wctx.wctxConn
 
--- | The spawner this context was given, if the engine gave it one.
-taskSpawner :: Ctx m -> Maybe (TaskSpawner m)
-taskSpawner ctx = ctx.ctxSpawner
-
--- | The connection this call reaches the system database through.
-currentConnection :: Ctx m -> Connection m
-currentConnection ctx = ctx.ctxConn
-
--- | The resolved deployment identity this call's rows are stamped with.
-currentIdentity :: Ctx m -> Identity
-currentIdentity ctx = ctx.ctxIdentity
-
--- | The id of the workflow this call belongs to.
-workflowId :: Ctx m -> Text
-workflowId ctx = ctx.ctxWorkflow.workflowId
+-- | The resolved deployment identity this execution's rows are stamped with.
+workflowIdentity :: WorkflowCtx exec m -> Identity
+workflowIdentity wctx = wctx.wctxIdentity
 
 -- | When this workflow must stop, if it has a deadline at all.
-deadline :: Ctx m -> Maybe Timestamp
-deadline ctx = ctx.ctxWorkflow.deadline
+deadline :: WorkflowCtx exec m -> Maybe Timestamp
+deadline wctx = wctx.wctxState.deadline
+
 
 -- | The identity of the execution this context belongs to. Pointer
 -- identity in the oracle; here an opaque token minted once per execution.
-executionIdentityOf :: Ctx m -> ExecutionIdentity
-executionIdentityOf ctx = ctx.ctxWorkflow.executionIdentity
+executionIdentityOf :: WorkflowCtx exec m -> ExecutionIdentity
+executionIdentityOf wctx = wctx.wctxState.executionIdentity
 
 -- | Whether two contexts are the same execution of the same workflow.
-isSameExecution :: Ctx m -> Ctx m -> Bool
+isSameExecution :: WorkflowCtx exec m -> WorkflowCtx exec m -> Bool
 isSameExecution first second =
   executionIdentityOf first == executionIdentityOf second
-
--- | Allocate the next zero-based step id in this workflow. Zero-based so
--- the first step is step 0, matching Go, TypeScript and Java.
-nextStepId :: MonadSTM m => Ctx m -> m Int
-nextStepId ctx = atomically $ do
-    current <- readTVar ctx.ctxWorkflow.nextStepIdRef
-    writeTVar ctx.ctxWorkflow.nextStepIdRef (current + 1)
-    pure current
 
 -- | How many step bodies deep this execution currently runs: zero at a
 -- step boundary and outside workflows, one inside a step body, more under
@@ -267,22 +224,14 @@ nextStepId ctx = atomically $ do
 -- refused. Bumped by 'withAttempt' on entry and restored on every exit,
 -- so a call reaching through a captured parent sees the running body
 -- exactly like the handed view does.
-stepDepth :: MonadSTM m => Ctx m -> m Int
-stepDepth ctx = readTVarIO ctx.ctxWorkflow.stepDepthRef
+stepDepth :: MonadSTM m => WorkflowCtx exec m -> m Int
+stepDepth wctx = readTVarIO wctx.wctxState.stepDepthRef
 
 -- | Which step body a context is inside. Opaque and equality-only; a fresh
 -- value per attempt, so two bodies of one workflow cannot be confused.
 newtype StepMarker = StepMarker Int
   deriving stock (Eq, Show)
 
--- | Mint a marker for a step body entering its scope.
-nextStepMarker :: MonadSTM m => Ctx m -> m StepMarker
-nextStepMarker ctx = do
-  n <- atomically $ do
-    current <- readTVar ctx.ctxWorkflow.nextMarkerRef
-    writeTVar ctx.ctxWorkflow.nextMarkerRef (current + 1)
-    pure current
-  pure (StepMarker n)
 
 -- | What a step body can learn about the attempt it is running as: the
 -- step's ordinal position counting from zero, which attempt is running
@@ -344,67 +293,38 @@ newStepScope marker status = do
 
 -- | The id of the step body this context is inside, or 'Nothing' in the
 -- workflow proper: between two steps a workflow is inside neither.
-stepId :: Ctx m -> Maybe Int
-stepId ctx = case ctx.ctxStep of
+stepId :: StepCtx exec m -> Maybe Int
+stepId sctx = case sctx.stepCtxScope of
   Nothing    -> Nothing
   Just scope -> Just scope.scopeStatus.step_id
 
 -- | Which step body this context is inside, if any. 'stepId' asks whether
 -- there is one; this asks which, which is what tells two bodies of one
 -- workflow apart.
-stepMarker :: Ctx m -> Maybe StepMarker
-stepMarker ctx = fmap (.scopeMarker) ctx.ctxStep
+stepMarker :: StepCtx exec m -> Maybe StepMarker
+stepMarker sctx = fmap (.scopeMarker) sctx.stepCtxScope
 
 -- | What the step body may read about its own attempt, or 'Nothing'
 -- outside one.
-stepStatus :: Ctx m -> Maybe StepStatus
-stepStatus ctx = case ctx.ctxStep of
+stepStatus :: StepCtx exec m -> Maybe StepStatus
+stepStatus sctx = case sctx.stepCtxScope of
   Nothing    -> Nothing
   Just scope -> Just scope.scopeStatus
 
--- | Whether this context is inside a step body. Per call, not per
--- workflow: a sibling step running concurrently has no bearing on it.
-inStep :: Ctx m -> Bool
-inStep ctx = case ctx.ctxStep of
-  Nothing -> False
-  Just _  -> True
-
--- | Whether this execution is inside a step body right now — through the
--- context in hand ('inStep') or through a captured parent while a body
--- runs (the shared depth counter). Every guard that refuses or degrades
--- inside a step reads this, never the scope field alone, so the
--- captured-parent shape gets the same verdict as the handed view.
-insideAStep :: MonadSTM m => Ctx m -> m Bool
-insideAStep ctx
-  | inStep ctx = pure True
-  | otherwise = (> 0) <$> stepDepth ctx
-
--- | Runs a body under a context that is 'inStep': this attempt's marker
--- and status, and a fresh cancellation flag. Rebinding rather than
--- mutating — the scope lives on the context handed to the body alone, so
--- it goes out of scope with the body however the body ends. Abandoning the
--- attempt (cancellation, timeout kill, dropped future) fires the token, as
--- the oracle's drop guard does; completing it leaves the token quiet.
-withAttempt :: (MonadSTM m, MonadCatch m) => Ctx m -> StepMarker -> StepStatus -> (Ctx m -> m a) -> m a
-withAttempt ctx marker status body = do
-  scope <- newStepScope marker status
-  atomically (modifyTVar ctx.ctxWorkflow.stepDepthRef (+ 1))
-  -- Cancel and unbump in one transaction: the token fires and the depth
-  -- restores together, never one without the other. Restored explicitly
-  -- rather than through 'finally' so this keeps its 'MonadCatch'
-  -- constraint — no 'MonadMask' cascade through the step API. The
-  -- residual window (an async kill landing between the body's return and
-  -- the restore below) leaks safe: a stuck depth degrades later calls to
-  -- plain rather than corrupting any position.
-  outcome <- body ctx {ctxStep = Just scope} `onException` atomically (writeTVar scope.scopeCancellation True >> modifyTVar ctx.ctxWorkflow.stepDepthRef (subtract 1))
-  atomically (modifyTVar ctx.ctxWorkflow.stepDepthRef (subtract 1))
-  pure outcome
+-- | Whether this execution is inside a step body right now: the shared
+-- depth counter is nonzero while a body runs. Every guard that refuses or
+-- degrades inside a step reads this — a handed 'StepCtx' is statically
+-- in-step and never reaches these guards; a call through a captured
+-- parent view reads the running body through the counter. One predicate,
+-- same verdict either way.
+insideAStep :: MonadSTM m => WorkflowCtx exec m -> m Bool
+insideAStep wctx = (> 0) <$> stepDepth wctx
 
 -- | A token that fires when the step running here is abandoned. Outside a
 -- step it never fires, so a body that is also called outside a workflow
 -- needs no second path.
-cancellationToken :: MonadSTM m => Ctx m -> m (StrictTVar m Bool)
-cancellationToken ctx = case ctx.ctxStep of
+cancellationToken :: MonadSTM m => StepCtx exec m -> m (StrictTVar m Bool)
+cancellationToken sctx = case sctx.stepCtxScope of
   Just scope -> pure scope.scopeCancellation
   Nothing    -> newTVarIO False
 
@@ -415,9 +335,9 @@ cancellationToken ctx = case ctx.ctxStep of
 -- 'raceCancel' honors workflow cancellation and attempt timeouts without a
 -- hand-polling loop, mirroring the skill's timeout-plus-abort-signal rule
 -- ('step-timeouts.md') in polled-token form.
-raceCancel :: (MonadSTM m, MonadAsync m) => Ctx m -> m a -> m (Maybe a)
-raceCancel ctx action = do
-  token <- cancellationToken ctx
+raceCancel :: (MonadSTM m, MonadAsync m) => StepCtx exec m -> m a -> m (Maybe a)
+raceCancel sctx action = do
+  token <- cancellationToken sctx
   outcome <- race action (atomically (readTVar token >>= check))
   pure $ case outcome of
     Left value -> Just value
@@ -433,8 +353,8 @@ tokenCancelled = readTVarIO
 
 -- | Run a class method against this context's backend, passing the handle
 -- explicitly. The one place the connection's existential is unpacked.
-withSystemDB :: Monad m => Ctx m -> (forall db. SystemDB.SystemDB db m => db -> m a) -> m a
-withSystemDB ctx action = runSystemDB ctx.ctxConn.connSysdb action
+withSystemDB :: Monad m => WorkflowCtx exec m -> (forall db. SystemDB.SystemDB db m => db -> m a) -> m a
+withSystemDB wctx action = runSystemDB wctx.wctxConn.connSysdb action
 
 -- * Scoped workflow contexts: one execution's view and one attempt's view.
 --
@@ -476,15 +396,26 @@ withWorkflow :: MonadSTM m => Connection m -> Identity -> WorkflowId -> Maybe Ti
 withWorkflow conn identity wid deadline run = do
   execution <- nextExecutionIdentity conn
   state <- newWorkflowState (workflowIdText wid) deadline execution
-  run
-    ( WorkflowCtx
-        { wctxConn = conn,
-          wctxIdentity = identity,
-          wctxState = state,
-          wctxSpawner = Nothing,
-          wctxTracer = conn.connTracer
-        }
-    )
+  run =<< newWorkflowCtx conn identity state
+
+-- | Build one execution's workflow view around a state the caller already
+-- holds: a fresh execution identity is minted by 'withWorkflow', which is
+-- the only builder application code needs, because its rank-2 binder is
+-- what keeps one run's brand from leaking into another. This seam exists
+-- for engine paths and test fixtures that must hold a view outside a
+-- continuation; it binds the brand at the call site exactly like the old
+-- 'newCtx' did. Nothing here exposes allocation to a 'StepCtx' — the
+-- narrowed view still owns no allocator.
+newWorkflowCtx :: MonadSTM m => Connection m -> Identity -> WorkflowState m -> m (WorkflowCtx exec m)
+newWorkflowCtx conn identity state =
+  pure
+    WorkflowCtx
+      { wctxConn = conn,
+        wctxIdentity = identity,
+        wctxState = state,
+        wctxSpawner = Nothing,
+        wctxTracer = conn.connTracer
+      }
 
 -- | Run one attempt under the narrowed view. Bumps the shared depth on
 -- entry and restores it on every exit; abandoning the attempt
@@ -532,32 +463,17 @@ workflowCtxId wctx = wctx.wctxState.workflowId
 stepCtxId :: StepCtx exec m -> Text
 stepCtxId sctx = sctx.stepCtxWorkflow.wctxState.workflowId
 
--- | The inner context behind a workflow view, for engine paths that
--- delegate to the context-level machinery. TRANSITIONAL (C5): rebuilds
--- the context from the view's fields; dies with the last 'Ctx' worker.
-workflowCtxInner :: WorkflowCtx exec m -> Ctx m
-workflowCtxInner wctx =
-  Ctx
-    { ctxConn = wctx.wctxConn,
-      ctxIdentity = wctx.wctxIdentity,
-      ctxWorkflow = wctx.wctxState,
-      ctxStep = Nothing,
-      ctxSpawner = wctx.wctxSpawner,
-      ctxTracer = wctx.wctxTracer
-    }
-
 -- | Rebind a workflow view's execution to a task spawner: what the run
 -- path installs before handing the view to a body, so child starts reach
 -- the executor's task registry.
 withWorkflowTaskSpawner :: TaskSpawner m -> WorkflowCtx exec m -> WorkflowCtx exec m
 withWorkflowTaskSpawner spawner wctx = wctx {wctxSpawner = Just spawner}
 
--- | Rebuild the narrowed view around an attempt's inner context: what the
--- engine's step runner hands a body, built from the scope it is about to
--- run. Exported for the step seam; application code obtains views only
--- through 'withStep'.
-stepCtxAt :: WorkflowCtx exec m -> Ctx m -> StepCtx exec m
-stepCtxAt wctx inner = StepCtx wctx inner.ctxStep
+-- | A step view with no scope: what a drive polling at a step boundary
+-- hands where an attempt view is expected. Reads like the workflow proper
+-- (no step id, a token that never fires), drives like its execution.
+stepCtxBoundary :: WorkflowCtx exec m -> StepCtx exec m
+stepCtxBoundary wctx = StepCtx wctx Nothing
 
 -- | The workflow view this attempt belongs to. Reaching the parent's
 -- operations from inside a step body is the captured-parent shape, which
@@ -567,16 +483,6 @@ stepCtxAt wctx inner = StepCtx wctx inner.ctxStep
 -- runtime keeps the verdict.
 stepCtxWorkflow :: StepCtx exec m -> WorkflowCtx exec m
 stepCtxWorkflow (StepCtx wctx _) = wctx
-
--- | The inner context behind a step view: the documented downgrade for
--- reader calls that have no scoped twin yet (a step body reads its
--- cancellation token, step id, or deadline through it). Widening is
--- explicit and greppable; the C5 pass twins the hot readers and deletes
--- these uses.
--- TRANSITIONAL (C5): rebuilds from the parent view plus the scope; dies
--- with the last 'Ctx' worker.
-stepCtxInner :: StepCtx exec m -> Ctx m
-stepCtxInner sctx = (workflowCtxInner sctx.stepCtxWorkflow) {ctxStep = sctx.stepCtxScope}
 
 -- | The tracer behind a step view, for engine paths that must announce
 -- through the view's execution without widening it.

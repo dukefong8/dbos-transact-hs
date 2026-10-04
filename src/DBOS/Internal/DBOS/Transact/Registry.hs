@@ -44,7 +44,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Types (Serialization (..), SerializedWorkflowValue, WorkflowId, WorkflowName (..))
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Context (Ctx, WorkflowCtx, workflowCtxInner)
+import DBOS.Transact.Context (WorkflowCtx)
 import DBOS.Transact.Error qualified as TransactError
 
 -- | The identity stored in @workflow_status@: a workflow name, optionally

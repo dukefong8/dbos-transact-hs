@@ -59,28 +59,28 @@ import DBOS.SystemDB.Types (Outcome (..), Serialization (..), SerializedWorkflow
 import DBOS.Transact.Checkpoint (PendingStep (..), StepPlacement (..), pendingStepId, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (Ctx, WorkflowCtx, currentConnection, workflowId, workflowCtxInner)
+import DBOS.Transact.Context (WorkflowCtx, workflowConnection, workflowCtxId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Serialization (CodecError, decodeWorkflowValue, encodeWorkflowValue)
 
 -- | What 'checkSelect' found: a winner already recorded, or a race still
 -- to run. Two states rather than an 'Option' beside a loose index, so the
 -- caller must handle both.
-data Racing m
+data Racing exec m
   = -- | This select already ran. Drive **only** this branch, which then
     -- replays from its own step row without running. Carries the select's
     -- own step id so a stale-winner refusal names where it refused.
     Replay Int Int
   | -- | No checkpoint yet. Race the branches, then hand the winner to
     -- 'recordSelect'.
-    Fresh (Recording m)
+    Fresh (Recording exec m)
   deriving stock (Show)
 
 -- | A checkpoint that has been claimed and not yet written: the placement
 -- it claimed, and the instant from *before* the wait, so the recorded
 -- duration covers the waiting.
-data Recording m = Recording
-  { recordingPlacement :: StepPlacement m,
+data Recording exec m = Recording
+  { recordingPlacement :: StepPlacement exec m,
     recordingStartedAt :: Timestamp
   }
   deriving stock (Show)
@@ -127,14 +127,14 @@ branchCount (Branches identities) = length identities
 -- are constructed and the select's own id follows them, so a select that
 -- took its id first would leave every branch one slot higher than the
 -- replay expects. Holds a recorded winner to the branches that exist now.
-checkSelect :: (MonadSTM m, MonadTime m) => Ctx m -> Branches -> m (Either (TransactError.Error TransactError.EngineOnly) (Racing m))
-checkSelect ctx branches = do
-  placement <- placeCall ctx
+checkSelect :: (MonadSTM m, MonadTime m) => WorkflowCtx exec m -> Branches -> m (Either (TransactError.Error TransactError.EngineOnly) (Racing exec m))
+checkSelect wctx branches = do
+  placement <- placeCall wctx
   startedAt <- timestampNow
   case placement of
-    Recorded ctx' stepId' -> do
-      let conn = currentConnection ctx'
-          parent = WorkflowId (workflowId ctx')
+    Recorded wctx' stepId' -> do
+      let conn = workflowConnection wctx'
+          parent = WorkflowId (workflowCtxId wctx')
       checked <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db parent stepId' selectStepStepName)
       case checked of
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
@@ -146,7 +146,7 @@ checkSelect ctx branches = do
                 ( Left
                     ( TransactError.ErrorSystemDatabase
                         ( SystemDBError.UnexpectedStep
-                            { workflowId = workflowId ctx',
+                            { workflowId = workflowCtxId wctx',
                               stepId = stepId',
                               expected = "a recorded select winner",
                               recorded = "a select row with no decodable winner"
@@ -160,7 +160,7 @@ checkSelect ctx branches = do
                     ( Left
                         ( TransactError.ErrorSystemDatabase
                             ( SystemDBError.UnexpectedStep
-                                { workflowId = workflowId ctx',
+                                { workflowId = workflowCtxId wctx',
                                   stepId = stepId',
                                   expected =
                                     "a select over " <> showText (branchCount branches) <> " branches — " <> summarize branches,
@@ -175,11 +175,11 @@ checkSelect ctx branches = do
 -- | Writes which branch won, once the race has one. Where nothing is
 -- checkpointed — outside a workflow, or inside a step body — this writes
 -- nothing and the race was a plain one.
-recordSelect :: (MonadSTM m, MonadTime m) => Recording m -> Int -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+recordSelect :: (MonadSTM m, MonadTime m) => Recording exec m -> Int -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 recordSelect recording winner = case recording.recordingPlacement of
-  Recorded ctx stepId' -> do
+  Recorded wctx stepId' -> do
     completedAt <- timestampNow
-    let conn = currentConnection ctx
+    let conn = workflowConnection wctx
         encoded = encodeWorkflowValue winner
         serialization = case encoded.serializedSerialization of
           Nothing -> Nothing
@@ -189,7 +189,7 @@ recordSelect recording winner = case recording.recordingPlacement of
       runSystemDB conn.connSysdb $ \db ->
         SystemDB.recordStep
           db
-          (WorkflowId (workflowId ctx))
+          (WorkflowId (workflowCtxId wctx))
           stepId'
           selectStepStepName
           (OutcomeOutput (Just encoded.serializedText))
@@ -250,23 +250,23 @@ selectStep ::
   WorkflowCtx exec m ->
   [SelectArm exec m r] ->
   m (Either (TransactError.Error TransactError.EngineOnly) r)
-selectStep wctx arms = selectStepOn (workflowCtxInner wctx) arms
+selectStep wctx arms = selectStepOn wctx arms
 
--- | The context-level race: the scoped entry unwraps its view once and
--- this runs the race over the raw context.
+-- | The context-level race: the scoped entry hands its view straight
+-- through; this runs the race over it.
 selectStepOn ::
   forall exec m r.
   (MonadAsync m, MonadTime m) =>
-  Ctx m ->
+  WorkflowCtx exec m ->
   [SelectArm exec m r] ->
   m (Either (TransactError.Error TransactError.EngineOnly) r)
 selectStepOn _ [] =
   pure (Left (TransactError.ErrorConfig "selectStep races two or more durable steps; one branch is not a race"))
 selectStepOn _ [_] =
   pure (Left (TransactError.ErrorConfig "selectStep races two or more durable steps; one branch is not a race"))
-selectStepOn ctx arms = do
+selectStepOn wctx arms = do
   let branches = foldl (\bs arm -> case arm of SelectArm _ pending _ -> pushBranch pending bs) newBranches arms
-  checked <- checkSelect ctx branches
+  checked <- checkSelect wctx branches
   case checked of
     Left err -> pure (Left err)
     Right (Replay winner replayedStep) -> case drop winner arms of
@@ -281,7 +281,7 @@ selectStepOn ctx arms = do
           ( Left
               ( TransactError.ErrorSystemDatabase
                   ( SystemDBError.UnexpectedStep
-                      { workflowId = workflowId ctx,
+                      { workflowId = workflowCtxId wctx,
                         stepId = replayedStep,
                         expected = "a branch a recorded select can replay",
                         recorded = "a select won by branch " <> showText winner <> ", which no longer exists"

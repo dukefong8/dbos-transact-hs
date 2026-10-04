@@ -41,13 +41,12 @@ import DBOS.Transact
 import DBOS.Transact.Checkpoint (pendingStepId)
 import DBOS.Transact.Context
   ( cancellationToken,
-    stepCtxInner,
+    stepCtxBoundary,
     stepId,
     stepStatus,
     stepStatusCurrentAttempt,
     stepStatusId,
-    stepStatusMaxAttempts,
-    workflowCtxInner
+    stepStatusMaxAttempts
   )
 import DBOS.Transact.ContextTest (connOver, ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -95,7 +94,7 @@ tests =
           conn <- connOver backend nullTracer
           let body :: forall exec. StepCtx exec IO -> IO Int
               body sctx = do
-                writeIORef observedStepId (stepId (stepCtxInner sctx))
+                writeIORef observedStepId (stepId sctx)
                 modifyIORef' calls (+ 1)
                 pure 42
           first <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
@@ -251,10 +250,10 @@ tests =
           first <- runStep wctx "first" (\_ -> pure ())
           let outerBody :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) ())
               outerBody sctx = do
-                let outer = stepStatus (stepCtxInner sctx)
+                let outer = stepStatus sctx
                 inner <- runNestedStep sctx "inner" (\innerSctx -> do
-                  let innerStatus = stepStatus (stepCtxInner innerSctx)
-                      innerId = stepId (stepCtxInner innerSctx)
+                  let innerStatus = stepStatus innerSctx
+                      innerId = stepId innerSctx
                   modifyIORef' seen (++ [(outer, innerStatus, innerId)])
                   pure ())
                 case inner of
@@ -305,8 +304,8 @@ tests =
         conn <- connOver backend nullTracer
         (outside, body, abandoned) <-
           withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
-            outside <- cancellationToken (workflowCtxInner wctx)
-            body <- cancellationToken (workflowCtxInner wctx)
+            outside <- cancellationToken (stepCtxBoundary wctx)
+            body <- cancellationToken (stepCtxBoundary wctx)
             let hanging :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) ())
                 hanging _ = threadDelay 1000000 >> pure (Right ())
                 options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 20)}

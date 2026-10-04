@@ -37,7 +37,6 @@ import DBOS.Transact
     withStep,
     withWorkflow,
     workflowCtxId,
-    workflowId,
   )
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)

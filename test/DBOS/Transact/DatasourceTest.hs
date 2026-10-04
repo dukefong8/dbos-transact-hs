@@ -86,8 +86,7 @@ import DBOS.Transact
     withWorkflow,
   )
 import DBOS.Transact.Context
-  ( workflowCtxInner,
-    withSystemDB
+  ( withSystemDB
   )
 import DBOS.Transact.Connection
   ( newConnection,
@@ -310,7 +309,7 @@ scenarioOwnershipMoved :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) 
 scenarioOwnershipMoved fx wfId = do
   fake <- fx.dsFixtureMkDs
   started <- runFixture fx wfId $ \wctx ->
-    withSystemDB (workflowCtxInner wctx) (\db -> initWorkflow db ((newWorkflow wfId) {newWorkflowExecutorId = Just "other-executor"}) Nothing Fresh Nothing)
+    withSystemDB wctx (\db -> initWorkflow db ((newWorkflow wfId) {newWorkflowExecutorId = Just "other-executor"}) Nothing Fresh Nothing)
 
   case started of
     Left err -> pure (Left (ErrorSystemDatabase err))
