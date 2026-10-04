@@ -1,8 +1,8 @@
 # TODO — scoped workflow capabilities + step tables
 
 Branch `proto/phantom-brands` (cut from main-line work; main untouched).
-Date: 2026-10-03. Gate state: full suite **644/644**, psql mirror green,
-migration ceiling 114, both probes green (12/12, 7/7).
+Date: 2026-10-03. Gate state: full suite **650/650**, psql mirror green,
+migration ceiling 114, permanent probes 8/8 (`make probes`).
 Design record: `.lavish/rust-port-plan.html` (Phase 10, Rule 9, TODO 12–16),
 `docs/scoped-workflow-capabilities.md` (§1–§10),
 `docs/agent-skill-api-review.md` (per-rule verdicts),
@@ -130,12 +130,11 @@ the last module flips.
 - [x] C5c probes: permanent `probes/` pairs + `make probes` (four
       negatives matched to their error class, four witness twins clean):
       child start, allocation, nested step, cross-exec race.
-- [ ] C5c inner accessors: `workflowCtxInner`/`stepCtxInner` stay
-      facade-exported as the documented engine seam. The runtime-backstop
-      tests construct their illegal shapes through them (capture and
-      in-step), and the witness/reader twins that would replace them are
-      the C5a-remaining bulk pass below; hiding now would delete gates
-      without replacements (docs/invariant-gates.md reading rule).
+- [x] C5c inner accessors (superseded 2026-10-04): `workflowCtxInner`/
+      `stepCtxInner` LEFT the facade in the C5a trim and are peer-only now;
+      the backstop tests keep constructing illegal shapes through them via
+      the test-suite→internals dep, so no gate was deleted (the discipline
+      the box demanded holds; only the import path changed).
 - [x] C5a op-pair promotion: every `*Scoped` operation takes the plain
       oracle name (`send`, `recv`, `setEvent`, `getEvent`, `runTransaction`,
       `runWorkflowStep(With)`, `sleepWorkflowStep`, `awaitChild`,
@@ -161,16 +160,24 @@ the last module flips.
       (near-miss with the raw reader), typeclass overloading. 4 body
       sites swapped; StepTest's 2 workflow-scope checks stay downgraded
       by design (documented asymmetry). Gates: 650/650, probes 8/8.
-- [ ] C5b delete the old entries, the downgrades, and `Ctx` from the body
-      surface; enqueue/start `WorkflowCtx`-only (closes the
-      `currentConnection` hole); permanent tree-level `-fno-code` probes
-      (negative + witness) for the exec brand.
-- [ ] C2 Handle: awaits over scoped views.
-- [ ] C3 Select/Event/Sleep: scoped arms/reads/sleeps.
-- [ ] C4 Workflow execute path: `startChildWorkflow` takes `WorkflowCtx`;
-      enqueue/start `WorkflowCtx`-only (no `StepCtx` overload — closes the
-      `currentConnection` hole); typed start wrapper lands here.
-- [ ] C5 Management/Datasource/rest; final `Ctx` removal; full gate.
+- [ ] C5b remainder (narrowed 2026-10-04 — old entries ARE deleted, zero
+      `*Scoped` identifiers remain, enqueue/start take `Executor`/
+      `WorkflowCtx`): `data Ctx` still defined (`Context.hs`), 10
+      `let ctx = workflowCtxInner` downgradelets remain in bodies, the
+      `currentConnection` hole is open (`Management.hs` reads it), and the
+      permanent tree-level `-fno-code` probes (negative + witness) for the
+      exec brand are not yet written.
+- [x] C2 Handle — executed as C2a + C5a: awaits over scoped views
+      (`awaitChild`/`pendingAwait` take the plain oracle names).
+- [x] C3 Select/Event/Sleep — executed as C2b + C5a: scoped arms/reads/
+      sleeps under the plain names.
+- [x] C4 Workflow execute path — executed as C4a/b/c + C5c + C5a:
+      `startChildWorkflow` takes `WorkflowCtx` (the typed surface is the
+      `WorkflowRef m e`-taking entry); enqueue/start are `WorkflowCtx`-only
+      with no `StepCtx` overload.
+- [ ] C5 remainder (narrowed 2026-10-04 — management `...InWorkflow`s and
+      `runTransaction` are scoped): the final `Ctx` removal, which is the
+      C5b remainder above; then the full gate.
 
 ## Phase D — StepOps widget pilot (`docs/widget-step-tables.md`)
 
@@ -191,7 +198,8 @@ the last module flips.
       live+canned case (`failingPgCheckoutOps` refuses the paid mark)
       asserts no `order_id`, order `(1,0,3)`, inventory `4`, PENDING row
       with no dispatch child. Gates: full suite 651/651, Widget pair 5/7.
-- [ ] D3 follow-up domains after the pilot proves the pattern.
+- [ ] D3 follow-up domains after the pilot proves the pattern (intentionally
+      open: next-domain work, not this epic's gate).
 
 ## Standing gates (every slice)
 
