@@ -32,6 +32,7 @@ module DBOS.Transact.Workflow
     startWorkflowRef,
     runWorkflowRef,
     startChildWorkflow,
+    startChildWorkflowScoped,
     maxRecoveryAttempts,
     spawnRegisteredWorkflowWithRow,
     workflowNewWorkflow,
@@ -72,7 +73,7 @@ import DBOS.SystemDB.Types (ApplicationVersion, AwaitedOutcome (..), Duration, E
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeWorkflowValue)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, nextExecutionIdentity, runSystemDB)
-import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..), TaskSpawner (..), currentConnection, currentIdentity, deadline, insideAStep, newCtx, newWorkflowState, nextStepId, spawnLocal, taskSpawner, withTaskSpawner, withWorkflow, withWorkflowTaskSpawner, workflowId)
+import DBOS.Transact.Context (Ctx, LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx, currentConnection, currentIdentity, deadline, insideAStep, newCtx, newWorkflowState, nextStepId, spawnLocal, taskSpawner, withTaskSpawner, withWorkflow, withWorkflowTaskSpawner, workflowCtxInner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
@@ -639,6 +640,9 @@ runWorkflowRef tasks conn identity snapshot ref options input = do
 -- follow-up. Starting from inside a step is 'InsideStep': a step is a
 -- leaf, and an id-allocating call inside one would shift every later step
 -- onto the wrong replay slot.
+startChildWorkflowScoped :: (MonadMVar m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startChildWorkflowScoped wctx = startChildWorkflow (workflowCtxInner wctx)
+
 startChildWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => Ctx m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startChildWorkflow ctx ref options input = do
   -- A start inside a step body is refused — and a start through a captured

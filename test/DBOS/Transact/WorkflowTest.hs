@@ -183,6 +183,7 @@ import DBOS.Transact
     runSystemDB,
     runDBOSWorkflowRef,
     nextStepMarker,
+    nextWorkflowMarker,
     runOptionsDefault,
     runOptionsToStartOptions,
     nullTracer,
@@ -197,6 +198,7 @@ import DBOS.Transact
     spawnTracked,
     spawnLocal,
     startChildWorkflow,
+    startChildWorkflowScoped,
     tasksSpawner,
     millisDuration,
     secondsDuration,
@@ -208,6 +210,7 @@ import DBOS.Transact
     stepOptionsDefault,
     tokenCancelled,
     withAttempt,
+    withStep,
     withWorkflow,
     timeoutBudget,
     waitForWorkflow,
@@ -730,9 +733,14 @@ scenarioRegisteredRecordsResult ::
 scenarioRegisteredRecordsResult fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     let key = newWorkflowKey "double"
-        body :: Int -> Ctx m -> m (Either (Error EngineOnly) Int)
-        body value ctx = runWorkflowStep ctx "double" (const (pure (value * 2)))
-    registered <- registerDBOSWorkflow dbos key body
+        -- Converted body: registered through the scoped entry and using the
+        -- scoped step runner. The conversion pattern for one body at a
+        -- time: swap the registration, take WorkflowCtx, and replace
+        -- context-level calls with their scoped entries (downgrading via
+        -- workflowCtxInner where an entry does not exist yet).
+        body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
+    registered <- registerDBOSWorkflowScoped dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
@@ -1819,14 +1827,18 @@ scenarioCaptureChildRefused fx = do
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
-    let badBody :: Int -> Ctx m -> m (Either (Error EngineOnly) Text)
-        badBody _ ctx = do
-          marker <- nextStepMarker ctx
-          outcome <- withAttempt ctx marker (firstStepStatus 0) (\_ -> startChildWorkflow ctx childRef startOptionsDefault Nothing)
+    let -- Converted body: the scoped shape with the captured-parent start.
+        -- The step body captures the workflow view and starts through it —
+        -- the same capture the context-level shape made — and the refusal
+        -- still fires through the shared depth backstop.
+        badBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        badBody _ wctx = do
+          marker <- nextWorkflowMarker wctx
+          outcome <- withStep wctx marker (firstStepStatus 0) (\_ -> startChildWorkflowScoped wctx childRef startOptionsDefault Nothing)
           pure $ case outcome of
             Left err -> Left err
             Right handle -> Left (ErrorConfig ("started through a captured parent: " <> handleWorkflowId handle))
-    parentReg <- registerDBOSWorkflow dbos parentKey badBody
+    parentReg <- registerDBOSWorkflowScoped dbos parentKey badBody
     case parentReg of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()

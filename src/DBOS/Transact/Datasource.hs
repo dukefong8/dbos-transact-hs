@@ -27,6 +27,7 @@ module DBOS.Transact.Datasource
     DataSource (..),
     -- * Runner (staged: signatures first, bodies next)
     runTransaction,
+    runTransactionScoped,
     registerTransaction,
     runTransactionOutside,
     -- * Tracing
@@ -47,7 +48,7 @@ import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderErro
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..))
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Context (Ctx, contextTracer, currentIdentity, insideAStep, nextStepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (Ctx, WorkflowCtx, contextTracer, currentIdentity, insideAStep, nextStepId, withSystemDB, workflowCtxInner, workflowId)
 import DBOS.Transact.Error (Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
@@ -177,6 +178,9 @@ instance ToLogStr TransactionEvent where
 -- back off and retry; an in-step call is refused. Bodies report their
 -- failure as a value (like 'runWorkflowStepWith'); a body panic propagates
 -- unrecorded.
+runTransactionScoped :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
+runTransactionScoped ds wctx = runTransaction ds (workflowCtxInner wctx)
+
 runTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> TransactionConfig -> (Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
 runTransaction ds ctx config body = do
   -- Refused through the handed context or a captured parent alike: a

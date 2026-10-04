@@ -12,10 +12,15 @@ module DBOS.Transact.Message
     SendBulkOptions (..),
     sendBulkOptionsDefault,
     send,
+    sendScoped,
     sendWith,
+    sendWithScoped,
     sendBulk,
+    sendBulkScoped,
     sendBulkWith,
+    sendBulkWithScoped,
     recv,
+    recvScoped,
   )
 where
 
@@ -28,7 +33,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Context (Ctx, insideAStep, nextStepId, stepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (Ctx, WorkflowCtx, insideAStep, nextStepId, stepId, withSystemDB, workflowCtxInner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runWorkflowStepWith, stepOptionsDefault)
 
@@ -77,6 +82,28 @@ sendBulkOptionsDefault = SendBulkOptions {forks = ForksSkip}
 send :: (ToJSON value, MonadSTM m) => Ctx m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 send ctx destination topic idempotencyKey value =
   sendWith ctx destination value (sendOptionsDefault {topic = topic, idempotency_key = idempotencyKey})
+
+-- | 'send' over the scoped workflow view.
+sendScoped :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendScoped wctx destination topic idempotencyKey value =
+  send (workflowCtxInner wctx) destination topic idempotencyKey value
+
+-- | 'sendWith' over the scoped workflow view.
+sendWithScoped :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> WorkflowId -> value -> SendOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendWithScoped wctx destination value options =
+  sendWith (workflowCtxInner wctx) destination value options
+
+-- | 'sendBulk' over the scoped workflow view.
+sendBulkScoped :: (ToJSON value, MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Message value] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendBulkScoped wctx messages = sendBulk (workflowCtxInner wctx) messages
+
+-- | 'sendBulkWith' over the scoped workflow view.
+sendBulkWithScoped :: (ToJSON value, MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Message value] -> SendBulkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendBulkWithScoped wctx messages options = sendBulkWith (workflowCtxInner wctx) messages options
+
+-- | 'recv' over the scoped workflow view.
+recvScoped :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Maybe Topic -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
+recvScoped wctx topic timeout = recv (workflowCtxInner wctx) topic timeout
 
 -- | 'send' with the options rather than the defaults: a topic, an
 -- idempotency key, or the fork fan-out. Mirrors Rust @send_with@.
