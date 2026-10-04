@@ -13,6 +13,7 @@ Repo guide for DBOS Haskell.
 - `rust-migrate/` is a standalone Cargo crate driving the Rust migration runner (`make db-migrate`); it is not part of any workspace, and it vendors the corpus (`migrations/*.sql` + `src/migrations/{mod,runner}.rs`, copied from `dbos-transact-rust/crates/dbos`) so the only path deps are its own files.
 - `docs/` holds durable engineering notes, workflow guidance, research context, and ADRs (`cross-language-schema-interop.md` = the shared `dbos` schema contract).
 - `docs/adr/` records architectural decisions.
+- `probes/` holds the permanent compile probes for the scoped-capability brands: each `neg-*.hs` must fail to typecheck with its expected error class and each `w-*.hs` witness twin must build clean; run through `make probes` (`cabal exec -- ghc -fno-code -fno-write-interface`, driven by `probes/run.sh`). The policy is `docs/invariant-gates.md`.
 - `.lavish/rust-port-plan.html` is the living port plan; fold each phase's delta back into it (self-recursive loop) and mark edits with dated notes.
 - `CONTEXT.md` is the glossary for domain language only.
 

@@ -108,28 +108,41 @@ the last module flips.
       position, forall exec in result position — MonoLocalBinds cannot
       generalize let-bound bodies to rank-2). Gates: Workflow pair 54/54,
       ManagementSim 12/12, Widget pair 4/7, full suite 650/650, psql 3/3.
-- [ ] C1c step-body flip: StepRetryTest's `body :: Ctx IO -> ...` step
-      bodies and MessageTest's helpers convert with the step-runner call
-      sites (runWorkflowStep(With) -> scoped twins) when the step bodies
-      take `StepCtx`; `runNestedStep` covers the nested shape.
+- [x] C1c step-body flip (fa5768f): StepRetryTest/StepTest/EventTest/
+      MessageTest/WidgetSim/WidgetTest/DatasourceTest step bodies take
+      `StepCtx`; runner call sites go through runWorkflowStep(With)Scoped;
+      nested shapes use `runNestedStep`; the Datasource fixture is
+      `dsFixtureRun` (scope runner) instead of a Ctx builder. In-step
+      downgrades for refusal tests stay explicit via `stepCtxInner`.
+      Gates: full suite 650/650, DatasourceSim 11/11, WidgetSim 7/7.
 - [x] C5b registration + twin-swap (4eb040f, 2785fee): every body's
       alias deleted and calls moved to the scoped twins; the old
       registration entries (`registerTypedWorkflow`, `registerWorkflowRef`,
       `registerDBOSWorkflow`, `registerDBOSWorkflowRef`) and their facade
       exports deleted; demo apps converted and registered scoped. Gates:
       650/650, sim trees individually green, demo apps load clean.
-- [ ] C5c remaining: enqueue/start `WorkflowCtx`-only (the `Connection`-
-      taking enqueue paths); permanent `-fno-code` probes (negative +
-      witness) for the exec brand; hide `workflowCtxInner`/`stepCtxInner`
-      from the facade once the last helper downgrades (EventTest's
-      `action`, WidgetSim/WidgetTest's `widgetStep`) convert.
-- [ ] C5a remaining scoped surface for body code: `runWorkflowStepWithScoped`
-      (options variant); scoped reader twins — StepCtx:
-      `cancellationToken`/`cancelToken`/`tokenCancelled`/`stepId`/
+- [x] C5c raw start/enqueue paths (50d8eb1): the facade no longer exports
+      enqueueWorkflow/startWorkflowRef/runWorkflowRef/startChildWorkflow/
+      runRegisteredWorkflow*; starts and enqueues reach application code
+      only through the Executor/DBOS wrappers or the WorkflowCtx scoped
+      entries. WorkflowTest's two in-step negatives moved to the captured
+      shape; the direct in-step shape has no facade term.
+- [x] C5c probes: permanent `probes/` pairs + `make probes` (four
+      negatives matched to their error class, four witness twins clean):
+      child start, allocation, nested step, cross-exec race.
+- [ ] C5c inner accessors: `workflowCtxInner`/`stepCtxInner` stay
+      facade-exported as the documented engine seam. The runtime-backstop
+      tests construct their illegal shapes through them (capture and
+      in-step), and the witness/reader twins that would replace them are
+      the C5a-remaining bulk pass below; hiding now would delete gates
+      without replacements (docs/invariant-gates.md reading rule).
+- [ ] C5a remaining scoped surface for body code: scoped reader twins —
+      StepCtx: `cancellationToken`/`cancelToken`/`tokenCancelled`/`stepId`/
       `stepStatus`/`stepMarker`/`raceCancel`; WorkflowCtx: `deadline`/
       `currentConnection`/`currentIdentity`/`withSystemDB`. Decide naming
       (view-prefixed twins vs documented `stepCtxInner`/`workflowCtxInner`
-      downgrades) before the bulk pass.
+      downgrades) before the bulk pass. (`runWorkflowStepWithScoped` landed
+      in C1a/C1c.)
 - [ ] C5b delete the old entries, the downgrades, and `Ctx` from the body
       surface; enqueue/start `WorkflowCtx`-only (closes the
       `currentConnection` hole); permanent tree-level `-fno-code` probes
