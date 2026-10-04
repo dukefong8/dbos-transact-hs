@@ -14,6 +14,7 @@
 module DBOS.Transact.ContextTest
   ( tests,
     ctxOver,
+    connOver,
     Fixture (..),
     scenarioWorkflowId,
     scenarioStepIds,

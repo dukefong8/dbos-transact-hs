@@ -22,12 +22,17 @@ import DBOS.Transact
     StepOptions (..),
     StepStatus (..),
     WorkflowId (..),
+    Identity (..),
     acquireLoggerBackend,
     cancellationToken,
+    firstStepStatus,
     ioTracer,
     nullTracer,
+    runNestedStep,
     runWorkflowStep,
+    runWorkflowStepScoped,
     runWorkflowStepWith,
+    stepCtxStatus,
     sleepWorkflowStep,
     stepId,
     stepStatus,
@@ -35,10 +40,22 @@ import DBOS.Transact
     stepStatusId,
     stepStatusMaxAttempts,
     stepOptionsDefault,
+    withWorkflow,
   )
-import DBOS.Transact.ContextTest (ctxOver)
+import DBOS.Transact.ContextTest (connOver, ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+
+-- | The application identity the scoped runner installs: the app
+-- identity, not the execution identity the state mints internally.
+scopedTestIdentity :: Identity
+scopedTestIdentity =
+  Identity
+    { identityAppName = "test-app",
+      identityAppVersion = "1.0.0",
+      identityExecutorId = "test-executor",
+      identityAppId = ""
+    }
 
 -- | One backend for the whole group: pools are per-backend, so sharing
 -- bounds connections no matter how many tests run or are interrupted.
@@ -113,6 +130,60 @@ tests =
         case free of
           Right Nothing -> pure ()
           _ -> fail "expected no checkpoint for the inner call",
+      testCase "a scoped step runs once and replays through the workflow view" $ do
+        backend <- getBackend
+        freshId <- UUID.V4.nextRandom
+        let workflowText = "hs-l2-step-scoped-" <> Text.pack (UUID.toString freshId)
+            initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2StepScopedTest"}
+        created <- initWorkflow backend initialWorkflow Nothing Fresh Nothing
+        case created of
+          Left err -> fail (show err)
+          Right _ -> pure ()
+        calls <- newIORef (0 :: Int)
+        observed <- newIORef Nothing
+        let runScoped :: IO (Either (Error EngineOnly) Int)
+            runScoped = do
+              conn <- connOver backend nullTracer
+              withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+                runWorkflowStepScoped wctx "scoped_step" $ \s -> do
+                  writeIORef observed (stepCtxStatus s)
+                  modifyIORef' calls (+ 1)
+                  pure 42
+        first <- runScoped
+        assertEqual "the scoped runner returns the body's result" (Right 42) first
+        assertEqual "the body runs inside step zero" (Just (firstStepStatus 0)) =<< readIORef observed
+        replay <- runScoped
+        assertEqual "replay returns the recorded result" (Right 42) replay
+        assertEqual "replay does not run the body again" 1 =<< readIORef calls,
+      testCase "a nested step through the step view is plain and takes no id" $ do
+        backend <- getBackend
+        freshId <- UUID.V4.nextRandom
+        let workflowText = "hs-l2-step-nested-scoped-" <> Text.pack (UUID.toString freshId)
+            initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2StepNestedScopedTest"}
+        created <- initWorkflow backend initialWorkflow Nothing Fresh Nothing
+        case created of
+          Left err -> fail (show err)
+          Right _ -> pure ()
+        (logger, cleanup) <- acquireLoggerBackend
+        conn <- connOver backend (ioTracer logger)
+        outer <-
+          withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+            ( runWorkflowStepScoped wctx "outer" $ \s -> do
+                inner <- runNestedStep s "inner" (\_ -> pure (7 :: Int)) :: IO (Either (Error EngineOnly) Int)
+                case inner of
+                  Right n -> pure (n + 1)
+                  Left err -> fail (show err)
+            ) :: IO (Either (Error EngineOnly) Int)
+        cleanup
+        assertEqual "the outer body sees the inner result" (Right 8) outer
+        placed <- checkStep backend (WorkflowId workflowText) 0 "outer"
+        case placed of
+          Right (Just _) -> pure ()
+          _ -> fail "expected a checkpoint for the outer step"
+        free <- checkStep backend (WorkflowId workflowText) 1 "inner"
+        case free of
+          Right Nothing -> pure ()
+          _ -> fail "expected no checkpoint for the nested call",
       testCase "durable sleep reuses its recorded wake time" $ do
         backend <- getBackend
         freshId <- UUID.V4.nextRandom

@@ -86,6 +86,9 @@ module DBOS.Transact.Context
     workflowCtxId,
     stepCtxId,
     stepCtxStatus,
+    stepCtxAt,
+    stepCtxTracer,
+    workflowCtxInner,
   )
 where
 
@@ -490,6 +493,23 @@ workflowCtxId wctx = workflowId wctx.workflowCtx
 -- | The id of the workflow this attempt belongs to.
 stepCtxId :: StepCtx exec m -> Text
 stepCtxId sctx = workflowId sctx.stepCtxInner
+
+-- | The inner context behind a workflow view, for engine paths that
+-- delegate to the context-level machinery.
+workflowCtxInner :: WorkflowCtx exec m -> Ctx m
+workflowCtxInner wctx = wctx.workflowCtx
+
+-- | Rebuild the narrowed view around an attempt's inner context: what the
+-- engine's step runner hands a body, built from the scope it is about to
+-- run. Exported for the step seam; application code obtains views only
+-- through 'withStep'.
+stepCtxAt :: WorkflowCtx exec m -> Ctx m -> StepCtx exec m
+stepCtxAt wctx inner = StepCtx wctx inner
+
+-- | The tracer behind a step view, for engine paths that must announce
+-- through the view's execution without widening it.
+stepCtxTracer :: StepCtx exec m -> SomeTracer m
+stepCtxTracer sctx = contextTracer sctx.stepCtxInner
 
 -- | What this attempt may read about itself, or 'Nothing' outside any
 -- attempt — which a handed 'StepCtx' never is. Kept 'Maybe' like the

@@ -28,7 +28,9 @@ import DBOS.Transact
     Error (..),
     Identity (..),
     StepOptions (..),
+    StepStatus (..),
     WorkflowEvent (..),
+    WorkflowId (..),
     firstStepStatus,
     newCtx,
     newWorkflowState,
@@ -36,10 +38,14 @@ import DBOS.Transact
     nextStepId,
     nextStepMarker,
     renderTransactError,
+    runNestedStep,
     runWorkflowStep,
+    runWorkflowStepScoped,
     runWorkflowStepWith,
+    stepCtxStatus,
     stepOptionsDefault,
     withAttempt,
+    withWorkflow,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -155,11 +161,49 @@ tests =
         (outcome, tr) <- runSimCase plainRun
         printSimTrace tr
         outcome @?= Right 3
-        traceEvents tr @?= [StepPlain "inner"]
+        traceEvents tr @?= [StepPlain "inner"],
+      testCase "a scoped step runs through the workflow view" $ do
+        (outcome, tr) <- runSimCase scopedRun
+        printSimTrace tr
+        outcome @?= (Right 42, Just (firstStepStatus 0))
+        traceEvents tr @?= [StepRunning "scoped" 0, StepOutputRecorded "scoped" 0],
+      testCase "a nested step through the step view is plain" $ do
+        (outcome, tr) <- runSimCase scopedNested
+        printSimTrace tr
+        outcome @?= Right 8
+        traceEvents tr @?= [StepRunning "outer" 0, StepPlain "inner", StepOutputRecorded "outer" 0]
     ]
 
 traceEvents :: SimTrace a -> [WorkflowEvent]
 traceEvents = selectTraceEventsDynamic
+
+-- * Scoped-runner cases
+
+-- | The workflow-scope runner over the sim backend: the body reads its
+-- narrowed view's status, so the case proves the handoff as well as the
+-- checkpoint.
+scopedRun :: IOSim s (Either (Error EngineOnly) Int, Maybe StepStatus)
+scopedRun = do
+  conn <- simConnectionWith simTracer
+  observed <- newTVarIO Nothing
+  result <-
+    withWorkflow conn simIdentity (WorkflowId "sim-step-scoped") Nothing $ \wctx ->
+      runWorkflowStepScoped wctx "scoped" $ \s -> do
+        atomically (writeTVar observed (stepCtxStatus s))
+        pure 42
+  seen <- readTVarIO observed
+  pure (result, seen)
+
+-- | The step-scope runner: the nested call is plain by construction.
+scopedNested :: forall s. IOSim s (Either (Error EngineOnly) Int)
+scopedNested = do
+  conn <- simConnectionWith simTracer
+  withWorkflow conn simIdentity (WorkflowId "sim-step-nested-scoped") Nothing $ \wctx ->
+    runWorkflowStepScoped wctx "outer" $ \s -> do
+      inner <- runNestedStep s "inner" (\_ -> pure (7 :: Int)) :: IOSim s (Either (Error EngineOnly) Int)
+      case inner of
+        Right n -> pure (n + 1)
+        Left err -> error (show err)
 
 -- * The mirrored cases
 

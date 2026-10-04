@@ -11,6 +11,8 @@ module DBOS.Transact.Step
   ( StepError (..),
     WorkflowEvent (..),
     runWorkflowStep,
+    runWorkflowStepScoped,
+    runNestedStep,
     runWorkflowStepWith,
     pendingWorkflowStep,
     pendingWorkflowStepWith,
@@ -38,7 +40,7 @@ import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encode
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..))
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
-import DBOS.Transact.Context (Ctx, StepStatus (..), cancellationToken, cancelToken, contextTracer, currentConnection, firstStepStatus, inStep, nextStepId, nextStepMarker, withAttempt, withSystemDB, workflowId)
+import DBOS.Transact.Context (Ctx, StepCtx, StepStatus (..), WorkflowCtx, cancellationToken, cancelToken, contextTracer, currentConnection, firstStepStatus, inStep, nextStepId, nextStepMarker, stepCtxAt, stepCtxTracer, withAttempt, withSystemDB, workflowCtxInner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import GHC.Stack (HasCallStack)
 
@@ -213,6 +215,36 @@ runWorkflowStep ctx name body
             Right () -> do
               runTracer (contextTracer ctx) (StepOutputRecorded name stepId')
               pure (Right value)
+
+-- | 'runWorkflowStep' over the scoped workflow view: the workflow-scope
+-- entry. The id is allocated through the workflow context and the body is
+-- handed the narrowed step view, so the step-scoped operations are the
+-- only ones its type can reach. The step-scope entry is 'runNestedStep':
+-- taking 'StepCtx' is the whole guard, because a workflow body holds no
+-- step view and a step body holds no workflow view.
+runWorkflowStepScoped ::
+  (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m, HasCallStack) =>
+  WorkflowCtx exec m ->
+  Text ->
+  (StepCtx exec m -> m value) ->
+  m (Either (TransactError.Error e) value)
+runWorkflowStepScoped wctx name body =
+  runWorkflowStep (workflowCtxInner wctx) name (\inner -> body (stepCtxAt wctx inner))
+
+-- | The step-scope entry: a call made inside a step body runs plainly —
+-- no id is allocated and nothing is checkpointed — mirroring the leaf
+-- rule. It cannot allocate even if asked: the narrowed view exposes no
+-- allocator, and the allocating entry demands the workflow view this
+-- scope does not hold.
+runNestedStep ::
+  Monad m =>
+  StepCtx exec m ->
+  Text ->
+  (StepCtx exec m -> m value) ->
+  m (Either (TransactError.Error e) value)
+runNestedStep sctx name body = do
+  runTracer (stepCtxTracer sctx) (StepPlain name)
+  Right <$> body sctx
 
 -- | The recorded outcome of a step, replayed without entering the body.
 replayWorkflowStep :: (FromJSON value, FromJSON e) => Text -> Int -> StepRecord -> Either (TransactError.Error e) value
