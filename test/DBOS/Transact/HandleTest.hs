@@ -26,7 +26,7 @@ import DBOS.Transact
     WorkflowHandle,
     WorkflowId (..),
     WorkflowKey,
-    awaitChildScoped,
+    awaitChild,
     configFromEnv,
     decodeWorkflowValue,
     deleteWorkflows,
@@ -38,12 +38,11 @@ import DBOS.Transact
     newDBOS,
     newWorkflowKey,
     nullTracer,
-    registerDBOSWorkflowScoped,
+    registerDBOSWorkflow,
     renderTransactError,
     retrieveWorkflow,
     runDBOSWorkflow,
     runWorkflowStep,
-    runWorkflowStepScoped,
     shutdown,
     withWorkflow,
   )
@@ -94,9 +93,9 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -125,9 +124,9 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -157,7 +156,7 @@ tests =
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body _ _ = pure (Left (StepFailed "body" "boom"))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -191,7 +190,7 @@ tests =
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value _ = pure (Right (value + 1))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -219,9 +218,9 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -254,14 +253,14 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
             parentRow = (newWorkflow parentText) {newWorkflowName = Just "L2HandleAwaiter"}
         created <- initWorkflow backend parentRow Nothing Fresh Nothing
         case created of
           Left err -> fail (show err)
           Right _ -> pure ()
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -276,7 +275,7 @@ tests =
             Right handle -> do
               conn <- connOver backend nullTracer
               awaited <- withWorkflow conn handleTestIdentity (WorkflowId parentText) Nothing $ \wctx ->
-                awaitChildScoped wctx handle
+                awaitChild wctx handle
               case awaited of
                 Right (Just stored) -> do
                   let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int

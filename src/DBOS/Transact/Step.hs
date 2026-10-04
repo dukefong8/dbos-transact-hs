@@ -11,16 +11,10 @@ module DBOS.Transact.Step
   ( StepError (..),
     WorkflowEvent (..),
     runWorkflowStep,
-    runWorkflowStepScoped,
     runNestedStep,
     runWorkflowStepWith,
-    runWorkflowStepWithScoped,
-    pendingWorkflowStepScoped,
-    pendingWorkflowStepWithScoped,
-    driveWorkflowStepWithScoped,
     pendingWorkflowStep,
     pendingWorkflowStepWith,
-    driveWorkflowStepWith,
     stepOptionsDefault,
     stepBackoff,
     StepOptions (..),
@@ -175,11 +169,11 @@ instance ToLogStr WorkflowEvent where
 -- Run and replay announcements go through the context's tracer, so the
 -- same call sites log to FastLogger in production and to the io-sim trace
 -- in simulations with no logger argument at all.
-runWorkflowStep :: (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m, HasCallStack) => Ctx m -> Text -> (Ctx m -> m value) -> m (Either (TransactError.Error e) value)
-runWorkflowStep ctx name body
+runWorkflowStep :: (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m, HasCallStack) => WorkflowCtx exec m -> Text -> (StepCtx exec m -> m value) -> m (Either (TransactError.Error e) value)
+runWorkflowStep wctx name body
   | inStep ctx = do
       runTracer (contextTracer ctx) (StepPlain name)
-      value <- body ctx
+      value <- body (stepCtxAt wctx ctx)
       pure (Right value)
   | otherwise = do
       let workflowId' = WorkflowId (workflowId ctx)
@@ -195,7 +189,7 @@ runWorkflowStep ctx name body
         Right Nothing -> do
           runTracer (contextTracer ctx) (StepRunning name stepId')
           marker <- nextStepMarker ctx
-          value <- withAttempt ctx marker (firstStepStatus stepId') body
+          value <- withAttempt ctx marker (firstStepStatus stepId') (\inner -> body (stepCtxAt wctx inner))
           completedAt <- timestampNow
           let encoded = encodeWorkflowValue value
               serialization = case encoded.serializedSerialization of
@@ -219,33 +213,8 @@ runWorkflowStep ctx name body
             Right () -> do
               runTracer (contextTracer ctx) (StepOutputRecorded name stepId')
               pure (Right value)
-
--- | 'runWorkflowStepWith' over the scoped workflow view: the options
--- variant of the workflow-scope entry.
-runWorkflowStepWithScoped ::
-  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
-  StepOptions e ->
-  WorkflowCtx exec m ->
-  Text ->
-  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
-  m (Either (TransactError.Error e) value)
-runWorkflowStepWithScoped options wctx name body =
-  runWorkflowStepWith options (workflowCtxInner wctx) name (\inner -> body (stepCtxAt wctx inner))
-
--- | 'runWorkflowStep' over the scoped workflow view: the workflow-scope
--- entry. The id is allocated through the workflow context and the body is
--- handed the narrowed step view, so the step-scoped operations are the
--- only ones its type can reach. The step-scope entry is 'runNestedStep':
--- taking 'StepCtx' is the whole guard, because a workflow body holds no
--- step view and a step body holds no workflow view.
-runWorkflowStepScoped ::
-  (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m, HasCallStack) =>
-  WorkflowCtx exec m ->
-  Text ->
-  (StepCtx exec m -> m value) ->
-  m (Either (TransactError.Error e) value)
-runWorkflowStepScoped wctx name body =
-  runWorkflowStep (workflowCtxInner wctx) name (\inner -> body (stepCtxAt wctx inner))
+  where
+    ctx = workflowCtxInner wctx
 
 -- | The step-scope entry: a call made inside a step body runs plainly —
 -- no id is allocated and nothing is checkpointed — mirroring the leaf
@@ -360,47 +329,14 @@ stepBackoff options failures =
 runWorkflowStepWith ::
   (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepOptions e ->
-  Ctx m ->
-  Text ->
-  (Ctx m -> m (Either (TransactError.Error e) value)) ->
-  m (Either (TransactError.Error e) value)
-runWorkflowStepWith options ctx name body =
-  placeCall ctx >>= \placement -> driveWorkflowStepWith options ctx name placement body
-
--- | 'pendingWorkflowStepWith' over the scoped workflow view: the id is
--- claimed through the workflow context and the body is handed the narrowed
--- step view when the pending is driven.
-pendingWorkflowStepWithScoped ::
-  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
-  StepOptions e ->
   WorkflowCtx exec m ->
   Text ->
-  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
-  m (PendingStep exec m (Either (TransactError.Error e) value))
-pendingWorkflowStepWithScoped options wctx name body =
-  pendingWorkflowStepWith options (workflowCtxInner wctx) name (\inner -> body (stepCtxAt wctx inner))
-
--- | 'pendingWorkflowStepWithScoped' with the default options: a plain step.
-pendingWorkflowStepScoped ::
-  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
-  WorkflowCtx exec m ->
-  Text ->
-  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
-  m (PendingStep exec m (Either (TransactError.Error e) value))
-pendingWorkflowStepScoped = pendingWorkflowStepWithScoped stepOptionsDefault
-
--- | 'driveWorkflowStepWith' over the scoped workflow view: the race and
--- await paths drive a pending built through the same view.
-driveWorkflowStepWithScoped ::
-  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
-  StepOptions e ->
-  WorkflowCtx exec m ->
-  Text ->
-  StepPlacement m ->
   (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
   m (Either (TransactError.Error e) value)
-driveWorkflowStepWithScoped options wctx name placement body =
-  driveWorkflowStepWith options (workflowCtxInner wctx) name placement (\inner -> body (stepCtxAt wctx inner))
+runWorkflowStepWith options wctx name body =
+  placeCall ctx >>= \placement -> driveWorkflowStepWith options ctx name placement (\inner -> body (stepCtxAt wctx inner))
+  where
+    ctx = workflowCtxInner wctx
 
 -- | A durable step built at its position and not yet run: the call claims
 -- its id here, where it is written, and 'pendingRun' drives exactly what
@@ -411,25 +347,26 @@ driveWorkflowStepWithScoped options wctx name placement body =
 pendingWorkflowStepWith ::
   (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepOptions e ->
-  Ctx m ->
+  WorkflowCtx exec m ->
   Text ->
-  (Ctx m -> m (Either (TransactError.Error e) value)) ->
+  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
   m (PendingStep exec m (Either (TransactError.Error e) value))
-pendingWorkflowStepWith options ctx name body = do
+pendingWorkflowStepWith options wctx name body = do
+  let ctx = workflowCtxInner wctx
   placement <- placeCall ctx
   pure
     PendingStep
       { name = name,
         placement = Just placement,
-        pendingRun = driveWorkflowStepWith options ctx name placement body
+        pendingRun = driveWorkflowStepWith options ctx name placement (\inner -> body (stepCtxAt wctx inner))
       }
 
 -- | 'pendingWorkflowStepWith' with the default options: a plain step.
 pendingWorkflowStep ::
   (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
-  Ctx m ->
+  WorkflowCtx exec m ->
   Text ->
-  (Ctx m -> m (Either (TransactError.Error e) value)) ->
+  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
   m (PendingStep exec m (Either (TransactError.Error e) value))
 pendingWorkflowStep = pendingWorkflowStepWith stepOptionsDefault
 

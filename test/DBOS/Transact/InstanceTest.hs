@@ -42,7 +42,7 @@ import DBOS.Transact
     newDBOS,
     newWorkflowKey,
     nullTracer,
-    registerDBOSWorkflowScoped,
+    registerDBOSWorkflow,
     renderTransactError,
     runDBOSWorkflow,
     shutdown,
@@ -144,7 +144,7 @@ tests =
         case started of
           Left _ -> pure ()
           Right _ -> fail "expected a short application name to be refused"
-        reopened <- registerDBOSWorkflowScoped dbos (newWorkflowKey "late") echoWorkflow
+        reopened <- registerDBOSWorkflow dbos (newWorkflowKey "late") echoWorkflow
         case reopened of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right () -> pure (),
@@ -209,7 +209,7 @@ tests =
             echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         dbos <- newDBOS configured
-        registered <- registerDBOSWorkflowScoped dbos (newWorkflowKey "greeting") echoWorkflow
+        registered <- registerDBOSWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
         case registered of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right () -> pure ()
@@ -258,7 +258,7 @@ tests =
         dbos <- newDBOS configured
         let echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
-        beforeLaunch <- registerDBOSWorkflowScoped dbos (newWorkflowKey "greeting") echoWorkflow
+        beforeLaunch <- registerDBOSWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
         case beforeLaunch of
           Left err -> fail (Text.unpack (renderTransactError err))
           Right () -> pure ()
@@ -272,7 +272,7 @@ tests =
         case missing of
           Left err -> assertBool "reports the missing workflow" ("no such workflow" `Text.isInfixOf` renderTransactError err)
           Right _ -> fail "expected waiting for a missing workflow to fail"
-        afterLaunch <- registerDBOSWorkflowScoped dbos (newWorkflowKey "late") echoWorkflow
+        afterLaunch <- registerDBOSWorkflow dbos (newWorkflowKey "late") echoWorkflow
         case afterLaunch of
           Left err -> assertBool "names the lifecycle boundary" ("after DBOS is launched" `Text.isInfixOf` renderTransactError err)
           Right () -> fail "expected registration after launch to be refused"
@@ -291,7 +291,7 @@ tests =
             echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         bracket (newDBOS configured) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowScoped dbos (newWorkflowKey "queued") echoWorkflow
+          registered <- registerDBOSWorkflow dbos (newWorkflowKey "queued") echoWorkflow
           case registered of
             Left err -> fail (Text.unpack (renderTransactError err))
             Right () -> pure ()

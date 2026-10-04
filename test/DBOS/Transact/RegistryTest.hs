@@ -24,9 +24,9 @@ import DBOS.Transact
     nullTracer,
     refKey,
     refName,
-    registerTypedWorkflowScoped,
+    registerTypedWorkflow,
     registerErasedWorkflow,
-    registerWorkflowRefScoped,
+    registerWorkflowRef,
     renderTransactError,
     renderWorkflowKey,
     snapshotRegistry,
@@ -111,7 +111,7 @@ tests =
         let key = newWorkflowKey "double"
             double :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             double value _ = pure (Right (value * 2))
-        registered <- registerTypedWorkflowScoped registry key double
+        registered <- registerTypedWorkflow registry key double
         case registered of
           Left err -> fail (show err)
           Right () -> pure ()
@@ -130,7 +130,7 @@ tests =
         let key = newWorkflowKey "double"
             double :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             double value _ = pure (Right (value * 2))
-        registered <- registerTypedWorkflowScoped registry key double
+        registered <- registerTypedWorkflow registry key double
         case registered of
           Left err -> fail (show err)
           Right () -> pure ()
@@ -150,7 +150,7 @@ tests =
         let key = instanceWorkflowKey "checkout" "Checkout" "eu"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value _ = pure (Right (value * 2))
-        registered <- registerWorkflowRefScoped registry key body
+        registered <- registerWorkflowRef registry key body
         case registered of
           Left err -> fail (show err)
           Right ref -> do
@@ -161,11 +161,11 @@ tests =
         let key = newWorkflowKey "same"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value _ = pure (Right value)
-        first <- registerWorkflowRefScoped registry key body
+        first <- registerWorkflowRef registry key body
         case first of
           Left err -> fail (show err)
           Right _ -> pure ()
-        second <- registerWorkflowRefScoped registry key body
+        second <- registerWorkflowRef registry key body
         case second of
           Left err -> renderTransactError err @?= "a workflow is already registered as same"
           Right _ -> fail "expected duplicate registration to be refused",
@@ -174,7 +174,7 @@ tests =
         let key = newWorkflowKey "nothing"
             nothing :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             nothing () _ = pure (Right "nothing")
-        registered <- registerTypedWorkflowScoped registry key nothing
+        registered <- registerTypedWorkflow registry key nothing
         case registered of
           Left err -> fail (show err)
           Right () -> pure ()

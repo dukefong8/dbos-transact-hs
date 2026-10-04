@@ -7,7 +7,7 @@ module NegChildStartStep where
 
 import Control.Monad (void)
 import DBOS.Prelude
-import DBOS.Transact (StepCtx, WorkflowRef, startChildWorkflowScoped, startOptionsDefault)
+import DBOS.Transact (StepCtx, WorkflowRef, startChildWorkflow, startOptionsDefault)
 
 bad :: StepCtx exec IO -> WorkflowRef IO e -> IO ()
-bad sctx ref = void (startChildWorkflowScoped sctx ref startOptionsDefault Nothing)
+bad sctx ref = void (startChildWorkflow sctx ref startOptionsDefault Nothing)

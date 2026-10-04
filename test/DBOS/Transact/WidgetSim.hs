@@ -52,7 +52,7 @@ import DBOS.Transact
     newWorkflowKey,
     nextWorkflowMarker,
     recv,
-    registerDBOSWorkflowRefScoped,
+    registerDBOSWorkflowRef,
     runDBOSWorkflow,
     runTransaction,
     sendWorkflowMessage,
@@ -63,11 +63,11 @@ import DBOS.Transact
     StartOptions (..),
     withStep,
     withWorkflow,
-    recvScoped,
-    runTransactionScoped,
-    setEventScoped,
-    sleepWorkflowStepScoped,
-    startChildWorkflowScoped,
+    recv,
+    runTransaction,
+    setEvent,
+    sleepWorkflowStep,
+    startChildWorkflow,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -268,25 +268,25 @@ checkoutBody :: forall s exec. DataSource (IOSim s) -> CheckoutOps exec (IOSim s
 checkoutBody ds ops dispatchRef () wctx = runExceptT $ do
   -- The checkpoint payload stays a plain Int (as before the flip); the
   -- OrderId boundary is the ops table, unwrapped at the transaction edge.
-  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right . (\(OrderId oid) -> oid) <$> ops.coCreate sctx))
-  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coReserve sctx))
+  orderId <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right . (\(OrderId oid) -> oid) <$> ops.coCreate sctx))
+  onShelf <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coReserve sctx))
   if not onShelf
     then do
-      _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) (-1) ))
-      _ <- ExceptT (setEventScoped wctx "payment_id" (Nothing :: Maybe Text))
+      _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) (-1) ))
+      _ <- ExceptT (setEvent wctx "payment_id" (Nothing :: Maybe Text))
       pure "no-inventory"
     else do
-      _ <- ExceptT (setEventScoped wctx "payment_id" (Just (Text.pack (show orderId))))
-      ExceptT (recvScoped wctx (Just (Topic "payment_status")) (millisDuration 5000) :: IOSim s (Either (Error EngineOnly) (Maybe Text))) >>= \case
+      _ <- ExceptT (setEvent wctx "payment_id" (Just (Text.pack (show orderId))))
+      ExceptT (recv wctx (Just (Topic "payment_status")) (millisDuration 5000) :: IOSim s (Either (Error EngineOnly) (Maybe Text))) >>= \case
         Just status | status == "paid" -> do
-          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) 2))
-          _ <- ExceptT (startChildWorkflowScoped wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
-          _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
+          _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) 2))
+          _ <- ExceptT (startChildWorkflow wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
+          _ <- ExceptT (setEvent wctx "order_id" (Text.pack (show orderId)))
           pure "paid"
         _ -> do
-          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coUndo sctx))
-          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) (-1) ))
-          _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
+          _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coUndo sctx))
+          _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) (-1) ))
+          _ <- ExceptT (setEvent wctx "order_id" (Text.pack (show orderId)))
           pure "cancelled"
 
 -- | The dispatch workflow: three ticks 50ms apart (the oracle runs ten
@@ -296,11 +296,11 @@ dispatchBody ds ops orderId wctx = go (3 :: Int)
   where
     go 0 = pure (Right "dispatched")
     go n = do
-      slept <- sleepWorkflowStepScoped wctx (millisDuration 50)
+      slept <- sleepWorkflowStep wctx (millisDuration 50)
       case slept of
         Left err -> pure (Left err)
         Right () -> do
-          _ <- runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.doTick sctx (OrderId orderId)) :: IOSim s (Either (Error EngineOnly) ())
+          _ <- runTransaction ds wctx widgetConfig (\sctx _tx -> Right <$> ops.doTick sctx (OrderId orderId)) :: IOSim s (Either (Error EngineOnly) ())
           go (n - 1)
 
 -- * The composition scenario
@@ -314,8 +314,8 @@ scenarioCheckout payment = do
   mem <- newMemDB
   dbos <- simInstance
   store <- newWidgetStore 5
-  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs (stmDispatchOps store))
-  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs (stmCheckoutOps store) dispatchRef)
+  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs (stmDispatchOps store))
+  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs (stmCheckoutOps store) dispatchRef)
   exec <- memLaunchOn mem simTracer dbos
   let wid = WorkflowId "widget-wf-1"
   _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-1"}) Nothing
@@ -352,8 +352,8 @@ scenarioPaidStepFails = do
   dbos <- simInstance
   store <- newWidgetStore 5
   calls <- newTVarIO 0
-  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs (stmDispatchOps store))
-  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs (failingCheckoutOps calls store) dispatchRef)
+  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs (stmDispatchOps store))
+  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs (failingCheckoutOps calls store) dispatchRef)
   exec <- memLaunchOn mem simTracer dbos
   let wid = WorkflowId "widget-wf-fail"
   _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-fail"}) Nothing

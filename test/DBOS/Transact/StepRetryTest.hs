@@ -18,14 +18,14 @@ import DBOS.SystemDB (NewWorkflow (..), StepRecord (..), Submission (..), Workfl
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-  ( runWorkflowStepScoped,
+  ( runWorkflowStep,
     EngineOnly,
     Identity (..),
     SomeTracer,
     StepCtx,
     WorkflowCtx,
     withWorkflow,
-    runWorkflowStepWithScoped,
+    runWorkflowStepWith,
     Error (..),
     StepOptions (..),
     acquireLoggerBackend,
@@ -59,7 +59,7 @@ tests =
                 else pure (Right (42 :: Int))
             options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1}
         outcome <- withScopedContext backend (ioTracer logger) workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "flaky" body
+          runWorkflowStepWith options wctx "flaky" body
         cleanup
         outcome @?= Right 42
         readIORef attempts >>= (@?= 3),
@@ -71,7 +71,7 @@ tests =
               pure (Left (StepFailed "doomed" "boom"))
             options = stepOptionsDefault {max_attempts = 2, interval = millisDuration 1}
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "doomed" body
+          runWorkflowStepWith options wctx "doomed" body
         case outcome of
           Left MaxStepRetriesExceeded {step, attempts = made, errors} -> do
             step @?= "doomed"
@@ -86,7 +86,7 @@ tests =
               modifyIORef' attempts (+ 1)
               pure (Left (StepFailed "plain" "boom"))
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped stepOptionsDefault wctx "plain" body
+          runWorkflowStepWith stepOptionsDefault wctx "plain" body
         outcome @?= Left (StepFailed "plain" "boom")
         readIORef attempts >>= (@?= 1),
       testCase "a retried step replays from its single checkpoint" $ withBackendWorkflow getBackend "retry-replay" $ \backend workflowText -> do
@@ -101,7 +101,7 @@ tests =
                 else pure (Right (7 :: Int))
             options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1}
         first <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "flaky" body
+          runWorkflowStepWith options wctx "flaky" body
         first @?= Right 7
         readIORef attempts >>= (@?= 2)
         -- The replay announces through FastLogger, so the run proves the
@@ -109,7 +109,7 @@ tests =
         (logger, cleanup) <- acquireLoggerBackend
 
         replayed <- withScopedContext backend (ioTracer logger) workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "flaky" body
+          runWorkflowStepWith options wctx "flaky" body
         cleanup
         replayed @?= Right 7
         readIORef attempts >>= (@?= 2),
@@ -127,7 +127,7 @@ tests =
                   should_retry = Just (const False)
                 }
         outcome <- withScopedContext backend (ioTracer logger) workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "declined" body
+          runWorkflowStepWith options wctx "declined" body
         cleanup
         outcome @?= Left (StepFailed "declined" "boom")
         readIORef attempts >>= (@?= 1),
@@ -148,7 +148,7 @@ tests =
                   should_retry = Just declinesSecond
                 }
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "pick" body
+          runWorkflowStepWith options wctx "pick" body
         case outcome of
           Left MaxStepRetriesExceeded {attempts = made, errors} -> do
             made @?= 2
@@ -163,7 +163,7 @@ tests =
             body _ = threadDelay 50000 >> pure (Right (1 :: Int))
             options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 5)}
         outcome <- withScopedContext backend (ioTracer logger) workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "slow" body
+          runWorkflowStepWith options wctx "slow" body
         cleanup
         case outcome of
           Left StepTimeout {step} -> step @?= "slow"
@@ -173,7 +173,7 @@ tests =
             body _ = pure (Right (9 :: Int))
             options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 500)}
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "quick" body
+          runWorkflowStepWith options wctx "quick" body
         outcome @?= Right 9,
       testCase "a timed-out body stops rather than continuing" $ withBackendWorkflow getBackend "retry-stops" $ \backend workflowText -> do
         ran <- newIORef False
@@ -181,7 +181,7 @@ tests =
             body _ = threadDelay 100000 >> writeIORef ran True >> pure (Right (1 :: Int))
             options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 5)}
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "slow" body
+          runWorkflowStepWith options wctx "slow" body
         case outcome of
           Left StepTimeout {} -> pure ()
           other -> fail ("expected StepTimeout, got: " <> show other)
@@ -198,7 +198,7 @@ tests =
                 else pure (Right (42 :: Int))
             options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1, timeout = Just (millisDuration 20)}
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "flaky" body
+          runWorkflowStepWith options wctx "flaky" body
         outcome @?= Right 42
         readIORef attempts >>= (@?= 3),
       testCase "every attempt timing out reports each timeout" $ withBackendWorkflow getBackend "retry-all-timeout" $ \backend workflowText -> do
@@ -208,7 +208,7 @@ tests =
             isTimeout StepTimeout {} = True
             isTimeout _ = False
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "slow" body
+          runWorkflowStepWith options wctx "slow" body
         case outcome of
           Left MaxStepRetriesExceeded {attempts = made, errors} -> do
             made @?= 2
@@ -222,7 +222,7 @@ tests =
         worker <-
           async
             ( withScopedContext backend nullTracer workflowText $ \wctx ->
-                runWorkflowStepWithScoped stepOptionsDefault wctx "plain" body
+                runWorkflowStepWith stepOptionsDefault wctx "plain" body
             )
         threadDelay 200000
         cancelled <- SystemDB.cancelWorkflows backend [WorkflowId workflowText] False Nothing
@@ -241,7 +241,7 @@ tests =
               writeIORef seen fired
               pure (Right (1 :: Int))
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped stepOptionsDefault wctx "quiet" body
+          runWorkflowStepWith stepOptionsDefault wctx "quiet" body
         outcome @?= Right 1
         readIORef seen >>= (@?= False),
       testCase "the cancellation token fires before the body is dropped" $ withBackendWorkflow getBackend "retry-token-first" $ \backend workflowText -> do
@@ -254,7 +254,7 @@ tests =
               takeMVar gate >> pure (Right (1 :: Int))
             options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 50)}
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
-          runWorkflowStepWithScoped options wctx "slow" body
+          runWorkflowStepWith options wctx "slow" body
         case outcome of
           Left StepTimeout {} -> pure ()
           other -> fail ("expected StepTimeout, got: " <> show other)
@@ -274,7 +274,7 @@ tests =
         worker <-
           async
             ( withScopedContext backend nullTracer workflowText $ \wctx ->
-                runWorkflowStepWithScoped stepOptionsDefault wctx "dropped" body
+                runWorkflowStepWith stepOptionsDefault wctx "dropped" body
             )
         takeMVar started
         cancel worker
@@ -291,7 +291,7 @@ tests =
         worker <-
           async
             ( withScopedContext backend (ioTracer logger) workflowText $ \wctx ->
-                runWorkflowStepWithScoped options wctx "preemptible" body
+                runWorkflowStepWith options wctx "preemptible" body
             )
         takeMVar started
         cancelled <- SystemDB.cancelWorkflows backend [WorkflowId workflowText] False Nothing
@@ -350,4 +350,4 @@ withBackendWorkflow getBackend label action = do
 -- | The simple step runner at the engine-only channel: top-level test
 -- calls do not sit in an annotated body, so the channel needs pinning.
 runStep :: (FromJSON value, ToJSON value) => WorkflowCtx exec IO -> Text -> (StepCtx exec IO -> IO value) -> IO (Either (Error EngineOnly) value)
-runStep wctx name body = runWorkflowStepScoped wctx name body
+runStep wctx name body = runWorkflowStep wctx name body

@@ -13,7 +13,7 @@ module DBOS.Transact.Instance
     Executor (..),
     newDBOS,
     config,
-    registerDBOSWorkflowScoped,
+    registerDBOSWorkflow,
     isLaunched,
     dbosExecutorId,
     dbosAppVersion,
@@ -23,7 +23,7 @@ module DBOS.Transact.Instance
     launchOn,
     shutdown,
     requireExecutor,
-    registerDBOSWorkflowRefScoped,
+    registerDBOSWorkflowRef,
     registerDBOSDataSource,
     clearDBOSCheckpoints,
     runDBOSWorkflow,
@@ -78,7 +78,7 @@ import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
 import DBOS.Transact.Datasource (DataSource (..))
 import DBOS.Transact.Datasource.Registry (DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, registerDataSource, thawDataSourceRegistry)
-import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflowScoped, registerWorkflowRefScoped, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
+import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflow, registerWorkflowRef, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
 import DBOS.Transact.Workflow (RunOptions (..), StartOptions, Tasks, abortAll, enqueueWorkflow, newTasks, runRegisteredWorkflow, runWorkflowRef, spawnTracked, startWorkflowRef)
 
 -- | An instance is the application's stable configuration and registry;
@@ -134,12 +134,12 @@ config dbos = dbos.dbos_config
 -- downgrade explicitly at call sites not yet converted; converted and
 -- unconverted bodies share the registry, so conversion proceeds one body
 -- at a time.
-registerDBOSWorkflowScoped :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-registerDBOSWorkflowScoped dbos key body = registerTypedWorkflowScoped dbos.dbos_registry key body
+registerDBOSWorkflow :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+registerDBOSWorkflow dbos key body = registerTypedWorkflow dbos.dbos_registry key body
 
--- | 'registerDBOSWorkflowRef' for a body taking the scoped workflow view.
-registerDBOSWorkflowRefScoped :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
-registerDBOSWorkflowRefScoped dbos key body = registerWorkflowRefScoped dbos.dbos_registry key body
+-- | 'registerDBOSWorkflowRef' for a reference-typed workflow body.
+registerDBOSWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
+registerDBOSWorkflowRef dbos key body = registerWorkflowRef dbos.dbos_registry key body
 
 isLaunched :: MonadMVar m => DBOS m -> m Bool
 isLaunched dbos = maybe False (const True) <$> readMVar dbos.dbos_executor

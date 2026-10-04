@@ -39,7 +39,7 @@ import Data.Text (Text, pack)
 import Data.Word (Word64)
 import DBOS.Prelude
 import DBOS.SystemDB (Topic (..), millisDuration)
-import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowCtx, WorkflowRef, newWorkflowKey, recvScoped, registerDBOSWorkflowScoped, registerDBOSWorkflowRefScoped, runWorkflowStepScoped, setEventScoped, sleepWorkflowStepScoped)
+import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowCtx, WorkflowRef, newWorkflowKey, recv, registerDBOSWorkflow, registerDBOSWorkflowRef, runWorkflowStep, setEvent, sleepWorkflowStep)
 
 -- * Durations and keys
 
@@ -99,7 +99,7 @@ exampleWorkflowBody () wctx = do
   case first of
     Left err -> pure (Left err)
     Right () -> do
-      published <- setEventScoped wctx stepsEventKey (1 :: Int)
+      published <- setEvent wctx stepsEventKey (1 :: Int)
       case published of
         Left err -> pure (Left err)
         Right () -> continue wctx
@@ -109,7 +109,7 @@ exampleWorkflowBody () wctx = do
       case second of
         Left err -> pure (Left err)
         Right () -> do
-          published <- setEventScoped innerWctx stepsEventKey (2 :: Int)
+          published <- setEvent innerWctx stepsEventKey (2 :: Int)
           case published of
             Left err -> pure (Left err)
             Right () -> do
@@ -117,7 +117,7 @@ exampleWorkflowBody () wctx = do
               case third of
                 Left err -> pure (Left err)
                 Right () -> do
-                  lastPublished <- setEventScoped innerWctx stepsEventKey (3 :: Int)
+                  lastPublished <- setEvent innerWctx stepsEventKey (3 :: Int)
                   pure (lastPublished >> Right "Workflow completed")
 
 orderWorkflowBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
@@ -126,38 +126,38 @@ orderWorkflowBody () wctx = do
   pure (sequence_ published >> Right "Order complete")
   where
     publish (stage, key) = do
-      slept <- sleepWorkflowStepScoped wctx (millisDuration orderStepMs)
+      slept <- sleepWorkflowStep wctx (millisDuration orderStepMs)
       case slept of
         Left err -> pure (Left err)
-        Right () -> setEventScoped wctx key (key <> " at step " <> pack (show (stage :: Int)))
+        Right () -> setEvent wctx key (key <> " at step " <> pack (show (stage :: Int)))
 
 approvalWorkflowBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
 approvalWorkflowBody () wctx = do
-  decision <- recvScoped wctx (Just approvalTopic) (millisDuration approvalTimeoutMs)
+  decision <- recv wctx (Just approvalTopic) (millisDuration approvalTimeoutMs)
   case (decision :: Either (Error EngineOnly) (Maybe Text)) of
     Left err -> pure (Left err)
     Right stored -> do
       let outcome = fromMaybe "expired" stored
-      published <- setEventScoped wctx decisionEventKey outcome
+      published <- setEvent wctx decisionEventKey outcome
       pure (published >> Right outcome)
 
 enqueuedWorkflowBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
 enqueuedWorkflowBody () wctx = do
-  slept <- sleepWorkflowStepScoped wctx (millisDuration queueSleepMs)
+  slept <- sleepWorkflowStep wctx (millisDuration queueSleepMs)
   pure (slept >> Right "Enqueued workflow completed")
 
 stepSleep :: WorkflowCtx exec IO -> Text -> Word64 -> IO (Either (Error EngineOnly) ())
 stepSleep wctx name milliseconds =
-  runWorkflowStepScoped wctx name (const (threadDelay (fromIntegral milliseconds * 1000) >> pure ()))
+  runWorkflowStep wctx name (const (threadDelay (fromIntegral milliseconds * 1000) >> pure ()))
 
 -- * Registration
 
 registerStarterWorkflows :: DBOS IO -> IO (Either (Error EngineOnly) StarterRefs)
 registerStarterWorkflows dbos = do
-  example <- registerDBOSWorkflowRefScoped dbos (newWorkflowKey "ExampleWorkflow") exampleWorkflowBody
-  order <- registerDBOSWorkflowRefScoped dbos (newWorkflowKey "OrderWorkflow") orderWorkflowBody
-  approval <- registerDBOSWorkflowRefScoped dbos (newWorkflowKey approvalWorkflowName) approvalWorkflowBody
-  enqueued <- registerDBOSWorkflowScoped dbos (newWorkflowKey enqueuedWorkflowName) enqueuedWorkflowBody
+  example <- registerDBOSWorkflowRef dbos (newWorkflowKey "ExampleWorkflow") exampleWorkflowBody
+  order <- registerDBOSWorkflowRef dbos (newWorkflowKey "OrderWorkflow") orderWorkflowBody
+  approval <- registerDBOSWorkflowRef dbos (newWorkflowKey approvalWorkflowName) approvalWorkflowBody
+  enqueued <- registerDBOSWorkflow dbos (newWorkflowKey enqueuedWorkflowName) enqueuedWorkflowBody
   pure (StarterRefs <$> example <*> order <*> approval <* enqueued)
 
 -- | The refs the handlers start through. Starting by ref persists the

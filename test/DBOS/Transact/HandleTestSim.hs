@@ -25,7 +25,7 @@ import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (SerializedWorkflowValue (..), WorkflowId (..), WorkflowStatus (..))
 import DBOS.SystemDB.IOSim (simConnectionWith, simDBOSWith)
 import DBOS.Transact (
-    EngineOnly,DBOS, Error, Identity (..), WorkflowHandle, awaitChildScoped, handleResult, handleStatus, handleWorkflowId, retrieveWorkflow, withWorkflow)
+    EngineOnly,DBOS, Error, Identity (..), WorkflowHandle, awaitChild, handleResult, handleStatus, handleWorkflowId, retrieveWorkflow, withWorkflow)
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 
@@ -93,7 +93,7 @@ scopedAwait = do
     Right handle -> do
       conn <- simConnectionWith simTracer
       withWorkflow conn simIdentity (WorkflowId "sim-awaiter") Nothing $ \wctx ->
-        awaitChildScoped wctx handle
+        awaitChild wctx handle
 
 simIdentity :: Identity
 simIdentity =

@@ -238,3 +238,12 @@ deliberately:
    behavior-neutral.
 5. **`stepCtxStatus` stays `Maybe`.** A total reader would be partial;
    the narrowed view's guarantee is which values exist, not totality.
+6. **Captured-parent placements degrade to plain in `checkHere`.**
+   `placeCall` promises a call built while a step body runs goes plain
+   "whether the context in hand says so or not", but the
+   markerless-captured placement fell through to `StepBuiltElsewhere`
+   (built == polled, textually identical — a confusing verdict). The new
+   arm degrades markerless-captured placements in the same workflow to
+   plain, restoring the direct-shape verdicts (refusal where the op
+   refuses, plain where it goes plain) through the promoted calls.
+   Marker-bearing and cross-workflow mismatches still refuse as before.

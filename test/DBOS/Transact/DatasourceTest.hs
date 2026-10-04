@@ -22,7 +22,6 @@ module DBOS.Transact.DatasourceTest
     scenarioErrorReplays,
     scenarioRetryThenSuccess,
     scenarioConflictAdopts,
-    scenarioInStepRefused,
     scenarioCaptureRefused,
   )
 where
@@ -48,7 +47,6 @@ import DBOS.Transact
   ( AppDataSource,
     BackendError (..),
     Connection,
-    Ctx,
     DataSource (..),
     DBOS,
     EngineOnly,
@@ -76,11 +74,9 @@ import DBOS.Transact
     firstStepStatus,
     launchOn,
     newConnection,
-    newCtx,
     newDBOS,
     newWorkflowState,
     nextExecutionIdentity,
-    nextStepMarker,
     nextWorkflowMarker,
     nullTracer,
     registerDBOSDataSource,
@@ -88,7 +84,6 @@ import DBOS.Transact
     renderTransactError,
     runAppSession,
     runTransaction,
-    runTransactionScoped,
     runTransactionOutside,
     secondsDuration,
     toDataSource,
@@ -96,9 +91,7 @@ import DBOS.Transact
     uuidEntropy,
     uuidWorkflowId,
     verifyAppDataSource,
-    withAttempt,
     withStep,
-    stepCtxInner,
     withWorkflow,
     withSystemDB,
   )
@@ -204,8 +197,8 @@ scenarioCommitReplay :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) =>
 scenarioCommitReplay fx = do
   fake <- fx.dsFixtureMkDs
   let counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right "v1" :: Either (Error EngineOnly) Text)
-  first <- runFixture fx "ds-wf-1" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
-  second <- runFixture fx "ds-wf-1" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
+  first <- runFixture fx "ds-wf-1" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
+  second <- runFixture fx "ds-wf-1" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
   runs <- readTVarIO fake.fakeRuns
   pure (first, second, runs)
 
@@ -216,7 +209,7 @@ scenarioErrorReplays :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) =>
 scenarioErrorReplays fx = do
   fake <- fx.dsFixtureMkDs
   atomically (writeTVar fake.fakeRows (Map.singleton ("ds-wf-2", 0) (RecordedError (encodeErrorText (application ("boom" :: Text) :: Error Text)))))
-  runFixture fx "ds-wf-2" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("unused" :: Text)))
+  runFixture fx "ds-wf-2" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("unused" :: Text)))
 
 -- | Python @test_sync_ds_retries_on_serialization_error@: two retriable
 -- failures, then success, with the injections consumed.
@@ -224,7 +217,7 @@ scenarioRetryThenSuccess :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m
 scenarioRetryThenSuccess fx = do
   fake <- fx.dsFixtureMkDs
   atomically (writeTVar fake.fakeTransients 2)
-  result <- runFixture fx "ds-wf-3" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("v" :: Text)))
+  result <- runFixture fx "ds-wf-3" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("v" :: Text)))
   left <- readTVarIO fake.fakeTransients
   pure (result, left)
 
@@ -234,19 +227,7 @@ scenarioConflictAdopts :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) 
 scenarioConflictAdopts fx = do
   fake <- fx.dsFixtureMkDs
   atomically (writeTVar fake.fakeConflictOnce True)
-  runFixture fx "ds-wf-4" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("loser" :: Text)))
-
--- | A datasource call inside a step body is refused and records nothing
--- (the @InsideStep "transaction"@ shape of @Event.hs@).
-scenarioInStepRefused :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
-scenarioInStepRefused fx = do
-  fake <- fx.dsFixtureMkDs
-  result <- runFixture fx "ds-wf-5" $ \wctx -> do
-    marker <- nextWorkflowMarker wctx
-    withStep wctx marker (firstStepStatus 0) $ \sctx ->
-      runTransaction fake.fakeSource (stepCtxInner sctx) protoConfig (\_ -> pure (Right ("x" :: Text)))
-  rows <- readTVarIO fake.fakeRows
-  pure (result, Map.size rows)
+  runFixture fx "ds-wf-4" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("loser" :: Text)))
 
 -- | The captured-parent shape of the same leaf violation: the call reaches
 -- through a context whose scope field predates the running body, so the
@@ -258,7 +239,7 @@ scenarioCaptureRefused fx = do
   result <- runFixture fx "ds-wf-5-captured" $ \wctx -> do
     marker <- nextWorkflowMarker wctx
     withStep wctx marker (firstStepStatus 0) $ \_stepped ->
-      runTransactionScoped fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("x" :: Text)))
+      runTransaction fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("x" :: Text)))
   rows <- readTVarIO fake.fakeRows
   pure (result, Map.size rows)
 
@@ -269,8 +250,8 @@ scenarioBodyFailureRecorded fx = do
   fake <- fx.dsFixtureMkDs
   let failing _ = pure (Left (application ("boom" :: Text)))
       counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right ("v" :: Text))
-  first <- runFixture fx "ds-wf-6" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ tx -> failing tx)
-  second <- runFixture fx "ds-wf-6" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
+  first <- runFixture fx "ds-wf-6" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ tx -> failing tx)
+  second <- runFixture fx "ds-wf-6" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
   runs <- readTVarIO fake.fakeRuns
   pure (first, second, runs)
 
@@ -279,7 +260,7 @@ scenarioPrecheckRetry :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) =
 scenarioPrecheckRetry fx = do
   fake <- fx.dsFixtureMkDs
   atomically (writeTVar fake.fakeTransients 1)
-  result <- runFixture fx "ds-wf-8" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("v" :: Text)))
+  result <- runFixture fx "ds-wf-8" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("v" :: Text)))
   left <- readTVarIO fake.fakeTransients
   pure (result, left)
 
@@ -309,13 +290,13 @@ scenarioDeleteCheckpoints fx = do
           Right () -> pure (Right "cleaned")
   (first, second) <-
     runFixture fx "ds-wf-9" $ \wctx -> do
-      first <- runTransactionScoped fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
-      second <- runTransactionScoped fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
+      first <- runTransaction fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
+      second <- runTransaction fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
       pure (first, second)
   _ <- clean "ds-wf-9" 1
-  third <- runFixture fx "ds-wf-9" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
+  third <- runFixture fx "ds-wf-9" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
   _ <- clean "ds-wf-9" 0
-  fourth <- runFixture fx "ds-wf-9" $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
+  fourth <- runFixture fx "ds-wf-9" $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ tx -> counted tx)
   runs <- readTVarIO fake.fakeRuns
   pure (first, second, third, fourth, runs)
 
@@ -333,7 +314,7 @@ scenarioOwnershipMoved fx wfId = do
     Left err -> pure (Left (ErrorSystemDatabase err))
     Right _ -> do
       atomically (writeTVar fake.fakeConflictOnce True)
-      runFixture fx wfId $ \wctx -> runTransactionScoped fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("loser" :: Text)))
+      runFixture fx wfId $ \wctx -> runTransaction fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("loser" :: Text)))
 
 -- | The registry's created-before-launch rule and completion clearing,
 -- over an instance that never launches: registration is open, a duplicate
@@ -345,7 +326,7 @@ scenarioRegistryLifecycle dbos mkCtx wid = do
   fake <- mkFakeDs
   first <- registerDBOSDataSource dbos fake.fakeSource
   duplicate <- registerDBOSDataSource dbos fake.fakeSource
-  _ <- mkCtx wid (\wctx -> (runTransactionScoped fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("v" :: Text))) :: m (Either (Error Text) Text)))
+  _ <- mkCtx wid (\wctx -> (runTransaction fake.fakeSource wctx protoConfig (\_ _ -> pure (Right ("v" :: Text))) :: m (Either (Error Text) Text)))
   rowsBefore <- readTVarIO fake.fakeRows
   clearDBOSCheckpoints dbos (WorkflowId wid)
   rowsAfter <- readTVarIO fake.fakeRows
@@ -496,12 +477,6 @@ tests =
           let fx = DsFixture (dsRunOver backend) mkFakeDs
           result <- scenarioConflictAdopts fx
           result @?= Right "winner",
-        testCase "a call inside a step is refused and records nothing" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          (result, rowCount) <- scenarioInStepRefused fx
-          result @?= Left (InsideStep "transaction")
-          rowCount @?= 0,
         testCase "a call through a captured parent is refused and records nothing" $ do
           backend <- getBackend
           let fx = DsFixture (dsRunOver backend) mkFakeDs
@@ -587,8 +562,8 @@ tests =
                 expected = RecordedOutput (encodeWorkflowValue ("v" :: Text)).serializedText
             (first, second) <-
               dsRunOver backend wfId $ \wctx -> do
-                first <- runTransactionScoped ds wctx protoConfig (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
-                second <- runTransactionScoped ds wctx protoConfig (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
+                first <- runTransaction ds wctx protoConfig (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
+                second <- runTransaction ds wctx protoConfig (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
                 pure (first, second)
             (first, second) @?= (Right "v", Right "v")
             ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right (Just expected))
@@ -607,12 +582,12 @@ tests =
                 first = TransactionConfig {txName = Just "first_step", txIsolation = Just ReadCommitted}
                 second = TransactionConfig {txName = Just "second_step", txIsolation = Just ReadCommitted}
             written <- dsRunOver backend wfId $ \wctx ->
-              runTransactionScoped ds wctx first (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
+              runTransaction ds wctx first (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
             written @?= Right "v"
             -- A reordered or renamed body reaches the same step slot under a
             -- different name: replay must refuse instead of returning "v".
             replayed <- dsRunOver backend wfId $ \wctx ->
-              runTransactionScoped ds wctx second (\_ _ -> pure (Right ("changed" :: Text))) :: IO (Either (Error EngineOnly) Text)
+              runTransaction ds wctx second (\_ _ -> pure (Right ("changed" :: Text))) :: IO (Either (Error EngineOnly) Text)
             case replayed of
               Left (ErrorSystemDatabase (SysDB.UnexpectedStep {stepId = recordedStep, expected = want, recorded = got})) -> do
                 recordedStep @?= 0

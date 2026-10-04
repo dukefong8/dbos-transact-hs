@@ -32,15 +32,12 @@ import DBOS.Transact
     ioTracer,
     nullTracer,
     pendingStepId,
-    pendingWorkflowStepScoped,
+    pendingWorkflowStep,
     runNestedStep,
     runWorkflowStep,
-    runWorkflowStepScoped,
     runWorkflowStepWith,
-    runWorkflowStepWithScoped,
     stepCtxStatus,
     sleepWorkflowStep,
-    sleepWorkflowStepScoped,
     stepId,
     stepCtxInner,
     stepStatus,
@@ -156,7 +153,7 @@ tests =
             runScoped = do
               conn <- connOver backend nullTracer
               withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-                runWorkflowStepScoped wctx "scoped_step" $ \s -> do
+                runWorkflowStep wctx "scoped_step" $ \s -> do
                   writeIORef observed (stepCtxStatus s)
                   modifyIORef' calls (+ 1)
                   pure 42
@@ -179,7 +176,7 @@ tests =
         conn <- connOver backend (ioTracer logger)
         outer <-
           withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-            ( runWorkflowStepScoped wctx "outer" $ \s -> do
+            ( runWorkflowStep wctx "outer" $ \s -> do
                 inner <- runNestedStep s "inner" (\_ -> pure (7 :: Int)) :: IO (Either (Error EngineOnly) Int)
                 case inner of
                   Right n -> pure (n + 1)
@@ -210,7 +207,7 @@ tests =
               conn <- connOver backend nullTracer
               withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
                 (pending :: PendingStep exec IO (Either (Error EngineOnly) Int)) <-
-                  pendingWorkflowStepScoped wctx "pending_step" $ \_ -> do
+                  pendingWorkflowStep wctx "pending_step" $ \_ -> do
                     modifyIORef' calls (+ 1)
                     pure (Right 42)
                 outcome <- pending.pendingRun
@@ -232,10 +229,10 @@ tests =
           Right _ -> pure ()
         conn <- connOver backend nullTracer
         first <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-          sleepWorkflowStepScoped wctx (millisDuration 25)
+          sleepWorkflowStep wctx (millisDuration 25)
         assertEqual "first sleep succeeds" (Right ()) first
         replay <- withWorkflow conn scopedTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-          sleepWorkflowStepScoped wctx (millisDuration 25)
+          sleepWorkflowStep wctx (millisDuration 25)
         assertEqual "replay adopts the original wake time" (Right ()) replay,
       testCase "a nested step reports the step that encloses it" $ do
         backend <- getBackend
@@ -268,7 +265,7 @@ tests =
                       then pure (Left (StepFailed "outer" "boom"))
                       else pure (Right ())
               options = stepOptionsDefault {max_attempts = 2, interval = millisDuration 1}
-          outcome <- runWorkflowStepWithScoped options wctx "outer" outerBody
+          outcome <- runWorkflowStepWith options wctx "outer" outerBody
           pure (first, outcome)
         assertEqual "the leading step runs" (Right ()) first
         assertEqual "the outer step succeeds on its retry" (Right ()) outcome
@@ -312,7 +309,7 @@ tests =
             let hanging :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) ())
                 hanging _ = threadDelay 1000000 >> pure (Right ())
                 options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 20)}
-            abandoned <- runWorkflowStepWithScoped options wctx "times-out" hanging
+            abandoned <- runWorkflowStepWith options wctx "times-out" hanging
             pure (outside, body, abandoned)
         assertBool "outside a workflow there is no attempt to abandon" =<< stayedQuiet outside
         case abandoned of
@@ -333,4 +330,4 @@ stayedQuiet token = do
 -- | The simple step runner at the engine-only channel: top-level test
 -- calls do not sit in an annotated body, so the channel needs pinning.
 runStep :: (FromJSON value, ToJSON value) => WorkflowCtx exec IO -> Text -> (StepCtx exec IO -> IO value) -> IO (Either (Error EngineOnly) value)
-runStep wctx name body = runWorkflowStepScoped wctx name body
+runStep wctx name body = runWorkflowStep wctx name body

@@ -27,7 +27,6 @@ module DBOS.Transact.Datasource
     DataSource (..),
     -- * Runner (staged: signatures first, bodies next)
     runTransaction,
-    runTransactionScoped,
     registerTransaction,
     runTransactionOutside,
     -- * Tracing
@@ -185,12 +184,9 @@ instance ToLogStr TransactionEvent where
 -- the body is a step like any other (nested durable calls are refused by
 -- the leaf rule, the checkpoint id is visible, and a retry gets a fresh
 -- marker and token).
-runTransactionScoped :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
-runTransactionScoped ds wctx config body =
+runTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
+runTransaction ds wctx config body =
   runTransactionWith ds (workflowCtxInner wctx) config (\inner tx -> body (stepCtxAt wctx inner) tx)
-
-runTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> TransactionConfig -> (Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
-runTransaction ds ctx config body = runTransactionWith ds ctx config (\_inner tx -> body tx)
 
 -- | The shared transaction path: the shaped body receives the attempt's
 -- context (the scoped entry turns it into the step view) and the
@@ -431,4 +427,4 @@ runTransactionOutside ds config body = loop (1 :: Int) initialBackoffMs
         }
 
 registerTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> TransactionConfig -> (Tx m -> m (Either (Error e) a)) -> (Ctx m -> m (Either (Error e) a))
-registerTransaction ds config body ctx = runTransaction ds ctx config body
+registerTransaction ds config body ctx = runTransactionWith ds ctx config (\_inner tx -> body tx)

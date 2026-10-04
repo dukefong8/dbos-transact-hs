@@ -26,21 +26,21 @@ import DBOS.SystemDB (WorkflowId (..), millisDuration)
 import DBOS.SystemDB.IOSim (simConnectionWith)
 import DBOS.Transact
   (
-    EngineOnly, Ctx,
+    EngineOnly,
     Error (..),
     Identity (..),
     Message (..),
     Topic (..),
+    WorkflowCtx,
+    WorkflowId (..),
     firstStepStatus,
-    newCtx,
-    newWorkflowState,
-    nextExecutionIdentity,
-    nextStepId,
-    nextStepMarker,
+    nextWorkflowMarker,
+    nextWorkflowStepId,
     recv,
     send,
     sendBulk,
-    withAttempt,
+    withStep,
+    withWorkflow,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -54,12 +54,10 @@ simIdentity =
       identityAppId = ""
     }
 
-simCtx :: Text -> IOSim s (Ctx (IOSim s))
-simCtx name = do
+simRun :: Text -> (forall exec. WorkflowCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
+simRun name action = do
   conn <- simConnectionWith simTracer
-  identity <- nextExecutionIdentity conn
-  state <- newWorkflowState name Nothing identity
-  newCtx conn simIdentity state
+  withWorkflow conn simIdentity (WorkflowId name) Nothing action
 
 tests :: TestTree
 tests =
@@ -70,15 +68,13 @@ tests =
     "Workflow messages (Sim)"
     AllFinish
     [ testCase "a workflow send is accepted" $ do
-        (sent, tr) <- runSimCase $ do
-          context <- simCtx "sim-message-send"
-          send context (WorkflowId "sim-message-destination") (Just (Topic "approval")) Nothing ("approved" :: Text)
+        (sent, tr) <- runSimCase $ simRun "sim-message-send" $ \wctx ->
+          send wctx (WorkflowId "sim-message-destination") (Just (Topic "approval")) Nothing ("approved" :: Text)
         printSimTrace tr
         sent @?= Right (),
       testCase "a receive reads the mock's canned body, which is not JSON" $ do
-        (received :: Either (Error EngineOnly) (Maybe Text), tr) <- runSimCase $ do
-          context <- simCtx "sim-message-recv"
-          recv context (Just (Topic "approval")) (millisDuration 100)
+        (received :: Either (Error EngineOnly) (Maybe Text), tr) <- runSimCase $ simRun "sim-message-recv" $ \wctx ->
+          recv wctx (Just (Topic "approval")) (millisDuration 100)
         printSimTrace tr
         -- The mock is stateless: the live test reads back the sent
         -- message here. The canned "mock-message" body is not valid
@@ -87,37 +83,33 @@ tests =
           Left (ErrorDeserialization _ _) -> pure ()
           other -> fail ("expected a deserialization refusal, got: " <> show other),
       testCase "a bulk send checkpoints once and delivers the batch" $ do
-        (outcome, tr) <- runSimCase $ do
-          context <- simCtx "sim-bulk"
+        (outcome, tr) <- runSimCase $ simRun "sim-bulk" $ \wctx ->
           sendBulk
-            context
+            wctx
             [ Message (WorkflowId "first") (1 :: Int) Nothing Nothing,
               Message (WorkflowId "second") (2 :: Int) Nothing Nothing
             ]
         printSimTrace tr
         outcome @?= Right (),
       testCase "an empty bulk send still takes its step" $ do
-        (outcome, tr) <- runSimCase $ do
-          context <- simCtx "sim-bulk-empty"
-          sendBulk context ([] :: [Message Int])
+        (outcome, tr) <- runSimCase $ simRun "sim-bulk-empty" $ \wctx ->
+          sendBulk wctx ([] :: [Message Int])
         printSimTrace tr
         outcome @?= Right (),
       testCase "a send through a captured parent is plain and moves no id" $ do
-        (outcome, tr) <- runSimCase $ do
-          context <- simCtx "sim-captured-send"
-          marker <- nextStepMarker context
-          sent <- withAttempt context marker (firstStepStatus 0) $ \_ ->
-            send context (WorkflowId "sim-message-destination") (Just (Topic "approval")) Nothing ("ping" :: Text)
-          counter <- nextStepId context
+        (outcome, tr) <- runSimCase $ simRun "sim-captured-send" $ \wctx -> do
+          marker <- nextWorkflowMarker wctx
+          sent <- withStep wctx marker (firstStepStatus 0) $ \_ ->
+            send wctx (WorkflowId "sim-message-destination") (Just (Topic "approval")) Nothing ("ping" :: Text)
+          counter <- nextWorkflowStepId wctx
           pure (sent, counter)
         printSimTrace tr
         outcome @?= (Right (), 0),
       testCase "a recv through a captured parent is refused" $ do
-        (received :: Either (Error EngineOnly) (Maybe Text), tr) <- runSimCase $ do
-          context <- simCtx "sim-captured-recv"
-          marker <- nextStepMarker context
-          withAttempt context marker (firstStepStatus 0) $ \_ ->
-            recv context (Just (Topic "approval")) (millisDuration 100)
+        (received :: Either (Error EngineOnly) (Maybe Text), tr) <- runSimCase $ simRun "sim-captured-recv" $ \wctx -> do
+          marker <- nextWorkflowMarker wctx
+          withStep wctx marker (firstStepStatus 0) $ \_ ->
+            recv wctx (Just (Topic "approval")) (millisDuration 100)
         printSimTrace tr
         received @?= Left (InsideStep "recv")
     ]

@@ -20,7 +20,6 @@ import DBOS.Transact
     WorkflowCtx,
     WorkflowId (..),
     application,
-    newCtx,
     newWorkflowState,
     nextExecutionIdentity,
     renderTransactError,
@@ -35,7 +34,6 @@ import DBOS.Transact.DatasourceTest
     scenarioDeleteCheckpoints,
     scenarioErrorReplays,
     scenarioCaptureRefused,
-    scenarioInStepRefused,
     scenarioOwnershipMoved,
     scenarioPrecheckRetry,
     scenarioRetryThenSuccess,
@@ -134,11 +132,6 @@ tests =
           @?= [ TransactionRunning "ds-wf-4" "proto_step" 0,
                 TransactionConflictAdopted "ds-wf-4" "proto_step" 0
               ],
-      testCase "a call inside a step is refused and records nothing" $ do
-        (res, tr) <- runSimCase (scenarioInStepRefused simDsFixture)
-        printSimTrace tr
-        res @?= (Left (InsideStep "transaction"), 0)
-        (selectTraceEventsDynamic tr :: [TransactionEvent]) @?= [],
       testCase "a call through a captured parent is refused and records nothing" $ do
         (res, tr) <- runSimCase (scenarioCaptureRefused simDsFixture)
         printSimTrace tr

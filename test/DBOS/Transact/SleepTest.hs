@@ -13,8 +13,8 @@ import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (NewWorkflow (..), StepRecord (..), Submission (..), WorkflowId (..), millisDuration, newWorkflow, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (acquireLoggerBackend, ioTracer, nullTracer, sleepPlain, sleepWorkflowStep)
-import DBOS.Transact.ContextTest (ctxOver)
+import DBOS.Transact (Identity (..), acquireLoggerBackend, ioTracer, nullTracer, sleepPlain, sleepWorkflowStep, withWorkflow)
+import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -34,9 +34,10 @@ tests =
       "Durable sleep"
       [ testCase "a sleep waits and is checkpointed" $ do
           backend <- getBackend
-          withWorkflow backend "sleep-checkpoint" $ \workflowText -> do
-            context <- ctxOver backend nullTracer workflowText
-            outcome <- sleepWorkflowStep context (millisDuration 25)
+          withSleepWorkflow backend "sleep-checkpoint" $ \workflowText -> do
+            conn <- connOver backend nullTracer
+            outcome <- withWorkflow conn sleepTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+              sleepWorkflowStep wctx (millisDuration 25)
             outcome @?= Right ()
             checkpoint <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName
             case checkpoint of
@@ -46,16 +47,18 @@ tests =
               other -> fail ("expected a recorded sleep checkpoint, got: " <> show other),
         testCase "a replayed sleep does not start its clock again" $ do
           backend <- getBackend
-          withWorkflow backend "sleep-replay" $ \workflowText -> do
-            firstContext <- ctxOver backend nullTracer workflowText
-            _ <- sleepWorkflowStep firstContext (millisDuration 25)
+          withSleepWorkflow backend "sleep-replay" $ \workflowText -> do
+            firstConn <- connOver backend nullTracer
+            _ <- withWorkflow firstConn sleepTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+              sleepWorkflowStep wctx (millisDuration 25)
             before <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName
             -- The replay announces through FastLogger, so the run proves
             -- the trace seam as well as the wake it waits until.
             (logger, cleanup) <- acquireLoggerBackend
-            replayContext <- ctxOver backend (ioTracer logger) workflowText
+            replayConn <- connOver backend (ioTracer logger)
             -- A much longer request still returns at the recorded wake time.
-            replayed <- sleepWorkflowStep replayContext (millisDuration 60000)
+            replayed <- withWorkflow replayConn sleepTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+              sleepWorkflowStep wctx (millisDuration 60000)
             cleanup
             replayed @?= Right ()
             after <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName
@@ -69,8 +72,8 @@ tests =
           outcome @?= ()
       ]
 
-withWorkflow :: Postgres.PostgresSystemDB -> Text.Text -> (Text.Text -> IO a) -> IO a
-withWorkflow backend label action = do
+withSleepWorkflow :: Postgres.PostgresSystemDB -> Text.Text -> (Text.Text -> IO a) -> IO a
+withSleepWorkflow backend label action = do
   freshId <- UUID.V4.nextRandom
   let workflowText = "hs-l2-" <> label <> "-" <> Text.pack (UUID.toString freshId)
       initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2SleepTest"}
@@ -78,3 +81,13 @@ withWorkflow backend label action = do
   case created of
     Left err -> fail (show err)
     Right _ -> action workflowText
+
+-- | The application identity the scoped sleep cases install.
+sleepTestIdentity :: Identity
+sleepTestIdentity =
+  Identity
+    { identityAppName = "test-app",
+      identityAppVersion = "1.0.0",
+      identityExecutorId = "test-executor",
+      identityAppId = ""
+    }

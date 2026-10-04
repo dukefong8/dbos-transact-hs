@@ -32,7 +32,6 @@ module DBOS.Transact.Workflow
     startWorkflowRef,
     runWorkflowRef,
     startChildWorkflow,
-    startChildWorkflowScoped,
     maxRecoveryAttempts,
     spawnRegisteredWorkflowWithRow,
     workflowNewWorkflow,
@@ -640,11 +639,9 @@ runWorkflowRef tasks conn identity snapshot ref options input = do
 -- follow-up. Starting from inside a step is 'InsideStep': a step is a
 -- leaf, and an id-allocating call inside one would shift every later step
 -- onto the wrong replay slot.
-startChildWorkflowScoped :: (MonadMVar m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
-startChildWorkflowScoped wctx = startChildWorkflow (workflowCtxInner wctx)
-
-startChildWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => Ctx m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
-startChildWorkflow ctx ref options input = do
+startChildWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startChildWorkflow wctx ref options input = do
+  let ctx = workflowCtxInner wctx
   -- A start inside a step body is refused — and a start through a captured
   -- parent while a step body runs is the same leaf violation with a scope
   -- field predating the body, which the shared depth counter reports. Read
@@ -674,6 +671,7 @@ startChildWorkflow ctx ref options input = do
   where
     key = refKey ref
     name = refName ref
+    ctx = workflowCtxInner wctx
     conn = currentConnection ctx
     identity = currentIdentity ctx
     startChild parentStepId = do

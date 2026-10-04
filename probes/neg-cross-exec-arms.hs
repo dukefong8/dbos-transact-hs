@@ -7,7 +7,7 @@ module NegCrossExecArms where
 
 import Control.Monad (void)
 import DBOS.Prelude
-import DBOS.Transact (SelectArm, WorkflowCtx, selectStepScoped)
+import DBOS.Transact (SelectArm, WorkflowCtx, selectStep)
 
 bad :: WorkflowCtx exec1 IO -> WorkflowCtx exec2 IO -> [SelectArm exec2 IO r] -> IO ()
-bad wctx _ arms = void (selectStepScoped wctx arms)
+bad wctx _ arms = void (selectStep wctx arms)

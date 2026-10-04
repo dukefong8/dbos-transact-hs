@@ -89,6 +89,7 @@ module DBOS.Transact.Context
     stepCtxAt,
     stepCtxInner,
     stepCtxTracer,
+    stepCtxWorkflow,
     workflowCtxInner,
     withWorkflowTaskSpawner,
   )
@@ -514,6 +515,15 @@ withWorkflowTaskSpawner spawner wctx = wctx {workflowCtx = withTaskSpawner wctx.
 -- through 'withStep'.
 stepCtxAt :: WorkflowCtx exec m -> Ctx m -> StepCtx exec m
 stepCtxAt wctx inner = StepCtx wctx inner
+
+-- | The workflow view this attempt belongs to. Reaching the parent's
+-- operations from inside a step body is the captured-parent shape, which
+-- the depth backstop reads together with the handed context — a call
+-- through it degrades or refuses exactly as a call through the handed
+-- context would. Same execution brand, so the type stays quiet and the
+-- runtime keeps the verdict.
+stepCtxWorkflow :: StepCtx exec m -> WorkflowCtx exec m
+stepCtxWorkflow (StepCtx wctx _) = wctx
 
 -- | The inner context behind a step view: the documented downgrade for
 -- reader calls that have no scoped twin yet (a step body reads its

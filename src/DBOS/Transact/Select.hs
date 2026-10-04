@@ -43,7 +43,6 @@ module DBOS.Transact.Select
     SelectArm (..),
     Winner (..),
     selectStep,
-    selectStepScoped,
   )
 where
 
@@ -245,24 +244,26 @@ data Winner exec m r = forall a. Winner
 -- | 'selectStep' over the scoped workflow view: the race's id and the
 -- recorded winner are claimed through the workflow context, and the arms
 -- are pendings built through the same view.
-selectStepScoped ::
+selectStep ::
   (MonadAsync m, MonadTime m) =>
   WorkflowCtx exec m ->
   [SelectArm exec m r] ->
   m (Either (TransactError.Error TransactError.EngineOnly) r)
-selectStepScoped wctx arms = selectStep (workflowCtxInner wctx) arms
+selectStep wctx arms = selectStepOn (workflowCtxInner wctx) arms
 
-selectStep ::
+-- | The context-level race: the scoped entry unwraps its view once and
+-- this runs the race over the raw context.
+selectStepOn ::
   forall exec m r.
   (MonadAsync m, MonadTime m) =>
   Ctx m ->
   [SelectArm exec m r] ->
   m (Either (TransactError.Error TransactError.EngineOnly) r)
-selectStep _ [] =
+selectStepOn _ [] =
   pure (Left (TransactError.ErrorConfig "selectStep races two or more durable steps; one branch is not a race"))
-selectStep _ [_] =
+selectStepOn _ [_] =
   pure (Left (TransactError.ErrorConfig "selectStep races two or more durable steps; one branch is not a race"))
-selectStep ctx arms = do
+selectStepOn ctx arms = do
   let branches = foldl (\bs arm -> case arm of SelectArm _ pending _ -> pushBranch pending bs) newBranches arms
   checked <- checkSelect ctx branches
   case checked of

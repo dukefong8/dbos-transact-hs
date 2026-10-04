@@ -38,7 +38,7 @@ import DBOS.Transact
     newDBOS,
     newWorkflowKey,
     nullTracer,
-    registerDBOSWorkflowRefScoped,
+    registerDBOSWorkflowRef,
     retrieveWorkflow,
     runDBOSWorkflowRef,
     runOptionsDefault,
@@ -71,7 +71,7 @@ tests =
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () _ = pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRefScoped dbos key body
+          registered <- registerDBOSWorkflowRef dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -108,7 +108,7 @@ tests =
               threadDelay 30000000
               pure (Right 1)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRefScoped dbos key body
+          registered <- registerDBOSWorkflowRef dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -142,7 +142,7 @@ tests =
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () _ = takeMVar gate >> pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRefScoped dbos key body
+          registered <- registerDBOSWorkflowRef dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -185,7 +185,7 @@ tests =
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () _ = takeMVar gate >> pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRefScoped dbos key body
+          registered <- registerDBOSWorkflowRef dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -214,7 +214,7 @@ tests =
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () _ = pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRefScoped dbos key body
+          registered <- registerDBOSWorkflowRef dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref

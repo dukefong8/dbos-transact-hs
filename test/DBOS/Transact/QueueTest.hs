@@ -25,7 +25,7 @@ import DBOS.Transact (CodecError, Config (..), Ctx, DBOS, WorkflowCtx, workflowC
     WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueChange, defaultQueueOptions, deleteQueue, encodeWorkflowValue, enqueueDBOSWorkflow, enqueueNew, handleResult, handleStatus, handleWorkflowId, isLaunched,
     launchWithEnvironment,
     listQueues,
-    listWorkflows, newDBOS, newWorkflowKey, nullTracer, queue, queueFromRecord, queueIsPartitioned, registerDBOSWorkflowRefScoped, registerDBOSWorkflowScoped, registerQueue, renderTransactError, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault,     shutdown, startChildWorkflowScoped, startDBOSWorkflowRef, startOptionsDefault, updateQueue, waitForWorkflow)
+    listWorkflows, newDBOS, newWorkflowKey, nullTracer, queue, queueFromRecord, queueIsPartitioned, registerDBOSWorkflowRef, registerDBOSWorkflow, registerQueue, renderTransactError, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault,     shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, updateQueue, waitForWorkflow)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
@@ -83,7 +83,7 @@ tests =
           let key = newWorkflowKey "queued"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -169,7 +169,7 @@ tests =
           let key = newWorkflowKey "doubles"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right (input * 2))
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -240,7 +240,7 @@ tests =
                   if open then pure () else retry
                 atomically (modifyTVar active (subtract 1))
                 pure (Right input)
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -305,7 +305,7 @@ tests =
           let key = newWorkflowKey "either"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -361,7 +361,7 @@ tests =
           let key = newWorkflowKey "nothing"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -411,7 +411,7 @@ tests =
           let key = newWorkflowKey "internal"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right input)
-          registered <- registerDBOSWorkflowScoped dbos key body
+          registered <- registerDBOSWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -1438,7 +1438,7 @@ tests =
           let parentBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
               parentBody () wctx = do
                 startedChild <-
-                  startChildWorkflowScoped
+                  startChildWorkflow
                     wctx
                     childRef
                     (startOptionsDefault {startWorkflowId = Just childText, startQueue = Just (enqueueNew queueName)})
@@ -1628,12 +1628,12 @@ acquireSuiteBackend = do
 -- | Register a body at the engine-only channel: the polymorphic
 -- registration cannot infer the JSON types from a local binding.
 registerRefOf :: DBOS IO -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
-registerRefOf = registerDBOSWorkflowRefScoped
+registerRefOf = registerDBOSWorkflowRef
 
 -- | Register a @Text -> Text@ body at the engine-only channel.
 registerTextRefOf :: DBOS IO -> WorkflowKey -> (forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
-registerTextRefOf = registerDBOSWorkflowRefScoped
+registerTextRefOf = registerDBOSWorkflowRef
 
 -- | Register a @() -> Text@ body at the engine-only channel.
 registerUnitTextRefOf :: DBOS IO -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
-registerUnitTextRefOf = registerDBOSWorkflowRefScoped
+registerUnitTextRefOf = registerDBOSWorkflowRef

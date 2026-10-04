@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | 'DBOS.Transact.StepRetryTest' mirrored under IOSim: the same retry,
 -- predicate and timeout cases, with the real ported runner
@@ -23,31 +24,28 @@ import DBOS.SystemDB (millisDuration)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simConnectionWith)
 import DBOS.Transact
-  ( Ctx,
-    EngineOnly,
+  ( EngineOnly,
     Error (..),
     Identity (..),
+    StepCtx,
     StepOptions (..),
     StepStatus (..),
     PendingStep (..),
+    WorkflowCtx,
     WorkflowEvent (..),
     WorkflowId (..),
     firstStepStatus,
+    nextWorkflowMarker,
+    nextWorkflowStepId,
     pendingStepId,
-    pendingWorkflowStepScoped,
-    newCtx,
-    newWorkflowState,
-    nextExecutionIdentity,
-    nextStepId,
-    nextStepMarker,
+    pendingWorkflowStep,
     renderTransactError,
     runNestedStep,
     runWorkflowStep,
-    runWorkflowStepScoped,
     runWorkflowStepWith,
     stepCtxStatus,
     stepOptionsDefault,
-    withAttempt,
+    withStep,
     withWorkflow,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
@@ -62,12 +60,10 @@ simIdentity =
       identityAppId = ""
     }
 
-simCtx :: Text -> IOSim s (Ctx (IOSim s))
-simCtx name = do
+simRun :: Text -> (forall exec. WorkflowCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
+simRun name action = do
   conn <- simConnectionWith simTracer
-  identity <- nextExecutionIdentity conn
-  state <- newWorkflowState name Nothing identity
-  newCtx conn simIdentity state
+  withWorkflow conn simIdentity (WorkflowId name) Nothing action
 
 tests :: TestTree
 tests =
@@ -198,7 +194,7 @@ scopedRun = do
   observed <- newTVarIO Nothing
   result <-
     withWorkflow conn simIdentity (WorkflowId "sim-step-scoped") Nothing $ \wctx ->
-      runWorkflowStepScoped wctx "scoped" $ \s -> do
+      runWorkflowStep wctx "scoped" $ \s -> do
         atomically (writeTVar observed (stepCtxStatus s))
         pure 42
   seen <- readTVarIO observed
@@ -211,7 +207,7 @@ scopedPending = do
   conn <- simConnectionWith simTracer
   withWorkflow conn simIdentity (WorkflowId "sim-step-pending-scoped") Nothing $ \wctx -> do
     pending <-
-      pendingWorkflowStepScoped wctx "pending" $ \_ ->
+      pendingWorkflowStep wctx "pending" $ \_ ->
         pure (Right (42 :: Int))
     outcome <- pending.pendingRun
     pure (outcome, pendingStepId pending)
@@ -221,7 +217,7 @@ scopedNested :: forall s. IOSim s (Either (Error EngineOnly) Int)
 scopedNested = do
   conn <- simConnectionWith simTracer
   withWorkflow conn simIdentity (WorkflowId "sim-step-nested-scoped") Nothing $ \wctx ->
-    runWorkflowStepScoped wctx "outer" $ \s -> do
+    runWorkflowStep wctx "outer" $ \s -> do
       inner <- runNestedStep s "inner" (\_ -> pure (7 :: Int)) :: IOSim s (Either (Error EngineOnly) Int)
       case inner of
         Right n -> pure (n + 1)
@@ -229,71 +225,70 @@ scopedNested = do
 
 -- * The mirrored cases
 
-thirdAttempt :: IOSim s (Either (Error EngineOnly) Int, Int)
+thirdAttempt :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
 thirdAttempt = do
   attempts <- newTVarIO (0 :: Int)
-  context <- simCtx "sim-step"
-  let body _ = do
+  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+      body _ = do
         attempt <- readTVarIO attempts
         atomically (modifyTVar attempts (+ 1))
         if attempt < 2
           then pure (Left (StepFailed "flaky" "boom"))
           else pure (Right (42 :: Int))
       options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1}
-  outcome <- runWorkflowStepWith options context "flaky" body
+  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "flaky" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
-exhausted :: IOSim s (Either (Error EngineOnly) Int, Int)
+exhausted :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
 exhausted = do
   attempts <- newTVarIO (0 :: Int)
-  context <- simCtx "sim-step"
-  let body _ = do
+  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+      body _ = do
         atomically (modifyTVar attempts (+ 1))
         pure (Left (StepFailed "doomed" "boom"))
       options = stepOptionsDefault {max_attempts = 2, interval = millisDuration 1}
-  outcome <- runWorkflowStepWith options context "doomed" body
+  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "doomed" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
-defaultOnce :: IOSim s (Either (Error EngineOnly) Int, Int)
+defaultOnce :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
 defaultOnce = do
   attempts <- newTVarIO (0 :: Int)
-  context <- simCtx "sim-step"
-  let body _ = do
+  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+      body _ = do
         atomically (modifyTVar attempts (+ 1))
         pure (Left (StepFailed "plain" "boom"))
-  outcome <- runWorkflowStepWith stepOptionsDefault context "plain" body
+  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith stepOptionsDefault wctx "plain" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
-replayed :: IOSim s (Either (Error EngineOnly) Int, Either (Error EngineOnly) Int, Int)
+replayed :: forall s. IOSim s (Either (Error EngineOnly) Int, Either (Error EngineOnly) Int, Int)
 replayed = do
   mem <- newMemDB
   conn <- memConnectionOn mem simTracer
   attempts <- newTVarIO (0 :: Int)
   let runOnce = do
-        identity <- nextExecutionIdentity conn
-        state <- newWorkflowState "sim-step-replay" Nothing identity
-        context <- newCtx conn simIdentity state
-        let body _ = do
+        let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+            body _ = do
               attempt <- readTVarIO attempts
               atomically (modifyTVar attempts (+ 1))
               if attempt < 1
                 then pure (Left (StepFailed "flaky" "boom"))
                 else pure (Right (7 :: Int))
             options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1}
-        runWorkflowStepWith options context "flaky" body
+        withWorkflow conn simIdentity (WorkflowId "sim-step-replay") Nothing $ \wctx ->
+          runWorkflowStepWith options wctx "flaky" body
   first <- runOnce
   second <- runOnce
   made <- readTVarIO attempts
   pure (first, second, made)
 
-declined :: IOSim s (Either (Error EngineOnly) Int, Int)
+declined :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
 declined = do
   attempts <- newTVarIO (0 :: Int)
-  context <- simCtx "sim-step"
-  let body _ = do
+  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+      body _ = do
         atomically (modifyTVar attempts (+ 1))
         pure (Left (StepFailed "declined" "boom"))
       options =
@@ -302,15 +297,15 @@ declined = do
             interval = millisDuration 1,
             should_retry = Just (const False)
           }
-  outcome <- runWorkflowStepWith options context "declined" body
+  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "declined" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
-declinedMid :: IOSim s (Either (Error EngineOnly) Int, Int)
+declinedMid :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
 declinedMid = do
   attempts <- newTVarIO (0 :: Int)
-  context <- simCtx "sim-step"
-  let body _ = do
+  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
+      body _ = do
         attempt <- readTVarIO attempts
         atomically (modifyTVar attempts (+ 1))
         pure (Left (StepFailed "pick" (if attempt == 0 then "first" else "second")))
@@ -323,32 +318,27 @@ declinedMid = do
             interval = millisDuration 1,
             should_retry = Just declinesSecond
           }
-  outcome <- runWorkflowStepWith options context "pick" body
+  outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "pick" body
   made <- readTVarIO attempts
   pure (outcome, made)
 
 timedOut :: IOSim s (Either (Error EngineOnly) Int)
 timedOut = do
-  context <- simCtx "sim-step"
-  let body _ = threadDelay 50000 >> pure (Right (1 :: Int))
-      options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 5)}
-  runWorkflowStepWith options context "slow" body
+  let options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 5)}
+  simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "slow" (\_ -> threadDelay 50000 >> pure (Right (1 :: Int)))
 
 withinTimeout :: IOSim s (Either (Error EngineOnly) Int)
 withinTimeout = do
-  context <- simCtx "sim-step"
-  let body _ = pure (Right (9 :: Int))
-      options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 500)}
-  runWorkflowStepWith options context "quick" body
+  let options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 500)}
+  simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "quick" (\_ -> pure (Right (9 :: Int)))
 
 tracedRun :: IOSim s (Either (Error EngineOnly) Int)
 tracedRun = do
-  context <- simCtx "sim-step"
-  runWorkflowStep context "traced" (const (pure (1 :: Int)))
+  simRun "sim-step" $ \wctx -> runWorkflowStep wctx "traced" (const (pure (1 :: Int)))
 
 plainRun :: IOSim s (Either (Error EngineOnly) Int)
 plainRun = do
-  context <- simCtx "sim-step-plain"
-  marker <- nextStepMarker context
-  withAttempt context marker (firstStepStatus 0) $ \inner ->
-    runWorkflowStepWith stepOptionsDefault inner "inner" (const (pure (Right (3 :: Int))))
+  simRun "sim-step-plain" $ \wctx -> do
+    marker <- nextWorkflowMarker wctx
+    withStep wctx marker (firstStepStatus 0) $ \_stepped ->
+      runWorkflowStepWith stepOptionsDefault wctx "inner" (const (pure (Right (3 :: Int))))

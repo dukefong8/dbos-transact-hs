@@ -16,13 +16,11 @@ import DBOS.Transact
   (
     EngineOnly, CodecError,
     Config (..),
-    Ctx,
     WorkflowCtx,
     Identity (..),
     withWorkflow,
     withStep,
-    stepCtxInner,
-    workflowCtxInner,
+    stepCtxWorkflow,
     DBOS,
     Executor,
     Environment (..),
@@ -41,31 +39,28 @@ import DBOS.Transact
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
-    nextStepId,
-    nextStepMarker,
     nextWorkflowMarker,
+    nextWorkflowStepId,
     nullTracer,
     pendingGetEvent,
     pendingSetEvent,
     pendingSleep,
     pendingStepId,
     pendingWorkflowStep,
-    registerDBOSWorkflowRefScoped,
+    registerDBOSWorkflowRef,
     runDBOSWorkflowRef,
     runOptionsDefault,
     runWorkflowStep,
     runWorkflowStepWith,
-    runWorkflowStepWithScoped,
     setEvent,
     shutdown,
     stepOptionsDefault,
-    withAttempt,
-    getEventScoped,
-    pendingSetEventScoped,
-    pendingSleepScoped,
-    pendingWorkflowStepScoped,
-    runWorkflowStepScoped,
-    setEventScoped,
+    getEvent,
+    pendingSetEvent,
+    pendingSleep,
+    pendingWorkflowStep,
+    runWorkflowStep,
+    setEvent,
   )
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -105,10 +100,10 @@ tests =
             Right _ -> pure ()
           let action :: forall exec. WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Text))
               action wctx = do
-                published <- setEventScoped wctx "progress" ("ready" :: Text)
+                published <- setEvent wctx "progress" ("ready" :: Text)
                 case published of
                   Left err -> pure (Left err)
-                  Right () -> getEventScoped wctx (WorkflowId workflowText) "progress" (millisDuration 100)
+                  Right () -> getEvent wctx (WorkflowId workflowText) "progress" (millisDuration 100)
           conn <- connOver backend nullTracer
           first <- withWorkflow conn eventTestIdentity (WorkflowId workflowText) Nothing action
           case first of
@@ -135,17 +130,17 @@ tests =
             other -> fail (show other)
           publisherConn <- connOver backend nullTracer
           published <- withWorkflow publisherConn eventTestIdentity (WorkflowId publisherText) Nothing $ \wctx ->
-            setEventScoped wctx "answer" (42 :: Int)
+            setEvent wctx "answer" (42 :: Int)
           published @?= Right ()
           readerConn <- connOver backend nullTracer
           readOutside <- (withWorkflow readerConn eventTestIdentity (WorkflowId readerText) Nothing $ \wctx ->
-            getEventScoped wctx (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int)))
+            getEvent wctx (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int)))
           readOutside @?= Right (Just 42)
           outsideSteps <- stepNames backend readerText
           outsideSteps @?= [(0, getEventStepName), (1, sleepStepName)]
           inStepConn <- connOver backend nullTracer
           readInside <- (withWorkflow inStepConn eventTestIdentity (WorkflowId inStepText) Nothing $ \wctx ->
-            runWorkflowStepWithScoped stepOptionsDefault wctx "read" (\inner -> getEvent (stepCtxInner inner) (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either (Error EngineOnly) (Maybe Int)))
+            runWorkflowStepWith stepOptionsDefault wctx "read" (\sctx -> getEvent (stepCtxWorkflow sctx) (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either (Error EngineOnly) (Maybe Int)))
           readInside @?= Right (Just 42)
           insideSteps <- stepNames backend inStepText
           insideSteps @?= [(0, "read")]
@@ -165,10 +160,10 @@ tests =
           (refused, before, after) <-
             withWorkflow conn eventTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
               marker <- nextWorkflowMarker wctx
-              withStep wctx marker (firstStepStatus 0) $ \sctx -> do
-                before <- nextStepId (stepCtxInner sctx)
-                refused <- setEvent (stepCtxInner sctx) "progress" ("ready" :: Text)
-                after <- nextStepId (stepCtxInner sctx)
+              withStep wctx marker (firstStepStatus 0) $ \_sctx -> do
+                before <- nextWorkflowStepId wctx
+                refused <- setEvent wctx "progress" ("ready" :: Text)
+                after <- nextWorkflowStepId wctx
                 pure (refused, before, after)
           refused @?= Left (InsideStep "set_event")
           after @?= before + 1,
@@ -187,16 +182,16 @@ tests =
             other -> fail (show other)
           publisherConn <- connOver backend nullTracer
           published <- withWorkflow publisherConn eventTestIdentity (WorkflowId publisherText) Nothing $ \wctx ->
-            setEventScoped wctx "answer" (42 :: Int)
+            setEvent wctx "answer" (42 :: Int)
           published @?= Right ()
           readerConn <- connOver backend nullTracer
           (readCaptured, before, after) <-
             withWorkflow readerConn eventTestIdentity (WorkflowId readerText) Nothing $ \wctx -> do
               marker <- nextWorkflowMarker wctx
-              withStep wctx marker (firstStepStatus 0) $ \sctx -> do
-                before <- nextStepId (stepCtxInner sctx)
-                readCaptured <- getEvent (stepCtxInner sctx) (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int))
-                after <- nextStepId (stepCtxInner sctx)
+              withStep wctx marker (firstStepStatus 0) $ \_sctx -> do
+                before <- nextWorkflowStepId wctx
+                readCaptured <- getEvent wctx (WorkflowId publisherText) "answer" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int))
+                after <- nextWorkflowStepId wctx
                 pure (readCaptured, before, after)
           readCaptured @?= Right (Just 42)
           -- The probe's own counter read moves one; the plain read moves none.
@@ -212,13 +207,13 @@ tests =
             Right _ -> pure ()
           firstConn <- connOver backend nullTracer
           first <- withWorkflow firstConn eventTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-            setEventScoped wctx "progress" ("first" :: Text)
+            setEvent wctx "progress" ("first" :: Text)
           first @?= Right ()
           -- A replay reaches the same slot with a different value and does not
           -- republish: the recorded step wins.
           replayConn <- connOver backend nullTracer
           replayed <- withWorkflow replayConn eventTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-            setEventScoped wctx "progress" ("second" :: Text)
+            setEvent wctx "progress" ("second" :: Text)
           replayed @?= Right ()
           let readerText = workflowText <> "-reader"
           readerCreated <- SystemDB.initWorkflow backend ((newWorkflow readerText) {newWorkflowName = Just "L2EventReplayReader"}) Nothing Fresh Nothing
@@ -227,7 +222,7 @@ tests =
             Right _ -> pure ()
           readerConn <- connOver backend nullTracer
           readBack <- (withWorkflow readerConn eventTestIdentity (WorkflowId readerText) Nothing $ \wctx ->
-            getEventScoped wctx (WorkflowId workflowText) "progress" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Text)))
+            getEvent wctx (WorkflowId workflowText) "progress" (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Text)))
           readBack @?= Right (Just "first"),
       testCase "progress events survive recovery without republishing" $ do
         fresh <- UUID.V4.nextRandom
@@ -245,12 +240,12 @@ tests =
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () wctx = do
               proposal <- tryTakeMVar offer
-              published <- setEventScoped wctx "progress" (maybe "republished" id proposal)
+              published <- setEvent wctx "progress" (maybe "republished" id proposal)
               case published of
                 Left err -> pure (Left err)
                 Right () -> takeMVar release >> pure (Right 7)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflowRefScoped dbos key body
+          registered <- registerDBOSWorkflowRef dbos key body
           ref <- case registered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -288,9 +283,9 @@ tests =
           bracket (newDBOS ownerConfig) shutdown $ \owner -> do
             let body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Int))
                 body () wctx = do
-                  built <- pendingGetEvent other (workflowCtxInner wctx) (WorkflowId "wf-1") "answer" (millisDuration 0)
+                  built <- pendingGetEvent other wctx (WorkflowId "wf-1") "answer" (millisDuration 0)
                   built.pendingRun
-            ownerRegistered <- registerDBOSWorkflowRefScoped owner readerKey body
+            ownerRegistered <- registerDBOSWorkflowRef owner readerKey body
             readerRef <- case ownerRegistered of
               Left err  -> fail (show err)
               Right ref -> pure ref
@@ -299,13 +294,13 @@ tests =
             -- refuse.
             let inStepBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Int))
                 inStepBody () wctx = do
-                  stepped <- runWorkflowStepScoped wctx "read" $ \inner -> do
-                    built <- pendingGetEvent other (stepCtxInner inner) (WorkflowId "wf-1") "answer" (millisDuration 0)
+                  stepped <- runWorkflowStep wctx "read" $ \inner -> do
+                    built <- pendingGetEvent other (stepCtxWorkflow inner) (WorkflowId "wf-1") "answer" (millisDuration 0)
                     built.pendingRun
                   pure $ case stepped of
                     Left err  -> Left err
                     Right read -> read
-            inStepRegistered <- registerDBOSWorkflowRefScoped owner inStepKey inStepBody
+            inStepRegistered <- registerDBOSWorkflowRef owner inStepKey inStepBody
             inStepRef <- case inStepRegistered of
               Left err  -> fail (show err)
               Right ref -> pure ref
@@ -334,10 +329,10 @@ tests =
               body () wctx = do
                 -- Built a, b, c, d: the order their ids come from the
                 -- counter in, and the order a replay builds them in again.
-                a <- pendingSleepScoped wctx (millisDuration 1)
-                b <- pendingSetEventScoped wctx "b" (1 :: Int)
-                c <- (pendingGetEvent dbos (workflowCtxInner wctx) (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: IO (PendingStep exec IO (Either (Error EngineOnly) (Maybe Int))))
-                d <- (pendingWorkflowStepScoped wctx "after" (\_ -> pure (Right (1 :: Int))) :: IO (PendingStep exec IO (Either (Error EngineOnly) Int)))
+                a <- pendingSleep wctx (millisDuration 1)
+                b <- pendingSetEvent wctx "b" (1 :: Int)
+                c <- (pendingGetEvent dbos wctx (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: IO (PendingStep exec IO (Either (Error EngineOnly) (Maybe Int))))
+                d <- (pendingWorkflowStep wctx "after" (\_ -> pure (Right (1 :: Int))) :: IO (PendingStep exec IO (Either (Error EngineOnly) Int)))
                 idsOk <- case (pendingStepId a, pendingStepId b, pendingStepId c, pendingStepId d) of
                   (Just 0, Just 1, Just 2, Just 4) -> pure True
                   _                                -> pure False
@@ -352,7 +347,7 @@ tests =
                     pure $ case (dResult, cResult, bResult, aResult) of
                       (Right _, Right Nothing, Right _, Right _) -> Right ()
                       _ -> Left (StepFailed "joins" "a branch answered wrong")
-          registered <- registerDBOSWorkflowRefScoped dbos key body
+          registered <- registerDBOSWorkflowRef dbos key body
           ref <- case registered of
             Left err  -> fail (show err)
             Right ref -> pure ref

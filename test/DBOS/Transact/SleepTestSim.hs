@@ -20,17 +20,16 @@ import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (millisDuration)
 import DBOS.SystemDB.IOSim (simConnectionWith)
 import DBOS.Transact
-  ( Ctx,
-    Identity (..),
+  ( Identity (..),
+    WorkflowCtx,
+    WorkflowId (..),
     firstStepStatus,
-    newCtx,
-    newWorkflowState,
-    nextExecutionIdentity,
-    nextStepId,
-    nextStepMarker,
+    nextWorkflowMarker,
+    nextWorkflowStepId,
     sleepPlain,
     sleepWorkflowStep,
-    withAttempt,
+    withStep,
+    withWorkflow,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -44,12 +43,10 @@ simIdentity =
       identityAppId = ""
     }
 
-simCtx :: Text -> IOSim s (Ctx (IOSim s))
-simCtx name = do
+simRun :: Text -> (forall exec. WorkflowCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
+simRun name action = do
   conn <- simConnectionWith simTracer
-  identity <- nextExecutionIdentity conn
-  state <- newWorkflowState name Nothing identity
-  newCtx conn simIdentity state
+  withWorkflow conn simIdentity (WorkflowId name) Nothing action
 
 tests :: TestTree
 tests =
@@ -60,17 +57,15 @@ tests =
     "Durable sleep (Sim)"
     AllFinish
     [ testCase "a sleep waits and is checkpointed" $ do
-        (outcome, tr) <- runSimCase $ do
-          context <- simCtx "sim-sleep"
-          sleepWorkflowStep context (millisDuration 25)
+        (outcome, tr) <- runSimCase $ simRun "sim-sleep" $ \wctx ->
+          sleepWorkflowStep wctx (millisDuration 25)
         printSimTrace tr
         outcome @?= Right (),
       testCase "a replayed sleep does not start its clock again" $ do
-        (outcome, tr) <- runSimCase $ do
-          context <- simCtx "sim-sleep-replay"
-          _ <- sleepWorkflowStep context (millisDuration 25)
+        (outcome, tr) <- runSimCase $ simRun "sim-sleep-replay" $ \wctx -> do
+          _ <- sleepWorkflowStep wctx (millisDuration 25)
           -- A much longer request still returns at the recorded wake time.
-          sleepWorkflowStep context (millisDuration 60000)
+          sleepWorkflowStep wctx (millisDuration 60000)
         printSimTrace tr
         outcome @?= Right (),
       testCase "a sleep outside a workflow waits plainly" $ do
@@ -78,13 +73,12 @@ tests =
         printSimTrace tr
         outcome @?= (),
       testCase "a sleep inside a step takes no id" $ do
-        (outcome, tr) <- runSimCase $ do
-          context <- simCtx "sim-sleep-in-step"
-          marker <- nextStepMarker context
-          withAttempt context marker (firstStepStatus 0) $ \inner -> do
-            before <- nextStepId inner
-            slept <- sleepWorkflowStep inner (millisDuration 5)
-            after <- nextStepId inner
+        (outcome, tr) <- runSimCase $ simRun "sim-sleep-in-step" $ \wctx -> do
+          marker <- nextWorkflowMarker wctx
+          withStep wctx marker (firstStepStatus 0) $ \_stepped -> do
+            before <- nextWorkflowStepId wctx
+            slept <- sleepWorkflowStep wctx (millisDuration 5)
+            after <- nextWorkflowStepId wctx
             pure (slept, before, after)
         printSimTrace tr
         case outcome of

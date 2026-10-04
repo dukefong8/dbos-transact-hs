@@ -6,7 +6,7 @@ module WChildStartWorkflow where
 
 import Control.Monad (void)
 import DBOS.Prelude
-import DBOS.Transact (WorkflowCtx, WorkflowRef, startChildWorkflowScoped, startOptionsDefault)
+import DBOS.Transact (WorkflowCtx, WorkflowRef, startChildWorkflow, startOptionsDefault)
 
 good :: WorkflowCtx exec IO -> WorkflowRef IO e -> IO ()
-good wctx ref = void (startChildWorkflowScoped wctx ref startOptionsDefault Nothing)
+good wctx ref = void (startChildWorkflow wctx ref startOptionsDefault Nothing)

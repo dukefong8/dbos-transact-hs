@@ -53,7 +53,7 @@ import DBOS.Transact
     newWorkflowKey,
     recv,
     registerDBOSDataSource,
-    registerDBOSWorkflowRefScoped,
+    registerDBOSWorkflowRef,
     releaseAppDataSource,
     runAppSession,
     runTransaction,
@@ -64,11 +64,11 @@ import DBOS.Transact
     startDBOSWorkflowRef,
     startOptionsDefault,
     toDataSource,
-    recvScoped,
-    runTransactionScoped,
-    setEventScoped,
-    sleepWorkflowStepScoped,
-    startChildWorkflowScoped,
+    recv,
+    runTransaction,
+    setEvent,
+    sleepWorkflowStep,
+    startChildWorkflow,
   )
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
@@ -245,25 +245,25 @@ checkoutBody :: forall exec. DataSource IO -> (Tx IO -> CheckoutOps exec IO) -> 
 checkoutBody ds mkCheckout dispatchRef () wctx = runExceptT $ do
   -- The checkpoint payload stays a plain Int (as before the flip); the
   -- OrderId boundary is the ops table, unwrapped at the transaction edge.
-  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right . (\(OrderId oid) -> oid) <$> (mkCheckout tx).coCreate sctx))
-  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coReserve sctx))
+  orderId <- ExceptT (runTransaction ds wctx widgetConfig (\sctx tx -> Right . (\(OrderId oid) -> oid) <$> (mkCheckout tx).coCreate sctx))
+  onShelf <- ExceptT (runTransaction ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coReserve sctx))
   if not onShelf
     then do
-      _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) (-1)))
-      _ <- ExceptT (setEventScoped wctx "payment_id" (Nothing :: Maybe Text))
+      _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) (-1)))
+      _ <- ExceptT (setEvent wctx "payment_id" (Nothing :: Maybe Text))
       pure "no-inventory"
     else do
-      _ <- ExceptT (setEventScoped wctx "payment_id" (Just (Text.pack (show orderId))))
-      ExceptT (recvScoped wctx (Just (Topic "payment_status")) (millisDuration 30000) :: IO (Either (Error EngineOnly) (Maybe Text))) >>= \case
+      _ <- ExceptT (setEvent wctx "payment_id" (Just (Text.pack (show orderId))))
+      ExceptT (recv wctx (Just (Topic "payment_status")) (millisDuration 30000) :: IO (Either (Error EngineOnly) (Maybe Text))) >>= \case
         Just status | status == "paid" -> do
-          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) 2))
-          _ <- ExceptT (startChildWorkflowScoped wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
-          _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
+          _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) 2))
+          _ <- ExceptT (startChildWorkflow wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
+          _ <- ExceptT (setEvent wctx "order_id" (Text.pack (show orderId)))
           pure "paid"
         _ -> do
-          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coUndo sctx))
-          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) (-1)))
-          _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
+          _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coUndo sctx))
+          _ <- ExceptT (runTransaction ds wctx widgetConfig (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) (-1)))
+          _ <- ExceptT (setEvent wctx "order_id" (Text.pack (show orderId)))
           pure "cancelled"
 
 -- | The dispatch workflow: three one-second ticks, the oracle's durable
@@ -273,11 +273,11 @@ dispatchBody ds mkDispatch orderId wctx = go (3 :: Int)
   where
     go 0 = pure (Right "dispatched")
     go n = do
-      slept <- sleepWorkflowStepScoped wctx (millisDuration 1000)
+      slept <- sleepWorkflowStep wctx (millisDuration 1000)
       case slept of
         Left err -> pure (Left err)
         Right () -> do
-          _ <- runTransactionScoped ds wctx widgetConfig (\sctx tx -> Right <$> (mkDispatch tx).doTick sctx (OrderId orderId)) :: IO (Either (Error EngineOnly) ())
+          _ <- runTransaction ds wctx widgetConfig (\sctx tx -> Right <$> (mkDispatch tx).doTick sctx (OrderId orderId)) :: IO (Either (Error EngineOnly) ())
           go (n - 1)
 
 -- * Fixture
@@ -316,10 +316,10 @@ acquireWidgetFixture = do
   let ds = toDataSource app
   _ <- registerDBOSDataSource dbos ds >>= either (fail . show) pure
   dispatchRef <-
-    registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (pgDispatchOps tables))
+    registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (pgDispatchOps tables))
       >>= either (fail . show) pure
   checkoutRef <-
-    registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds (pgCheckoutOps tables) dispatchRef)
+    registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds (pgCheckoutOps tables) dispatchRef)
       >>= either (fail . show) pure
   pure
     WidgetFixture
@@ -437,10 +437,10 @@ tests =
       testCase "a refused paid write stops the checkout instead of dispatching" $ withWidgetFixture $ \wf -> do
         let ds = toDataSource wf.wfApp
         dispatchRef <-
-          registerDBOSWorkflowRefScoped wf.wfDbos (newWorkflowKey "DispatchOrderCannedFailWorkflow") (dispatchBody ds (pgDispatchOps wf.wfTables))
+          registerDBOSWorkflowRef wf.wfDbos (newWorkflowKey "DispatchOrderCannedFailWorkflow") (dispatchBody ds (pgDispatchOps wf.wfTables))
             >>= either (fail . show) pure
         checkoutRef <-
-          registerDBOSWorkflowRefScoped wf.wfDbos (newWorkflowKey "CheckoutCannedFailWorkflow") (checkoutBody ds (failingPgCheckoutOps wf.wfTables) dispatchRef)
+          registerDBOSWorkflowRef wf.wfDbos (newWorkflowKey "CheckoutCannedFailWorkflow") (checkoutBody ds (failingPgCheckoutOps wf.wfTables) dispatchRef)
             >>= either (fail . show) pure
         exec <- launchWidget wf
         let widText = "hs-widget-canned-fail-" <> wf.wfSchema

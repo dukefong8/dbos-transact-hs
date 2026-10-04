@@ -27,7 +27,7 @@ import DBOS.Prelude
 import DBOS.SystemDB (AwaitedOutcome (..), Outcome (..), StepRecord (..), Timestamp (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, defaultWorkflowFilter, getWorkflow, listWorkflowSteps)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simEntropy, simGeneratedId, simIdentity, simInstance)
-import DBOS.Transact (CodecError, Ctx, DBOS, Executor, WorkflowCtx, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), SomeSystemDB (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, cancellationToken, childWorkflowId, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, handleWorkflowId, millisDuration, newWorkflowKey, nextStepMarker, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflowRefScoped, registerDBOSWorkflowScoped, workflowCtxInner, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, tokenCancelled, waitForWorkflow, withAttempt, withSystemDB, workflowId, startChildWorkflowScoped)
+import DBOS.Transact (CodecError, Ctx, DBOS, Executor, WorkflowCtx, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), SomeSystemDB (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, cancellationToken, childWorkflowId, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, handleWorkflowId, millisDuration, newWorkflowKey, nextStepMarker, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflowRef, registerDBOSWorkflow, workflowCtxInner, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, tokenCancelled, waitForWorkflow, withAttempt, withSystemDB, workflowId, startChildWorkflow)
 import DBOS.Transact.WorkflowTest
   ( JoinOutcome (..),
     WfFixture (..),
@@ -724,11 +724,11 @@ joinChildBody () _ = pure (Right 9)
 
 joinParentBody :: forall s. WorkflowRef (IOSim s) EngineOnly -> Enqueue -> forall exec. () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
 joinParentBody childRef joinQueue () wctx = do
-  started <- startChildWorkflowScoped wctx childRef (startOptionsDefault {startQueue = Just joinQueue}) Nothing
+  started <- startChildWorkflow wctx childRef (startOptionsDefault {startQueue = Just joinQueue}) Nothing
   case started of
     Left err -> pure (Left err)
     Right handle -> do
-      result <- awaitWfSim (workflowCtxInner wctx) handle
+      result <- awaitWfSim wctx handle
       case result of
         Left err -> pure (Left err)
         Right (Just stored) ->
@@ -757,7 +757,7 @@ startWfRefSim = startDBOSWorkflowRef
 retrieveWfSim :: DBOS (IOSim s) -> WorkflowId -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
 retrieveWfSim = retrieveWorkflow
 
-awaitWfSim :: Ctx (IOSim s) -> WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+awaitWfSim :: WorkflowCtx exec (IOSim s) -> WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 awaitWfSim = awaitChild
 
 resultWfSim :: WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
@@ -770,10 +770,10 @@ statusWfSim = handleStatus
 -- signature, so the channel's @e@ stays ambiguous; these pin it while
 -- leaving @s@ universally quantified.
 registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
-registerWfSim = registerDBOSWorkflowScoped
+registerWfSim = registerDBOSWorkflow
 
 registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
-registerWfRefSim = registerDBOSWorkflowRefScoped
+registerWfRefSim = registerDBOSWorkflowRef
 
 -- * Helpers
 
@@ -809,7 +809,7 @@ registerIntRef dbos key body = orFail =<< registerWfRefSim dbos key body
 -- call site: the polymorphic registration cannot infer them from a local
 -- binding, and a locally written channel is the point of the lift case.
 registerRefOf :: forall e s a r. (FromJSON a, ToJSON r, ToJSON e) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error e) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) e))
-registerRefOf = registerDBOSWorkflowRefScoped
+registerRefOf = registerDBOSWorkflowRef
 
 orFail :: Either (Error EngineOnly) a -> IOSim s a
 orFail result = case result of

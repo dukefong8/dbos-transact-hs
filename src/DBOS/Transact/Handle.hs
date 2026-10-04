@@ -22,9 +22,7 @@ module DBOS.Transact.Handle
     handleStatus,
     handleResult,
     awaitChild,
-    awaitChildScoped,
     pendingAwait,
-    pendingAwaitScoped,
   )
 where
 
@@ -138,29 +136,12 @@ handleResult handle = do
 -- claimed id that names a different workflow is refused, never adopted.
 awaitChild ::
   (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
-  Ctx m ->
-  WorkflowHandle m e ->
-  m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-awaitChild ctx handle = placeCall ctx >>= driveAwait ctx handle
-
--- | 'awaitChild' over the scoped workflow view: the recorded await at the
--- workflow-scope entry. The body-less call needs no narrowed view, so this
--- is a pure delegation to the context-level machinery.
-awaitChildScoped ::
-  (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
   WorkflowCtx exec m ->
   WorkflowHandle m e ->
   m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-awaitChildScoped wctx handle = awaitChild (workflowCtxInner wctx) handle
-
--- | 'pendingAwait' over the scoped workflow view: the pending await built
--- through the workflow context, for the race and await paths.
-pendingAwaitScoped ::
-  (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
-  WorkflowCtx exec m ->
-  WorkflowHandle m e ->
-  m (PendingStep exec m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
-pendingAwaitScoped wctx handle = pendingAwait (workflowCtxInner wctx) handle
+awaitChild wctx handle = placeCall ctx >>= driveAwait ctx handle
+  where
+    ctx = workflowCtxInner wctx
 
 -- | An await built at its position and not yet run: the @DBOS.getResult@
 -- step claims its id here, where the call is written, and 'pendingRun'
@@ -169,10 +150,11 @@ pendingAwaitScoped wctx handle = pendingAwait (workflowCtxInner wctx) handle
 -- race drops still spent its id, and recorded nothing.
 pendingAwait ::
   (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
-  Ctx m ->
+  WorkflowCtx exec m ->
   WorkflowHandle m e ->
   m (PendingStep exec m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
-pendingAwait ctx handle = do
+pendingAwait wctx handle = do
+  let ctx = workflowCtxInner wctx
   placement <- placeCall ctx
   pure
     PendingStep

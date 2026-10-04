@@ -38,8 +38,8 @@ import DBOS.Transact.ManagementSimData (mockOutput, mockSerialization)
 import DBOS.Transact
   (
     EngineOnly,
-    runWorkflowStepScoped,
-    startChildWorkflowScoped,
+    runWorkflowStep,
+    startChildWorkflow,
     CodecError,
     Ctx,
     WorkflowCtx,
@@ -66,8 +66,8 @@ import DBOS.Transact
     handleStatus,
     handleWorkflowId,
     newWorkflowKey,
-    registerDBOSWorkflowScoped,
-    registerDBOSWorkflowRefScoped,
+    registerDBOSWorkflow,
+    registerDBOSWorkflowRef,
     registerQueue,
     resumeWorkflows,
     retrieveWorkflow,
@@ -357,13 +357,13 @@ stagedBody :: forall s. StrictTVar (IOSim s) [Text] -> forall exec. Int -> Workf
 stagedBody ran _ wctx = do
   outcomes <-
     mapM
-      (\name -> runWorkflowStepScoped wctx name (const (atomically (modifyTVar ran (<> [name])) >> pure (0 :: Int))))
+      (\name -> runWorkflowStep wctx name (const (atomically (modifyTVar ran (<> [name])) >> pure (0 :: Int))))
       ["one", "two", "three"]
   pure (fmap (const 0) (sequence outcomes))
 
 treeParentBody :: forall s. WorkflowRef (IOSim s) EngineOnly -> forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
 treeParentBody childRef _ wctx = do
-  started <- startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
+  started <- startChildWorkflow wctx childRef startOptionsDefault Nothing
   pure (fmap handleWorkflowId started)
 
 -- * Engine-only driver aliases
@@ -389,10 +389,10 @@ statusWfSim = handleStatus
 -- signature, so the channel's @e@ stays ambiguous; these pin it while
 -- leaving @s@ universally quantified.
 registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
-registerWfSim = registerDBOSWorkflowScoped
+registerWfSim = registerDBOSWorkflow
 
 registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
-registerWfRefSim = registerDBOSWorkflowRefScoped
+registerWfRefSim = registerDBOSWorkflowRef
 
 -- * Helpers
 

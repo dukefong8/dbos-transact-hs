@@ -165,6 +165,17 @@ checkHere placement step ambient =
     (PlacementInsideStep ctx, Just here)
       | sameStepBody ctx here ->
           Right DurabilityPlain
+    -- A call built through a captured parent while a step body runs
+    -- carries no marker on either side: the depth said in-step where the
+    -- context could not. It degrades to plain exactly like the direct
+    -- shape — nothing is recorded and no id moves — so a step body's own
+    -- calls and its parent's calls read together. Marker-bearing
+    -- placements still mismatch below, as do cross-workflow ones.
+    (PlacementInsideStep ctx, Just here)
+      | stepMarker ctx == Nothing
+      , stepMarker here == Nothing
+      , workflowId ctx == workflowId here ->
+          Right DurabilityPlain
     (Outside, Nothing) -> Right DurabilityPlain
     (ClientConnection, _) -> Right DurabilityPlain
     _ ->

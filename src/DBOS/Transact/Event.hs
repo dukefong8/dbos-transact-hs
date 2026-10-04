@@ -6,13 +6,9 @@
 -- from the explicit context and decodes their serialized values.
 module DBOS.Transact.Event
   ( setEvent,
-    setEventScoped,
     getEvent,
-    getEventScoped,
     pendingGetEvent,
-    pendingGetEventScoped,
     pendingSetEvent,
-    pendingSetEventScoped,
   )
 where
 
@@ -36,14 +32,17 @@ import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 -- | Publish a value on the current workflow. A write is a checkpointed
 -- operation and is refused from inside a step, where allocating another
 -- operation id would shift replay order.
-setEvent :: (ToJSON value, MonadSTM m) => Ctx m -> Text -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-setEvent ctx key value = placeCall ctx >>= driveSetEvent ctx key value
+setEvent :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+setEvent wctx key value = placeCall ctx >>= driveSetEvent ctx key value
+  where
+    ctx = workflowCtxInner wctx
 
 -- | A publish built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the write runs when the
 -- pending value is awaited or raced.
-pendingSetEvent :: forall exec value m. (ToJSON value, MonadSTM m) => Ctx m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
-pendingSetEvent ctx key value = do
+pendingSetEvent :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
+pendingSetEvent wctx key value = do
+  let ctx = workflowCtxInner wctx
   placement <- placeCall ctx
   pure (PendingStep setEventStepName (Just placement) (driveSetEvent ctx key value placement))
 
@@ -78,40 +77,16 @@ driveSetEvent ctx key value placement =
         Left err -> Left (TransactError.ErrorSystemDatabase err)
         Right () -> Right ()
 
--- | 'setEvent' over the scoped workflow view.
-setEventScoped :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-setEventScoped wctx key value = setEvent (workflowCtxInner wctx) key value
-
--- | 'pendingSetEvent' over the scoped workflow view.
-pendingSetEventScoped :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
-pendingSetEventScoped wctx key value = pendingSetEvent (workflowCtxInner wctx) key value
-
--- | 'getEvent' over the scoped workflow view.
-getEventScoped :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
-getEventScoped wctx destination key timeout = getEvent (workflowCtxInner wctx) destination key timeout
-
--- | 'pendingGetEvent' over the scoped workflow view: the named instance
--- still serves the read, the scope comes from the caller's execution.
-pendingGetEventScoped ::
-  (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m) =>
-  WorkflowCtx exec m ->
-  DBOS m ->
-  WorkflowId ->
-  Text ->
-  Duration ->
-  m (PendingStep exec m (Either (TransactError.Error c) (Maybe value)))
-pendingGetEventScoped wctx dbos destination key timeout =
-  pendingGetEvent dbos (workflowCtxInner wctx) destination key timeout
-
 -- | Read an event of another workflow, waiting up to the polling duration.
 -- The read belongs to the destination, the checkpoint to the caller. Outside
 -- a step the read and its timeout each own an operation id, so replay
 -- observes the same value (including absence) as the original execution.
 -- Inside a step the enclosing step checkpoint stands for the read, so it
 -- runs plainly. Mirrors Rust @get_event(workflow_id, key, timeout)@.
-getEvent :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => Ctx m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
-getEvent ctx destination key timeout = do
-  let workflowText = workflowId ctx
+getEvent :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
+getEvent wctx destination key timeout = do
+  let ctx = workflowCtxInner wctx
+      workflowText = workflowId ctx
   -- Inside a step the enclosing checkpoint stands for the read — through
   -- the handed context or a captured parent, read together.
   stepped <- insideAStep ctx
@@ -166,12 +141,13 @@ adoptEventValue found = case found of
 pendingGetEvent ::
   (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m) =>
   DBOS m ->
-  Ctx m ->
+  WorkflowCtx exec m ->
   WorkflowId ->
   Text ->
   Duration ->
   m (PendingStep exec m (Either (TransactError.Error c) (Maybe value)))
-pendingGetEvent dbos ctx destination key timeout = do
+pendingGetEvent dbos wctx destination key timeout = do
+  let ctx = workflowCtxInner wctx
   running <- requireExecutor dbos "get_event"
   case running of
     Left err -> pure (PendingStep getEventStepName Nothing (pure (Left (TransactError.liftEngine err))))

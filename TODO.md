@@ -136,6 +136,20 @@ the last module flips.
       in-step), and the witness/reader twins that would replace them are
       the C5a-remaining bulk pass below; hiding now would delete gates
       without replacements (docs/invariant-gates.md reading rule).
+- [x] C5a op-pair promotion: every `*Scoped` operation takes the plain
+      oracle name (`send`, `recv`, `setEvent`, `getEvent`, `runTransaction`,
+      `runWorkflowStep(With)`, `sleepWorkflowStep`, `awaitChild`,
+      `selectStep`, `startChildWorkflow`, the pendings, the six management
+      `...InWorkflow`s, the `register*` entries); the raw-context workers
+      are inlined or module-private (`selectStepOn`, `runTransactionWith`,
+      the `drive*` drivers). Direct-shape backstop tests move to the
+      captured shape with identical verdicts — except place-first ops,
+      where capture now degrades to plain per the new `checkHere` arm
+      (deviation 6); the transaction direct-shape case deletes
+      (compile-time by construction, captured twin keeps G4). New:
+      `stepCtxWorkflow` projector (same brand; backstop still applies).
+      Gates: full suite 650/650, every converted sim re-run pair-green,
+      probes 8/8.
 - [ ] C5a remaining scoped surface for body code: scoped reader twins —
       StepCtx: `cancellationToken`/`cancelToken`/`tokenCancelled`/`stepId`/
       `stepStatus`/`stepMarker`/`raceCancel`; WorkflowCtx: `deadline`/

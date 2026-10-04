@@ -30,8 +30,10 @@ test:
 
 
 # Exec-brand compile probes (docs/invariant-gates.md §5): negatives must
-# fail, witness twins must build clean. Needs the library built.
+# fail, witness twins must build clean. Builds the library first so the
+# probe compiles see a registered package.
 probes:
+	cabal build lib:dbos-transact-hs
 	./probes/run.sh
 
 
