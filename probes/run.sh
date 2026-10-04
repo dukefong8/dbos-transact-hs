@@ -39,12 +39,14 @@ probe probes/neg-child-start-step.hs must-fail
 probe probes/neg-alloc-on-step.hs must-fail
 probe probes/neg-nested-on-workflow.hs must-fail
 probe probes/neg-cross-exec-arms.hs must-fail
+probe probes/neg-exec-escape.hs must-fail
 
 echo "=== witness controls (each MUST build clean) ==="
 probe probes/w-child-start-workflow.hs must-pass
 probe probes/w-alloc-on-workflow.hs must-pass
 probe probes/w-nested-on-step.hs must-pass
 probe probes/w-cross-exec-arms.hs must-pass
+probe probes/w-exec-escape.hs must-pass
 
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0
