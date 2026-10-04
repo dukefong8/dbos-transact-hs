@@ -72,11 +72,11 @@ import DBOS.SystemDB.Types (ApplicationVersion, AwaitedOutcome (..), Duration, E
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeWorkflowValue)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, nextExecutionIdentity, runSystemDB)
-import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx, deadline, insideAStep, newWorkflowState, nextWorkflowStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowConnection, workflowCtxId, workflowIdentity, workflowSpawner)
+import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), deadline, insideAStep, newWorkflowState, nextWorkflowStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Registry (ErasedWorkflow (..), Snapshot, WorkflowKey (..), WorkflowRef, lookupRegistryWorkflow, lookupSnapshotWorkflow, refKey, refName, refRegistry, registryInstanceId, renderWorkflowKey)
+import DBOS.Transact.Registry (ErasedWorkflow (..), Snapshot, WorkflowKey (..), WorkflowRef (refKey, refRegistry), lookupRegistryWorkflow, lookupSnapshotWorkflow, refName, registryInstanceId, renderWorkflowKey)
 import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Tracer (runTracer)
 import Data.Text (Text, pack)
@@ -360,11 +360,11 @@ workflowNewWorkflow conn identity key (WorkflowId workflowText) input queueName 
 -- surfaces never spell the same four things differently.
 data Enqueue = Enqueue
   { name :: Text,
-    deduplication_id :: Maybe Text,
+    deduplicationId :: Maybe Text,
     priority :: Maybe Word32,
-    partition_key :: Maybe Text,
+    partitionKey :: Maybe Text,
     delay :: Maybe Duration,
-    duplication_policy :: DuplicationPolicy
+    duplicationPolicy :: DuplicationPolicy
   }
   deriving stock (Eq, Show)
 
@@ -381,11 +381,11 @@ enqueueNew :: Text -> Enqueue
 enqueueNew queueName =
   Enqueue
     { name = queueName,
-      deduplication_id = Nothing,
+      deduplicationId = Nothing,
       priority = Nothing,
-      partition_key = Nothing,
+      partitionKey = Nothing,
       delay = Nothing,
-      duplication_policy = Reject
+      duplicationPolicy = Reject
     }
 
 -- | Rejects an enqueue no queue could honour. Only what the shape could not
@@ -394,12 +394,12 @@ enqueueNew queueName =
 -- policy without a key, and the priority range.
 validateEnqueue :: Enqueue -> Either (TransactError.Error TransactError.EngineOnly) ()
 validateEnqueue queue
-  | Just _ <- queue.deduplication_id,
-    Just _ <- queue.partition_key =
+  | Just _ <- queue.deduplicationId,
+    Just _ <- queue.partitionKey =
       refuse
         "`deduplication_id` and `partition_key` cannot both be set: a partitioned queue's dequeue and a deduplication key enforce different things"
-  | queue.duplication_policy == ReturnExisting,
-    Nothing <- queue.deduplication_id =
+  | queue.duplicationPolicy == ReturnExisting,
+    Nothing <- queue.deduplicationId =
       refuse
         "`DuplicationPolicy::ReturnExisting` needs a `deduplication_id`: with no key there is no collision to resolve"
   | Just 0 <- queue.priority =
@@ -534,7 +534,7 @@ childWorkflowId chosen parent generated =
 -- enqueues so the two surfaces never diverge.
 resolveEnqueueCollision :: Monad m => Connection m -> Enqueue -> Text -> Error -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 resolveEnqueueCollision conn shape _offeredId err =
-  case (shape.duplication_policy, shape.deduplication_id) of
+  case (shape.duplicationPolicy, shape.deduplicationId) of
     (ReturnExisting, Just key) -> case err of
       QueueDeduplicated {} -> do
         holder <- runSystemDB conn.connSysdb (\db -> SystemDB.getDeduplicationKeyHolder db shape.name key)
@@ -564,15 +564,15 @@ startWorkflowRef tasks conn identity snapshot ref options input =
     Right _ -> do
       now <- timestampNow
       generated <- generatedWorkflowId conn
-      let key = refKey ref
+      let key = ref.refKey
           workflowText = fromMaybe generated options.startWorkflowId
           deadline' = resolveTimeoutDeadline options.startTimeout options.startQueue Nothing now
           base = workflowNewWorkflow conn identity key (WorkflowId workflowText) input ((.name) <$> options.startQueue)
           new =
             base
-              { newWorkflowDeduplicationId = options.startQueue >>= (.deduplication_id),
+              { newWorkflowDeduplicationId = options.startQueue >>= (.deduplicationId),
                 newWorkflowPriority = maybe 0 storedPriority options.startQueue,
-                newWorkflowQueuePartitionKey = options.startQueue >>= (.partition_key),
+                newWorkflowQueuePartitionKey = options.startQueue >>= (.partitionKey),
                 newWorkflowDelay = options.startQueue >>= (.delay),
                 newWorkflowTimeout = timeoutBudget options.startTimeout,
                 newWorkflowDeadline = deadline',
@@ -614,7 +614,7 @@ runWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, M
 runWorkflowRef tasks conn identity snapshot ref options input = do
   now <- timestampNow
   generated <- generatedWorkflowId conn
-  let key = refKey ref
+  let key = ref.refKey
       workflowText = fromMaybe generated options.runWorkflowId
       new =
         (workflowNewWorkflow conn identity key (WorkflowId workflowText) input Nothing)
@@ -655,8 +655,8 @@ startChildWorkflow wctx ref options input = do
       -- instance's database, where the workflow that allocated it cannot
       -- see it. Refused before anything is written and before the counter
       -- moves, as the oracle's placement does.
-      refInstance <- registryInstanceId (refRegistry ref)
-      let conn = workflowConnection wctx
+      refInstance <- registryInstanceId (ref.refRegistry)
+      let conn = wctx.wctxConn
       case refInstance of
         Nothing -> pure (Left (TransactError.ErrorNotLaunched {operation = "start a workflow"}))
         Just instanceId
@@ -668,14 +668,14 @@ startChildWorkflow wctx ref options input = do
                 parentStepId <- nextWorkflowStepId wctx
                 startChild parentStepId
   where
-    key = refKey ref
+    key = ref.refKey
     name = refName ref
-    conn = workflowConnection wctx
-    identity = workflowIdentity wctx
+    conn = wctx.wctxConn
+    identity = wctx.wctxIdentity
     startChild parentStepId = do
       now <- timestampNow
       generated <- generatedWorkflowId conn
-      let parentText = workflowCtxId wctx
+      let parentText = workflowId wctx
           childText = childWorkflowId options.startWorkflowId (Just (parentText, parentStepId)) generated
       recorded <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db (WorkflowId parentText) parentStepId name)
       case recorded of
@@ -705,9 +705,9 @@ startChildWorkflow wctx ref options input = do
               base = workflowNewWorkflow conn identity key (WorkflowId childText) input ((.name) <$> options.startQueue)
               new =
                 base
-                  { newWorkflowDeduplicationId = options.startQueue >>= (.deduplication_id),
+                  { newWorkflowDeduplicationId = options.startQueue >>= (.deduplicationId),
                     newWorkflowPriority = maybe 0 storedPriority options.startQueue,
-                    newWorkflowQueuePartitionKey = options.startQueue >>= (.partition_key),
+                    newWorkflowQueuePartitionKey = options.startQueue >>= (.partitionKey),
                     newWorkflowDelay = options.startQueue >>= (.delay),
                     newWorkflowTimeout = timeoutBudget options.startTimeout,
                     newWorkflowDeadline = childDeadline,
@@ -723,11 +723,11 @@ startChildWorkflow wctx ref options input = do
           initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh (Just caller))
           case initialized of
             Right result -> do
-              spawned <- case (workflowSpawner wctx, options.startQueue) of
+              spawned <- case (wctx.wctxSpawner, options.startQueue) of
                 -- A fresh start is not a dequeue, so it holds no queue's
                 -- slot; an owned-elsewhere row is already running somewhere.
                 (Just spawner, Nothing) | result.initResultShouldExecute -> do
-                  resolved <- lookupRegistryWorkflow key (refRegistry ref)
+                  resolved <- lookupRegistryWorkflow key (ref.refRegistry)
                   case resolved of
                     Nothing -> pure (Left (TransactError.ErrorWorkflowNotRegistered (renderWorkflowKey key)))
                     Just child -> do
@@ -745,7 +745,7 @@ startChildWorkflow wctx ref options input = do
                     -- The mapping only, never the holder's own parent link:
                     -- it travels on 'InitWorkflowCaller' and cannot be
                     -- reached from here.
-                    mapped <- runSystemDB conn.connSysdb (\db -> SystemDB.recordChildWorkflow db (WorkflowId parentText) (WorkflowId holder.workflow_id) parentStepId name (Just now))
+                    mapped <- runSystemDB conn.connSysdb (\db -> SystemDB.recordChildWorkflow db (WorkflowId parentText) (WorkflowId holder.workflowId) parentStepId name (Just now))
                     pure $ case mapped of
                       Left recordErr -> Left (TransactError.ErrorSystemDatabase recordErr)
                       Right _ -> Right holder

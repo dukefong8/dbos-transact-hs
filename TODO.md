@@ -130,11 +130,13 @@ the last module flips.
 - [x] C5c probes: permanent `probes/` pairs + `make probes` (four
       negatives matched to their error class, four witness twins clean):
       child start, allocation, nested step, cross-exec race.
-- [x] C5c inner accessors (superseded 2026-10-04): `workflowCtxInner`/
-      `stepCtxInner` LEFT the facade in the C5a trim and are peer-only now;
-      the backstop tests keep constructing illegal shapes through them via
-      the test-suite→internals dep, so no gate was deleted (the discipline
-      the box demanded holds; only the import path changed).
+- [x] C5c inner accessors (superseded twice): `workflowCtxInner`/
+      `stepCtxInner` LEFT the facade in the C5a trim, and the C5 close
+      (106e872) deleted them outright — views own their fields now, so
+      there is no inner context to reach. The backstop tests construct
+      illegal shapes through the view vocabulary itself
+      (`stepCtxBoundary`, `stepCtxWorkflow`, captured parents), and the
+      exec-brand probes pin the shapes that must not typecheck.
 - [x] C5a op-pair promotion: every `*Scoped` operation takes the plain
       oracle name (`send`, `recv`, `setEvent`, `getEvent`, `runTransaction`,
       `runWorkflowStep(With)`, `sleepWorkflowStep`, `awaitChild`,

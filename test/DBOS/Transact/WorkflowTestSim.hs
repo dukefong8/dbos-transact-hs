@@ -27,7 +27,7 @@ import DBOS.Prelude
 import DBOS.SystemDB (AwaitedOutcome (..), Outcome (..), StepRecord (..), Timestamp (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, defaultWorkflowFilter, getWorkflow, listWorkflowSteps)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simEntropy, simGeneratedId, simIdentity, simInstance)
-import DBOS.Transact (CodecError, DBOS, Executor, WorkflowCtx, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, handleWorkflowId, millisDuration, newWorkflowKey, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflowRef, registerDBOSWorkflow, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, waitForWorkflow, startChildWorkflow)
+import DBOS.Transact (CodecError, DBOS, Executor, WorkflowCtx, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, millisDuration, newWorkflowKey, pendingAwait, pendingWorkflowStepWith, registerDBOSWorkflowRef, registerDBOSWorkflow, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runWorkflowStep, runWorkflowStepWith, secondsDuration, selectStep, shutdown, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, waitForWorkflow, startChildWorkflow)
 import DBOS.Transact.Workflow (childWorkflowId)
 import DBOS.Transact.Connection (SomeSystemDB (..))
 import DBOS.Transact.WorkflowTest
@@ -203,8 +203,8 @@ tests =
               derivedText = parentText <> "-0"
               joinQueue =
                 (enqueueNew queueName)
-                  { deduplication_id = Just dedupKey,
-                    duplication_policy = ReturnExisting
+                  { deduplicationId = Just dedupKey,
+                    duplicationPolicy = ReturnExisting
                   }
               childBody = joinChildBody
           childRef <- registerUnitRef dbos childKey childBody
@@ -219,7 +219,7 @@ tests =
             startWfRefSim
               exec
               childRef
-              (startOptionsDefault {startWorkflowId = Just holderText, startQueue = Just (enqueueNew queueName) {deduplication_id = Just dedupKey}})
+              (startOptionsDefault {startWorkflowId = Just holderText, startQueue = Just (enqueueNew queueName) {deduplicationId = Just dedupKey}})
               Nothing
           case holderStarted of
             Left err -> throwIO (userError (show err))

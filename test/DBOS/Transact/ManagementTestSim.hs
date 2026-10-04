@@ -49,7 +49,7 @@ import DBOS.Transact
     QueueConflict (..),
     Serialization (..),
     StartOptions (..),
-    WorkflowHandle,
+    WorkflowHandle (workflowId),
     WorkflowKey,
     WorkflowRef,
     cancelWorkflows,
@@ -62,7 +62,6 @@ import DBOS.Transact
     forkWorkflows,
     handleResult,
     handleStatus,
-    handleWorkflowId,
     newWorkflowKey,
     registerDBOSWorkflow,
     registerDBOSWorkflowRef,
@@ -362,7 +361,7 @@ stagedBody ran _ wctx = do
 treeParentBody :: forall s. WorkflowRef (IOSim s) EngineOnly -> forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
 treeParentBody childRef _ wctx = do
   started <- startChildWorkflow wctx childRef startOptionsDefault Nothing
-  pure (fmap handleWorkflowId started)
+  pure (fmap (.workflowId) started)
 
 -- * Engine-only driver aliases
 

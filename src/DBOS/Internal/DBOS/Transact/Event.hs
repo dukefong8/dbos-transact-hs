@@ -26,7 +26,7 @@ import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Se
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextWorkflowStepId, stepCtxBoundary, withSystemDB, workflowCtxId)
+import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextWorkflowStepId, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 
@@ -58,7 +58,7 @@ driveSetEvent wctx key value placement =
           serialization = case encoded.serializedSerialization of
             Nothing -> Nothing
             Just (Serialization name) -> Just name
-          workflowText = workflowCtxId wctx'
+          workflowText = workflowId wctx'
       written <-
         withSystemDB
           wctx'
@@ -83,7 +83,7 @@ driveSetEvent wctx key value placement =
 -- runs plainly. Mirrors Rust @get_event(workflow_id, key, timeout)@.
 getEvent :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
 getEvent wctx destination key timeout = do
-  let workflowText = workflowCtxId wctx
+  let workflowText = workflowId wctx
   -- Inside a step the enclosing checkpoint stands for the read — through
   -- the handed context or a captured parent, read together.
   stepped <- insideAStep wctx
@@ -154,7 +154,7 @@ pendingGetEvent dbos wctx destination key timeout = do
         Right placement -> case placement of
           Recorded wctx' readStep -> do
             timeoutStep <- nextWorkflowStepId wctx'
-            let caller = Just (GetEventCaller (WorkflowId (workflowCtxId wctx')) readStep timeoutStep)
+            let caller = Just (GetEventCaller (WorkflowId (workflowId wctx')) readStep timeoutStep)
             pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor caller destination key timeout))
           _ -> pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor Nothing destination key timeout))
 

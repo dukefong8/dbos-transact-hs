@@ -12,7 +12,6 @@ module DBOS.Transact.Instance
   ( DBOS (..),
     Executor (..),
     newDBOS,
-    config,
     registerDBOSWorkflow,
     isLaunched,
     dbosExecutorId,
@@ -121,9 +120,6 @@ newDBOS config' = do
         dbos_executor = executor,
         dbos_lifecycle = lifecycle
       }
-
-config :: DBOS m -> Config
-config dbos = dbos.dbos_config
 
 -- | Register one typed workflow under its full identity triple. The registry
 -- lock makes registration and launch's snapshot mutually exclusive. The body

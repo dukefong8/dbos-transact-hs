@@ -22,7 +22,7 @@ import DBOS.Transact
     Error (..),
     WorkflowCtx,
     Identity (..),
-    WorkflowHandle,
+    WorkflowHandle (workflowId),
     WorkflowId (..),
     WorkflowKey,
     awaitChild,
@@ -32,7 +32,6 @@ import DBOS.Transact
     encodeWorkflowValue,
     handleResult,
     handleStatus,
-    handleWorkflowId,
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
@@ -107,7 +106,7 @@ tests =
           case retrieved of
             Left err -> fail (show err)
             Right handle -> do
-              handleWorkflowId handle @?= workflowText
+              handle.workflowId @?= workflowText
               status <- statusWf handle
               case status of
                 Right (Just _) -> pure ()

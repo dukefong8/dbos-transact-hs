@@ -59,7 +59,7 @@ import DBOS.SystemDB.Types (Outcome (..), Serialization (..), SerializedWorkflow
 import DBOS.Transact.Checkpoint (PendingStep (..), StepPlacement (..), pendingStepId, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (WorkflowCtx, workflowConnection, workflowCtxId)
+import DBOS.Transact.Context (WorkflowCtx (wctxConn), workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Serialization (CodecError, decodeWorkflowValue, encodeWorkflowValue)
 
@@ -133,8 +133,8 @@ checkSelect wctx branches = do
   startedAt <- timestampNow
   case placement of
     Recorded wctx' stepId' -> do
-      let conn = workflowConnection wctx'
-          parent = WorkflowId (workflowCtxId wctx')
+      let conn = wctx'.wctxConn
+          parent = WorkflowId (workflowId wctx')
       checked <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db parent stepId' selectStepStepName)
       case checked of
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
@@ -146,7 +146,7 @@ checkSelect wctx branches = do
                 ( Left
                     ( TransactError.ErrorSystemDatabase
                         ( SystemDBError.UnexpectedStep
-                            { workflowId = workflowCtxId wctx',
+                            { workflowId = workflowId wctx',
                               stepId = stepId',
                               expected = "a recorded select winner",
                               recorded = "a select row with no decodable winner"
@@ -160,7 +160,7 @@ checkSelect wctx branches = do
                     ( Left
                         ( TransactError.ErrorSystemDatabase
                             ( SystemDBError.UnexpectedStep
-                                { workflowId = workflowCtxId wctx',
+                                { workflowId = workflowId wctx',
                                   stepId = stepId',
                                   expected =
                                     "a select over " <> showText (branchCount branches) <> " branches — " <> summarize branches,
@@ -179,7 +179,7 @@ recordSelect :: (MonadSTM m, MonadTime m) => Recording exec m -> Int -> m (Eithe
 recordSelect recording winner = case recording.recordingPlacement of
   Recorded wctx stepId' -> do
     completedAt <- timestampNow
-    let conn = workflowConnection wctx
+    let conn = wctx.wctxConn
         encoded = encodeWorkflowValue winner
         serialization = case encoded.serializedSerialization of
           Nothing -> Nothing
@@ -189,7 +189,7 @@ recordSelect recording winner = case recording.recordingPlacement of
       runSystemDB conn.connSysdb $ \db ->
         SystemDB.recordStep
           db
-          (WorkflowId (workflowCtxId wctx))
+          (WorkflowId (workflowId wctx))
           stepId'
           selectStepStepName
           (OutcomeOutput (Just encoded.serializedText))
@@ -281,7 +281,7 @@ selectStepOn wctx arms = do
           ( Left
               ( TransactError.ErrorSystemDatabase
                   ( SystemDBError.UnexpectedStep
-                      { workflowId = workflowCtxId wctx,
+                      { workflowId = workflowId wctx,
                         stepId = replayedStep,
                         expected = "a branch a recorded select can replay",
                         recorded = "a select won by branch " <> showText winner <> ", which no longer exists"

@@ -157,7 +157,6 @@ import DBOS.Transact
     enqueueNew,
     handleResult,
     handleStatus,
-    handleWorkflowId,
     ioTracer,
     launchOn,
     launchWithEnvironment,
@@ -202,7 +201,7 @@ import DBOS.Transact.Context
   ( withSystemDB,
     spawnLocal,
     tokenCancelled,
-    workflowCtxId
+    workflowId
   )
 import DBOS.Transact.Workflow (abortAll, childWorkflowId, newTasks, spawnTracked, tasksSpawner)
 import DBOS.Transact.Connection
@@ -592,8 +591,8 @@ tests =
             parentKey = newWorkflowKey "joiner"
             joinQueue =
               (enqueueNew queueName)
-                { deduplication_id = Just dedupKey,
-                  duplication_policy = ReturnExisting
+                { deduplicationId = Just dedupKey,
+                  duplicationPolicy = ReturnExisting
                 }
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
@@ -631,7 +630,7 @@ tests =
           -- when the child starts: a delay holds the key without running.
           let holderQueue =
                 (enqueueNew queueName)
-                  { deduplication_id = Just dedupKey,
+                  { deduplicationId = Just dedupKey,
                     delay = Just (secondsDuration 3)
                   }
           holder <- startWfRef exec childRef (startOptionsDefault {startWorkflowId = Just holderText, startQueue = Just holderQueue}) Nothing
@@ -730,10 +729,8 @@ scenarioRegisteredRecordsResult fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     let key = newWorkflowKey "double"
         -- Converted body: registered through the scoped entry and using the
-        -- scoped step runner. The conversion pattern for one body at a
-        -- time: swap the registration, take WorkflowCtx, and replace
-        -- context-level calls with their scoped entries (downgrading via
-        -- workflowCtxInner where an entry does not exist yet).
+        -- scoped step runner. The body takes WorkflowCtx and every call
+        -- it makes takes that view or one derived from it.
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body value wctx = runWorkflowStep wctx "double" (const (pure (value * 2)))
     registered <- registerDBOSWorkflow dbos key body
@@ -934,8 +931,8 @@ scenarioJoinTakesId fx = do
                   joinSecond = b,
                   joinEntered = count,
                   joinRowStatus = found.workflowRecordStatus,
-                  joinFirstId = handleWorkflowId firstHandle,
-                  joinSecondId = handleWorkflowId secondHandle,
+                  joinFirstId = firstHandle.workflowId,
+                  joinSecondId = secondHandle.workflowId,
                   joinFirstPending = firstPending
                 }
           other -> throwIO (userError ("expected both handles to resolve: " <> show other))
@@ -1473,7 +1470,7 @@ scenarioRowBeforeBody fx = do
     let key = newWorkflowKey "sees-itself"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Bool)
         body () wctx = do
-          row <- withSystemDB wctx (\db -> SystemDB.getWorkflow db (WorkflowId (workflowCtxId wctx)))
+          row <- withSystemDB wctx (\db -> SystemDB.getWorkflow db (WorkflowId (workflowId wctx)))
           pure (Right (case row of Right (Just _) -> True; _ -> False))
     registered <- registerDBOSWorkflow dbos key body
     case registered of
@@ -1570,7 +1567,7 @@ scenarioDerivedChildAdopted fx = do
         parentBody _ wctx = do
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
             startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
-          pure (handleWorkflowId <$> started)
+          pure ((.workflowId) <$> started)
     parentReg <- registerDBOSWorkflow dbos parentKey parentBody
     case parentReg of
       Left err -> throwIO (userError (show err))
@@ -1618,7 +1615,7 @@ scenarioAssignedChildAdopted fx = do
         parentBody _ wctx = do
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
             startChildWorkflow wctx childRef (startOptionsDefault {startWorkflowId = Just chosenText}) (Just (encodeWorkflowValue (21 :: Int)))
-          pure (handleWorkflowId <$> started)
+          pure ((.workflowId) <$> started)
     parentReg <- registerDBOSWorkflow dbos parentKey parentBody
     case parentReg of
       Left err -> throwIO (userError (show err))
@@ -1833,7 +1830,7 @@ scenarioCaptureChildRefused fx = do
           outcome <- withStep wctx marker (firstStepStatus 0) (\_ -> startChildWorkflow wctx childRef startOptionsDefault Nothing)
           pure $ case outcome of
             Left err -> Left err
-            Right handle -> Left (ErrorConfig ("started through a captured parent: " <> handleWorkflowId handle))
+            Right handle -> Left (ErrorConfig ("started through a captured parent: " <> handle.workflowId))
     parentReg <- registerDBOSWorkflow dbos parentKey badBody
     case parentReg of
       Left err -> throwIO (userError (show err))
@@ -1869,7 +1866,7 @@ scenarioChildInsideStepRefused fx = do
           outcome <- withStep wctx marker (firstStepStatus 0) (\_sctx -> startChildWorkflow wctx childRef startOptionsDefault Nothing)
           pure $ case outcome of
             Left err -> Left err
-            Right handle -> Left (ErrorConfig ("started inside a step: " <> handleWorkflowId handle))
+            Right handle -> Left (ErrorConfig ("started inside a step: " <> handle.workflowId))
     parentReg <- registerDBOSWorkflow dbos parentKey badBody
     case parentReg of
       Left err -> throwIO (userError (show err))

@@ -58,7 +58,7 @@ import DBOS.Transact
     Serializer (..),
     SomeTracer (..),
     StepCtx,
-    StepStatus (..),
+    StepStatus,
     Timestamp (..),
     WorkflowCtx,
     WorkflowId (..),
@@ -69,20 +69,19 @@ import DBOS.Transact
     nextWorkflowStepId,
     nullTracer,
     secondsDuration,
-    stepCtxId,
     stepCtxStatus,
     withStep,
     withWorkflow,
-    workflowCtxId,
+    workflowId,
   )
 import DBOS.Transact.Context
-  ( newWorkflowCtx,
+  ( StepCtx (stepCtxWorkflow),
+    WorkflowCtx (wctxConn, wctxIdentity),
+    newWorkflowCtx,
     newWorkflowState,
     nextAttempt,
     insideAStep,
     stepCtxBoundary,
-    workflowConnection,
-    workflowIdentity,
     deadline,
     raceCancel,
     cancelToken,
@@ -185,7 +184,7 @@ data Fixture m = Fixture
 -- * Scenarios: each written once, returning a plain value the trees assert.
 
 scenarioWorkflowId :: MonadSTM m => Fixture m -> m Text
-scenarioWorkflowId fx = workflowCtxId <$> fx.fixtureMkCtx "wf-1"
+scenarioWorkflowId fx = workflowId <$> fx.fixtureMkCtx "wf-1"
 
 scenarioStepIds :: MonadSTM m => Fixture m -> m (Int, Int, Int)
 scenarioStepIds fx = do
@@ -280,7 +279,7 @@ scenarioRerunIdentity fx = do
 scenarioTravelsWith :: MonadSTM m => Fixture m -> m (Identity, Maybe Text)
 scenarioTravelsWith fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  pure (workflowIdentity ctx, (workflowConnection ctx).connAppName)
+  pure (ctx.wctxIdentity, ctx.wctxConn.connAppName)
 
 scenarioNestedRunners :: MonadSTM m => Fixture m -> m (Text, Text, Bool)
 scenarioNestedRunners fx = do
@@ -291,7 +290,7 @@ scenarioNestedRunners fx = do
   innerState <- newWorkflowState "wf-1" Nothing innerId
   outer <- newWorkflowCtx conn fx.fixtureIdentity outerState
   inner <- newWorkflowCtx conn fx.fixtureIdentity innerState
-  pure (workflowCtxId outer, workflowCtxId inner, isSameExecution outer inner)
+  pure (workflowId outer, workflowId inner, isSameExecution outer inner)
 
 scenarioStateInterop :: MonadSTM m => Fixture m -> m Text
 scenarioStateInterop fx = do
@@ -349,7 +348,7 @@ scenarioConcurrentIsolation fx = do
         identity <- nextExecutionIdentity conn
         state <- newWorkflowState name Nothing identity
         ctx <- newWorkflowCtx conn fx.fixtureIdentity state
-        putMVar box (workflowCtxId ctx)
+        putMVar box (workflowId ctx)
   a <- async (child "a" first)
   b <- async (child "b" second)
   wait a
@@ -391,7 +390,7 @@ scenarioStepView fx = do
   withWorkflow conn ident (WorkflowId "wf-9") Nothing $ \wctx -> do
     marker <- nextWorkflowMarker wctx
     withStep wctx marker (firstStepStatus 7) $ \sctx ->
-      pure (stepCtxId sctx, stepCtxStatus sctx)
+      pure (workflowId sctx.stepCtxWorkflow, stepCtxStatus sctx)
 
 -- * Shared checks: pure verdicts; both trees turn them into assertions,
 -- so the IOSim typed assertions live alongside the same checks here.

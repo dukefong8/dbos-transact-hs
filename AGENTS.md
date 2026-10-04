@@ -20,7 +20,7 @@ Repo guide for DBOS Haskell.
 ## HARD RULES — Rust fidelity (module + type one-to-one)
 
 - **One Rust module maps to exactly one Haskell module.** `sysdb/types.rs` → `DBOS.SystemDB.Types`, `sysdb/error.rs` → `DBOS.SystemDB.Error`, `sysdb/retry.rs` → `DBOS.SystemDB.Retry`. Do NOT split a Rust module across several Haskell modules.
-- **One Rust type maps to exactly one Haskell type, by name.** Types, constructors, and fields keep the Rust spelling verbatim — no `SystemDb` prefixes, no renames for taste, no field splitting. Collisions with existing names are resolved as documented deviations (constructor prefixes), not by renaming the ported type.
+- **One Rust type maps to exactly one Haskell type, by name.** Types, constructors, and fields keep the Rust DBOS domain name verbatim, spelled per Haskell convention (PascalCase for types and constructors, camelCase for fields and values) — no `SystemDb` prefixes, no renames for taste, no field splitting. Collisions with existing names are resolved as documented deviations (constructor prefixes), not by renaming the ported type. Snake_case spellings carried over from Rust (`workflow_id`, `worker_concurrency`) are the deviation this replaces; the public-field camelCase sweep records the conversion per slice.
 - **A split or a rename requires an explicit ADR** in `docs/adr/` recording why it was unavoidable. (No module split is in force today: the short-lived `DBOS.SystemDB.Time` leaf was merged back into `Types` once the cycle it broke was removed. Constructor-prefix collisions like `ForkStep` and `ErrorMaxRecoveryAttemptsExceeded` are the deviation style instead.)
 - Facades (`DBOS.SystemDB`, `DBOS.Transact`) and `[typedSql| ... |]` session modules are the port's own seams, not Rust module counterparts; they may re-export (`module Types`) but never redefine ported types.
 - **Keep the established `SystemDB` spelling in Haskell module, type, and class names.** Use `DBOS.SystemDB.*`, `SystemDB`, and `PostgresSystemDB` — never `SystemDatabase` — for Haskell artifacts. References to Rust's `trait SystemDatabase` keep the Rust spelling.
@@ -88,14 +88,67 @@ Soft conventions: they apply only where the Rust oracle and the plan rules (`.la
 - Tracing (Rule 5): explicit `SomeTracer m` (contra-tracer GADT, universal over event types), never ambient; per-domain event ADTs homed with their owners (`EngineEvent` in `Recovery`, `SysdbEvent` in `Retry`, `WorkflowEvent` in `Step`, `QueueEvent` in `Dequeue`, `ManagementEvent` in `Management`) with `LogEvent`+`ToLogStr`; a line is severity + constructor name + prose (`renderLine`, the name from `show`), and the IO backend prefixes FastLogger's time and the emitting `ThreadId` (pre-formatted once per thread in a capped cache, `LoggerBackend`'s second field) and renders only events at or above its `TRACE_LEVEL` floor (read once at acquisition; below-floor events are dropped before formatting); emission only through `runTracer`; `showText` in the Prelude. FastLogger Rank-N backend on IO (stderr — stdout carries results), `traceM` on IOSim (the sim carrier also says each rendered line, for `printSimTrace`); sim trees print via the test-owned carrier (`printSimTrace` to pane stderr, never into `ghcid.txt`); co-log is out (ADR-0015).
 - Sim mirrors (ADR-0020): a `*Sim` case must drive the same engine functions as its live half — only the backend and the scheduler/clock may differ. Staged effects, re-encoded call sequences, hand-emitted events, and test-side `forkIO`/`killThread`/poll stand-ins are defects; cases the simulator cannot run (preemption-dependent) are marked IO-only with an `-- IO only:` comment above the case (plain name; the reason also lives in ADR-0020's running list), never dropped. Build plan: `docs/dual-stack-concurrency-todo.md`.
 - Deriving: every clause carries an explicit `stock`/`newtype` strategy.
-- Records (`NoFieldSelectors` + `OverloadedRecordDot`, both in cabal `default-extensions`):
-  - DO read with record-dot: `row.rowWorkflowStatus`, `message.logMessage`.
-  - DO lift reads with dot sections: `(.rowWorkflowInputs) =<< fetched`, `maybe "null" (.serializedText) input`.
-  - DO update and construct with record syntax: `row { rowWorkflowId = wid }`, `SerializedWorkflowValue { serializedText = t, ... }`.
-  - DO destructure with patterns: `let WorkflowId destination = ...`, `case ... of Just (WorkflowSucceeded stored) -> ...`.
-  - DO add a per-file `{-# LANGUAGE OverloadedRecordDot #-}` wherever dot syntax is used (ghci loads don't inherit cabal defaults; `.ghci` keeps it `:seti`).
-  - DON'T call bare field selectors as functions (`rowWorkflowId row`) — they don't exist under `NoFieldSelectors`.
-  - DON'T reach for optics (`optics`/`aeson-optics`/`optics-th`) for reads or simple updates — optics is reserved for deep nested updates only. No such case exists, so the deps stay out (`aeson-optics` is additionally unusable: capped at `base<4.20`, incompatible with GHC 9.12).
+- Records (`NoFieldSelectors` + `OverloadedRecordDot`, both in cabal `default-extensions`).
+  Field access, in this order — stop at the first that fits:
+  1. **Record dot** — the default. Requires the field in scope (import it,
+     e.g. `WorkflowCtx (wctxConn)`) and a record type concrete enough for
+     `HasField`; it works fine under the rank-2 `forall exec.` binders, but
+     not for a field whose *own* type is rank-n (dot would need impredicative
+     instantiation):
+     `first.wctxState.executionIdentity == second.wctxState.executionIdentity` (`isSameExecution`),
+     `wctx.wctxConn.connInstanceId` (`Checkpoint`).
+     Dot sections lift reads: `(.rowWorkflowInputs) =<< fetched`,
+     `maybe "null" (.serializedText) input`.
+  2. **Plain record pattern** — for rank-n fields, or when destructuring once
+     and using several fields:
+     `let DataSource {dsWithTransaction = withTx} = ds` (`Datasource`),
+     `Right (Just WorkflowRecord {workflowRecordStatus = status}) -> ...`.
+     Rank-n fields only expose through patterns:
+     `spawnLocal (TaskSpawner spawn) = spawn`, `let ErasedWorkflow body = workflow`.
+     Newtype/sum destructuring likewise: `let WorkflowId destination = ...`,
+     `case ... of Just (WorkflowSucceeded stored) -> ...`.
+     RecordWildCards destructures a whole record (`InitWorkflowParams {..} = params`,
+     `Statements.hs`) and can rebuild it in one spread — override one field, the
+     rest come from the in-scope bind: `let MkA {..} = myA in MkA {c = 13, ..}`.
+     It is a cabal default (and a `.ghci` `:set`, like the other record
+     extensions); the spread reads plain in-scope variables, so it sidesteps
+     duplicate-field ambiguity rather than resolving it.
+  3. **Record pattern with a type annotation or TypeApplication** — when the
+     type cannot be inferred at the pattern. GHC 9.12 rejects a type
+     application on a record constructor (`R @Int{f = 1}` is a parse error), so
+     annotate the scrutinee or the field instead:
+     `case (found :: Maybe WorkflowRecord) of ...`,
+     `(R {f = x :: Int})`, `Right (numbers :: [Int]) -> ...` (`WorkflowTest`).
+     An annotation can also pin an *update's* target:
+     `(myA :: A) {c = 13}` — but on a field name shared under
+     `DuplicateRecordFields` this is the type-directed disambiguation GHC
+     deprecates (`-Wambiguous-fields` fires by default). The warning is a
+     future-GHC deprecation, not an error: when the type-directed
+     disambiguation is intended, it is safe to silence per file with
+     `{-# OPTIONS_GHC -Wno-ambiguous-fields #-}`; otherwise prefer the
+     rule-2 spread or the rule-4 qualified field.
+     TypeApplications are only for non-record constructors: `go (Just @Int x) = ...`.
+  4. **Module-qualified constructor (and qualified fields in construction, update,
+     and patterns)** — last resort for duplicate-field ambiguity:
+     `SystemDBError.WorkflowCancelled {workflowId = workflowId wctx'}` and
+     `TransactError.StepTimeout {step = name, timeout = limit}` (`Step.hs`),
+     `Types.QueueRecord {Types.queueRecordName = name}`; qualified fields also
+     update and match (`myA {M.c = 13}` / `MkA {M.c = x}`) and are the fix
+     `-Wambiguous-fields` names. The records need not live in separate
+     modules: one module may declare several whose field names collide
+     (DuplicateRecordFields permits it), and the consumer imports that one
+     module once per type under an alias —
+     `import qualified Mod as Foo (Foo (..))` /
+     `import qualified Mod as Bar (Bar (..))` (or post-qualified:
+     `import Mod qualified as Foo (Foo (..))`) — then names fields per type:
+     `Foo.Foo {Foo.x = 1, Foo.y = 2}`, `b {Bar.x = 9}`, `Bar.Bar {Bar.x = v}`.
+     Dot reads cannot be
+     qualified (`r.M.f` is a parse error), so a qualified read goes through
+     2 or 3, never a dot chain.
+- DO update and construct with record syntax: `row { rowWorkflowId = wid }`, `SerializedWorkflowValue { serializedText = t, ... }`.
+- DO add a per-file `{-# LANGUAGE OverloadedRecordDot #-}` wherever dot syntax is used (ghci loads don't inherit cabal defaults; `.ghci` keeps it `:seti`).
+- DON'T call bare field selectors as functions (`rowWorkflowId row`) — they don't exist under `NoFieldSelectors`.
+- DON'T reach for optics (`optics`/`aeson-optics`/`optics-th`) for reads or simple updates — optics is reserved for deep nested updates only. No such case exists, so the deps stay out (`aeson-optics` is additionally unusable: capped at `base<4.20`, incompatible with GHC 9.12).
 - `.ghci` discipline: `:set` iff cabal enables it, else `:seti` (a `:set -XNoFieldSelectors` once broke every ghci load while cabal stayed green).
 - Exports: explicit export lists, grouped by concept (see `DBOS.Transact`).
 - Typeclasses: concrete modules now; a second real backend earns the Port pattern, test fakes use records-of-functions.

@@ -14,9 +14,7 @@ module DBOS.Transact.Registry
     workflowKeyFromRow,
     renderWorkflowKey,
     WorkflowRef (..),
-    refKey,
     refName,
-    refRegistry,
     registerWorkflowRef,
     ErasedWorkflow (..),
     Registry,
@@ -53,8 +51,8 @@ import DBOS.Transact.Error qualified as TransactError
 -- same absence at this registration boundary.
 data WorkflowKey = WorkflowKey
   { name :: Text,
-    class_name :: Maybe Text,
-    config_name :: Maybe Text
+    className :: Maybe Text,
+    configName :: Maybe Text
   }
   deriving stock (Eq, Ord, Show)
 
@@ -104,15 +102,6 @@ data WorkflowRef m e = WorkflowRef
 instance Show (WorkflowRef m e) where
   show ref = "WorkflowRef " <> Text.unpack (renderWorkflowKey ref.refKey)
 
--- | The identity this workflow was registered under.
-refKey :: WorkflowRef m e -> WorkflowKey
-refKey ref = ref.refKey
-
--- | The registry this reference resolves bodies through: what a child
--- start reaches for when its call site holds no snapshot.
-refRegistry :: WorkflowRef m e -> Registry m
-refRegistry ref = ref.refRegistry
-
 -- | The workflow's name: the bare name, not the full identity triple.
 refName :: WorkflowRef m e -> Text
 refName ref = case ref.refKey of WorkflowKey name _ _ -> name
@@ -145,10 +134,10 @@ newtype ErasedWorkflow m = ErasedWorkflow
 -- the registry boundary. The stored representation is the same serialized
 -- value used by workflow rows and operation checkpoints.
 -- | Register a typed workflow whose body takes the scoped workflow view:
--- the converted shape, where the body can only reach the scoped entries
--- and must downgrade explicitly (via 'workflowCtxInner') at call sites not
--- yet converted. The type-erased form is the same either way, so converted
--- and unconverted bodies coexist in one registry and convert one at a time.
+-- the only shape left, now that the engine has no context-level entries —
+-- every durable call the body makes takes the view it was handed or one
+-- derived from it. The type-erased form is the same either way, so the
+-- registry seam is unchanged.
 registerTypedWorkflow :: forall argument result e m. (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 registerTypedWorkflow registry key body =
   registerErasedWorkflow registry key $ ErasedWorkflow $ \input wctx ->

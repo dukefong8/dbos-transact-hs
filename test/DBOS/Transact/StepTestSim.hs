@@ -29,7 +29,7 @@ import DBOS.Transact
     Identity (..),
     StepCtx,
     StepOptions (..),
-    StepStatus (..),
+    StepStatus,
     PendingStep (..),
     WorkflowCtx,
     WorkflowEvent (..),
@@ -235,7 +235,7 @@ thirdAttempt = do
         if attempt < 2
           then pure (Left (StepFailed "flaky" "boom"))
           else pure (Right (42 :: Int))
-      options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1}
+      options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1}
   outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "flaky" body
   made <- readTVarIO attempts
   pure (outcome, made)
@@ -247,7 +247,7 @@ exhausted = do
       body _ = do
         atomically (modifyTVar attempts (+ 1))
         pure (Left (StepFailed "doomed" "boom"))
-      options = stepOptionsDefault {max_attempts = 2, interval = millisDuration 1}
+      options = stepOptionsDefault {maxAttempts = 2, interval = millisDuration 1}
   outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "doomed" body
   made <- readTVarIO attempts
   pure (outcome, made)
@@ -276,7 +276,7 @@ replayed = do
               if attempt < 1
                 then pure (Left (StepFailed "flaky" "boom"))
                 else pure (Right (7 :: Int))
-            options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1}
+            options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1}
         withWorkflow conn simIdentity (WorkflowId "sim-step-replay") Nothing $ \wctx ->
           runWorkflowStepWith options wctx "flaky" body
   first <- runOnce
@@ -293,9 +293,9 @@ declined = do
         pure (Left (StepFailed "declined" "boom"))
       options =
         stepOptionsDefault
-          { max_attempts = 3,
+          { maxAttempts = 3,
             interval = millisDuration 1,
-            should_retry = Just (const False)
+            shouldRetry = Just (const False)
           }
   outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "declined" body
   made <- readTVarIO attempts
@@ -314,9 +314,9 @@ declinedMid = do
         _ -> True
       options =
         stepOptionsDefault
-          { max_attempts = 3,
+          { maxAttempts = 3,
             interval = millisDuration 1,
-            should_retry = Just declinesSecond
+            shouldRetry = Just declinesSecond
           }
   outcome <- simRun "sim-step" $ \wctx -> runWorkflowStepWith options wctx "pick" body
   made <- readTVarIO attempts

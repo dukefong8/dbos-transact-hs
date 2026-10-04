@@ -21,7 +21,6 @@ module DBOS.Transact.Client
     Client (..),
     connectClient,
     closeClient,
-    clientAppName,
     -- * Workflows from outside
     EnqueueOptions (..),
     enqueueOptionsNew,
@@ -101,15 +100,15 @@ import System.Environment (lookupEnv)
 -- listen set, and no migrate — four fields that must not be set is four
 -- fields that should not exist.
 data ClientConfig = ClientConfig
-  { app_name :: Maybe Text,
-    database_url :: Text,
-    max_connections :: Word,
+  { appName :: Maybe Text,
+    databaseUrl :: Text,
+    maxConnections :: Word,
     schema :: Text,
     serializer :: Serializer,
-    use_listen_notify :: Bool,
-    polling_concurrency :: Maybe Word,
-    outcome_poll_interval :: Maybe Duration,
-    notification_coalesce :: Maybe Duration
+    useListenNotify :: Bool,
+    pollingConcurrency :: Maybe Word,
+    outcomePollInterval :: Maybe Duration,
+    notificationCoalesce :: Maybe Duration
   }
   deriving stock (Eq, Show)
 
@@ -118,15 +117,15 @@ data ClientConfig = ClientConfig
 clientConfigNew :: Text -> ClientConfig
 clientConfigNew databaseUrl =
   ClientConfig
-    { app_name = Nothing,
-      database_url = databaseUrl,
-      max_connections = 5,
+    { appName = Nothing,
+      databaseUrl = databaseUrl,
+      maxConnections = 5,
       schema = "dbos",
       serializer = RustSerde,
-      use_listen_notify = True,
-      polling_concurrency = Nothing,
-      outcome_poll_interval = Nothing,
-      notification_coalesce = Nothing
+      useListenNotify = True,
+      pollingConcurrency = Nothing,
+      outcomePollInterval = Nothing,
+      notificationCoalesce = Nothing
     }
 
 -- | 'clientConfigNew', taking the database URL from @DBOS_DATABASE_URL@.
@@ -139,7 +138,7 @@ clientConfigFromEnv = do
 -- | Checks what can be checked before anything is connected.
 validateClientConfig :: ClientConfig -> Either (TransactError.Error TransactError.EngineOnly) ()
 validateClientConfig config
-  | Text.null config.database_url =
+  | Text.null config.databaseUrl =
       Left
         ( TransactError.ErrorConfig
             ( "no database URL: set `database_url`, or the "
@@ -147,12 +146,12 @@ validateClientConfig config
                 <> " environment variable if the configuration came from `ClientConfig::from_env`"
             )
         )
-  | Just name <- config.app_name,
+  | Just name <- config.appName,
     Left err <- validateAppName name =
       Left err
   | Text.null config.schema = Left (TransactError.ErrorConfig "`schema` cannot be empty")
-  | config.max_connections == 0 = Left (TransactError.ErrorConfig "`max_connections` cannot be zero")
-  | Just interval <- config.outcome_poll_interval,
+  | config.maxConnections == 0 = Left (TransactError.ErrorConfig "`max_connections` cannot be zero")
+  | Just interval <- config.outcomePollInterval,
     durationIsZero interval =
       Left (TransactError.ErrorConfig "`outcome_poll_interval` cannot be zero")
   | otherwise = Right ()
@@ -160,7 +159,7 @@ validateClientConfig config
 -- | How often a waiting caller looks, resolved.
 clientOutcomePollInterval :: ClientConfig -> Duration
 clientOutcomePollInterval config =
-  maybe defaultOutcomePollInterval id config.outcome_poll_interval
+  maybe defaultOutcomePollInterval id config.outcomePollInterval
 
 -- | A connection to an application's system database, from outside it. It
 -- holds a connection and nothing else — not an executor. Mirrors the
@@ -192,7 +191,7 @@ connectClient config =
               newConnection
                 (SomeSystemDB systemDB)
                 config.serializer
-                config.app_name
+                config.appName
                 (clientOutcomePollInterval config)
                 OwnerClient
                 instanceId
@@ -203,15 +202,15 @@ connectClient config =
   where
     backendConfig =
       Postgres.Config
-        { Postgres.configUrl = config.database_url,
-          Postgres.configMaxConnections = fromIntegral config.max_connections,
+        { Postgres.configUrl = config.databaseUrl,
+          Postgres.configMaxConnections = fromIntegral config.maxConnections,
           Postgres.configSettings =
             (Postgres.defaultSettings :: Settings)
               { settingsSchema = config.schema,
                 settingsExecutorId = Nothing,
-                settingsApplicationName = config.app_name,
-                settingsPollingConcurrency = fromIntegral <$> config.polling_concurrency,
-                settingsNotificationCoalesce = config.notification_coalesce
+                settingsApplicationName = config.appName,
+                settingsPollingConcurrency = fromIntegral <$> config.pollingConcurrency,
+                settingsNotificationCoalesce = config.notificationCoalesce
               }
         }
     uuidWorkflowId = Text.pack . UUID.toString <$> UUID.V4.nextRandom
@@ -221,21 +220,17 @@ connectClient config =
 closeClient :: Monad m => Client m -> m ()
 closeClient client = closeConnection client.conn
 
--- | The application this client acts for, or 'Nothing' if nameless.
-clientAppName :: Client m -> Maybe Text
-clientAppName client = client.conn.connAppName
-
 -- | What an enqueue may say about how, beside the workflow and its input.
 -- Mirrors Rust @EnqueueOptions@: the queue-shaped asks live on 'Enqueue',
 -- where the runtime's start keeps them too, so the two surfaces never spell
 -- the same things differently.
 data EnqueueOptions = EnqueueOptions
   { queue :: Enqueue,
-    workflow_id :: Maybe Text,
-    class_name :: Maybe Text,
-    config_name :: Maybe Text,
-    app_name :: Maybe Text,
-    app_version :: Maybe Text,
+    workflowId :: Maybe Text,
+    className :: Maybe Text,
+    configName :: Maybe Text,
+    appName :: Maybe Text,
+    appVersion :: Maybe Text,
     timeout :: Maybe Duration,
     attributes :: Maybe (Map Text Value)
   }
@@ -250,11 +245,11 @@ enqueueOptionsOn :: Enqueue -> EnqueueOptions
 enqueueOptionsOn shape =
   EnqueueOptions
     { queue = shape,
-      workflow_id = Nothing,
-      class_name = Nothing,
-      config_name = Nothing,
-      app_name = Nothing,
-      app_version = Nothing,
+      workflowId = Nothing,
+      className = Nothing,
+      configName = Nothing,
+      appName = Nothing,
+      appVersion = Nothing,
       timeout = Nothing,
       attributes = Nothing
     }
@@ -278,31 +273,31 @@ enqueueClientWorkflowWith client workflowName options input = do
     Right () -> do
       generated <- generatedWorkflowId client.conn
       let shape = options.queue
-          workflowText = fromMaybe generated options.workflow_id
+          workflowText = fromMaybe generated options.workflowId
           serialization = case input >>= (.serializedSerialization) of
             Just (Serialization name) -> Just name
             Nothing -> Just (serializerName client.conn.connSerializer)
-          applicationName = case options.app_name of
+          applicationName = case options.appName of
             Just name -> Just name
             Nothing -> client.conn.connAppName
           new =
             (newWorkflow workflowText)
               { newWorkflowName = Just workflowName,
-                newWorkflowClassName = options.class_name,
-                newWorkflowConfigName = options.config_name,
+                newWorkflowClassName = options.className,
+                newWorkflowConfigName = options.configName,
                 newWorkflowInput = (.serializedText) <$> input,
                 newWorkflowSerialization = serialization,
                 newWorkflowQueueName = Just shape.name,
-                newWorkflowDeduplicationId = shape.deduplication_id,
+                newWorkflowDeduplicationId = shape.deduplicationId,
                 newWorkflowPriority = storedPriority shape,
-                newWorkflowQueuePartitionKey = shape.partition_key,
+                newWorkflowQueuePartitionKey = shape.partitionKey,
                 newWorkflowDelay = shape.delay,
                 newWorkflowTimeout = options.timeout,
                 newWorkflowDeadline = Nothing,
                 newWorkflowAttributes = encodeAttributes options.attributes,
                 newWorkflowExecutorId = Nothing,
                 newWorkflowApplicationName = applicationName,
-                newWorkflowApplicationVersion = options.app_version
+                newWorkflowApplicationVersion = options.appVersion
               }
       initialized <- runSystemDB client.conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh Nothing)
       case initialized of

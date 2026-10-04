@@ -48,7 +48,7 @@ start = do
     registerQueue
       dbos
       demoQueueName
-      (defaultQueueOptions {worker_concurrency = Just defaultWorkerConcurrency})
+      (defaultQueueOptions {workerConcurrency = Just defaultWorkerConcurrency})
       NeverUpdate
   _ <- either (fail . show) pure registeredQueue
   orderId <- newTVarIO Nothing

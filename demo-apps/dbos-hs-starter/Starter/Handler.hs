@@ -142,13 +142,13 @@ applyConcurrency app requested = do
           demoQueueName
           ( QueueChange
               { concurrency = Leave,
-                worker_concurrency = Set (Just (max 1 requested)),
-                polling_interval = Leave,
-                rate_limit = Leave,
-                priority_enabled = Leave,
-                partition_concurrency = Leave,
-                partition_worker_concurrency = Leave,
-                partition_rate_limit = Leave
+                workerConcurrency = Set (Just (max 1 requested)),
+                pollingInterval = Leave,
+                rateLimit = Leave,
+                priorityEnabled = Leave,
+                partitionConcurrency = Leave,
+                partitionWorkerConcurrency = Leave,
+                partitionRateLimit = Leave
               }
           )
       )
@@ -242,7 +242,7 @@ fetchQueueWorkerConcurrency :: DBOS IO -> Text -> IO (Maybe Int)
 fetchQueueWorkerConcurrency dbos name = do
   found <- queue dbos name
   pure $ case found of
-    Right (Just (Queue {worker_concurrency = wc})) -> wc
+    Right (Just (Queue {workerConcurrency = wc})) -> wc
     _ -> Nothing
 
 -- | Start a workflow and return at once; the task is dropped. The id is an

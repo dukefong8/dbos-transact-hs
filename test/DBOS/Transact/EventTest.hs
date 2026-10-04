@@ -20,7 +20,6 @@ import DBOS.Transact
     Identity (..),
     withWorkflow,
     withStep,
-    stepCtxWorkflow,
     DBOS,
     Executor,
     Environment (..),
@@ -62,6 +61,7 @@ import DBOS.Transact
     setEvent,
   )
 import DBOS.Transact.Checkpoint (pendingStepId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow))
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
@@ -140,7 +140,7 @@ tests =
           outsideSteps @?= [(0, getEventStepName), (1, sleepStepName)]
           inStepConn <- connOver backend nullTracer
           readInside <- (withWorkflow inStepConn eventTestIdentity (WorkflowId inStepText) Nothing $ \wctx ->
-            runWorkflowStepWith stepOptionsDefault wctx "read" (\sctx -> getEvent (stepCtxWorkflow sctx) (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either (Error EngineOnly) (Maybe Int)))
+            runWorkflowStepWith stepOptionsDefault wctx "read" (\sctx -> getEvent sctx.stepCtxWorkflow (WorkflowId publisherText) "answer" (millisDuration 0)) :: IO (Either (Error EngineOnly) (Maybe Int)))
           readInside @?= Right (Just 42)
           insideSteps <- stepNames backend inStepText
           insideSteps @?= [(0, "read")]
@@ -295,7 +295,7 @@ tests =
             let inStepBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Int))
                 inStepBody () wctx = do
                   stepped <- runWorkflowStep wctx "read" $ \inner -> do
-                    built <- pendingGetEvent other (stepCtxWorkflow inner) (WorkflowId "wf-1") "answer" (millisDuration 0)
+                    built <- pendingGetEvent other inner.stepCtxWorkflow (WorkflowId "wf-1") "answer" (millisDuration 0)
                     built.pendingRun
                   pure $ case stepped of
                     Left err  -> Left err

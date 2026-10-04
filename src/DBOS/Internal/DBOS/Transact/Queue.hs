@@ -61,13 +61,13 @@ import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 data Queue = Queue
   { name :: Text,
     concurrency :: Maybe Int,
-    worker_concurrency :: Maybe Int,
-    rate_limit :: Maybe RateLimit,
-    priority_enabled :: Bool,
-    partition_concurrency :: Maybe Int,
-    partition_worker_concurrency :: Maybe Int,
-    partition_rate_limit :: Maybe RateLimit,
-    polling_interval :: Duration
+    workerConcurrency :: Maybe Int,
+    rateLimit :: Maybe RateLimit,
+    priorityEnabled :: Bool,
+    partitionConcurrency :: Maybe Int,
+    partitionWorkerConcurrency :: Maybe Int,
+    partitionRateLimit :: Maybe RateLimit,
+    pollingInterval :: Duration
   }
   deriving stock (Eq, Show)
 
@@ -75,13 +75,13 @@ data Queue = Queue
 -- with one-second polling.
 data QueueOptions = QueueOptions
   { concurrency :: Maybe Int,
-    worker_concurrency :: Maybe Int,
-    polling_interval :: Duration,
-    rate_limit :: Maybe RateLimit,
-    priority_enabled :: Bool,
-    partition_concurrency :: Maybe Int,
-    partition_worker_concurrency :: Maybe Int,
-    partition_rate_limit :: Maybe RateLimit
+    workerConcurrency :: Maybe Int,
+    pollingInterval :: Duration,
+    rateLimit :: Maybe RateLimit,
+    priorityEnabled :: Bool,
+    partitionConcurrency :: Maybe Int,
+    partitionWorkerConcurrency :: Maybe Int,
+    partitionRateLimit :: Maybe RateLimit
   }
   deriving stock (Eq, Show)
 
@@ -89,26 +89,26 @@ defaultQueueOptions :: QueueOptions
 defaultQueueOptions =
   QueueOptions
     { concurrency = Nothing,
-      worker_concurrency = Nothing,
-      polling_interval = secondsDuration 1,
-      rate_limit = Nothing,
-      priority_enabled = False,
-      partition_concurrency = Nothing,
-      partition_worker_concurrency = Nothing,
-      partition_rate_limit = Nothing
+      workerConcurrency = Nothing,
+      pollingInterval = secondsDuration 1,
+      rateLimit = Nothing,
+      priorityEnabled = False,
+      partitionConcurrency = Nothing,
+      partitionWorkerConcurrency = Nothing,
+      partitionRateLimit = Nothing
     }
 
 -- | A partial change. 'Leave' differs from 'Set Nothing': only the latter
 -- clears an optional limit.
 data QueueChange = QueueChange
   { concurrency :: Change (Maybe Int),
-    worker_concurrency :: Change (Maybe Int),
-    polling_interval :: Change Duration,
-    rate_limit :: Change (Maybe RateLimit),
-    priority_enabled :: Change Bool,
-    partition_concurrency :: Change (Maybe Int),
-    partition_worker_concurrency :: Change (Maybe Int),
-    partition_rate_limit :: Change (Maybe RateLimit)
+    workerConcurrency :: Change (Maybe Int),
+    pollingInterval :: Change Duration,
+    rateLimit :: Change (Maybe RateLimit),
+    priorityEnabled :: Change Bool,
+    partitionConcurrency :: Change (Maybe Int),
+    partitionWorkerConcurrency :: Change (Maybe Int),
+    partitionRateLimit :: Change (Maybe RateLimit)
   }
   deriving stock (Eq, Show)
 
@@ -116,13 +116,13 @@ defaultQueueChange :: QueueChange
 defaultQueueChange =
   QueueChange
     { concurrency = Leave,
-      worker_concurrency = Leave,
-      polling_interval = Leave,
-      rate_limit = Leave,
-      priority_enabled = Leave,
-      partition_concurrency = Leave,
-      partition_worker_concurrency = Leave,
-      partition_rate_limit = Leave
+      workerConcurrency = Leave,
+      pollingInterval = Leave,
+      rateLimit = Leave,
+      priorityEnabled = Leave,
+      partitionConcurrency = Leave,
+      partitionWorkerConcurrency = Leave,
+      partitionRateLimit = Leave
     }
 
 -- | What registering a queue that already exists does to the stored limits.
@@ -138,18 +138,18 @@ queueFromRecord record =
    in Queue
         { name = record.queueRecordName,
           concurrency = limits.resolvedConcurrency,
-          worker_concurrency = limits.resolvedWorkerConcurrency,
-          rate_limit = limits.resolvedRateLimit,
-          priority_enabled = record.queueRecordPriorityEnabled,
-          partition_concurrency = limits.resolvedPartitionConcurrency,
-          partition_worker_concurrency = limits.resolvedPartitionWorkerConcurrency,
-          partition_rate_limit = limits.resolvedPartitionRateLimit,
-          polling_interval = record.queueRecordPollingInterval
+          workerConcurrency = limits.resolvedWorkerConcurrency,
+          rateLimit = limits.resolvedRateLimit,
+          priorityEnabled = record.queueRecordPriorityEnabled,
+          partitionConcurrency = limits.resolvedPartitionConcurrency,
+          partitionWorkerConcurrency = limits.resolvedPartitionWorkerConcurrency,
+          partitionRateLimit = limits.resolvedPartitionRateLimit,
+          pollingInterval = record.queueRecordPollingInterval
         }
 
 queueIsPartitioned :: Queue -> Bool
 queueIsPartitioned receipt =
-  case (receipt.partition_concurrency, receipt.partition_worker_concurrency, receipt.partition_rate_limit) of
+  case (receipt.partitionConcurrency, receipt.partitionWorkerConcurrency, receipt.partitionRateLimit) of
     (Nothing, Nothing, Nothing) -> False
     _ -> True
 
@@ -157,18 +157,18 @@ queueOptionsToNewQueue :: Text -> QueueOptions -> NewQueue
 queueOptionsToNewQueue queueName options =
   (newQueue queueName)
     { newQueueConcurrency = options.concurrency,
-      newQueueWorkerConcurrency = options.worker_concurrency,
-      newQueueRateLimit = options.rate_limit,
-      newQueuePriorityEnabled = options.priority_enabled,
+      newQueueWorkerConcurrency = options.workerConcurrency,
+      newQueueRateLimit = options.rateLimit,
+      newQueuePriorityEnabled = options.priorityEnabled,
       newQueuePartitionQueue = anyPresent options,
-      newQueuePartitionConcurrency = options.partition_concurrency,
-      newQueuePartitionWorkerConcurrency = options.partition_worker_concurrency,
-      newQueuePartitionRateLimit = options.partition_rate_limit,
-      newQueuePollingInterval = options.polling_interval
+      newQueuePartitionConcurrency = options.partitionConcurrency,
+      newQueuePartitionWorkerConcurrency = options.partitionWorkerConcurrency,
+      newQueuePartitionRateLimit = options.partitionRateLimit,
+      newQueuePollingInterval = options.pollingInterval
     }
   where
     anyPresent configured =
-      case (configured.partition_concurrency, configured.partition_worker_concurrency, configured.partition_rate_limit) of
+      case (configured.partitionConcurrency, configured.partitionWorkerConcurrency, configured.partitionRateLimit) of
         (Nothing, Nothing, Nothing) -> False
         _ -> True
 
@@ -176,23 +176,23 @@ queueChangeToUpdate :: QueueChange -> Queue -> QueueUpdate
 queueChangeToUpdate change current =
   let update = defaultQueueUpdate
       partitionTouched =
-        change.partition_concurrency /= Leave
-          || change.partition_worker_concurrency /= Leave
-          || change.partition_rate_limit /= Leave
+        change.partitionConcurrency /= Leave
+          || change.partitionWorkerConcurrency /= Leave
+          || change.partitionRateLimit /= Leave
       resultingPartitioned =
-        maybeChanged change.partition_concurrency current.partition_concurrency /= Nothing
-          || maybeChanged change.partition_worker_concurrency current.partition_worker_concurrency /= Nothing
-          || maybeChanged change.partition_rate_limit current.partition_rate_limit /= Nothing
+        maybeChanged change.partitionConcurrency current.partitionConcurrency /= Nothing
+          || maybeChanged change.partitionWorkerConcurrency current.partitionWorkerConcurrency /= Nothing
+          || maybeChanged change.partitionRateLimit current.partitionRateLimit /= Nothing
    in update
         { queueUpdateConcurrency = change.concurrency,
-          queueUpdateWorkerConcurrency = change.worker_concurrency,
-          queueUpdateRateLimit = change.rate_limit,
-          queueUpdatePriorityEnabled = change.priority_enabled,
+          queueUpdateWorkerConcurrency = change.workerConcurrency,
+          queueUpdateRateLimit = change.rateLimit,
+          queueUpdatePriorityEnabled = change.priorityEnabled,
           queueUpdatePartitionQueue = if partitionTouched then Set resultingPartitioned else Leave,
-          queueUpdatePartitionConcurrency = change.partition_concurrency,
-          queueUpdatePartitionWorkerConcurrency = change.partition_worker_concurrency,
-          queueUpdatePartitionRateLimit = change.partition_rate_limit,
-          queueUpdatePollingInterval = change.polling_interval
+          queueUpdatePartitionConcurrency = change.partitionConcurrency,
+          queueUpdatePartitionWorkerConcurrency = change.partitionWorkerConcurrency,
+          queueUpdatePartitionRateLimit = change.partitionRateLimit,
+          queueUpdatePollingInterval = change.pollingInterval
         }
   where
     maybeChanged (Set value) _ = value
@@ -211,17 +211,17 @@ validateQueueOptions queueName options =
     firstInvalid =
       first
         [ positive "concurrency" options.concurrency,
-          positive "worker_concurrency" options.worker_concurrency,
-          ordered "worker_concurrency" "concurrency" options.worker_concurrency options.concurrency,
-          nonzeroDuration "polling_interval" options.polling_interval,
-          rate "rate_limit" options.rate_limit,
-          rate "partition_rate_limit" options.partition_rate_limit,
-          positive "partition_concurrency" options.partition_concurrency,
-          positive "partition_worker_concurrency" options.partition_worker_concurrency,
-          ordered "partition_worker_concurrency" "partition_concurrency" options.partition_worker_concurrency options.partition_concurrency,
-          ordered "partition_concurrency" "concurrency" options.partition_concurrency options.concurrency,
-          ordered "partition_worker_concurrency" "worker_concurrency" options.partition_worker_concurrency options.worker_concurrency,
-          partitionRate options.partition_rate_limit options.rate_limit
+          positive "worker_concurrency" options.workerConcurrency,
+          ordered "worker_concurrency" "concurrency" options.workerConcurrency options.concurrency,
+          nonzeroDuration "polling_interval" options.pollingInterval,
+          rate "rate_limit" options.rateLimit,
+          rate "partition_rate_limit" options.partitionRateLimit,
+          positive "partition_concurrency" options.partitionConcurrency,
+          positive "partition_worker_concurrency" options.partitionWorkerConcurrency,
+          ordered "partition_worker_concurrency" "partition_concurrency" options.partitionWorkerConcurrency options.partitionConcurrency,
+          ordered "partition_concurrency" "concurrency" options.partitionConcurrency options.concurrency,
+          ordered "partition_worker_concurrency" "worker_concurrency" options.partitionWorkerConcurrency options.workerConcurrency,
+          partitionRate options.partitionRateLimit options.rateLimit
         ]
     positive field = \case
       Just value | value < 1 -> Just (field, "must be at least 1, got " <> Text.pack (show value))
@@ -309,9 +309,9 @@ updateQueue dbos queueName change = case reserved queueName of
             -- partition limit leaves a legacy-looking row, and refusing
             -- that would make un-partitioning impossible.
             let touchesPartition =
-                  change.partition_concurrency /= Leave
-                    || change.partition_worker_concurrency /= Leave
-                    || change.partition_rate_limit /= Leave
+                  change.partitionConcurrency /= Leave
+                    || change.partitionWorkerConcurrency /= Leave
+                    || change.partitionRateLimit /= Leave
             if touchesPartition && queueIsLegacyPartitioned record
               then
                 pure
@@ -380,13 +380,13 @@ queueOptionsAfterChange :: QueueChange -> Queue -> QueueOptions
 queueOptionsAfterChange change current =
   QueueOptions
     { concurrency = apply change.concurrency current.concurrency,
-      worker_concurrency = apply change.worker_concurrency current.worker_concurrency,
-      polling_interval = apply change.polling_interval current.polling_interval,
-      rate_limit = apply change.rate_limit current.rate_limit,
-      priority_enabled = apply change.priority_enabled current.priority_enabled,
-      partition_concurrency = apply change.partition_concurrency current.partition_concurrency,
-      partition_worker_concurrency = apply change.partition_worker_concurrency current.partition_worker_concurrency,
-      partition_rate_limit = apply change.partition_rate_limit current.partition_rate_limit
+      workerConcurrency = apply change.workerConcurrency current.workerConcurrency,
+      pollingInterval = apply change.pollingInterval current.pollingInterval,
+      rateLimit = apply change.rateLimit current.rateLimit,
+      priorityEnabled = apply change.priorityEnabled current.priorityEnabled,
+      partitionConcurrency = apply change.partitionConcurrency current.partitionConcurrency,
+      partitionWorkerConcurrency = apply change.partitionWorkerConcurrency current.partitionWorkerConcurrency,
+      partitionRateLimit = apply change.partitionRateLimit current.partitionRateLimit
     }
   where
     apply Leave value = value

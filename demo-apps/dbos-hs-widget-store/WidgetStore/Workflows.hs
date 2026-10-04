@@ -32,7 +32,7 @@ import Control.Monad.Except (ExceptT (..), runExceptT)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Prelude
-import DBOS.Transact (DataSource, Duration, EngineOnly, Error, IsolationLevel (..), Topic (..), TransactionConfig (..), Tx (..), WorkflowRef, encodeWorkflowValue, millisDuration, recv, runTransaction, secondsDuration, setEvent, sleepWorkflowStep, startOptionsDefault, WorkflowCtx, workflowCtxId, runTransaction, setEvent, recv, startChildWorkflow)
+import DBOS.Transact (DataSource, Duration, EngineOnly, Error, IsolationLevel (..), Topic (..), TransactionConfig (..), Tx (..), WorkflowRef, encodeWorkflowValue, millisDuration, recv, runTransaction, secondsDuration, setEvent, sleepWorkflowStep, startOptionsDefault, WorkflowCtx, workflowId, runTransaction, setEvent, recv, startChildWorkflow)
 import IHP.TypedSql.Id (Id' (..))
 import WidgetStore.Store
 
@@ -115,7 +115,7 @@ checkoutWorkflow ::
   WorkflowCtx exec IO ->
   IO (Either (Error EngineOnly) ())
 checkoutWorkflow ds dispatchRef () wctx = runExceptT $ do
-  let wid = workflowCtxId wctx
+  let wid = workflowId wctx
   orderId <- ExceptT (runTransaction ds wctx (namedStep "create_order") (\_sctx tx -> Right <$> createOrderTx tx))
   onShelf <- ExceptT (runTransaction ds wctx (namedStep "reserve_inventory") (\_sctx tx -> Right <$> reserveInventoryTx tx))
   if not onShelf

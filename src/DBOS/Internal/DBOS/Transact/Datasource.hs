@@ -56,7 +56,7 @@ import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderErro
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..))
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Context (StepCtx, WorkflowCtx, firstStepStatus, insideAStep, nextWorkflowMarker, nextWorkflowStepId, withStep, withSystemDB, workflowCtxId, workflowIdentity, workflowTracer)
+import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextWorkflowMarker, nextWorkflowStepId, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
@@ -210,10 +210,10 @@ runTransactionWith ds wctx config body = do
     else do
       let stepName = fromMaybe "transaction" config.txName
       stepId <- nextWorkflowStepId wctx
-      let wid = WorkflowId (workflowCtxId wctx)
-          tracer = workflowTracer wctx
+      let wid = WorkflowId (workflowId wctx)
+          tracer = wctx.wctxTracer
           DataSource {dsStepName = nameAt} = ds
-      runTracer tracer (TransactionRunning (workflowCtxId wctx) stepName stepId)
+      runTracer tracer (TransactionRunning (workflowId wctx) stepName stepId)
       prechecked <- checkWithRetry ds tracer wid stepName stepId
       case prechecked of
         Left err -> pure (Left (controlErr err))
@@ -226,7 +226,7 @@ runTransactionWith ds wctx config body = do
             Left err -> pure (Left (controlErr err))
             Right (Just other) | other /= stepName -> pure (Left (unexpectedTransaction wid stepName stepId other))
             _ -> do
-              runTracer tracer (TransactionReplaying (workflowCtxId wctx) stepName stepId)
+              runTracer tracer (TransactionReplaying (workflowId wctx) stepName stepId)
               pure (replayRecorded stepName recorded)
         Right Nothing -> attemptTransaction ds wctx config.txIsolation body tracer wid stepName stepId 1 initialBackoffMs
 
@@ -320,7 +320,7 @@ checkOwner wctx wid = do
     Right (Just row) -> case row.workflowRecordOwnerXid of
       Nothing -> Right Nothing
       Just _ -> case row.workflowRecordExecutorId of
-        Just owner | owner /= (workflowIdentity wctx).identityExecutorId -> Right (Just owner)
+        Just owner | owner /= wctx.wctxIdentity.identityExecutorId -> Right (Just owner)
         _ -> Right Nothing
 
 -- | Another executor owns the workflow: stop without recording, so the

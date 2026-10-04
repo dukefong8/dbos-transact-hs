@@ -22,7 +22,7 @@ import DBOS.Transact (CodecError, Config (..), DBOS, WorkflowCtx, Executor, Dupl
  StartOptions (..), Timeout (..), WorkflowId (..),
  WorkflowKey,
  WorkflowRef,
- WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueOptions, deleteQueue, encodeWorkflowValue, enqueueDBOSWorkflow, enqueueNew, handleResult, handleStatus, handleWorkflowId, isLaunched,
+ WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueOptions, deleteQueue, encodeWorkflowValue, enqueueDBOSWorkflow, enqueueNew, handleResult, handleStatus, isLaunched,
  launchWithEnvironment,
  listQueues,
  listWorkflows, newDBOS, newWorkflowKey, nullTracer, queue, registerDBOSWorkflowRef, registerDBOSWorkflow, registerQueue, renderTransactError, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, shutdown, startChildWorkflow, startDBOSWorkflowRef, startOptionsDefault, updateQueue, waitForWorkflow)
@@ -47,9 +47,9 @@ tests =
     [ testCase "queue options default to no limits and poll once a second" $ do
         let options = defaultQueueOptions
         options.concurrency @?= Nothing
-        options.worker_concurrency @?= Nothing
-        options.polling_interval @?= secondsDuration 1
-        options.priority_enabled @?= False,
+        options.workerConcurrency @?= Nothing
+        options.pollingInterval @?= secondsDuration 1
+        options.priorityEnabled @?= False,
       testCase "a legacy-partitioned row re-scopes its limits" $ do
         let record =
               QueueRecord
@@ -68,9 +68,9 @@ tests =
             receipt = queueFromRecord record
         receipt.name @?= "legacy"
         receipt.concurrency @?= Nothing
-        receipt.worker_concurrency @?= Nothing
-        receipt.partition_concurrency @?= Just 8
-        receipt.partition_worker_concurrency @?= Just 3
+        receipt.workerConcurrency @?= Nothing
+        receipt.partitionConcurrency @?= Just 8
+        receipt.partitionWorkerConcurrency @?= Just 3
         assertBool "the resolved receipt is partitioned" (queueIsPartitioned receipt),
       testCase "a registered queue updates, lists and deletes through the instance" $ do
         fresh <- UUID.V4.nextRandom
@@ -92,18 +92,18 @@ tests =
           let options =
                 QueueOptions
                   { concurrency = Nothing,
-                    worker_concurrency = Just 3,
-                    polling_interval = secondsDuration 1,
-                    rate_limit = Nothing,
-                    priority_enabled = False,
-                    partition_concurrency = Nothing,
-                    partition_worker_concurrency = Nothing,
-                    partition_rate_limit = Nothing
+                    workerConcurrency = Just 3,
+                    pollingInterval = secondsDuration 1,
+                    rateLimit = Nothing,
+                    priorityEnabled = False,
+                    partitionConcurrency = Nothing,
+                    partitionWorkerConcurrency = Nothing,
+                    partitionRateLimit = Nothing
                   }
           queueRegistered <- registerQueue dbos queueName options AlwaysUpdate
           case queueRegistered of
             Left err      -> fail (show err)
-            Right receipt -> receipt.worker_concurrency @?= Just 3
+            Right receipt -> receipt.workerConcurrency @?= Just 3
           let workflowId = WorkflowId ("hs-l2-enqueue-" <> suffix)
               input = encodeWorkflowValue (7 :: Int)
           enqueued <- enqueueDBOSWorkflow dbos key workflowId (Just input) queueName
@@ -127,22 +127,22 @@ tests =
           leftAlone <- registerQueue dbos queueName defaultQueueOptions NeverUpdate
           case leftAlone of
             Left err      -> fail (show err)
-            Right receipt -> receipt.worker_concurrency @?= Just 3
+            Right receipt -> receipt.workerConcurrency @?= Just 3
           let change =
                 QueueChange
                   { concurrency = Leave,
-                    worker_concurrency = Set (Just 2),
-                    polling_interval = Leave,
-                    rate_limit = Leave,
-                    priority_enabled = Leave,
-                    partition_concurrency = Leave,
-                    partition_worker_concurrency = Leave,
-                    partition_rate_limit = Leave
+                    workerConcurrency = Set (Just 2),
+                    pollingInterval = Leave,
+                    rateLimit = Leave,
+                    priorityEnabled = Leave,
+                    partitionConcurrency = Leave,
+                    partitionWorkerConcurrency = Leave,
+                    partitionRateLimit = Leave
                   }
           updated <- updateQueue dbos queueName change
           case updated of
             Left err      -> fail (show err)
-            Right receipt -> receipt.worker_concurrency @?= Just 2
+            Right receipt -> receipt.workerConcurrency @?= Just 2
           listed <- listQueues dbos
           case listed of
             Left err     -> fail (show err)
@@ -150,7 +150,7 @@ tests =
           fetched <- queue dbos queueName
           case fetched of
             Left err             -> fail (show err)
-            Right (Just receipt) -> assertEqual "a queue read sees the updated limits" (Just 2) receipt.worker_concurrency
+            Right (Just receipt) -> assertEqual "a queue read sees the updated limits" (Just 2) receipt.workerConcurrency
             Right Nothing        -> fail "registered queue disappeared"
           removed <- deleteQueue dbos queueName
           assertEqual "delete succeeds" (Right ()) removed
@@ -249,18 +249,18 @@ tests =
           let options =
                 QueueOptions
                   { concurrency = Nothing,
-                    worker_concurrency = Just 2,
-                    polling_interval = secondsDuration 1,
-                    rate_limit = Nothing,
-                    priority_enabled = False,
-                    partition_concurrency = Nothing,
-                    partition_worker_concurrency = Nothing,
-                    partition_rate_limit = Nothing
+                    workerConcurrency = Just 2,
+                    pollingInterval = secondsDuration 1,
+                    rateLimit = Nothing,
+                    priorityEnabled = False,
+                    partitionConcurrency = Nothing,
+                    partitionWorkerConcurrency = Nothing,
+                    partitionRateLimit = Nothing
                   }
           queueRegistered <- registerQueue dbos queueName options AlwaysUpdate
           case queueRegistered of
             Left err      -> fail (show err)
-            Right receipt -> receipt.worker_concurrency @?= Just 2
+            Right receipt -> receipt.workerConcurrency @?= Just 2
           let workflowIds = [WorkflowId ("hs-l2-queueconc-" <> suffix <> "-" <> Text.pack (show n)) | n <- [1 :: Int, 2, 3]]
               input = encodeWorkflowValue (7 :: Int)
           mapM_
@@ -470,25 +470,25 @@ tests =
             rateLimit limit period = RateLimit {rateLimitLimit = limit, rateLimitPeriod = period}
             cases =
               [ ( "a rate limit admitting nothing",
-                  (defaultQueueOptions :: QueueOptions) {rate_limit = Just (rateLimit 0 (secondsDuration 1))},
+                  (defaultQueueOptions :: QueueOptions) {rateLimit = Just (rateLimit 0 (secondsDuration 1))},
                   "rate_limit.limit"
                 ),
                 ( "a rate limit over no window",
-                  (defaultQueueOptions :: QueueOptions) {rate_limit = Just (rateLimit 1 (secondsDuration 0))},
+                  (defaultQueueOptions :: QueueOptions) {rateLimit = Just (rateLimit 1 (secondsDuration 0))},
                   "rate_limit.period"
                 ),
                 ( "no workflows at all per partition",
-                  (defaultQueueOptions :: QueueOptions) {partition_concurrency = Just 0},
+                  (defaultQueueOptions :: QueueOptions) {partitionConcurrency = Just 0},
                   "partition_concurrency"
                 ),
                 ( "a partition allowed more than the whole queue",
-                  (defaultQueueOptions :: QueueOptions) {concurrency = Just 2, partition_concurrency = Just 4},
+                  (defaultQueueOptions :: QueueOptions) {concurrency = Just 2, partitionConcurrency = Just 4},
                   "must not exceed"
                 ),
                 ( "a partition allowed to start faster than the whole queue",
                   (defaultQueueOptions :: QueueOptions)
-                    { rate_limit = Just (rateLimit 10 (secondsDuration 60)),
-                      partition_rate_limit = Just (rateLimit 5 (secondsDuration 1))
+                    { rateLimit = Just (rateLimit 10 (secondsDuration 60)),
+                      partitionRateLimit = Just (rateLimit 5 (secondsDuration 1))
                     },
                   "must not exceed `rate_limit`"
                 )
@@ -517,7 +517,7 @@ tests =
             coherent =
               (defaultQueueOptions :: QueueOptions)
                 { concurrency = Just 2,
-                  worker_concurrency = Just 2
+                  workerConcurrency = Just 2
                 }
         bracket (newDBOS config) shutdown $ \dbos -> do
           exec <- launchQueueExec dbos isolatedEnvironment
@@ -531,23 +531,23 @@ tests =
             updateQueue
               dbos
               queueName
-              (defaultQueueChange {worker_concurrency = Set (Just 5)})
+              (defaultQueueChange {workerConcurrency = Set (Just 5)})
           case refused of
             Left (ErrorConfig message) -> assertBool "refuses the pair" ("must not exceed" `Text.isInfixOf` message)
             other                      -> fail ("expected a pair refusal, got: " <> show other)
           stored <- queue dbos queueName
           case stored of
-            Right (Just receipt) -> receipt.worker_concurrency @?= Just 2
+            Right (Just receipt) -> receipt.workerConcurrency @?= Just 2
             other                -> fail ("expected the stored limits untouched, got: " <> show other)
           -- Raising both together is coherent, and accepted.
           raised <-
             updateQueue
               dbos
               queueName
-              (defaultQueueChange {concurrency = Set (Just 5), worker_concurrency = Set (Just 5)})
+              (defaultQueueChange {concurrency = Set (Just 5), workerConcurrency = Set (Just 5)})
           case raised of
             Left err      -> fail (show err)
-            Right receipt -> receipt.worker_concurrency @?= Just 5,
+            Right receipt -> receipt.workerConcurrency @?= Just 5,
       testCase "a dequeue stamps the deadline an enqueue left open" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -653,7 +653,7 @@ tests =
           let options =
                 startOptionsDefault
                   { startWorkflowId = Just workflowText,
-                    startQueue = Just ((enqueueNew queueName) {partition_key = Just "tenant-7", priority = Just 4})
+                    startQueue = Just ((enqueueNew queueName) {partitionKey = Just "tenant-7", priority = Just 4})
                   }
           startedRun <- startDBOSWorkflowRef exec ref options Nothing
           case startedRun of
@@ -808,7 +808,7 @@ tests =
             Right _  -> pure ()
           -- Delayed, so the first workflow is still holding the key when
           -- the second arrives.
-          let held = (enqueueNew queueName) {deduplication_id = Just "order-42", delay = Just (secondsDuration 3)}
+          let held = (enqueueNew queueName) {deduplicationId = Just "order-42", delay = Just (secondsDuration 3)}
           firstRun <-
             startDBOSWorkflowRef
               exec
@@ -838,7 +838,7 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just thirdText, startQueue = Just ((enqueueNew queueName) {deduplication_id = Just "order-42"})})
+              (startOptionsDefault {startWorkflowId = Just thirdText, startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42"})})
               Nothing
           case thirdRun of
             Left err -> fail ("the key was not released when the holder finished: " <> show (err :: Error EngineOnly))
@@ -866,7 +866,7 @@ tests =
             Left err -> fail (show err)
             Right _  -> pure ()
           -- Delayed, so the holder is still waiting when the second caller arrives.
-          let joining = (enqueueNew queueName) {deduplication_id = Just "order-42", delay = Just (secondsDuration 3), duplication_policy = ReturnExisting}
+          let joining = (enqueueNew queueName) {deduplicationId = Just "order-42", delay = Just (secondsDuration 3), duplicationPolicy = ReturnExisting}
           firstRun <-
             startDBOSWorkflowRef
               exec
@@ -885,7 +885,7 @@ tests =
           second <- case secondRun of
             Left err     -> fail ("the second enqueue was refused rather than joined: " <> show (err :: Error EngineOnly))
             Right handle -> pure handle
-          handleWorkflowId second @?= firstText
+          second.workflowId @?= firstText
           reader <- getBackend
           loser <- getWorkflow reader (WorkflowId secondText)
           case loser of
@@ -906,12 +906,12 @@ tests =
             startDBOSWorkflowRef
               exec
               ref
-              (startOptionsDefault {startWorkflowId = Just thirdText, startQueue = Just ((enqueueNew queueName) {deduplication_id = Just "order-42", duplication_policy = ReturnExisting})})
+              (startOptionsDefault {startWorkflowId = Just thirdText, startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42", duplicationPolicy = ReturnExisting})})
               Nothing
           third <- case thirdRun of
             Left err     -> fail ("the released key was not claimable: " <> show (err :: Error EngineOnly))
             Right handle -> pure handle
-          handleWorkflowId third @?= thirdText,
+          third.workflowId @?= thirdText,
       testCase "priority orders the backlog lower first" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -948,7 +948,7 @@ tests =
               Right handle -> pure handle
           -- The backlog is complete, so registering the queue is what
           -- starts its worker.
-          queueRegistered <- registerQueue dbos queueName (defaultQueueOptions {worker_concurrency = Just 1}) UpdateIfLatestVersion
+          queueRegistered <- registerQueue dbos queueName (defaultQueueOptions {workerConcurrency = Just 1}) UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
             Right _  -> pure ()
@@ -991,7 +991,7 @@ tests =
             registerQueue
               dbos
               queueName
-              (defaultQueueOptions {worker_concurrency = Just 1})
+              (defaultQueueOptions {workerConcurrency = Just 1})
               UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
@@ -1011,10 +1011,10 @@ tests =
           threadDelay 1200000
           firstPeak <- atomically (readTVar peak)
           firstPeak @?= 1
-          updated <- updateQueue dbos queueName (defaultQueueChange {worker_concurrency = Set (Just 3)})
+          updated <- updateQueue dbos queueName (defaultQueueChange {workerConcurrency = Set (Just 3)})
           case updated of
             Left err    -> fail (show err)
-            Right queue -> queue.worker_concurrency @?= Just 3
+            Right queue -> queue.workerConcurrency @?= Just 3
           results <- mapM resultWf handles
           case sequence results of
             Left err -> fail ("a queued workflow failed: " <> show (err :: Error EngineOnly))
@@ -1062,7 +1062,7 @@ tests =
             registerQueue
               dbos
               queueName
-              (defaultQueueOptions {partition_concurrency = Just 1})
+              (defaultQueueOptions {partitionConcurrency = Just 1})
               UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
@@ -1074,7 +1074,7 @@ tests =
                 startDBOSWorkflowRef
                   exec
                   ref
-                  (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {partition_key = Just partition})})
+                  (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})})
                   (Just (encodeWorkflowValue partition))
               case startedRun of
                 Left err     -> fail (show (err :: Error EngineOnly))
@@ -1124,7 +1124,7 @@ tests =
             registerQueue
               dbos
               queueName
-              (defaultQueueOptions {partition_concurrency = Just 2})
+              (defaultQueueOptions {partitionConcurrency = Just 2})
               UpdateIfLatestVersion
           case queueRegistered of
             Left err -> fail (show err)
@@ -1136,7 +1136,7 @@ tests =
                 startDBOSWorkflowRef
                   exec
                   ref
-                  (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {partition_key = Just partition})})
+                  (startOptionsDefault {startWorkflowId = Just workflowText, startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})})
                   (Just (encodeWorkflowValue partition))
               case startedRun of
                 Left err     -> fail (show (err :: Error EngineOnly))
@@ -1249,21 +1249,21 @@ tests =
             cases :: [(Text, QueueOptions, Text)]
             cases =
               [ ( "a per-partition rate limit over no window",
-                  defaultQueueOptions {partition_rate_limit = Just (rateLimit 1 (secondsDuration 0))},
+                  defaultQueueOptions {partitionRateLimit = Just (rateLimit 1 (secondsDuration 0))},
                   "partition_rate_limit.period"
                 ),
                 ( "a partition's worker limit above the partition's own",
-                  (defaultQueueOptions :: QueueOptions) {partition_concurrency = Just 2, partition_worker_concurrency = Just 4},
+                  (defaultQueueOptions :: QueueOptions) {partitionConcurrency = Just 2, partitionWorkerConcurrency = Just 4},
                   "must not exceed `partition_concurrency`"
                 ),
                 ( "a partition's worker limit above this process's own",
-                  (defaultQueueOptions :: QueueOptions) {worker_concurrency = Just 2, partition_worker_concurrency = Just 4},
+                  (defaultQueueOptions :: QueueOptions) {workerConcurrency = Just 2, partitionWorkerConcurrency = Just 4},
                   "must not exceed `worker_concurrency`"
                 ),
                 ( "a partition allowed to start faster than the whole queue",
                   (defaultQueueOptions :: QueueOptions)
-                    { rate_limit = Just (rateLimit 10 (secondsDuration 1)),
-                      partition_rate_limit = Just (rateLimit 100 (secondsDuration 1))
+                    { rateLimit = Just (rateLimit 10 (secondsDuration 1)),
+                      partitionRateLimit = Just (rateLimit 100 (secondsDuration 1))
                     },
                   "must not exceed `rate_limit`"
                 )
@@ -1287,7 +1287,7 @@ tests =
             registerQueue
               dbos
               queueName
-              (defaultQueueOptions {rate_limit = Just (rateLimit 10 (secondsDuration 1)), partition_rate_limit = Just (rateLimit 100 (secondsDuration 60))})
+              (defaultQueueOptions {rateLimit = Just (rateLimit 10 (secondsDuration 1)), partitionRateLimit = Just (rateLimit 100 (secondsDuration 60))})
               UpdateIfLatestVersion
           case accepted of
             Left err -> fail ("a slower per-partition rate should be honoured: " <> show err)
@@ -1305,13 +1305,13 @@ tests =
             registerQueue
               dbos
               queueName
-              (defaultQueueOptions {concurrency = Just 3, worker_concurrency = Just 3})
+              (defaultQueueOptions {concurrency = Just 3, workerConcurrency = Just 3})
               UpdateIfLatestVersion
           case registered of
             Left err -> fail (show err)
             Right receipt -> do
               receipt.concurrency @?= Just 3
-              receipt.worker_concurrency @?= Just 3,
+              receipt.workerConcurrency @?= Just 3,
       testCase "adding a per-partition limit to a legacy row is refused" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -1334,11 +1334,11 @@ tests =
           case stored of
             Right (Just receipt) -> do
               assertBool "the flag re-scopes the row" (queueIsPartitioned receipt)
-              receipt.partition_concurrency @?= Just 1
-              receipt.partition_worker_concurrency @?= Just 1
+              receipt.partitionConcurrency @?= Just 1
+              receipt.partitionWorkerConcurrency @?= Just 1
               receipt.concurrency @?= Nothing
             other -> fail ("expected the legacy row, got: " <> show other)
-          refused <- updateQueue dbos queueName (defaultQueueChange {partition_concurrency = Set (Just 4)})
+          refused <- updateQueue dbos queueName (defaultQueueChange {partitionConcurrency = Set (Just 4)})
           case refused of
             Left (ErrorConfig message) -> assertBool "names the deprecated flag" ("deprecated `partition_queue`" `Text.isInfixOf` message)
             other                      -> fail ("the update was accepted: " <> show other),
@@ -1446,7 +1446,7 @@ tests =
                     Nothing
                 case startedChild of
                   Left err     -> pure (Left err)
-                  Right handle -> pure (Right (handleWorkflowId handle))
+                  Right handle -> pure (Right handle.workflowId)
           parentRegistered <- registerUnitTextRefOf dbos parentKey parentBody
           parentRef <- case parentRegistered of
             Left err  -> fail (show err)
@@ -1486,13 +1486,13 @@ tests =
             registerQueue
               dbos
               queueName
-              (defaultQueueOptions {rate_limit = Just (rateLimit 5 (secondsDuration 30)), priority_enabled = True})
+              (defaultQueueOptions {rateLimit = Just (rateLimit 5 (secondsDuration 30)), priorityEnabled = True})
               UpdateIfLatestVersion
           case registered of
             Left err -> fail (show err)
             Right receipt -> do
-              receipt.rate_limit @?= Just (rateLimit 5 (secondsDuration 30))
-              assertBool "priority ordering is reported" receipt.priority_enabled
+              receipt.rateLimit @?= Just (rateLimit 5 (secondsDuration 30))
+              assertBool "priority ordering is reported" receipt.priorityEnabled
               assertBool "nothing partitioned" (not (queueIsPartitioned receipt))
           -- Changed at runtime, like every other limit: cleared, and
           -- priority turned back off.
@@ -1500,12 +1500,12 @@ tests =
             updateQueue
               dbos
               queueName
-              (defaultQueueChange {rate_limit = Set Nothing, priority_enabled = Set False})
+              (defaultQueueChange {rateLimit = Set Nothing, priorityEnabled = Set False})
           case updated of
             Left err -> fail (show err)
             Right receipt -> do
-              receipt.rate_limit @?= Nothing
-              assertBool "priority ordering is off" (not receipt.priority_enabled),
+              receipt.rateLimit @?= Nothing
+              assertBool "priority ordering is off" (not receipt.priorityEnabled),
       testCase "per-partition limits partition a queue" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -1519,15 +1519,15 @@ tests =
             registerQueue
               dbos
               queueName
-              (defaultQueueOptions {concurrency = Just 60, worker_concurrency = Just 10, partition_concurrency = Just 4, partition_worker_concurrency = Just 2})
+              (defaultQueueOptions {concurrency = Just 60, workerConcurrency = Just 10, partitionConcurrency = Just 4, partitionWorkerConcurrency = Just 2})
               UpdateIfLatestVersion
           case registered of
             Left err -> fail (show err)
             Right receipt -> do
               assertBool "a partition limit partitions it" (queueIsPartitioned receipt)
               receipt.concurrency @?= Just 60
-              receipt.partition_concurrency @?= Just 4
-              receipt.partition_worker_concurrency @?= Just 2
+              receipt.partitionConcurrency @?= Just 4
+              receipt.partitionWorkerConcurrency @?= Just 2
           reader <- getBackend
           stored <- getQueue reader queueName
           case stored of
@@ -1538,7 +1538,7 @@ tests =
             updateQueue
               dbos
               queueName
-              (defaultQueueChange {partition_concurrency = Set Nothing, partition_worker_concurrency = Set Nothing})
+              (defaultQueueChange {partitionConcurrency = Set Nothing, partitionWorkerConcurrency = Set Nothing})
           case updated of
             Left err -> fail (show err)
             Right receipt -> do

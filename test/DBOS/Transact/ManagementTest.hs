@@ -58,7 +58,7 @@ import DBOS.Transact
     Identity (..),
     QueueConflict (..),
     StartOptions (..),
-    WorkflowHandle,
+    WorkflowHandle (workflowId),
     WorkflowKey,
     WorkflowRef,
     acquireLoggerBackend,
@@ -82,7 +82,6 @@ import DBOS.Transact
     forkWorkflowsInWorkflow,
     handleResult,
     handleStatus,
-    handleWorkflowId,
     ioTracer,
     launchWithEnvironment,
     listWorkflows,
@@ -1093,4 +1092,4 @@ decodeSerializedChildId :: SerializedWorkflowValue -> Either CodecError Text
 decodeSerializedChildId output = decodeWorkflowValue "result" (Just output)
 
 workflowTextOf :: WorkflowHandle IO EngineOnly -> Text
-workflowTextOf handle = handleWorkflowId handle
+workflowTextOf handle = handle.workflowId

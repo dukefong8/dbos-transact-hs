@@ -56,7 +56,7 @@ tests =
               if attempt < 2
                 then pure (Left (StepFailed "flaky" "boom"))
                 else pure (Right (42 :: Int))
-            options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1}
+            options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1}
         outcome <- withScopedContext backend (ioTracer logger) workflowText $ \wctx ->
           runWorkflowStepWith options wctx "flaky" body
         cleanup
@@ -68,7 +68,7 @@ tests =
             body _ = do
               modifyIORef' attempts (+ 1)
               pure (Left (StepFailed "doomed" "boom"))
-            options = stepOptionsDefault {max_attempts = 2, interval = millisDuration 1}
+            options = stepOptionsDefault {maxAttempts = 2, interval = millisDuration 1}
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
           runWorkflowStepWith options wctx "doomed" body
         case outcome of
@@ -98,7 +98,7 @@ tests =
               if attempt < 1
                 then pure (Left (StepFailed "flaky" "boom"))
                 else pure (Right (7 :: Int))
-            options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1}
+            options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1}
         first <- withScopedContext backend nullTracer workflowText $ \wctx ->
           runWorkflowStepWith options wctx "flaky" body
         first @?= Right 7
@@ -121,9 +121,9 @@ tests =
               pure (Left (StepFailed "declined" "boom"))
             options =
               stepOptionsDefault
-                { max_attempts = 3,
+                { maxAttempts = 3,
                   interval = millisDuration 1,
-                  should_retry = Just (const False)
+                  shouldRetry = Just (const False)
                 }
         outcome <- withScopedContext backend (ioTracer logger) workflowText $ \wctx ->
           runWorkflowStepWith options wctx "declined" body
@@ -142,9 +142,9 @@ tests =
               _ -> True
             options =
               stepOptionsDefault
-                { max_attempts = 3,
+                { maxAttempts = 3,
                   interval = millisDuration 1,
-                  should_retry = Just declinesSecond
+                  shouldRetry = Just declinesSecond
                 }
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
           runWorkflowStepWith options wctx "pick" body
@@ -195,7 +195,7 @@ tests =
               if attempt < 2
                 then threadDelay 100000 >> pure (Right (1 :: Int))
                 else pure (Right (42 :: Int))
-            options = stepOptionsDefault {max_attempts = 3, interval = millisDuration 1, timeout = Just (millisDuration 20)}
+            options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1, timeout = Just (millisDuration 20)}
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
           runWorkflowStepWith options wctx "flaky" body
         outcome @?= Right 42
@@ -203,7 +203,7 @@ tests =
       testCase "every attempt timing out reports each timeout" $ withBackendWorkflow getBackend "retry-all-timeout" $ \backend workflowText -> do
         let body :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body _ = threadDelay 100000 >> pure (Right (1 :: Int))
-            options = stepOptionsDefault {max_attempts = 2, interval = millisDuration 1, timeout = Just (millisDuration 10)}
+            options = stepOptionsDefault {maxAttempts = 2, interval = millisDuration 1, timeout = Just (millisDuration 10)}
             isTimeout StepTimeout {} = True
             isTimeout _ = False
         outcome <- withScopedContext backend nullTracer workflowText $ \wctx ->
@@ -286,7 +286,7 @@ tests =
         (logger, cleanup) <- acquireLoggerBackend
         let body :: forall exec. StepCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body _ = putMVar started () >> takeMVar gate >> pure (Right (7 :: Int))
-            options = stepOptionsDefault {preemptible = True, max_attempts = 3, interval = millisDuration 1, timeout = Just (millisDuration 50)}
+            options = stepOptionsDefault {preemptible = True, maxAttempts = 3, interval = millisDuration 1, timeout = Just (millisDuration 50)}
         worker <-
           async
             ( withScopedContext backend (ioTracer logger) workflowText $ \wctx ->

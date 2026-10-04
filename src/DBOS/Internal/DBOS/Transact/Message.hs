@@ -28,7 +28,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextWorkflowStepId, stepCtxId, stepCtxWorkflow, stepId, withSystemDB, workflowCtxId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextWorkflowStepId, stepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runWorkflowStepWith, stepOptionsDefault)
 
@@ -53,13 +53,13 @@ data Forks
 -- | The per-call options of a single send. Mirrors Rust @SendOptions@.
 data SendOptions = SendOptions
   { topic :: Maybe Topic,
-    idempotency_key :: Maybe IdempotencyKey,
+    idempotencyKey :: Maybe IdempotencyKey,
     forks :: Forks
   }
   deriving stock (Eq, Show)
 
 sendOptionsDefault :: SendOptions
-sendOptionsDefault = SendOptions {topic = Nothing, idempotency_key = Nothing, forks = ForksSkip}
+sendOptionsDefault = SendOptions {topic = Nothing, idempotencyKey = Nothing, forks = ForksSkip}
 
 -- | The per-call options of a bulk send: only what is uniform across the
 -- batch. Mirrors Rust @SendBulkOptions@.
@@ -76,13 +76,13 @@ sendBulkOptionsDefault = SendBulkOptions {forks = ForksSkip}
 -- and the enclosing step's checkpoint stands for the send.
 send :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 send wctx destination topic idempotencyKey value =
-  sendWith wctx destination value (sendOptionsDefault {topic = topic, idempotency_key = idempotencyKey})
+  sendWith wctx destination value (sendOptionsDefault {topic = topic, idempotencyKey = idempotencyKey})
 
 -- | 'send' with the options rather than the defaults: a topic, an
 -- idempotency key, or the fork fan-out. Mirrors Rust @send_with@.
 sendWith :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> WorkflowId -> value -> SendOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWith wctx destination value options = do
-  let workflowText = workflowCtxId wctx
+  let workflowText = workflowId wctx
       encoded = encodeWorkflowValue value
       serialization = case encoded.serializedSerialization of
         Nothing -> Nothing
@@ -92,7 +92,7 @@ sendWith wctx destination value options = do
           { sendDestinationId = destination,
             sendMessageBody = encoded,
             sendTopic = options.topic,
-            sendIdempotencyKey = options.idempotency_key
+            sendIdempotencyKey = options.idempotencyKey
           }
       sendToForks = options.forks == ForksInclude
   -- Inside a step the enclosing checkpoint stands for the send — through
@@ -132,8 +132,8 @@ sendBulkWith wctx messages options = do
   -- here; a bulk send through a captured parent degrades inside
   -- 'runWorkflowStepWith' by the depth backstop.
   runWorkflowStepWith stepOptionsDefault wctx sendBulkStepName $ \sctx -> do
-    let caller = (\sid -> (WorkflowId (stepCtxId sctx), sid)) <$> stepId sctx
-    plainSend (stepCtxWorkflow sctx) encoded serialization caller
+    let caller = (\sid -> (WorkflowId (workflowId sctx.stepCtxWorkflow), sid)) <$> stepId sctx
+    plainSend sctx.stepCtxWorkflow encoded serialization caller
   where
     encodeMessage message =
       let encodedValue = encodeWorkflowValue message.messageValue
@@ -160,7 +160,7 @@ recv wctx topic timeout = do
   if stepped
     then pure (Left (TransactError.InsideStep "recv"))
     else do
-      let workflowText = workflowCtxId wctx
+      let workflowText = workflowId wctx
       stepId' <- nextWorkflowStepId wctx
       timeoutStepId <- nextWorkflowStepId wctx
       let workflowId' = WorkflowId workflowText

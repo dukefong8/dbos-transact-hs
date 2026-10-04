@@ -29,7 +29,7 @@ import DBOS.Transact.Registry
     newRegistry,
     registerErasedWorkflow,
     renderWorkflowKey,
-    refKey,
+    WorkflowRef (refKey),
     refName,
     snapshotRegistry,
     snapshotSize,
@@ -155,7 +155,7 @@ tests =
         case registered of
           Left err -> fail (show err)
           Right ref -> do
-            refKey ref @?= key
+            ref.refKey @?= key
             refName ref @?= "checkout",
       testCase "a reference to a duplicate identity is refused" $ do
         registry <- newRegistry

@@ -20,7 +20,7 @@ import DBOS.Transact
     Error (..),
     PendingStep (..),
     StepOptions (..),
-    StepStatus (..),
+    StepStatus,
     StepCtx,
     WorkflowCtx,
     WorkflowId (..),
@@ -264,7 +264,7 @@ tests =
                     if attempt == 0
                       then pure (Left (StepFailed "outer" "boom"))
                       else pure (Right ())
-              options = stepOptionsDefault {max_attempts = 2, interval = millisDuration 1}
+              options = stepOptionsDefault {maxAttempts = 2, interval = millisDuration 1}
           outcome <- runWorkflowStepWith options wctx "outer" outerBody
           pure (first, outcome)
         assertEqual "the leading step runs" (Right ()) first

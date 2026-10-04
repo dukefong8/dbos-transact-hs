@@ -16,7 +16,7 @@ import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
-import DBOS.Transact.Context (WorkflowCtx, nextWorkflowStepId, stepCtxBoundary, withSystemDB, workflowCtxId, workflowTracer)
+import DBOS.Transact.Context (WorkflowCtx (wctxTracer), nextWorkflowStepId, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Error qualified as TransactError
 
@@ -62,17 +62,17 @@ driveSleep wctx duration placement =
       -- Inside a step the sleep is plain: the enclosing step's checkpoint
       -- stands for everything its body did, and taking an id here would shift
       -- every step after it on replay. Mirrors Rust's @InsideStep@ placement.
-      runTracer (workflowTracer wctx) (SleepUncheckpointed (durationAsMillis duration))
+      runTracer (wctx.wctxTracer) (SleepUncheckpointed (durationAsMillis duration))
       sleepPlain duration >> pure (Right ())
     Right (DurabilityRecorded wctx' stepId') -> do
-      let workflowId' = WorkflowId (workflowCtxId wctx')
+      let workflowId' = WorkflowId (workflowId wctx')
       recordedWake <- withSystemDB wctx' (\db -> SystemDB.recordSleep db workflowId' stepId' duration)
       case recordedWake of
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
         Right wakeAt -> do
           now <- timestampNow
           let remainingMillis = max 0 (timestampToEpochMs wakeAt - timestampToEpochMs now)
-          runTracer (workflowTracer wctx') (SleepUntilWake stepId' remainingMillis)
+          runTracer (wctx'.wctxTracer) (SleepUntilWake stepId' remainingMillis)
           threadDelay (millisToMicros remainingMillis)
           pure (Right ())
 

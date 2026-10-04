@@ -17,7 +17,6 @@ import DBOS.Transact
   (
     EngineOnly,
     StepCtx,
-    stepCtxWorkflow,
     Error (..),
     Forks (..),
     SendOptions (..),
@@ -36,8 +35,9 @@ import DBOS.Transact
     sendWith,
     withStep,
     withWorkflow,
-    workflowCtxId,
+    workflowId,
   )
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow))
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertEqual, testCase, (@?=))
@@ -182,7 +182,7 @@ tests =
             other -> fail (show other)
           secondSend <- send sender destination (Just (Topic "approval")) Nothing ("two" :: Text)
           secondSend @?= Right ()
-          replayed <- withWorkflow receiverConn messageTestIdentity (WorkflowId (workflowCtxId receiver)) Nothing $ \replayReceiver ->
+          replayed <- withWorkflow receiverConn messageTestIdentity (WorkflowId (workflowId receiver)) Nothing $ \replayReceiver ->
             recv replayReceiver (Just (Topic "approval")) (millisDuration 100)
           case replayed of
             Right (Just value) -> assertEqual "replay returns the recorded message" ("one" :: Text) value
@@ -191,7 +191,7 @@ tests =
           case secondReceive of
             Right (Just value) -> assertEqual "the second message is still queued" ("two" :: Text) value
             other -> fail (show other)
-          replaySend <- withWorkflow senderConn messageTestIdentity (WorkflowId (workflowCtxId sender)) Nothing $ \replaySender ->
+          replaySend <- withWorkflow senderConn messageTestIdentity (WorkflowId (workflowId sender)) Nothing $ \replaySender ->
             send replaySender destination (Just (Topic "approval")) Nothing ("one" :: Text)
           replaySend @?= Right ()
           total <- notificationCount backend destination
@@ -263,7 +263,7 @@ withPair getBackend label action = do
 -- oracle's leaf rule for messages, observed as one Text line.
 probeSendRecv :: WorkflowId -> StepCtx exec IO -> IO Text
 probeSendRecv destination sctx = do
-  let wctx = stepCtxWorkflow sctx
+  let wctx = sctx.stepCtxWorkflow
   sent <- send wctx destination (Just (Topic "approval")) Nothing ("ping" :: Text)
   received <- recv wctx (Just (Topic "approval")) (millisDuration 100) :: IO (Either (Error EngineOnly) (Maybe Text))
   pure (render sent received)

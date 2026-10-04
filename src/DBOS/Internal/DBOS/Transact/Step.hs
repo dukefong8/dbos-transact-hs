@@ -38,7 +38,7 @@ import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encode
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..))
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
-import DBOS.Transact.Context (StepCtx, StepStatus (..), WorkflowCtx, cancellationToken, cancelToken, firstStepStatus, insideAStep, nextWorkflowMarker, nextWorkflowStepId, stepCtxBoundary, stepCtxTracer, withStep, withSystemDB, workflowConnection, workflowCtxId, workflowTracer)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), StepStatus, WorkflowCtx (wctxConn, wctxTracer), cancellationToken, cancelToken, firstStepStatus, insideAStep, nextWorkflowMarker, nextWorkflowStepId, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import GHC.Stack (HasCallStack)
 
@@ -174,11 +174,11 @@ runWorkflowStep wctx name body = do
   stepped <- insideAStep wctx
   if stepped
     then do
-      runTracer (workflowTracer wctx) (StepPlain name)
+      runTracer wctx.wctxTracer (StepPlain name)
       value <- body (stepCtxBoundary wctx)
       pure (Right value)
     else do
-      let workflowId' = WorkflowId (workflowCtxId wctx)
+      let workflowId' = WorkflowId (workflowId wctx)
       stepId' <- nextWorkflowStepId wctx
       -- 'started_at' covers the lookup round-trip, as in the oracle.
       startedAt <- timestampNow
@@ -186,10 +186,10 @@ runWorkflowStep wctx name body = do
       case checked of
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
         Right (Just recorded) -> do
-          runTracer (workflowTracer wctx) (StepReplaying name stepId')
+          runTracer wctx.wctxTracer (StepReplaying name stepId')
           pure (replayWorkflowStep name stepId' recorded)
         Right Nothing -> do
-          runTracer (workflowTracer wctx) (StepRunning name stepId')
+          runTracer wctx.wctxTracer (StepRunning name stepId')
           marker <- nextWorkflowMarker wctx
           value <- withStep wctx marker (firstStepStatus stepId') body
           completedAt <- timestampNow
@@ -213,7 +213,7 @@ runWorkflowStep wctx name body = do
           case written of
             Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
             Right () -> do
-              runTracer (workflowTracer wctx) (StepOutputRecorded name stepId')
+              runTracer wctx.wctxTracer (StepOutputRecorded name stepId')
               pure (Right value)
 
 -- | The step-scope entry: a call made inside a step body runs plainly —
@@ -228,14 +228,14 @@ runNestedStep ::
   (StepCtx exec m -> m value) ->
   m (Either (TransactError.Error e) value)
 runNestedStep sctx name body = do
-  runTracer (stepCtxTracer sctx) (StepPlain name)
+  runTracer sctx.stepCtxWorkflow.wctxTracer (StepPlain name)
   Right <$> body sctx
 
 -- | The recorded outcome of a step, replayed without entering the body.
 replayWorkflowStep :: (FromJSON value, FromJSON e) => Text -> Int -> StepRecord -> Either (TransactError.Error e) value
 replayWorkflowStep name stepId record =
   case record.stepRecordChildWorkflowId of
-    Just child -> Left (TransactError.StepFailed name ("unexpected child workflow checkpoint: " <> workflowIdText child))
+    Just (WorkflowId childText) -> Left (TransactError.StepFailed name ("unexpected child workflow checkpoint: " <> childText))
     Nothing -> case record.stepRecordError of
       Just errorText -> Left (TransactError.StepFailed name errorText)
       Nothing -> case record.stepRecordOutput of
@@ -249,7 +249,6 @@ replayWorkflowStep name stepId record =
             Left err -> Left (TransactError.ErrorDeserialization "result" (codecMessage err))
             Right value -> Right value
   where
-    workflowIdText (WorkflowId child) = child
     codecMessage err =
       case err of
         CodecNotJson _ input -> "invalid JSON: " <> input
@@ -264,44 +263,44 @@ replayWorkflowStep name stepId record =
 type ShouldRetry e = TransactError.Error e -> Bool
 
 data StepOptions e = StepOptions
-  { max_attempts :: Int,
+  { maxAttempts :: Int,
     interval :: Duration,
-    backoff_rate :: Double,
-    max_interval :: Duration,
+    backoffRate :: Double,
+    maxInterval :: Duration,
     timeout :: Maybe Duration,
     preemptible :: Bool,
-    should_retry :: Maybe (ShouldRetry e)
+    shouldRetry :: Maybe (ShouldRetry e)
   }
 
 -- | The defaults above: a plain step does not retry.
 stepOptionsDefault :: StepOptions e
 stepOptionsDefault =
   StepOptions
-    { max_attempts = 1,
+    { maxAttempts = 1,
       interval = secondsDuration 1,
-      backoff_rate = 2.0,
-      max_interval = secondsDuration 3600,
+      backoffRate = 2.0,
+      maxInterval = secondsDuration 3600,
       timeout = Nothing,
       preemptible = False,
-      should_retry = Nothing
+      shouldRetry = Nothing
     }
 
 instance Show (StepOptions e) where
   show options =
     "StepOptions {max_attempts = "
-      <> show options.max_attempts
+      <> show options.maxAttempts
       <> ", interval = "
       <> show options.interval
       <> ", backoff_rate = "
-      <> show options.backoff_rate
+      <> show options.backoffRate
       <> ", max_interval = "
-      <> show options.max_interval
+      <> show options.maxInterval
       <> ", timeout = "
       <> show options.timeout
       <> ", preemptible = "
       <> show options.preemptible
       <> ", should_retry = "
-      <> show (maybe False (const True) options.should_retry)
+      <> show (maybe False (const True) options.shouldRetry)
       <> "}"
 
 -- | The wait before the attempt following @failures@ failures:
@@ -310,11 +309,11 @@ instance Show (StepOptions e) where
 stepBackoff :: StepOptions e -> Int -> Duration
 stepBackoff options failures =
   let Duration interval = options.interval
-      Duration cap = options.max_interval
-      grown = realToFrac interval * (options.backoff_rate ** fromIntegral failures)
+      Duration cap = options.maxInterval
+      grown = realToFrac interval * (options.backoffRate ** fromIntegral failures)
       capSeconds = realToFrac cap
    in if isNaN grown || isInfinite grown || grown < 0 || grown >= capSeconds
-        then options.max_interval
+        then options.maxInterval
         else Duration (realToFrac grown)
 
 -- | 'runWorkflowStep' with the oracle's retry seam: the body returns its
@@ -385,19 +384,19 @@ driveWorkflowStepWith options wctx name placement body =
       let sctx = case placement of
             PlacementInsideStep built -> built
             _ -> stepCtxBoundary wctx
-      runTracer (stepCtxTracer sctx) (StepPlain name)
+      runTracer sctx.stepCtxWorkflow.wctxTracer (StepPlain name)
       body sctx
     Right (DurabilityRecorded wctx' stepId') -> driveAt wctx' stepId'
   where
     driveAt wctx' stepId' = do
-      let workflowId' = WorkflowId (workflowCtxId wctx')
+      let workflowId' = WorkflowId (workflowId wctx')
       -- 'started_at' covers the lookup round-trip, as in the oracle.
       startedAt <- timestampNow
       checked <- withSystemDB wctx' (\db -> SystemDB.checkStep db workflowId' stepId' name)
       case checked of
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
         Right (Just recorded) -> do
-          runTracer (workflowTracer wctx') (StepReplaying name stepId')
+          runTracer wctx'.wctxTracer (StepReplaying name stepId')
           pure (replayWorkflowStep name stepId' recorded)
         Right Nothing -> do
           outcome <- attemptLoop workflowId' stepId' 1 []
@@ -410,7 +409,7 @@ driveWorkflowStepWith options wctx name placement body =
             _ -> do
               completedAt <- timestampNow
               let timing = Just (StepTiming startedAt completedAt)
-                  serialization = Just (serializerName (workflowConnection wctx').connSerializer)
+                  serialization = Just (serializerName wctx'.wctxConn.connSerializer)
               written <- case outcome of
                 Right value -> do
                   let encoded = encodeWorkflowValue value
@@ -446,13 +445,13 @@ driveWorkflowStepWith options wctx name placement body =
                 Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
                 Right () -> case outcome of
                   Right _ -> do
-                    runTracer (workflowTracer wctx') (StepOutputRecorded name stepId')
+                    runTracer wctx'.wctxTracer (StepOutputRecorded name stepId')
                     pure outcome
                   Left _ -> do
-                    runTracer (workflowTracer wctx') (StepErrorRecorded name stepId')
+                    runTracer wctx'.wctxTracer (StepErrorRecorded name stepId')
                     pure outcome
       where
-        attempts = max 1 options.max_attempts
+        attempts = max 1 options.maxAttempts
         attemptLoop workflowId' stepId' attempt failures = do
           -- A preemptible step observes an externally cancelled workflow before
           -- every attempt and stops without checkpointing, as the oracle's
@@ -460,17 +459,14 @@ driveWorkflowStepWith options wctx name placement body =
           preempted <- if options.preemptible then checkCancelled workflowId' else pure False
           if preempted
             then do
-              runTracer (workflowTracer wctx') (StepPreempted name stepId')
-              pure (Left (TransactError.ErrorSystemDatabase (SystemDBError.WorkflowCancelled {workflowId = workflowCtxId wctx'})))
+              runTracer wctx'.wctxTracer (StepPreempted name stepId')
+              pure (Left (TransactError.ErrorSystemDatabase (SystemDBError.WorkflowCancelled {workflowId = workflowId wctx'})))
             else do
               marker <- nextWorkflowMarker wctx'
               rest workflowId' stepId' attempt failures marker
         rest workflowId' stepId' attempt failures marker = do
           let status =
-                (firstStepStatus stepId')
-                  { current_attempt = fromIntegral attempt,
-                    max_attempts = fromIntegral attempts
-                  }
+                stepStatusAt stepId' (fromIntegral attempt) (fromIntegral attempts)
           result <-
             withStep wctx' marker status $ \sctx -> case options.timeout of
               Nothing -> body sctx
@@ -484,22 +480,22 @@ driveWorkflowStepWith options wctx name placement body =
                     token <- cancellationToken sctx
                     cancelToken token
                     cancel task
-                    runTracer (workflowTracer wctx') (StepAttemptTimedOut name stepId' (durationAsMillis limit))
+                    runTracer wctx'.wctxTracer (StepAttemptTimedOut name stepId' (durationAsMillis limit))
                     pure (Left (TransactError.StepTimeout {step = name, timeout = limit}))
                   Right value -> pure value
           case result of
             Right value -> pure (Right value)
             Left err
               | isControlError err -> do
-                  runTracer (workflowTracer wctx') (StepControlEnded name stepId' attempt)
+                  runTracer wctx'.wctxTracer (StepControlEnded name stepId' attempt)
                   pure (Left err)
               | attempt >= attempts -> pure (Left (finalFailure attempt (failures <> [err])))
               | declined err -> do
-                  runTracer (workflowTracer wctx') (StepDeclined name stepId' attempt (TransactError.renderTransactError err))
+                  runTracer wctx'.wctxTracer (StepDeclined name stepId' attempt (TransactError.renderTransactError err))
                   pure (Left (finalFailure attempt (failures <> [err])))
               | otherwise -> do
                   let backoff = stepBackoff options (attempt - 1)
-                  runTracer (workflowTracer wctx') (StepRetrying name stepId' attempt attempts (durationAsMillis backoff) (TransactError.renderTransactError err))
+                  runTracer wctx'.wctxTracer (StepRetrying name stepId' attempt attempts (durationAsMillis backoff) (TransactError.renderTransactError err))
                   threadDelay (durationMicros backoff)
                   attemptLoop workflowId' stepId' (attempt + 1) (failures <> [err])
         finalFailure attemptCount errs
@@ -510,7 +506,7 @@ driveWorkflowStepWith options wctx name placement body =
                   attempts = attemptCount,
                   errors = errs
                 }
-        declined err = case options.should_retry of
+        declined err = case options.shouldRetry of
           Just predicate -> not (predicate err)
           Nothing -> False
         isControlError err = case TransactError.controlOf err of

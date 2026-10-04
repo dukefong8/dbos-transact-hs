@@ -13,7 +13,7 @@ import DBOS.Transact
     SomeTracer (..),
     StepDurability (..),
     StepPlacement (..),
-    StepStatus (..),
+    StepStatus,
     Timestamp (..),
     acquireLoggerBackend,
     firstStepStatus,

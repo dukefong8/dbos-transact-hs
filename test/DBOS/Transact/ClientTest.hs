@@ -58,7 +58,6 @@ import DBOS.Transact
     enqueueOptionsNew,
     enqueueOptionsOn,
     handleResult,
-    handleWorkflowId,
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
@@ -76,7 +75,7 @@ import DBOS.Transact
     validateEnqueue,
     WorkflowKey,
     workflowStatusClient,
-    WorkflowHandle,
+    WorkflowHandle (workflowId),
     recv,
     runWorkflowStep,
     setEvent,
@@ -125,12 +124,12 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             -- Pinned to the app's version: an unversioned row is only
             -- claimed by the latest registered version, and this shared
             -- database always has a newer nameless row.
-            let options = (enqueueOptionsNew queueName) {app_version = Just appVersion}
+            let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
             enqueued <- enqueueClientWorkflowWith client "double" options (Just (encodeWorkflowValue (21 :: Int)))
             case enqueued of
               Left err -> fail (show err)
@@ -143,12 +142,12 @@ tests =
                     assertEqual "the app ran the client's enqueue" (Right 42) decoded
                   other -> fail (show other),
       testCase "an enqueue no queue could honour is refused before any write" $ do
-        let both = (enqueueNew "q") {deduplication_id = Just "key", partition_key = Just "part"}
+        let both = (enqueueNew "q") {deduplicationId = Just "key", partitionKey = Just "part"}
         case validateEnqueue both of
           Left err ->
             assertBool "names the queue" ("enqueue onto `q`" `Text.isInfixOf` Text.pack (show err))
           Right () -> fail "expected dedup plus partition to be refused"
-        let noKey = (enqueueNew "q") {duplication_policy = ReturnExisting}
+        let noKey = (enqueueNew "q") {duplicationPolicy = ReturnExisting}
         case validateEnqueue noKey of
           Left _ -> pure ()
           Right () -> fail "expected return-existing without a key to be refused"
@@ -166,8 +165,8 @@ tests =
             executorId = "hs-l2-client-dup-executor-" <> suffix
             queueName = "hs-l2-client-dup-q-" <> Text.take 12 suffix
             key = newWorkflowKey "double"
-            shape = (enqueueNew queueName) {deduplication_id = Just ("dup-" <> suffix), duplication_policy = ReturnExisting}
-            options = (enqueueOptionsOn shape) {app_version = Just appVersion}
+            shape = (enqueueNew queueName) {deduplicationId = Just ("dup-" <> suffix), duplicationPolicy = ReturnExisting}
+            options = (enqueueOptionsOn shape) {appVersion = Just appVersion}
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -183,13 +182,13 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             first <- enqueueClientWorkflowWith client "double" options (Just (encodeWorkflowValue (21 :: Int)))
             second <- enqueueClientWorkflowWith client "double" options (Just (encodeWorkflowValue (99 :: Int)))
             case (first, second) of
               (Right holder, Right joiner) -> do
-                handleWorkflowId joiner @?= handleWorkflowId holder
+                joiner.workflowId @?= holder.workflowId
                 _ <- dequeueDBOSWorkflows dbos
                 result <- resultWf joiner
                 case result of
@@ -222,10 +221,10 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let handle = retrieveClientWorkflow client workflowText
-            handleWorkflowId handle @?= workflowText
+            handle.workflowId @?= workflowText
             status <- workflowStatusClient client (WorkflowId workflowText)
             case status of
               Right (Just _) -> pure ()
@@ -241,12 +240,12 @@ tests =
             enqueueClientWorkflowWith
               client
               "no-such-function"
-              (enqueueOptionsNew queueName) {workflow_id = Just workflowText}
+              (enqueueOptionsNew queueName) {workflowId = Just workflowText}
               Nothing
           case enqueued of
             Left err -> fail (show err)
             Right handle -> do
-              handleWorkflowId handle @?= workflowText
+              handle.workflowId @?= workflowText
               status <- workflowStatusClient client (WorkflowId workflowText)
               case status of
                 Right (Just _) -> pure ()
@@ -256,13 +255,13 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             queueName = "hs-l2-client-opts-q-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-opts-id-" <> suffix
-            shape = (enqueueNew queueName) {deduplication_id = Just ("opts-" <> suffix), priority = Just 3, delay = Just (secondsDuration 60)}
+            shape = (enqueueNew queueName) {deduplicationId = Just ("opts-" <> suffix), priority = Just 3, delay = Just (secondsDuration 60)}
             options =
               (enqueueOptionsOn shape)
-                { workflow_id = Just workflowText,
-                  class_name = Just "cls",
-                  config_name = Just "cfg",
-                  app_version = Just "v1",
+                { workflowId = Just workflowText,
+                  className = Just "cls",
+                  configName = Just "cfg",
+                  appVersion = Just "v1",
                   timeout = Just (secondsDuration 30),
                   attributes = Just (Map.fromList [("k", String "v")])
                 }
@@ -290,7 +289,7 @@ tests =
             workflowText = "hs-l2-client-nameless-id-" <> suffix
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          enqueued <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflow_id = Just workflowText} Nothing
+          enqueued <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
           case enqueued of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -305,10 +304,10 @@ tests =
             workflowText = "hs-l2-client-idkey-id-" <> suffix
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          first <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflow_id = Just workflowText} Nothing
-          second <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflow_id = Just workflowText} Nothing
+          first <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+          second <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
           case (first, second) of
-            (Right holder, Right joiner) -> handleWorkflowId joiner @?= handleWorkflowId holder
+            (Right holder, Right joiner) -> joiner.workflowId @?= holder.workflowId
             (Left err, _) -> fail ("the first enqueue failed: " <> show err)
             (_, Left err) -> fail ("the joining enqueue failed: " <> show err),
       testCase "closing is clean and the pool stays usable" $ do
@@ -359,14 +358,14 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            let options = (enqueueOptionsNew queueName) {app_version = Just appVersion}
+            let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
             enqueued <- enqueueClientWorkflowWith client "receiver" options Nothing
             handle <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
-            let enqueuedId = handleWorkflowId handle
+            let enqueuedId = handle.workflowId
             sent <- clientSendMessage client (WorkflowId enqueuedId) (Just (Topic "ping")) Nothing (encodeWorkflowValue ("hello" :: Text))
             sent @?= Right ()
             _ <- dequeueDBOSWorkflows dbos
@@ -413,14 +412,14 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            let options = (enqueueOptionsNew queueName) {app_version = Just appVersion}
+            let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
             enqueued <- enqueueClientWorkflowWith client "batcher" options Nothing
             batch <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
-            let enqueuedId = WorkflowId (handleWorkflowId batch)
+            let enqueuedId = WorkflowId batch.workflowId
             sent <-
               clientSendMessages
                 client
@@ -460,7 +459,7 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             found <- clientGetEvent client (WorkflowId workflowText) "greeting" (millisDuration 100)
             case found of
@@ -489,7 +488,7 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             cancelled <- clientCancelWorkflows client [WorkflowId workflowText] False
             -- The run already finished: cancel moves nothing, overwrites
@@ -515,9 +514,9 @@ tests =
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            enqueued <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflow_id = Just workflowText} Nothing
+            enqueued <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
             case enqueued of
               Left err -> fail (show err)
               Right _ -> pure ()
@@ -546,7 +545,7 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             forked <- clientForkWorkflows client [forkNew workflowText] defaultForkOptions
             case forked of
@@ -563,7 +562,7 @@ tests =
         let configA = config0 {configAppVersion = Just versionA, configExecutorId = Just ("exec-a-" <> suffix)}
             configB = config0 {configAppVersion = Just versionB, configExecutorId = Just ("exec-b-" <> suffix)}
         clientConfig0 <- clientConfigFromEnv
-        let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
         bracket (connectOrFail clientConfig) closeClient $ \client -> do
           bracket (newDBOS configA) shutdown $ \dbosA -> do
             exec <- launchClientExec dbosA isolatedEnvironment
@@ -614,7 +613,7 @@ tests =
           _ <- runWf exec key (WorkflowId firstText) (Just (encodeWorkflowValue (1 :: Int)))
           _ <- runWf exec key (WorkflowId secondText) (Just (encodeWorkflowValue (2 :: Int)))
           clientConfig0 <- clientConfigFromEnv
-          let clientConfig = (clientConfig0 :: ClientConfig) {app_name = Just appName}
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             listed <- clientListWorkflows client defaultWorkflowFilter
             case listed of

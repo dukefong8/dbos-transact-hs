@@ -3,6 +3,7 @@
 :set -XNoFieldSelectors
 :set -XOverloadedLabels
 :set -XOverloadedRecordDot
+:set -XRecordWildCards
 :set -XPartialTypeSignatures
 :set -XExplicitNamespaces
 :set -Wall

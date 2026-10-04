@@ -22,9 +22,9 @@ import DBOS.Transact
     runTracer,
   )
 import DBOS.Transact.Context
-  ( newWorkflowCtx,
+  ( WorkflowCtx (wctxTracer),
+    newWorkflowCtx,
     newWorkflowState,
-    workflowTracer,
     withTracer
   )
 import DBOS.Transact.Connection (Connection)
@@ -211,5 +211,5 @@ tests =
     demoTrace :: forall s. IOSim s ()
     demoTrace = do
       ctx <- withTracer simTracer <$> simFixture.fixtureMkCtx "wf-1"
-      runTracer (workflowTracer ctx) (StepRunning "demo" 0)
-      runTracer (workflowTracer ctx) (SysdbRetryAttempt "demo-op" 1 0 "demo")
+      runTracer ctx.wctxTracer (StepRunning "demo" 0)
+      runTracer ctx.wctxTracer (SysdbRetryAttempt "demo-op" 1 0 "demo")

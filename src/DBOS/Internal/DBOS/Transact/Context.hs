@@ -26,8 +26,12 @@
 --   same move: a counter on the 'Connection' rather than Rust's pointer.
 module DBOS.Transact.Context
   ( -- * The context: one execution's view, one attempt's view
-    WorkflowCtx,
-    StepCtx,
+    -- Fields are exported for reads (dot / record syntax); construction
+    -- still goes through 'withWorkflow' or the engine's 'newWorkflowCtx'.
+    WorkflowCtx (wctxConn, wctxIdentity, wctxState, wctxSpawner, wctxTracer),
+    -- 'stepCtxWorkflow' is exported for reads (the captured-parent shape);
+    -- the attempt scope stays behind the derived readers below.
+    StepCtx (stepCtxWorkflow),
     withWorkflow,
     withStep,
     newWorkflowCtx,
@@ -36,22 +40,18 @@ module DBOS.Transact.Context
     -- * What outlives any one call
     WorkflowState,
     newWorkflowState,
-    workflowIdentity,
-    workflowConnection,
-    workflowTracer,
-    workflowSpawner,
     withTracer,
     withWorkflowTaskSpawner,
     deadline,
     stepDepth,
-    executionIdentityOf,
     isSameExecution,
 
     -- * Step scopes
     StepScope,
     newStepScope,
     StepMarker (..),
-    StepStatus (..),
+    StepStatus,
+    stepStatusAt,
     stepStatusId,
     stepStatusCurrentAttempt,
     stepStatusMaxAttempts,
@@ -77,11 +77,8 @@ module DBOS.Transact.Context
     -- * Execution readers
     nextWorkflowStepId,
     nextWorkflowMarker,
-    workflowCtxId,
-    stepCtxId,
+    workflowId,
     stepCtxStatus,
-    stepCtxTracer,
-    stepCtxWorkflow,
     stepCtxCancellationToken,
   )
 where
@@ -92,7 +89,7 @@ import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Kind (Type)
 import Data.Text (Text)
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Timestamp, WorkflowId, workflowIdText)
+import DBOS.SystemDB.Types (Timestamp, WorkflowId (..))
 import DBOS.Tracer (SomeTracer)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity, nextExecutionIdentity, runSystemDB)
 import DBOS.Transact.Identity (Identity)
@@ -133,10 +130,10 @@ spawnLocal (TaskSpawner spawn) = spawn
 -- what a placement refusal names.
 instance Eq (WorkflowCtx exec m) where
   first == second =
-    executionIdentityOf first == executionIdentityOf second
+    first.wctxState.executionIdentity == second.wctxState.executionIdentity
 
 instance Show (WorkflowCtx exec m) where
-  show wctx = "WorkflowCtx " <> show (workflowCtxId wctx)
+  show wctx = "WorkflowCtx " <> show (workflowId wctx)
 
 -- | Two attempt views are equal when they are the same execution and the
 -- same step body.
@@ -146,7 +143,7 @@ instance Eq (StepCtx exec m) where
       && fmap (.scopeMarker) first.stepCtxScope == fmap (.scopeMarker) second.stepCtxScope
 
 instance Show (StepCtx exec m) where
-  show sctx = "StepCtx " <> show (stepCtxId sctx) <> " " <> show (stepId sctx)
+  show sctx = "StepCtx " <> show (workflowId sctx.stepCtxWorkflow) <> " " <> show (stepId sctx)
 
 -- | The parts of a workflow that outlive any one call within it. Mirrors
 -- Rust @WorkflowState@: the id, the deadline the database holds, the step
@@ -184,39 +181,16 @@ newWorkflowState workflowText deadlineAt identity = do
 withTracer :: SomeTracer m -> WorkflowCtx exec m -> WorkflowCtx exec m
 withTracer tracer wctx = wctx {wctxTracer = tracer}
 
--- | The tracer this execution's resource-lifetime events go through.
-workflowTracer :: WorkflowCtx exec m -> SomeTracer m
-workflowTracer wctx = wctx.wctxTracer
-
--- | The spawner the run path installed on this execution, if any: what
--- lets a child a body starts reach the executor's task registry.
-workflowSpawner :: WorkflowCtx exec m -> Maybe (TaskSpawner m)
-workflowSpawner wctx = wctx.wctxSpawner
-
--- | The connection this execution reaches the system database through.
--- Engine-internal (never on the client facade): reaching the backend goes
--- through 'withSystemDB' or the scoped entries, never a bare connection.
-workflowConnection :: WorkflowCtx exec m -> Connection m
-workflowConnection wctx = wctx.wctxConn
-
--- | The resolved deployment identity this execution's rows are stamped with.
-workflowIdentity :: WorkflowCtx exec m -> Identity
-workflowIdentity wctx = wctx.wctxIdentity
-
--- | When this workflow must stop, if it has a deadline at all.
+-- | When this workflow must stop, if it has a deadline at all. Deep
+-- enough (a state field behind the view) to keep as a reader.
 deadline :: WorkflowCtx exec m -> Maybe Timestamp
 deadline wctx = wctx.wctxState.deadline
 
-
--- | The identity of the execution this context belongs to. Pointer
--- identity in the oracle; here an opaque token minted once per execution.
-executionIdentityOf :: WorkflowCtx exec m -> ExecutionIdentity
-executionIdentityOf wctx = wctx.wctxState.executionIdentity
-
--- | Whether two contexts are the same execution of the same workflow.
+-- | Whether two views are the same execution of the same workflow:
+-- pointer identity in the oracle, an opaque per-execution token here.
 isSameExecution :: WorkflowCtx exec m -> WorkflowCtx exec m -> Bool
 isSameExecution first second =
-  executionIdentityOf first == executionIdentityOf second
+  first.wctxState.executionIdentity == second.wctxState.executionIdentity
 
 -- | How many step bodies deep this execution currently runs: zero at a
 -- step boundary and outside workflows, one inside a step body, more under
@@ -255,6 +229,17 @@ stepStatusCurrentAttempt status = status.current_attempt
 -- predicate may stop short of, not a promise.
 stepStatusMaxAttempts :: StepStatus -> Word
 stepStatusMaxAttempts status = status.max_attempts
+
+-- | A specific attempt at a step: its ordinal, which attempt, and the
+-- ceiling the policy allows. The retry path builds each attempt's status
+-- through this; 'firstStepStatus' is the common case.
+stepStatusAt :: Int -> Word -> Word -> StepStatus
+stepStatusAt stepId' attempt maxAttempts =
+  StepStatus
+    { step_id = stepId',
+      current_attempt = attempt,
+      max_attempts = maxAttempts
+    }
 
 -- | A first attempt at a step: attempt 1 of 1. A plain step honestly
 -- reports itself this way; "does this step retry?" is @max_attempts > 1@.
@@ -367,10 +352,11 @@ withSystemDB wctx action = runSystemDB wctx.wctxConn.connSysdb action
 
 -- | One execution's workflow context: the connection, identity, and fresh
 -- workflow state a body runs with, plus the task spawner the run path
--- installs and the tracer announcements go to. Built only by
--- 'withWorkflow', which mints the state new — a fresh view always starts
--- outside any step. Branded by execution, so one run's counters never leak
--- into another's.
+-- installs and the tracer announcements go to. Built by 'withWorkflow',
+-- which mints the state new — a fresh view always starts outside any step
+-- — or by the engine's 'newWorkflowCtx'. Branded by execution, so one
+-- run's counters never leak into another's; the fields are exported for
+-- reads, not for construction.
 data WorkflowCtx (exec :: Type) m = WorkflowCtx
   { wctxConn     :: Connection m,
     wctxIdentity :: Identity,
@@ -379,10 +365,13 @@ data WorkflowCtx (exec :: Type) m = WorkflowCtx
     wctxTracer   :: SomeTracer m
   }
 
--- | One attempt's narrowed view: the execution it belongs to and the
--- attempt's scope. Built only by 'withStep'. Readers expose the id and
--- the status — never a counter and never the backend, so only
--- 'WorkflowCtx' allocates and only the engine reaches the database.
+-- | One attempt's narrowed view: the execution it belongs to
+-- ('stepCtxWorkflow', readable for the captured-parent shape) and the
+-- attempt's scope (kept behind the derived readers: 'stepId',
+-- 'stepMarker', 'stepStatus', 'stepCtxStatus',
+-- 'stepCtxCancellationToken'). Built by 'withStep' and the engine's
+-- drives; only 'WorkflowCtx' allocates and only the engine reaches the
+-- database.
 data StepCtx (exec :: Type) m = StepCtx
   { stepCtxWorkflow :: WorkflowCtx exec m,
     stepCtxScope    :: Maybe (StepScope m)
@@ -393,9 +382,9 @@ data StepCtx (exec :: Type) m = StepCtx
 -- continuation binds the execution scope — values built inside cannot
 -- escape it, so one run's counters never leak into another's.
 withWorkflow :: MonadSTM m => Connection m -> Identity -> WorkflowId -> Maybe Timestamp -> (forall exec. WorkflowCtx exec m -> m a) -> m a
-withWorkflow conn identity wid deadline run = do
+withWorkflow conn identity (WorkflowId widText) deadline run = do
   execution <- nextExecutionIdentity conn
-  state <- newWorkflowState (workflowIdText wid) deadline execution
+  state <- newWorkflowState widText deadline execution
   run =<< newWorkflowCtx conn identity state
 
 -- | Build one execution's workflow view around a state the caller already
@@ -455,13 +444,12 @@ nextWorkflowMarker wctx = do
     pure current
   pure (StepMarker n)
 
--- | The id of the workflow this execution runs.
-workflowCtxId :: WorkflowCtx exec m -> Text
-workflowCtxId wctx = wctx.wctxState.workflowId
-
--- | The id of the workflow this attempt belongs to.
-stepCtxId :: StepCtx exec m -> Text
-stepCtxId sctx = sctx.stepCtxWorkflow.wctxState.workflowId
+-- | The id of the workflow this execution runs — the workflow's own id,
+-- not the context's: a context's execution identity is the state's
+-- @executionIdentity@. A step view reads the same id through its parent:
+-- @workflowId sctx.stepCtxWorkflow@.
+workflowId :: WorkflowCtx exec m -> Text
+workflowId wctx = wctx.wctxState.workflowId
 
 -- | Rebind a workflow view's execution to a task spawner: what the run
 -- path installs before handing the view to a body, so child starts reach
@@ -474,20 +462,6 @@ withWorkflowTaskSpawner spawner wctx = wctx {wctxSpawner = Just spawner}
 -- (no step id, a token that never fires), drives like its execution.
 stepCtxBoundary :: WorkflowCtx exec m -> StepCtx exec m
 stepCtxBoundary wctx = StepCtx wctx Nothing
-
--- | The workflow view this attempt belongs to. Reaching the parent's
--- operations from inside a step body is the captured-parent shape, which
--- the depth backstop reads together with the handed context — a call
--- through it degrades or refuses exactly as a call through the handed
--- context would. Same execution brand, so the type stays quiet and the
--- runtime keeps the verdict.
-stepCtxWorkflow :: StepCtx exec m -> WorkflowCtx exec m
-stepCtxWorkflow (StepCtx wctx _) = wctx
-
--- | The tracer behind a step view, for engine paths that must announce
--- through the view's execution without widening it.
-stepCtxTracer :: StepCtx exec m -> SomeTracer m
-stepCtxTracer sctx = sctx.stepCtxWorkflow.wctxTracer
 
 -- | The cancellation token behind a step view: the token that fires
 -- when the step running here is abandoned. The view-taking twin of

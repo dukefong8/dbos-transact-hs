@@ -27,7 +27,7 @@ where
 
 import DBOS.Prelude
 import Data.Text (Text)
-import DBOS.Transact.Context (StepCtx, WorkflowCtx, insideAStep, nextWorkflowStepId, stepCtxBoundary, stepCtxId, stepCtxWorkflow, stepId, stepMarker, workflowConnection, workflowCtxId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), insideAStep, nextWorkflowStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
 import DBOS.Transact.Connection (Connection (..), Owner (..))
 import DBOS.Transact.Error (Error (..))
 
@@ -78,7 +78,7 @@ placementAt :: StepCtx exec m -> Int -> StepPlacement exec m
 placementAt sctx stepId' =
   case stepId sctx of
     Just _ -> PlacementInsideStep sctx
-    Nothing -> Recorded (stepCtxWorkflow sctx) stepId'
+    Nothing -> Recorded sctx.stepCtxWorkflow stepId'
 
 -- | Where a call served by the given connection stands, with the ambient
 -- context reconciled against it. Mirrors @StepPlacement::taken@: inside a
@@ -100,7 +100,7 @@ takenPlacement conn operation wctx = do
   if stepped
     then pure (Right (PlacementInsideStep (stepCtxBoundary wctx)))
     else
-      if conn.connInstanceId == (workflowConnection wctx).connInstanceId
+      if conn.connInstanceId == wctx.wctxConn.connInstanceId
         then do
           stepId' <- nextWorkflowStepId wctx
           pure (Right (Recorded wctx stepId'))
@@ -163,7 +163,7 @@ checkHere :: StepPlacement exec m -> Text -> Maybe (StepCtx exec m) -> Either (E
 checkHere placement step ambient =
   case (placement, ambient) of
     (Recorded wctx stepId', Just here)
-      | stepCtxId here == workflowCtxId wctx && stepId here == Nothing ->
+      | workflowId here.stepCtxWorkflow == workflowId wctx && stepId here == Nothing ->
           Right (DurabilityRecorded wctx stepId')
     (PlacementInsideStep built, Just here)
       | sameStepBody built here ->
@@ -177,7 +177,7 @@ checkHere placement step ambient =
     (PlacementInsideStep built, Just here)
       | stepMarker built == Nothing
       , stepMarker here == Nothing
-      , stepCtxId built == stepCtxId here ->
+      , workflowId built.stepCtxWorkflow == workflowId here.stepCtxWorkflow ->
           Right DurabilityPlain
     (Outside, Nothing) -> Right DurabilityPlain
     (ClientConnection, _) -> Right DurabilityPlain
@@ -196,7 +196,7 @@ checkHere placement step ambient =
     sameStepBody built here =
       case (stepMarker built, stepMarker here) of
         (Just outer, Just inner) ->
-          outer == inner && stepCtxId here == stepCtxId built
+          outer == inner && workflowId here.stepCtxWorkflow == workflowId built.stepCtxWorkflow
         _ -> False
 
 -- | How to describe the place a call is standing, given the context there.
@@ -205,8 +205,8 @@ describePlacement ambient =
   case ambient of
     Nothing -> "outside a workflow"
     Just sctx -> case stepId sctx of
-      Just _ -> "inside a step of workflow " <> stepCtxId sctx
-      Nothing -> "in workflow " <> stepCtxId sctx
+      Just _ -> "inside a step of workflow " <> workflowId sctx.stepCtxWorkflow
+      Nothing -> "in workflow " <> workflowId sctx.stepCtxWorkflow
 
 -- | How to describe where a placement was built.
 placementWhereabouts :: StepPlacement exec m -> Text
@@ -224,7 +224,7 @@ describePolled :: StepPlacement exec m -> Maybe (StepCtx exec m) -> Text
 describePolled placement ambient =
   case (placement, ambient) of
     (PlacementInsideStep _, Just here) -> case stepMarker here of
-      Just _ -> "inside a different step of workflow " <> stepCtxId here
+      Just _ -> "inside a different step of workflow " <> workflowId here.stepCtxWorkflow
       Nothing -> describePlacement ambient
     _ -> describePlacement ambient
 

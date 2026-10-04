@@ -15,6 +15,7 @@ common commons
     NoImplicitPrelude
     OverloadedLabels
     OverloadedRecordDot
+    RecordWildCards
   ghc-options: -Wall -threaded
 
 executable demo-apps
