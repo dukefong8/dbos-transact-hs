@@ -66,7 +66,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty DatasourceSim.tests
 --- $> tasty QueueSim.tests
 -- $> tasty WidgetSim.tests
---- $> tasty WidgetTest.tests
+-- $> tasty WidgetTest.tests
 --- $> tasty DeadlinesTest.tests
 --- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests

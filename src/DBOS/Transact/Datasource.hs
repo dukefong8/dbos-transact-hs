@@ -48,7 +48,7 @@ import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderErro
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..))
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Context (Ctx, WorkflowCtx, contextTracer, currentIdentity, insideAStep, nextStepId, withSystemDB, workflowCtxInner, workflowId)
+import DBOS.Transact.Context (Ctx, StepCtx, WorkflowCtx, contextTracer, currentIdentity, firstStepStatus, insideAStep, nextStepId, nextStepMarker, stepCtxAt, withAttempt, withSystemDB, workflowCtxInner, workflowId)
 import DBOS.Transact.Error (Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
@@ -178,11 +178,25 @@ instance ToLogStr TransactionEvent where
 -- back off and retry; an in-step call is refused. Bodies report their
 -- failure as a value (like 'runWorkflowStepWith'); a body panic propagates
 -- unrecorded.
-runTransactionScoped :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
-runTransactionScoped ds wctx = runTransaction ds (workflowCtxInner wctx)
+--
+-- The scoped entry hands the body the step view of the transaction's own
+-- step beside the transaction handle, so step tables can be keyed by the
+-- capability that scopes the call. Each attempt runs under 'withAttempt':
+-- the body is a step like any other (nested durable calls are refused by
+-- the leaf rule, the checkpoint id is visible, and a retry gets a fresh
+-- marker and token).
+runTransactionScoped :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
+runTransactionScoped ds wctx config body =
+  runTransactionWith ds (workflowCtxInner wctx) config (\inner tx -> body (stepCtxAt wctx inner) tx)
 
 runTransaction :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> TransactionConfig -> (Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
-runTransaction ds ctx config body = do
+runTransaction ds ctx config body = runTransactionWith ds ctx config (\_inner tx -> body tx)
+
+-- | The shared transaction path: the shaped body receives the attempt's
+-- context (the scoped entry turns it into the step view) and the
+-- transaction handle.
+runTransactionWith :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> TransactionConfig -> (Ctx m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
+runTransactionWith ds ctx config body = do
   -- Refused through the handed context or a captured parent alike: a
   -- transaction inside a step would checkpoint under the wrong id.
   stepped <- insideAStep ctx
@@ -233,14 +247,15 @@ checkWithRetry ds tracer wid stepName stepId = loop 1 initialBackoffMs
 -- | One attempt: body plus checkpoint insert in a single transaction. A
 -- held checkpoint throws 'TxConflict' to roll the attempt's application
 -- writes back; transport failures surface as 'Left' through the adapter.
-attemptTransaction :: forall a e m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> Maybe IsolationLevel -> (Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
+attemptTransaction :: forall a e m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> Ctx m -> Maybe IsolationLevel -> (Ctx m -> Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
 attemptTransaction ds ctx isolation body tracer wid stepName stepId n waitMs = do
   let DataSource {dsWithTransaction = withTx} = ds
       DataSource {dsRecordOutput = recordOutput} = ds
       DataSource {dsRecordError = recordError} = ds
+  marker <- nextStepMarker ctx
   outcome <-
     MThrow.try (withTx isolation $ \tx -> do
-      bodyOutcome <- body tx
+      bodyOutcome <- withAttempt ctx marker (firstStepStatus stepId) (\inner -> body inner tx)
       case bodyOutcome of
         Left err -> do
           wrote <- recordError tx wid stepName stepId (encodeErrorText err)

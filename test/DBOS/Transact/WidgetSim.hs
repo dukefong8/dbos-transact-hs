@@ -257,64 +257,42 @@ mkWidgetDs =
       dsDeleteCheckpoints = \_ _ -> pure (Right ())
     }
 
--- | A datasource whose third transaction fails: the checkout's paid write
--- cannot commit. The checkout must stop with the failure instead of walking
--- on to the dispatch child (the seed-8 fuzz finding).
-failingWidgetDs :: MonadSTM m => StrictTVar m Int -> DataSource m
-failingWidgetDs calls =
-  mkWidgetDs
-    { dsWithTransaction = \_ action -> do
-        n <- atomically (modifyTVar calls (+ 1) >> readTVar calls)
-        if n == 3
-          then
-            pure
-              ( Left
-                  BackendError
-                    { backendMessage = "mark_order_paid refused",
-                      backendSqlState = Nothing,
-                      backendKind = Permanent
-                    }
-              )
-          else Right <$> action (Tx (\_ _ -> error "widget fake: statements unsupported"))
-    }
-
 -- * The workflows
 
--- | One app transaction at the engine's engine-only channel.
-widgetStep :: DataSource (IOSim s) -> WorkflowCtx exec (IOSim s) -> (Tx (IOSim s) -> IOSim s ()) -> IOSim s (Either (Error EngineOnly) ())
-widgetStep ds wctx action = runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> action tx)
-
+-- * The workflows
 -- | The checkout workflow: create, reserve, publish the payment id, wait
 -- for the payment, then dispatch or compensate. Mirrors the oracle's
 -- @checkout_workflow@ (create before reserve; the payment id event is the
 -- workflow's own id in the oracle — here the order id names the order).
-checkoutBody :: forall s exec. DataSource (IOSim s) -> WidgetStore (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
-checkoutBody ds store dispatchRef () wctx = runExceptT $ do
-  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> createOrder store tx))
-  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> reserveInventory store tx))
+checkoutBody :: forall s exec. DataSource (IOSim s) -> CheckoutOps exec (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
+checkoutBody ds ops dispatchRef () wctx = runExceptT $ do
+  -- The checkpoint payload stays a plain Int (as before the flip); the
+  -- OrderId boundary is the ops table, unwrapped at the transaction edge.
+  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right . (\(OrderId oid) -> oid) <$> ops.coCreate sctx))
+  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coReserve sctx))
   if not onShelf
     then do
-      _ <- ExceptT (widgetStep ds wctx (\tx -> setStatus store orderId (-1) tx))
+      _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) (-1) ))
       _ <- ExceptT (setEventScoped wctx "payment_id" (Nothing :: Maybe Text))
       pure "no-inventory"
     else do
       _ <- ExceptT (setEventScoped wctx "payment_id" (Just (Text.pack (show orderId))))
       ExceptT (recvScoped wctx (Just (Topic "payment_status")) (millisDuration 5000) :: IOSim s (Either (Error EngineOnly) (Maybe Text))) >>= \case
         Just status | status == "paid" -> do
-          _ <- ExceptT (widgetStep ds wctx (\tx -> setStatus store orderId 2 tx))
+          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) 2))
           _ <- ExceptT (startChildWorkflowScoped wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
           _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "paid"
         _ -> do
-          _ <- ExceptT (widgetStep ds wctx (\tx -> undoReserve store tx))
-          _ <- ExceptT (widgetStep ds wctx (\tx -> setStatus store orderId (-1) tx))
+          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coUndo sctx))
+          _ <- ExceptT (runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.coSetStatus sctx (OrderId orderId) (-1) ))
           _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "cancelled"
 
 -- | The dispatch workflow: three ticks 50ms apart (the oracle runs ten
 -- one-second ticks; shortened so the simulation stays fast).
-dispatchBody :: forall s exec. DataSource (IOSim s) -> WidgetStore (IOSim s) -> Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
-dispatchBody ds store orderId wctx = go (3 :: Int)
+dispatchBody :: forall s exec. DataSource (IOSim s) -> DispatchOps exec (IOSim s) -> Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
+dispatchBody ds ops orderId wctx = go (3 :: Int)
   where
     go 0 = pure (Right "dispatched")
     go n = do
@@ -322,42 +300,8 @@ dispatchBody ds store orderId wctx = go (3 :: Int)
       case slept of
         Left err -> pure (Left err)
         Right () -> do
-          _ <- widgetStep ds wctx (\tx -> tickOrder store orderId tx)
+          _ <- runTransactionScoped ds wctx widgetConfig (\sctx _tx -> Right <$> ops.doTick sctx (OrderId orderId)) :: IOSim s (Either (Error EngineOnly) ())
           go (n - 1)
-
--- * App operations
-
-createOrder :: MonadSTM m => WidgetStore m -> Tx m -> m Int
-createOrder store _ = do
-  orderId <- readTVarIO store.wsNextOrder
-  atomically $ do
-    writeTVar store.wsNextOrder (orderId + 1)
-    modifyTVar store.wsOrders (Map.insert orderId (0, 3))
-  pure orderId
-
-reserveInventory :: MonadSTM m => WidgetStore m -> Tx m -> m Bool
-reserveInventory store _ = do
-  stock <- readTVarIO store.wsInventory
-  if stock > 0
-    then atomically (writeTVar store.wsInventory (stock - 1)) >> pure True
-    else pure False
-
-undoReserve :: MonadSTM m => WidgetStore m -> Tx m -> m ()
-undoReserve store _ = atomically (modifyTVar store.wsInventory (+ 1))
-
-setStatus :: MonadSTM m => WidgetStore m -> Int -> Int -> Tx m -> m ()
-setStatus store orderId status _ =
-  atomically (modifyTVar store.wsOrders (Map.adjust (\(_, progress) -> (status, progress)) orderId))
-
-tickOrder :: MonadSTM m => WidgetStore m -> Int -> Tx m -> m ()
-tickOrder store orderId _ =
-  atomically $
-    modifyTVar store.wsOrders $
-      Map.adjust
-        ( \(status, progress) ->
-            if progress <= 1 then (1, 0) else (status, progress - 1)
-        )
-        orderId
 
 -- * The composition scenario
 
@@ -370,8 +314,8 @@ scenarioCheckout payment = do
   mem <- newMemDB
   dbos <- simInstance
   store <- newWidgetStore 5
-  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs store)
-  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs store dispatchRef)
+  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs (stmDispatchOps store))
+  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs (stmCheckoutOps store) dispatchRef)
   exec <- memLaunchOn mem simTracer dbos
   let wid = WorkflowId "widget-wf-1"
   _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-1"}) Nothing
@@ -408,8 +352,8 @@ scenarioPaidStepFails = do
   dbos <- simInstance
   store <- newWidgetStore 5
   calls <- newTVarIO 0
-  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs store)
-  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody (failingWidgetDs calls) store dispatchRef)
+  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody mkWidgetDs (stmDispatchOps store))
+  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRefScoped dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody mkWidgetDs (failingCheckoutOps calls store) dispatchRef)
   exec <- memLaunchOn mem simTracer dbos
   let wid = WorkflowId "widget-wf-fail"
   _ <- startDBOSWorkflowRef exec checkoutRef (startOptionsDefault {startWorkflowId = Just "widget-wf-fail"}) Nothing

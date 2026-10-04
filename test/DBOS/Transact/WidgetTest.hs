@@ -182,7 +182,7 @@ widgetConfig = TransactionConfig {txName = Just "widget_step", txIsolation = Not
 
 -- | One app transaction at the engine's engine-only channel.
 widgetStep :: DataSource IO -> WorkflowCtx exec IO -> (Tx IO -> IO ()) -> IO (Either (Error EngineOnly) ())
-widgetStep ds wctx action = runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> action tx)
+widgetStep ds wctx action = runTransactionScoped ds wctx widgetConfig (\_sctx tx -> Right <$> action tx)
 
 createOrderTx :: WidgetTables -> Tx IO -> IO Int
 createOrderTx tables (Tx run) = fromIntegral <$> run tables.wtCreateOrder ()
@@ -210,8 +210,8 @@ tickOrderTx tables orderId (Tx run) = do
 -- @checkout_workflow@.
 checkoutBody :: forall exec. DataSource IO -> WorkflowRef IO EngineOnly -> WidgetTables -> () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
 checkoutBody ds dispatchRef tables () wctx = runExceptT $ do
-  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> createOrderTx tables tx))
-  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> reserveInventoryTx tables tx))
+  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\_sctx tx -> Right <$> createOrderTx tables tx))
+  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\_sctx tx -> Right <$> reserveInventoryTx tables tx))
   if not onShelf
     then do
       _ <- ExceptT (widgetStep ds wctx (\tx -> setStatusTx tables orderId (-1) tx))
