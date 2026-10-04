@@ -73,7 +73,6 @@ import DBOS.Transact
     retrieveWorkflow,
     runDBOSWorkflow,
     runWorkflowStep,
-    startChildWorkflow,
     startDBOSWorkflowRef,
     startOptionsDefault,
     runTracer,

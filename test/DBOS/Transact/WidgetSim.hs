@@ -58,7 +58,6 @@ import DBOS.Transact
     sendWorkflowMessage,
     setEvent,
     sleepWorkflowStep,
-    startChildWorkflow,
     startDBOSWorkflowRef,
     startOptionsDefault,
     StartOptions (..),

@@ -60,7 +60,6 @@ import DBOS.Transact
     setEvent,
     shutdown,
     sleepWorkflowStep,
-    startChildWorkflow,
     startDBOSWorkflowRef,
     startOptionsDefault,
     toDataSource,

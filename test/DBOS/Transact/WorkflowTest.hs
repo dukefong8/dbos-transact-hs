@@ -198,7 +198,6 @@ import DBOS.Transact
     selectWorkflow,
     spawnTracked,
     spawnLocal,
-    startChildWorkflow,
     startChildWorkflowScoped,
     tasksSpawner,
     millisDuration,
@@ -1790,8 +1789,8 @@ scenarioLiftChildError fx = do
                     _ -> False
               marker <- nextWorkflowMarker wctx
               (refusedStart :: Either (Error GaveUp) ()) <-
-                withAttempt (workflowCtxInner wctx) marker (firstStepStatus 2) $ \inner -> do
-                  inside <- startChildWorkflow inner shipRef startOptionsDefault Nothing
+                withStep wctx marker (firstStepStatus 2) $ \_sctx -> do
+                  inside <- startChildWorkflowScoped wctx shipRef startOptionsDefault Nothing
                   pure (case inside of
                     Left err -> Left err
                     Right _ -> Right ())
@@ -1874,7 +1873,7 @@ scenarioChildInsideStepRefused fx = do
     let badBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         badBody _ wctx = do
           marker <- nextWorkflowMarker wctx
-          outcome <- withAttempt (workflowCtxInner wctx) marker (firstStepStatus 0) (\inner -> startChildWorkflow inner childRef startOptionsDefault Nothing)
+          outcome <- withStep wctx marker (firstStepStatus 0) (\_sctx -> startChildWorkflowScoped wctx childRef startOptionsDefault Nothing)
           pure $ case outcome of
             Left err -> Left err
             Right handle -> Left (ErrorConfig ("started inside a step: " <> handleWorkflowId handle))

@@ -357,10 +357,10 @@ module DBOS.Transact
     thawRegistry,
     lookupSnapshotWorkflow,
     snapshotSize,
-    runRegisteredWorkflow,
-    runRegisteredWorkflowWithSubmission,
-    runRegisteredWorkflowWithRow,
-    enqueueWorkflow,
+    -- The registry run/enqueue/start primitives take a raw 'Connection'/'Tasks'
+    -- and are engine-internal: the facade exposes the 'Executor'/'DBOS'
+    -- wrappers above and the 'WorkflowCtx'-taking scoped entries below.
+    -- (C5c: no facade entry hands a bare connection to a start/enqueue path.)
     Enqueue (..),
     DuplicationPolicy (..),
     enqueueNew,
@@ -376,9 +376,6 @@ module DBOS.Transact
     runOptionsToStartOptions,
     childWorkflowId,
     resolveEnqueueCollision,
-    startWorkflowRef,
-    runWorkflowRef,
-    startChildWorkflow,
     startChildWorkflowScoped,
     -- * Task ownership (workflow.rs @Tasks@)
     Tasks,
@@ -489,7 +486,7 @@ import DBOS.Transact.Select (Branches (..), Racing (..), Recording (..), SelectA
 import DBOS.Transact.Step (StepError (..), StepOptions (..), ShouldRetry, WorkflowEvent (..), driveWorkflowStepWithScoped, pendingWorkflowStep, pendingWorkflowStepScoped, pendingWorkflowStepWith, pendingWorkflowStepWithScoped, runNestedStep, runWorkflowStep, runWorkflowStepScoped, runWorkflowStepWith, runWorkflowStepWithScoped, stepBackoff, stepOptionsDefault)
 import DBOS.Transact.Sleep (SleepEvent (..), pendingSleep, pendingSleepScoped, sleepPlain, sleepWorkflowStep, sleepWorkflowStepScoped)
 import DBOS.Transact.Wait (WaitEvent (..), joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Tasks, Timeout (..), abortAll, childWorkflowId, enqueueNew, enqueueWorkflow, newTasks, resolveEnqueueCollision, resolveTimeoutDeadline, runOptionsDefault, runOptionsToStartOptions, runRegisteredWorkflow, runRegisteredWorkflowWithRow, runRegisteredWorkflowWithSubmission, runWorkflowRef, spawnTracked, startChildWorkflow, startChildWorkflowScoped, startOptionsDefault, startWorkflowRef, storedPriority, tasksSpawner, timeoutBudget, validateEnqueue)
+import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Tasks, Timeout (..), abortAll, childWorkflowId, enqueueNew, newTasks, resolveEnqueueCollision, resolveTimeoutDeadline, runOptionsDefault, runOptionsToStartOptions, spawnTracked, startChildWorkflowScoped, startOptionsDefault, storedPriority, tasksSpawner, timeoutBudget, validateEnqueue)
 
 import DBOS.SystemDB.Types (
     durationAsMillis,

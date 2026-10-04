@@ -101,7 +101,6 @@ import DBOS.Transact
     runWorkflowStep,
     setWorkflowDelay,
     shutdown,
-    startChildWorkflow,
     updateWorkflowAttributes,
     startDBOSWorkflowRef,
     startOptionsDefault,
