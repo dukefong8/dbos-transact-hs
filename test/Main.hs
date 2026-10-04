@@ -65,8 +65,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty DatasourceTest.tests
 --- $> tasty DatasourceSim.tests
 --- $> tasty QueueSim.tests
---- $> tasty WidgetSim.tests
---- $> tasty WidgetTest.tests
+-- $> tasty WidgetSim.tests
+-- $> tasty WidgetTest.tests
 --- $> tasty DeadlinesTest.tests
 --- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests
@@ -90,8 +90,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty StepSim.tests
 --- $> tasty WaitTest.tests
 --- $> tasty WaitSim.tests
--- $> tasty WorkflowTest.tests
--- $> tasty WorkflowSim.tests
+--- $> tasty WorkflowTest.tests
+--- $> tasty WorkflowSim.tests
 main :: IO ()
 main = defaultMain tests
 
