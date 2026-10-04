@@ -18,6 +18,7 @@ import DBOS.Transact
     Config (..),
     Ctx,
     WorkflowCtx,
+    stepCtxInner,
     workflowCtxInner,
     DBOS,
     Executor,
@@ -55,6 +56,12 @@ import DBOS.Transact
     shutdown,
     stepOptionsDefault,
     withAttempt,
+    getEventScoped,
+    pendingSetEventScoped,
+    pendingSleepScoped,
+    pendingWorkflowStepScoped,
+    runWorkflowStepScoped,
+    setEventScoped,
   )
 import DBOS.Transact.ContextTest (ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -211,9 +218,8 @@ tests =
             -- set step keeps the published value at "first".
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body () wctx = do
-              let ctx = workflowCtxInner wctx
               proposal <- tryTakeMVar offer
-              published <- setEvent ctx "progress" (maybe "republished" id proposal)
+              published <- setEventScoped wctx "progress" (maybe "republished" id proposal)
               case published of
                 Left err -> pure (Left err)
                 Right () -> takeMVar release >> pure (Right 7)
@@ -256,8 +262,7 @@ tests =
           bracket (newDBOS ownerConfig) shutdown $ \owner -> do
             let body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Int))
                 body () wctx = do
-                  let ctx = workflowCtxInner wctx
-                  built <- pendingGetEvent other ctx (WorkflowId "wf-1") "answer" (millisDuration 0)
+                  built <- pendingGetEvent other (workflowCtxInner wctx) (WorkflowId "wf-1") "answer" (millisDuration 0)
                   built.pendingRun
             ownerRegistered <- registerDBOSWorkflowRefScoped owner readerKey body
             readerRef <- case ownerRegistered of
@@ -268,9 +273,8 @@ tests =
             -- refuse.
             let inStepBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) (Maybe Int))
                 inStepBody () wctx = do
-                  let ctx = workflowCtxInner wctx
-                  stepped <- runWorkflowStep ctx "read" $ \inner -> do
-                    built <- pendingGetEvent other inner (WorkflowId "wf-1") "answer" (millisDuration 0)
+                  stepped <- runWorkflowStepScoped wctx "read" $ \inner -> do
+                    built <- pendingGetEvent other (stepCtxInner inner) (WorkflowId "wf-1") "answer" (millisDuration 0)
                     built.pendingRun
                   pure $ case stepped of
                     Left err  -> Left err
@@ -302,13 +306,12 @@ tests =
         bracket (newDBOS config) shutdown $ \dbos -> do
           let body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
               body () wctx = do
-                let ctx = workflowCtxInner wctx
                 -- Built a, b, c, d: the order their ids come from the
                 -- counter in, and the order a replay builds them in again.
-                a <- pendingSleep ctx (millisDuration 1)
-                b <- pendingSetEvent ctx "b" (1 :: Int)
-                c <- (pendingGetEvent dbos ctx (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: IO (PendingStep exec IO (Either (Error EngineOnly) (Maybe Int))))
-                d <- (pendingWorkflowStep ctx "after" (\_ -> pure (Right (1 :: Int))) :: IO (PendingStep exec IO (Either (Error EngineOnly) Int)))
+                a <- pendingSleepScoped wctx (millisDuration 1)
+                b <- pendingSetEventScoped wctx "b" (1 :: Int)
+                c <- (pendingGetEvent dbos (workflowCtxInner wctx) (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: IO (PendingStep exec IO (Either (Error EngineOnly) (Maybe Int))))
+                d <- (pendingWorkflowStepScoped wctx "after" (\_ -> pure (Right (1 :: Int))) :: IO (PendingStep exec IO (Either (Error EngineOnly) Int)))
                 idsOk <- case (pendingStepId a, pendingStepId b, pendingStepId c, pendingStepId d) of
                   (Just 0, Just 1, Just 2, Just 4) -> pure True
                   _                                -> pure False

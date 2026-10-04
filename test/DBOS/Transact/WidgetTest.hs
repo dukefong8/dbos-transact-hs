@@ -65,6 +65,11 @@ import DBOS.Transact
     startDBOSWorkflowRef,
     startOptionsDefault,
     toDataSource,
+    recvScoped,
+    runTransactionScoped,
+    setEventScoped,
+    sleepWorkflowStepScoped,
+    startChildWorkflowScoped,
   )
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
@@ -206,26 +211,26 @@ tickOrderTx tables orderId (Tx run) = do
 -- for the payment, then dispatch or compensate. Mirrors the oracle's
 -- @checkout_workflow@.
 checkoutBody :: forall exec. DataSource IO -> WorkflowRef IO EngineOnly -> WidgetTables -> () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
-checkoutBody ds dispatchRef tables () wctx = let ctx = workflowCtxInner wctx in runExceptT $ do
-  orderId <- ExceptT (runTransaction ds ctx widgetConfig (\tx -> Right <$> createOrderTx tables tx))
-  onShelf <- ExceptT (runTransaction ds ctx widgetConfig (\tx -> Right <$> reserveInventoryTx tables tx))
+checkoutBody ds dispatchRef tables () wctx = runExceptT $ do
+  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> createOrderTx tables tx))
+  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> reserveInventoryTx tables tx))
   if not onShelf
     then do
-      _ <- ExceptT (widgetStep ds ctx (\tx -> setStatusTx tables orderId (-1) tx))
-      _ <- ExceptT (setEvent ctx "payment_id" (Nothing :: Maybe Text))
+      _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> setStatusTx tables orderId (-1) tx))
+      _ <- ExceptT (setEventScoped wctx "payment_id" (Nothing :: Maybe Text))
       pure "no-inventory"
     else do
-      _ <- ExceptT (setEvent ctx "payment_id" (Just (Text.pack (show orderId))))
-      ExceptT (recv ctx (Just (Topic "payment_status")) (millisDuration 30000) :: IO (Either (Error EngineOnly) (Maybe Text))) >>= \case
+      _ <- ExceptT (setEventScoped wctx "payment_id" (Just (Text.pack (show orderId))))
+      ExceptT (recvScoped wctx (Just (Topic "payment_status")) (millisDuration 30000) :: IO (Either (Error EngineOnly) (Maybe Text))) >>= \case
         Just status | status == "paid" -> do
-          _ <- ExceptT (widgetStep ds ctx (\tx -> setStatusTx tables orderId 2 tx))
-          _ <- ExceptT (startChildWorkflow ctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
-          _ <- ExceptT (setEvent ctx "order_id" (Text.pack (show orderId)))
+          _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> setStatusTx tables orderId 2 tx))
+          _ <- ExceptT (startChildWorkflowScoped wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
+          _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "paid"
         _ -> do
-          _ <- ExceptT (widgetStep ds ctx (\tx -> undoReserveTx tables tx))
-          _ <- ExceptT (widgetStep ds ctx (\tx -> setStatusTx tables orderId (-1) tx))
-          _ <- ExceptT (setEvent ctx "order_id" (Text.pack (show orderId)))
+          _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> undoReserveTx tables tx))
+          _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> setStatusTx tables orderId (-1) tx))
+          _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "cancelled"
 
 -- | The dispatch workflow: three one-second ticks, the oracle's durable
@@ -233,14 +238,13 @@ checkoutBody ds dispatchRef tables () wctx = let ctx = workflowCtxInner wctx in 
 dispatchBody :: forall exec. DataSource IO -> WidgetTables -> Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
 dispatchBody ds tables orderId wctx = go (3 :: Int)
   where
-    ctx = workflowCtxInner wctx
     go 0 = pure (Right "dispatched")
     go n = do
-      slept <- sleepWorkflowStep ctx (millisDuration 1000)
+      slept <- sleepWorkflowStepScoped wctx (millisDuration 1000)
       case slept of
         Left err -> pure (Left err)
         Right () -> do
-          _ <- widgetStep ds ctx (\tx -> tickOrderTx tables orderId tx)
+          _ <- widgetStep ds (workflowCtxInner wctx) (\tx -> tickOrderTx tables orderId tx)
           go (n - 1)
 
 -- * Fixture

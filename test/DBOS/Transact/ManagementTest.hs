@@ -108,6 +108,12 @@ import DBOS.Transact
     startDBOSWorkflowRef,
     startOptionsDefault,
     waitForWorkflow,
+    cancelWorkflowsInWorkflowScoped,
+    deleteWorkflowsInWorkflowScoped,
+    forkWorkflowsInWorkflowScoped,
+    resumeWorkflowsInWorkflowScoped,
+    runWorkflowStepScoped,
+    startChildWorkflowScoped,
   )
 import DBOS.Transact.ContextTest (ctxOver)
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -224,8 +230,7 @@ tests =
           childRef <- registerRefOrFail dbos childKey childBody
           let parentBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
               parentBody () wctx = do
-                let ctx = workflowCtxInner wctx
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
+                started <- startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
                 case started of
                   Left err -> pure (Left err)
                   Right handle -> do
@@ -256,7 +261,7 @@ tests =
         withInstance "mgmt-delete" $ \dbos suffix -> do
           let key = newWorkflowKey "deletable"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body input wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "work" (const (pure input))
+              body input wctx = runWorkflowStepScoped wctx "work" (const (pure input))
               workflowText = "hs-l2-mgmt-delete-" <> suffix
               workflowId = WorkflowId workflowText
           registered <- registerDBOSWorkflowScoped dbos key body
@@ -371,10 +376,9 @@ tests =
           let key = newWorkflowKey "staged"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body _ wctx = do
-                let ctx = workflowCtxInner wctx
                 outcomes <-
                   mapM
-                    (\name -> runWorkflowStep ctx name (const (modifyIORef' ran (<> [name]) >> pure (0 :: Int))))
+                    (\name -> runWorkflowStepScoped wctx name (const (modifyIORef' ran (<> [name]) >> pure (0 :: Int))))
                     ["one", "two", "three"]
                 pure (fmap (const 0) (sequence outcomes))
               sourceText = "hs-l2-mgmt-fork-step-source-" <> suffix
@@ -537,8 +541,7 @@ tests =
               sourceId = WorkflowId ("hs-l2-mgmt-fork-fail-src-" <> suffix)
               flakyBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               flakyBody _ wctx = do
-                let ctx = workflowCtxInner wctx
-                first <- runWorkflowStep ctx "one" (const (pure (0 :: Int)))
+                first <- runWorkflowStepScoped wctx "one" (const (pure (0 :: Int)))
                 case first of
                   Left err -> pure (Left err)
                   Right _ -> do
@@ -546,7 +549,7 @@ tests =
                     modifyIORef' calls (+ 1)
                     if attempt < 1
                       then pure (Left (StepFailed "two" "boom"))
-                      else runWorkflowStep ctx "two" (const (pure 99))
+                      else runWorkflowStepScoped wctx "two" (const (pure 99))
           registered <- registerDBOSWorkflowScoped dbos key flakyBody
           case registered of
             Left err -> fail (show err)
@@ -614,8 +617,7 @@ tests =
               wid = WorkflowId ("hs-l2-mgmt-self-" <> suffix)
               body :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
               body ownId wctx = do
-                let ctx = workflowCtxInner wctx
-                deleted <- deleteWorkflowsInWorkflow ctx [WorkflowId ownId] False
+                deleted <- deleteWorkflowsInWorkflowScoped wctx [WorkflowId ownId] False
                 pure (void deleted)
           registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
@@ -646,15 +648,13 @@ tests =
               rootText = "hs-l2-mgmt-ancestor-" <> suffix
               childBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
               childBody root wctx = do
-                let ctx = workflowCtxInner wctx
-                outcome <- deleteWorkflowsInWorkflow ctx [WorkflowId root] True
+                outcome <- deleteWorkflowsInWorkflowScoped wctx [WorkflowId root] True
                 void (tryPutMVar observed outcome)
                 pure (void outcome)
           childRef <- registerRefOrFail dbos childKey childBody
           let parentBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
               parentBody root wctx = do
-                let ctx = workflowCtxInner wctx
-                started <- startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue root))
+                started <- startChildWorkflowScoped wctx childRef startOptionsDefault (Just (encodeWorkflowValue root))
                 case started of
                   Left err -> pure (Left err)
                   Right _ -> void <$> takeMVar observed
@@ -689,14 +689,13 @@ tests =
               targetBody () _ = pure (Right 1)
               operatorBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               operatorBody target wctx = do
-                let ctx = workflowCtxInner wctx
-                cancelled <- cancelWorkflowsInWorkflow ctx [WorkflowId target] False
+                cancelled <- cancelWorkflowsInWorkflowScoped wctx [WorkflowId target] False
                 case cancelled of
                   Left err -> pure (Left err)
                   Right _ -> do
                     listed <-
                       listWorkflowsInWorkflow
-                        ctx
+                        (workflowCtxInner wctx)
                         (defaultWorkflowFilter {workflowFilterWorkflowIds = [target]})
                     pure (Right (length listed))
           registeredTarget <- registerDBOSWorkflowScoped dbos targetKey targetBody
@@ -748,13 +747,12 @@ tests =
               sourceText = "hs-l2-mgmt-replay-src-" <> suffix
               operatorText = "hs-l2-mgmt-replay-op-" <> suffix
               sourceBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              sourceBody value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+              sourceBody value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
           shouldCrash <- newIORef True
           seen <- newEmptyMVar
           let operatorBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
               operatorBody source wctx = do
-                let ctx = workflowCtxInner wctx
-                forked <- forkWorkflowsInWorkflow ctx [forkNew source] defaultForkOptions
+                forked <- forkWorkflowsInWorkflowScoped wctx [forkNew source] defaultForkOptions
                 case forked of
                   Left err -> pure (Left err)
                   Right [WorkflowId fid] -> do
@@ -810,12 +808,11 @@ tests =
               targetBody () _ = pure (Right 1)
               operatorBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
               operatorBody target wctx = do
-                let ctx = workflowCtxInner wctx
-                cancelled <- cancelWorkflowsInWorkflow ctx [WorkflowId target] False
+                cancelled <- cancelWorkflowsInWorkflowScoped wctx [WorkflowId target] False
                 case cancelled of
                   Left err -> pure (Left err)
                   Right _ -> do
-                    resumed <- resumeWorkflowsInWorkflow ctx [WorkflowId target] (Just runQueue)
+                    resumed <- resumeWorkflowsInWorkflowScoped wctx [WorkflowId target] (Just runQueue)
                     case resumed of
                       Left err -> pure (Left err)
                       Right _ -> pure (Right ())
@@ -878,12 +875,11 @@ tests =
               Right client -> do
                 let body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
                     body () wctx = do
-                      let ctx = workflowCtxInner wctx
                       cancelled <- clientCancelWorkflows client [WorkflowId "never-existed"] False
                       case cancelled of
                         Left err -> pure (Left err)
                         Right _ -> do
-                          probe <- runWorkflowStep ctx "probe" (const (pure ()))
+                          probe <- runWorkflowStepScoped wctx "probe" (const (pure ()))
                           case probe of
                             Left err -> pure (Left err)
                             Right () -> pure (Right ())

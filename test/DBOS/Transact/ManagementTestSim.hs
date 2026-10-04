@@ -38,6 +38,8 @@ import DBOS.Transact.ManagementSimData (mockOutput, mockSerialization)
 import DBOS.Transact
   (
     EngineOnly,
+    runWorkflowStepScoped,
+    startChildWorkflowScoped,
     CodecError,
     Ctx,
     WorkflowCtx,
@@ -356,17 +358,15 @@ forkableBody attempts _ _ = do
 
 stagedBody :: forall s. StrictTVar (IOSim s) [Text] -> forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
 stagedBody ran _ wctx = do
-  let ctx = workflowCtxInner wctx
   outcomes <-
     mapM
-      (\name -> runWorkflowStep ctx name (const (atomically (modifyTVar ran (<> [name])) >> pure (0 :: Int))))
+      (\name -> runWorkflowStepScoped wctx name (const (atomically (modifyTVar ran (<> [name])) >> pure (0 :: Int))))
       ["one", "two", "three"]
   pure (fmap (const 0) (sequence outcomes))
 
 treeParentBody :: forall s. WorkflowRef (IOSim s) EngineOnly -> forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
 treeParentBody childRef _ wctx = do
-  let ctx = workflowCtxInner wctx
-  started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
+  started <- startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
   pure (fmap handleWorkflowId started)
 
 -- * Engine-only driver aliases

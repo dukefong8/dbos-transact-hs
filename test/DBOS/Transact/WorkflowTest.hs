@@ -141,6 +141,7 @@ import DBOS.Transact
     Ctx,
     DBOS,
     WorkflowCtx,
+    stepCtxInner,
     workflowCtxInner,
     Executor,
     Enqueue (..),
@@ -220,6 +221,8 @@ import DBOS.Transact
     workflowId,
     uuidEntropy,
     uuidWorkflowId,
+    awaitChildScoped,
+    pendingAwaitScoped,
   )
 import DBOS.Transact.ContextTest (ctxOver)
 import GHC.Conc (ThreadStatus (..), threadStatus)
@@ -250,8 +253,7 @@ tests =
         bodyCalls <- newIORef (0 :: Int)
         let body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = do
-              let ctx = workflowCtxInner wctx
-              completedStep <- runWorkflowStep ctx "once" (const (modifyIORef' bodyCalls (+ 1) >> pure (value * 2)))
+              completedStep <- runWorkflowStepScoped wctx "once" (const (modifyIORef' bodyCalls (+ 1) >> pure (value * 2)))
               case completedStep of
                 Left err -> pure (Left err)
                 Right result -> do
@@ -403,12 +405,11 @@ tests =
           -- then the parent is killed before it can finish.
           let parentBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               parentBody () wctx = do
-                let ctx = workflowCtxInner wctx
-                started <- startChildWorkflow ctx childRef startOptionsDefault Nothing
+                started <- startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
                 case started of
                   Left err -> pure (Left err)
                   Right wfHandle -> do
-                    awaited <- awaitWf ctx wfHandle
+                    awaited <- awaitWf (workflowCtxInner wctx) wfHandle
                     case awaited of
                       Left err -> pure (Left err)
                       Right (Just stored) -> do
@@ -451,12 +452,11 @@ tests =
             Right ref -> pure ref
           let parentBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               parentBody () wctx = do
-                let ctx = workflowCtxInner wctx
-                started <- startChildWorkflow ctx childRef2 startOptionsDefault Nothing
+                started <- startChildWorkflowScoped wctx childRef2 startOptionsDefault Nothing
                 case started of
                   Left err -> pure (Left err)
                   Right wfHandle -> do
-                    awaited <- awaitWf ctx wfHandle
+                    awaited <- awaitWf (workflowCtxInner wctx) wfHandle
                     pure $ case awaited of
                       Left err -> Left err
                       Right (Just stored) ->
@@ -616,12 +616,11 @@ tests =
             Right ref -> pure ref
           let parentBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               parentBody () wctx = do
-                let ctx = workflowCtxInner wctx
-                started <- startChildWorkflow ctx childRef (startOptionsDefault {startQueue = Just joinQueue}) Nothing
+                started <- startChildWorkflowScoped wctx childRef (startOptionsDefault {startQueue = Just joinQueue}) Nothing
                 case started of
                   Left err -> pure (Left err)
                   Right handle -> do
-                    result <- awaitWf ctx handle
+                    result <- awaitWf (workflowCtxInner wctx) handle
                     case result of
                       Left err -> pure (Left err)
                       Right (Just stored) ->
@@ -1035,13 +1034,12 @@ scenarioAwaitRecorded fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault Nothing
+            startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
           case started of
             Left err -> pure (Left err)
             Right wfHandle -> do
-              awaited <- awaitChild ctx wfHandle
+              awaited <- awaitChildScoped wctx wfHandle
               pure $ case awaited of
                 Left err -> Left err
                 Right (Just stored) ->
@@ -1090,13 +1088,12 @@ scenarioChildIdsInBuildOrder fx = do
     -- the rows are the contract both pin.
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: [Either (Error EngineOnly) (WorkflowHandle m EngineOnly)]) <-
-            mapM (\n -> startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))) [1, 2, 3]
+            mapM (\n -> startChildWorkflowScoped wctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))) [1, 2, 3]
           case sequence started of
             Left err -> pure (Left err)
             Right handles -> do
-              awaited <- mapM (awaitChild ctx) handles
+              awaited <- mapM (awaitChild (workflowCtxInner wctx)) handles
               case sequence awaited of
                 Left err -> pure (Left err)
                 Right outputs -> case mapM (decodeWorkflowValue "result") outputs of
@@ -1145,13 +1142,12 @@ scenarioWrongInstance fx =
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault Nothing
+            startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
           case started of
             Left err -> pure (Left err)
             Right wfHandle -> do
-              awaited <- awaitChild ctx wfHandle
+              awaited <- awaitChildScoped wctx wfHandle
               pure $ case awaited of
                 Left err -> Left err
                 Right (Just stored) ->
@@ -1205,11 +1201,10 @@ scenarioStepsTaken fx = do
     let key = newWorkflowKey "two-steps"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body value wctx = do
-          let ctx = workflowCtxInner wctx
-          first <- runWorkflowStep ctx "one" (const (pure (value + 1)))
+          first <- runWorkflowStepScoped wctx "one" (const (pure (value + 1)))
           case first of
             Left err -> pure (Left err)
-            Right stepped -> runWorkflowStep ctx "two" (const (pure (stepped * 2)))
+            Right stepped -> runWorkflowStepScoped wctx "two" (const (pure (stepped * 2)))
     registered <- registerDBOSWorkflowScoped dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
@@ -1311,13 +1306,12 @@ scenarioAttributes fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (0 :: Int)))
+            startChildWorkflowScoped wctx childRef startOptionsDefault (Just (encodeWorkflowValue (0 :: Int)))
           case started of
             Left err -> pure (Left err)
             Right handle -> do
-              result <- awaitChild ctx handle
+              result <- awaitChildScoped wctx handle
               pure $ case result of
                 Left err -> Left err
                 Right (Just stored) ->
@@ -1350,7 +1344,7 @@ scenarioStepErrorRecorded fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     let key = newWorkflowKey "charger"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        body () wctx = let ctx = workflowCtxInner wctx in runWorkflowStepWith stepOptionsDefault ctx "charge" (const (pure (Left (StepFailed "charge" "short by 12"))))
+        body () wctx = runWorkflowStepWith stepOptionsDefault (workflowCtxInner wctx) "charge" (const (pure (Left (StepFailed "charge" "short by 12"))))
     registered <- registerDBOSWorkflowScoped dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
@@ -1489,8 +1483,7 @@ scenarioRowBeforeBody fx = do
     let key = newWorkflowKey "sees-itself"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Bool)
         body () wctx = do
-          let ctx = workflowCtxInner wctx
-          row <- withSystemDB ctx (\db -> SystemDB.getWorkflow db (WorkflowId (workflowId ctx)))
+          row <- withSystemDB (workflowCtxInner wctx) (\db -> SystemDB.getWorkflow db (WorkflowId (workflowId (workflowCtxInner wctx))))
           pure (Right (case row of Right (Just _) -> True; _ -> False))
     registered <- registerDBOSWorkflowScoped dbos key body
     case registered of
@@ -1525,11 +1518,10 @@ scenarioPlainStepAtStart fx = do
     entered <- newEmptyMVar
     let parentBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody _ wctx = do
-          let ctx = workflowCtxInner wctx
           putMVar entered ()
           takeMVar gate
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (1 :: Int)))
+            startChildWorkflowScoped wctx childRef startOptionsDefault (Just (encodeWorkflowValue (1 :: Int)))
           case started of
             Left err -> pure (Left err)
             Right _ -> pure (Right 0)
@@ -1579,16 +1571,15 @@ scenarioDerivedChildAdopted fx = do
     let childKey = newWorkflowKey "double"
         parentKey = newWorkflowKey "parent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        childBody value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+        childBody value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
     childRefE <- registerDBOSWorkflowRefScoped dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
     let parentBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         parentBody _ wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
+            startChildWorkflowScoped wctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
           pure (handleWorkflowId <$> started)
     parentReg <- registerDBOSWorkflowScoped dbos parentKey parentBody
     case parentReg of
@@ -1635,9 +1626,8 @@ scenarioAssignedChildAdopted fx = do
         derivedText = parentText <> "-0"
         parentBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         parentBody _ wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef (startOptionsDefault {startWorkflowId = Just chosenText}) (Just (encodeWorkflowValue (21 :: Int)))
+            startChildWorkflowScoped wctx childRef (startOptionsDefault {startWorkflowId = Just chosenText}) (Just (encodeWorkflowValue (21 :: Int)))
           pure (handleWorkflowId <$> started)
     parentReg <- registerDBOSWorkflowScoped dbos parentKey parentBody
     case parentReg of
@@ -1703,13 +1693,12 @@ scenarioFanout fx = do
     -- would serialize them.
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: [Either (Error EngineOnly) (WorkflowHandle m EngineOnly)]) <-
-            mapM (\n -> startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))) [0, 1, 2]
+            mapM (\n -> startChildWorkflowScoped wctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))) [0, 1, 2]
           case sequence started of
             Left err -> pure (Left err)
             Right handles -> do
-              results <- mapM (awaitChild ctx) handles
+              results <- mapM (awaitChild (workflowCtxInner wctx)) handles
               case sequence results of
                 Left err -> pure (Left err)
                 Right outputs -> case mapM (decodeWorkflowValue "result") outputs of
@@ -1743,16 +1732,15 @@ scenarioUnawaitedChild fx = do
     let childKey = newWorkflowKey "child"
         parentKey = newWorkflowKey "forgetful"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        childBody value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+        childBody value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
     childRefE <- registerDBOSWorkflowRefScoped dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
     let parentBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
         parentBody _ wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
+            startChildWorkflowScoped wctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
           case started of
             Left err -> pure (Left err)
             Right _ -> pure (Right ())
@@ -1793,19 +1781,18 @@ scenarioLiftChildError fx = do
       Right r -> pure r
     let billBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error GaveUp) Bool)
         billBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error GaveUp) (WorkflowHandle m Refused)) <-
-            startChildWorkflow ctx shipRef startOptionsDefault Nothing
+            startChildWorkflowScoped wctx shipRef startOptionsDefault Nothing
           case started of
             Left err -> pure (Left err)
             Right handle -> do
-              awaited <- awaitChild ctx handle
+              awaited <- awaitChildScoped wctx handle
               let refusedChild = case awaited of
                     Left (Application Refused) -> True
                     _ -> False
-              marker <- nextStepMarker ctx
+              marker <- nextWorkflowMarker wctx
               (refusedStart :: Either (Error GaveUp) ()) <-
-                withAttempt ctx marker (firstStepStatus 2) $ \inner -> do
+                withAttempt (workflowCtxInner wctx) marker (firstStepStatus 2) $ \inner -> do
                   inside <- startChildWorkflow inner shipRef startOptionsDefault Nothing
                   pure (case inside of
                     Left err -> Left err
@@ -1841,7 +1828,7 @@ scenarioCaptureChildRefused fx = do
     let childKey = newWorkflowKey "double"
         parentKey = newWorkflowKey "badparent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        childBody value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+        childBody value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
     childRefE <- registerDBOSWorkflowRefScoped dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
@@ -1881,16 +1868,15 @@ scenarioChildInsideStepRefused fx = do
     let childKey = newWorkflowKey "double"
         parentKey = newWorkflowKey "badparent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
-        childBody value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+        childBody value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
     childRefE <- registerDBOSWorkflowRefScoped dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
     let badBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         badBody _ wctx = do
-          let ctx = workflowCtxInner wctx
-          marker <- nextStepMarker ctx
-          outcome <- withAttempt ctx marker (firstStepStatus 0) (\inner -> startChildWorkflow inner childRef startOptionsDefault Nothing)
+          marker <- nextWorkflowMarker wctx
+          outcome <- withAttempt (workflowCtxInner wctx) marker (firstStepStatus 0) (\inner -> startChildWorkflow inner childRef startOptionsDefault Nothing)
           pure $ case outcome of
             Left err -> Left err
             Right handle -> Left (ErrorConfig ("started inside a step: " <> handleWorkflowId handle))
@@ -1927,13 +1913,12 @@ scenarioCascadeDeadline fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault Nothing
+            startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
           case started of
             Left err -> pure (Left err)
             Right wfHandle -> do
-              awaited <- awaitChild ctx wfHandle
+              awaited <- awaitChildScoped wctx wfHandle
               pure $ case awaited of
                 Left err -> Left err
                 Right (Just stored) ->
@@ -1976,14 +1961,13 @@ scenarioDeclinedDeadline fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           let childPair opts = do
                 (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-                  startChildWorkflow ctx childRef opts Nothing
+                  startChildWorkflowScoped wctx childRef opts Nothing
                 case started of
                   Left err -> pure (Left err)
                   Right wfHandle -> do
-                    awaited <- awaitChild ctx wfHandle
+                    awaited <- awaitChildScoped wctx wfHandle
                     pure $ case awaited of
                       Left err -> Left err
                       Right (Just stored) ->
@@ -2030,13 +2014,12 @@ scenarioChildBudgetWins fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef (startOptionsDefault {startTimeout = Explicit (secondsDuration 3600)}) Nothing
+            startChildWorkflowScoped wctx childRef (startOptionsDefault {startTimeout = Explicit (secondsDuration 3600)}) Nothing
           case started of
             Left err -> pure (Left err)
             Right wfHandle -> do
-              awaited <- awaitChild ctx wfHandle
+              awaited <- awaitChildScoped wctx wfHandle
               pure $ case awaited of
                 Left err -> Left err
                 Right (Just stored) ->
@@ -2079,13 +2062,12 @@ scenarioDeadlineInherited fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault Nothing
+            startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
           case started of
             Left err -> pure (Left err)
             Right wfHandle -> do
-              awaited <- awaitChild ctx wfHandle
+              awaited <- awaitChildScoped wctx wfHandle
               pure $ case awaited of
                 Left err -> Left err
                 Right (Just stored) ->
@@ -2129,13 +2111,12 @@ scenarioCancelledChildAwaited fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef (startOptionsDefault {startTimeout = Explicit (millisDuration 300)}) Nothing
+            startChildWorkflowScoped wctx childRef (startOptionsDefault {startTimeout = Explicit (millisDuration 300)}) Nothing
           case started of
             Left err -> pure (Left err)
             Right wfHandle -> do
-              awaited <- awaitChild ctx wfHandle
+              awaited <- awaitChildScoped wctx wfHandle
               pure $ case awaited of
                 Left err -> Left err
                 Right (Just stored) ->
@@ -2266,9 +2247,8 @@ scenarioLosingTokenFired fx = do
     let parentKey = newWorkflowKey "parent"
         parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
-          slow <- pendingWorkflowStepWith stepOptionsDefault ctx "slow" $ \inner -> do
-            token <- cancellationToken inner
+          slow <- pendingWorkflowStepScoped wctx "slow" $ \inner -> do
+            token <- cancellationToken (stepCtxInner inner)
             _ <- async $ do
               let watch = do
                     cancelled <- tokenCancelled token
@@ -2278,9 +2258,9 @@ scenarioLosingTokenFired fx = do
             putMVar watching ()
             threadDelay 30000000
             pure (Right (2 :: Int))
-          fast <- pendingWorkflowStepWith stepOptionsDefault ctx "fast" (\_ -> takeMVar watching >> pure (Right (1 :: Int)))
+          fast <- pendingWorkflowStepScoped wctx "fast" (\_ -> takeMVar watching >> pure (Right (1 :: Int)))
           selectStep
-            ctx
+            (workflowCtxInner wctx)
             [ SelectArm "slow" slow (\outcome -> pure (outcome >>= \value -> Right value)),
               SelectArm "fast" fast (\outcome -> pure (outcome >>= \value -> Right value))
             ]
@@ -2315,11 +2295,10 @@ scenarioControlSelect fx = do
     let WorkflowId parentText = wid
         parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
-          interrupted <- pendingWorkflowStepWith stepOptionsDefault ctx "interrupted" (\_ -> pure (Left (Interrupted {workflowId = parentText})))
-          slow <- pendingWorkflowStepWith stepOptionsDefault ctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (1 :: Int)))
-          selectStep
-            ctx
+          interrupted <- pendingWorkflowStepScoped wctx "interrupted" (\_ -> pure (Left (Interrupted {workflowId = parentText})))
+          slow <- pendingWorkflowStepScoped wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (1 :: Int)))
+          selectStepScoped
+            wctx
             [ SelectArm "interrupted" interrupted (\outcome -> pure (outcome >>= \value -> Right value)),
               SelectArm "slow" slow (\outcome -> pure (outcome >>= \value -> Right value))
             ]
@@ -2357,16 +2336,15 @@ scenarioSelectStepRaces fx = do
     -- takes to settle.
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault Nothing
+            startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
           case started of
             Left err -> pure (Left err)
             Right childHandle -> do
-              slow <- pendingWorkflowStepWith stepOptionsDefault ctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (0 :: Int)))
-              awaited <- pendingAwait ctx childHandle
-              selectStep
-                ctx
+              slow <- pendingWorkflowStepScoped wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (0 :: Int)))
+              awaited <- pendingAwaitScoped wctx childHandle
+              selectStepScoped
+                wctx
                 [ SelectArm "slow" slow (\outcome -> pure (outcome >>= \value -> Right value)),
                   SelectArm "DBOS.getResult" awaited $ \outcome ->
                     pure $ case outcome of
@@ -2415,14 +2393,13 @@ scenarioStepIdPairs fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           let pair n = do
                 (startedPair :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-                  startChildWorkflow ctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))
+                  startChildWorkflowScoped wctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))
                 case startedPair of
                   Left err -> pure (Left err)
                   Right wfHandle -> do
-                    awaited <- awaitChild ctx wfHandle
+                    awaited <- awaitChildScoped wctx wfHandle
                     pure $ case awaited of
                       Left err -> Left err
                       Right (Just stored) ->
@@ -2474,13 +2451,12 @@ scenarioAwaitInsideStep fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault Nothing
+            startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
           case started of
             Left err -> pure (Left err)
             Right wfHandle ->
-              runWorkflowStepWith stepOptionsDefault ctx "collect" $ \inner -> do
+              runWorkflowStepWith stepOptionsDefault (workflowCtxInner wctx) "collect" $ \inner -> do
                 awaited <- awaitChild inner wfHandle
                 pure $ case awaited of
                   Left err -> Left err
@@ -2532,15 +2508,14 @@ scenarioStaleAwaitRefused fx = do
     entered <- newEmptyMVar
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          let ctx = workflowCtxInner wctx
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow ctx childRef startOptionsDefault Nothing
+            startChildWorkflowScoped wctx childRef startOptionsDefault Nothing
           case started of
             Left err -> pure (Left err)
             Right wfHandle -> do
               putMVar entered ()
               takeMVar gate
-              awaited <- awaitChild ctx wfHandle
+              awaited <- awaitChildScoped wctx wfHandle
               pure $ case awaited of
                 Left err -> Left err
                 Right (Just stored) ->

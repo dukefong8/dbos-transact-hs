@@ -65,6 +65,11 @@ import DBOS.Transact
     StartOptions (..),
     withStep,
     withWorkflow,
+    recvScoped,
+    runTransactionScoped,
+    setEventScoped,
+    sleepWorkflowStepScoped,
+    startChildWorkflowScoped,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -286,26 +291,26 @@ widgetStep ds ctx action = runTransaction ds ctx widgetConfig (\tx -> Right <$> 
 -- @checkout_workflow@ (create before reserve; the payment id event is the
 -- workflow's own id in the oracle — here the order id names the order).
 checkoutBody :: forall s exec. DataSource (IOSim s) -> WidgetStore (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
-checkoutBody ds store dispatchRef () wctx = let ctx = workflowCtxInner wctx in runExceptT $ do
-  orderId <- ExceptT (runTransaction ds ctx widgetConfig (\tx -> Right <$> createOrder store tx))
-  onShelf <- ExceptT (runTransaction ds ctx widgetConfig (\tx -> Right <$> reserveInventory store tx))
+checkoutBody ds store dispatchRef () wctx = runExceptT $ do
+  orderId <- ExceptT (runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> createOrder store tx))
+  onShelf <- ExceptT (runTransactionScoped ds wctx widgetConfig (\tx -> Right <$> reserveInventory store tx))
   if not onShelf
     then do
-      _ <- ExceptT (widgetStep ds ctx (\tx -> setStatus store orderId (-1) tx))
-      _ <- ExceptT (setEvent ctx "payment_id" (Nothing :: Maybe Text))
+      _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> setStatus store orderId (-1) tx))
+      _ <- ExceptT (setEventScoped wctx "payment_id" (Nothing :: Maybe Text))
       pure "no-inventory"
     else do
-      _ <- ExceptT (setEvent ctx "payment_id" (Just (Text.pack (show orderId))))
-      ExceptT (recv ctx (Just (Topic "payment_status")) (millisDuration 5000) :: IOSim s (Either (Error EngineOnly) (Maybe Text))) >>= \case
+      _ <- ExceptT (setEventScoped wctx "payment_id" (Just (Text.pack (show orderId))))
+      ExceptT (recvScoped wctx (Just (Topic "payment_status")) (millisDuration 5000) :: IOSim s (Either (Error EngineOnly) (Maybe Text))) >>= \case
         Just status | status == "paid" -> do
-          _ <- ExceptT (widgetStep ds ctx (\tx -> setStatus store orderId 2 tx))
-          _ <- ExceptT (startChildWorkflow ctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
-          _ <- ExceptT (setEvent ctx "order_id" (Text.pack (show orderId)))
+          _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> setStatus store orderId 2 tx))
+          _ <- ExceptT (startChildWorkflowScoped wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
+          _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "paid"
         _ -> do
-          _ <- ExceptT (widgetStep ds ctx (\tx -> undoReserve store tx))
-          _ <- ExceptT (widgetStep ds ctx (\tx -> setStatus store orderId (-1) tx))
-          _ <- ExceptT (setEvent ctx "order_id" (Text.pack (show orderId)))
+          _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> undoReserve store tx))
+          _ <- ExceptT (widgetStep ds (workflowCtxInner wctx) (\tx -> setStatus store orderId (-1) tx))
+          _ <- ExceptT (setEventScoped wctx "order_id" (Text.pack (show orderId)))
           pure "cancelled"
 
 -- | The dispatch workflow: three ticks 50ms apart (the oracle runs ten
@@ -313,14 +318,13 @@ checkoutBody ds store dispatchRef () wctx = let ctx = workflowCtxInner wctx in r
 dispatchBody :: forall s exec. DataSource (IOSim s) -> WidgetStore (IOSim s) -> Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
 dispatchBody ds store orderId wctx = go (3 :: Int)
   where
-    ctx = workflowCtxInner wctx
     go 0 = pure (Right "dispatched")
     go n = do
-      slept <- sleepWorkflowStep ctx (millisDuration 50)
+      slept <- sleepWorkflowStepScoped wctx (millisDuration 50)
       case slept of
         Left err -> pure (Left err)
         Right () -> do
-          _ <- widgetStep ds ctx (\tx -> tickOrder store orderId tx)
+          _ <- widgetStep ds (workflowCtxInner wctx) (\tx -> tickOrder store orderId tx)
           go (n - 1)
 
 -- * App operations

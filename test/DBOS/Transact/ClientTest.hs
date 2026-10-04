@@ -80,6 +80,9 @@ import DBOS.Transact
     WorkflowKey,
     workflowStatusClient,
     WorkflowHandle,
+    recvScoped,
+    runWorkflowStepScoped,
+    setEventScoped,
   )
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
@@ -113,7 +116,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
@@ -171,7 +174,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
@@ -210,7 +213,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
@@ -339,8 +342,7 @@ tests =
             key = newWorkflowKey "receiver"
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             body () wctx = do
-              let ctx = workflowCtxInner wctx
-              received <- recv ctx (Just (Topic "ping")) (millisDuration 5000)
+              received <- recvScoped wctx (Just (Topic "ping")) (millisDuration 5000)
               case received of
                 Left err -> pure (Left err)
                 Right Nothing -> pure (Left (StepFailed "recv" "nothing arrived"))
@@ -387,9 +389,8 @@ tests =
             key = newWorkflowKey "batcher"
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             body () wctx = do
-              let ctx = workflowCtxInner wctx
-              first <- recv ctx (Just (Topic "ping")) (millisDuration 5000)
-              second <- recv ctx (Just (Topic "ping")) (millisDuration 5000)
+              first <- recvScoped wctx (Just (Topic "ping")) (millisDuration 5000)
+              second <- recvScoped wctx (Just (Topic "ping")) (millisDuration 5000)
               pure $ case (first, second) of
                 -- Arrival order is not promised: one batch insert stamps
                 -- every row with the same millisecond, so the oldest-first
@@ -447,11 +448,10 @@ tests =
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = do
-              let ctx = workflowCtxInner wctx
-              published <- setEvent ctx "greeting" ("hello" :: Text)
+              published <- setEventScoped wctx "greeting" ("hello" :: Text)
               case published of
                 Left err -> pure (Left err)
-                Right () -> runWorkflowStep ctx "double" (const (pure (value * 2)))
+                Right () -> runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
@@ -480,7 +480,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
@@ -510,7 +510,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
@@ -537,7 +537,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowScoped dbos key body
           case registered of
@@ -607,7 +607,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value wctx = let ctx = workflowCtxInner wctx in runWorkflowStep ctx "double" (const (pure (value * 2)))
+            body value wctx = runWorkflowStepScoped wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflowScoped dbos key body
           case registered of

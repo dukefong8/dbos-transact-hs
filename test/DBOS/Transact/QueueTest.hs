@@ -1437,10 +1437,9 @@ tests =
             Right ref -> pure ref
           let parentBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
               parentBody () wctx = do
-                let ctx = workflowCtxInner wctx
                 startedChild <-
                   startChildWorkflow
-                    ctx
+                    (workflowCtxInner wctx)
                     childRef
                     (startOptionsDefault {startWorkflowId = Just childText, startQueue = Just (enqueueNew queueName)})
                     Nothing
