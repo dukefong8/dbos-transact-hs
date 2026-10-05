@@ -4,89 +4,51 @@
 
 -- | Mirrors the datasource test modules of the oracles, name for name:
 -- TypeScript @knex-datasource@ and Python @tests/test_datasource.py@.
--- Scenarios are written once against a fake 'DataSource' (STM maps, so
--- the same fake runs live and under IOSim) and asserted in the trees
--- here (live) and in 'DatasourceTestSim' (sim). Local copies of the
--- connection builders are deliberate, as in sibling sim trees.
+-- Scenarios and checks live in 'DBOS.Transact.DatasourceCases' and run here
+-- over Postgres system rows (and in 'DatasourceTestSim' over the mock or
+-- in-memory backend). The probe cases are IO-only: they need a live pool
+-- and scratch DDL, and the sim has no SQL layer.
 module DBOS.Transact.DatasourceTest
   ( tests,
-    DsFixture (..),
-    FakeDs (..),
-    mkFakeDs,
-    scenarioBodyFailureRecorded,
-    scenarioCommitReplay,
-    scenarioDeleteCheckpoints,
-    scenarioOwnershipMoved,
-    scenarioPrecheckRetry,
-    scenarioRunsOutside,
-    scenarioErrorReplays,
-    scenarioRetryThenSuccess,
-    scenarioConflictAdopts,
-    scenarioCaptureRefused,
   )
 where
 
+import DBOS.DualStack (liveCase)
 import DBOS.Prelude
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
-import Control.Monad.Class.MonadTime (MonadTime)
-import Control.Monad.Class.MonadTimer (MonadDelay)
-import Data.Map.Strict (Map)
-import Data.Map.Strict qualified as Map
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Hasql.Decoders qualified as Decoders
-import Hasql.Encoders qualified as Encoders
-import Hasql.Session qualified as Session
-import Hasql.Statement qualified as Statement
-import DBOS.SystemDB (BackendErrorKind (..))
-import DBOS.SystemDB (BackendErrorKind (..), NewWorkflow (..), Submission (..), SystemDB (..), newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), Submission (..), newWorkflow)
 import DBOS.SystemDB qualified as SysDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   ( AppDataSource,
     BackendError (..),
     DataSource (..),
-    DBOS,
     EngineOnly,
     Error (..),
     Identity (..),
     IsolationLevel (..),
     RecordedOutcome (..),
     Serializer (..),
-    SerializedWorkflowValue (..),
     TransactionConfig (..),
-    WorkflowCtx,
     Tx (..),
+    WorkflowCtx,
     WorkflowId (..),
     acquireAppDataSource,
     acquireAppDataSourceIn,
-    application,
     beginSql,
-    clearDBOSCheckpoints,
     configNew,
-    encodeErrorText,
     encodeWorkflowValue,
-    firstStepStatus,
-    launchOn,
     newDBOS,
-    nextWorkflowMarker,
     nullTracer,
-    registerDBOSDataSource,
     releaseAppDataSource,
-    renderTransactError,
     runAppSession,
     runTxStep,
-    runTxOutside,
     secondsDuration,
     toDataSource,
-    transactionConfigDefault,
     verifyAppDataSource,
-    withStep,
     withWorkflow,
-  )
-import DBOS.Transact.Context
-  ( withSystemDB
   )
 import DBOS.Transact.Connection
   ( newConnection,
@@ -96,242 +58,44 @@ import DBOS.Transact.Connection
     SomeSystemDB (..)
   )
 import DBOS.SystemDB.Retry (uuidEntropy)
+import DBOS.Transact.DatasourceCases
+  ( DsFixture (..),
+    RegistryFixture (..),
+    checkBeginSql,
+    checkBodyFailureRecorded,
+    checkCaptureRefused,
+    checkCommitReplay,
+    checkConflictAdopts,
+    checkDefaultConfig,
+    checkDeleteCheckpoints,
+    checkErrorReplays,
+    checkOwnershipMoved,
+    checkPrecheckRetry,
+    checkRegistryLifecycle,
+    checkRetryThenSuccess,
+    checkRunsOutside,
+    mkFakeDs,
+    protoConfig,
+    scenarioBeginSql,
+    scenarioBodyFailureRecorded,
+    scenarioCaptureRefused,
+    scenarioCommitReplay,
+    scenarioConflictAdopts,
+    scenarioDefaultConfig,
+    scenarioDeleteCheckpoints,
+    scenarioErrorReplays,
+    scenarioOwnershipMoved,
+    scenarioPrecheckRetry,
+    scenarioRegistryLifecycle,
+    scenarioRetryThenSuccess,
+    scenarioRunsOutside,
+  )
+import Hasql.Decoders qualified as Decoders
+import Hasql.Encoders qualified as Encoders
+import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import Test.Tasty (TestTree, testGroup, withResource)
-import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
-
--- | How a tree instantiation builds its world: contexts over any backend
--- plus a fresh fake datasource per case (each case owns its rows).
-data DsFixture m = DsFixture
-  { dsFixtureRun :: forall a. Text -> (forall exec. WorkflowCtx exec m -> m a) -> m a,
-    dsFixtureMkDs :: m (FakeDs m)
-  }
-
--- | Run a case's transactions under a fresh scope: the rank-2 field is
--- read by pattern match because record-dot has no 'HasField' instance for
--- polymorphic fields.
-runFixture :: DsFixture m -> Text -> (forall exec. WorkflowCtx exec m -> m a) -> m a
-runFixture (DsFixture run _) = run
-
--- | The STM-backed fake: checkpoint rows, body-run counter, injected
--- transient failures, and a one-shot simulated concurrent winner.
-data FakeDs m = FakeDs
-  { fakeSource :: DataSource m,
-    fakeRows :: StrictTVar m (Map (Text, Int) RecordedOutcome),
-    fakeNames :: StrictTVar m (Map (Text, Int) Text),
-    fakeRuns :: StrictTVar m Int,
-    fakeTransients :: StrictTVar m Int,
-    fakeConflictOnce :: StrictTVar m Bool
-  }
-
-widText :: WorkflowId -> Text
-widText (WorkflowId text) = text
-
-transientError :: BackendError
-transientError =
-  BackendError
-    { backendMessage = "serialization failure",
-      backendSqlState = Just "40001",
-      backendKind = Transient
-    }
-
-mkFakeDs :: MonadSTM m => m (FakeDs m)
-mkFakeDs = do
-  rows <- newTVarIO Map.empty
-  names <- newTVarIO Map.empty
-  runs <- newTVarIO 0
-  transients <- newTVarIO 0
-  conflict <- newTVarIO False
-  let fakeTx = Tx (\_ _ -> error "FakeDs: statements unsupported in this fake")
-      source =
-        DataSource
-          { dsName = "test-app-db",
-            dsSchema = "dbos",
-            dsCheck = \wid _name step -> do
-              pending <- readTVarIO transients
-              if pending > 0
-                then atomically (modifyTVar transients (subtract 1)) >> pure (Left transientError)
-                else Right . Map.lookup (widText wid, step) <$> readTVarIO rows,
-            dsWithTransaction = \_isolation action -> do
-              pending <- readTVarIO transients
-              if pending > 0
-                then atomically (modifyTVar transients (subtract 1)) >> pure (Left transientError)
-                else Right <$> action fakeTx,
-            dsRecordOutput = \_tx wid name step output -> atomically $ do
-              existing <- readTVar rows
-              priorNames <- readTVar names
-              winner <- readTVar conflict
-              case Map.lookup (widText wid, step) existing of
-                Just _ -> pure False
-                Nothing
-                  | winner -> do
-                      writeTVar conflict False
-                      writeTVar rows (Map.insert (widText wid, step) (RecordedOutput (encodeWorkflowValue ("winner" :: Text)).serializedText) existing)
-                      writeTVar names (Map.insert (widText wid, step) name priorNames)
-                      pure False
-                  | otherwise -> do
-                      writeTVar rows (Map.insert (widText wid, step) (RecordedOutput output) existing)
-                      writeTVar names (Map.insert (widText wid, step) name priorNames)
-                      pure True,
-            dsRecordError = \_tx wid name step message -> atomically $ do
-              existing <- readTVar rows
-              priorNames <- readTVar names
-              case Map.lookup (widText wid, step) existing of
-                Just _ -> pure False
-                Nothing -> do
-                  writeTVar rows (Map.insert (widText wid, step) (RecordedError message) existing)
-                  writeTVar names (Map.insert (widText wid, step) name priorNames)
-                  pure True,
-            dsStepName = \wid step -> Right . Map.lookup (widText wid, step) <$> readTVarIO names,
-            dsDeleteCheckpoints = \wid step -> atomically $ do
-              existing <- readTVar rows
-              writeTVar rows (Map.filterWithKey (\(w, s) _ -> not (w == widText wid && s >= step)) existing)
-              pure (Right ())
-          }
-  pure (FakeDs source rows names runs transients conflict)
-
-protoConfig :: TransactionConfig
-protoConfig = TransactionConfig {txName = Just "proto_step", txIsolation = Just ReadCommitted}
-
--- | Python @test_sync_ds_records_and_replays@: a fresh execution replays
--- the recorded output without re-running the body.
-scenarioCommitReplay :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
-scenarioCommitReplay fx = do
-  fake <- fx.dsFixtureMkDs
-  let counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right "v1" :: Either (Error EngineOnly) Text)
-  first <- runFixture fx "ds-wf-1" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ tx -> counted tx)
-  second <- runFixture fx "ds-wf-1" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ tx -> counted tx)
-  runs <- readTVarIO fake.fakeRuns
-  pure (first, second, runs)
-
--- | Python @test_sync_ds_records_and_replays_errors@ (replay half): a
--- recorded failure decodes back to itself. The record half follows once
--- the body-failure channel lands.
-scenarioErrorReplays :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error Text) Text)
-scenarioErrorReplays fx = do
-  fake <- fx.dsFixtureMkDs
-  atomically (writeTVar fake.fakeRows (Map.singleton ("ds-wf-2", 0) (RecordedError (encodeErrorText (application ("boom" :: Text) :: Error Text)))))
-  runFixture fx "ds-wf-2" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("unused" :: Text)))
-
--- | Python @test_sync_ds_retries_on_serialization_error@: two retriable
--- failures, then success, with the injections consumed.
-scenarioRetryThenSuccess :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
-scenarioRetryThenSuccess fx = do
-  fake <- fx.dsFixtureMkDs
-  atomically (writeTVar fake.fakeTransients 2)
-  result <- runFixture fx "ds-wf-3" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("v" :: Text)))
-  left <- readTVarIO fake.fakeTransients
-  pure (result, left)
-
--- | Python @test_sync_ds_conflicts_when_duplicate_execution_wins@: a
--- concurrent winner committed first, so this execution adopts it.
-scenarioConflictAdopts :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text)
-scenarioConflictAdopts fx = do
-  fake <- fx.dsFixtureMkDs
-  atomically (writeTVar fake.fakeConflictOnce True)
-  runFixture fx "ds-wf-4" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("loser" :: Text)))
-
--- | The captured-parent shape of the same leaf violation: the call reaches
--- through a context whose scope field predates the running body, so the
--- shared depth counter reports it. Refused with 'InsideStep' before
--- anything is written.
-scenarioCaptureRefused :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
-scenarioCaptureRefused fx = do
-  fake <- fx.dsFixtureMkDs
-  result <- runFixture fx "ds-wf-5-captured" $ \wctx -> do
-    marker <- nextWorkflowMarker wctx
-    withStep wctx marker (firstStepStatus 0) $ \_stepped ->
-      runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("x" :: Text)))
-  rows <- readTVarIO fake.fakeRows
-  pure (result, Map.size rows)
-
--- | The record half: a body failure records, and replay returns it
--- without re-running the body.
-scenarioBodyFailureRecorded :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error Text) Text, Either (Error Text) Text, Int)
-scenarioBodyFailureRecorded fx = do
-  fake <- fx.dsFixtureMkDs
-  let failing _ = pure (Left (application ("boom" :: Text)))
-      counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right ("v" :: Text))
-  first <- runFixture fx "ds-wf-6" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ tx -> failing tx)
-  second <- runFixture fx "ds-wf-6" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ tx -> counted tx)
-  runs <- readTVarIO fake.fakeRuns
-  pure (first, second, runs)
-
--- | A transient pre-check read is retried, then the transaction runs.
-scenarioPrecheckRetry :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
-scenarioPrecheckRetry fx = do
-  fake <- fx.dsFixtureMkDs
-  atomically (writeTVar fake.fakeTransients 1)
-  result <- runFixture fx "ds-wf-8" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("v" :: Text)))
-  left <- readTVarIO fake.fakeTransients
-  pure (result, left)
-
--- | Python @test_sync_ds_runs_outside_workflow@: outside any workflow the
--- body runs transactionally (transients retried) but checkpoints nothing.
--- Takes only the fake: no context exists out here.
-scenarioRunsOutside :: (MonadSTM m, MonadDelay m, MonadCatch m) => m (FakeDs m) -> m (Either BackendError Text, Int, Int)
-scenarioRunsOutside mkDs = do
-  fake <- mkDs
-  atomically (writeTVar fake.fakeTransients 1)
-  result <- runTxOutside fake.fakeSource protoConfig (\_ -> atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure "v")
-  rows <- readTVarIO fake.fakeRows
-  runs <- readTVarIO fake.fakeRuns
-  pure (result, Map.size rows, runs)
-
--- | Python completion clearing (`delete_checkpoints` shape): deleting
--- from a step drops later checkpoints (earlier ones stay, replaying),
--- and deleting everything re-runs the body.
-scenarioDeleteCheckpoints :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
-scenarioDeleteCheckpoints fx = do
-  fake <- fx.dsFixtureMkDs
-  let counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right ("v" :: Text))
-      clean wid step = do
-        cleared <- fake.fakeSource.dsDeleteCheckpoints (WorkflowId wid) step
-        case cleared of
-          Left err -> pure (Left (ErrorSystemDatabase (SysDB.Backend err)))
-          Right () -> pure (Right "cleaned")
-  (first, second) <-
-    runFixture fx "ds-wf-9" $ \wctx -> do
-      first <- runTxStep fake.fakeSource protoConfig wctx (\_ tx -> counted tx)
-      second <- runTxStep fake.fakeSource protoConfig wctx (\_ tx -> counted tx)
-      pure (first, second)
-  _ <- clean "ds-wf-9" 1
-  third <- runFixture fx "ds-wf-9" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ tx -> counted tx)
-  _ <- clean "ds-wf-9" 0
-  fourth <- runFixture fx "ds-wf-9" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ tx -> counted tx)
-  runs <- readTVarIO fake.fakeRuns
-  pure (first, second, third, fourth, runs)
-
--- | Python @test_sync_ds_rolls_back_once_ownership_moves@: the checkpoint
--- lost to an execution owned by another executor, so this execution stops
--- instead of adopting. Staged through the 'SystemDB' class so both stacks
--- run it: the row carries a foreign executor on live and sim alike.
-scenarioOwnershipMoved :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> Text -> m (Either (Error EngineOnly) Text)
-scenarioOwnershipMoved fx wfId = do
-  fake <- fx.dsFixtureMkDs
-  started <- runFixture fx wfId $ \wctx ->
-    withSystemDB wctx (\db -> initWorkflow db ((newWorkflow wfId) {newWorkflowExecutorId = Just "other-executor"}) Nothing Fresh Nothing)
-
-  case started of
-    Left err -> pure (Left (ErrorSystemDatabase err))
-    Right _ -> do
-      atomically (writeTVar fake.fakeConflictOnce True)
-      runFixture fx wfId $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("loser" :: Text)))
-
--- | The registry's created-before-launch rule and completion clearing,
--- over an instance that never launches: registration is open, a duplicate
--- name is refused, and clearing empties the fake's rows. The transaction
--- runs over the suite's own connection; only registration and clearing go
--- through the instance.
-scenarioRegistryLifecycle :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadMVar m) => DBOS m -> (forall a. Text -> (forall exec. WorkflowCtx exec m -> m a) -> m a) -> Text -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Int, Int)
-scenarioRegistryLifecycle dbos mkCtx wid = do
-  fake <- mkFakeDs
-  first <- registerDBOSDataSource dbos fake.fakeSource
-  duplicate <- registerDBOSDataSource dbos fake.fakeSource
-  _ <- mkCtx wid (\wctx -> (runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("v" :: Text))) :: m (Either (Error Text) Text)))
-  rowsBefore <- readTVarIO fake.fakeRows
-  clearDBOSCheckpoints dbos (WorkflowId wid)
-  rowsAfter <- readTVarIO fake.fakeRows
-  pure (first, duplicate, Map.size rowsBefore, Map.size rowsAfter)
+import Test.Tasty.HUnit (assertFailure, testCase, (@?=))
 
 -- | A connection over the suite backend. The engine under test touches no
 -- per-test tables — only their own workflow ids.
@@ -444,165 +208,109 @@ withProbeCheckpointApp action = do
 tests :: TestTree
 tests =
   withResource acquireDsBackend Postgres.releasePostgresSystemDB $ \getBackend ->
-    testGroup
-      "Datasource"
-      [ testCase "a default config names nothing and takes the database default isolation" $ do
-          transactionConfigDefault @?= TransactionConfig {txName = Nothing, txIsolation = Nothing},
-        testCase "a transaction commits once and replays without re-running" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          (first, second, runs) <- scenarioCommitReplay fx
-          first @?= Right "v1"
-          second @?= Right "v1"
-          runs @?= 1,
-        testCase "a recorded failure decodes back to itself" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          result <- scenarioErrorReplays fx
-          result @?= Left (application "boom"),
-        testCase "a body failure records, and replay returns it without re-running" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          (first, second, runs) <- scenarioBodyFailureRecorded fx
-          first @?= Left (application "boom")
-          second @?= Left (application "boom")
-          runs @?= 0,
-        testCase "retriable failures are retried, then the body runs" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          (result, left) <- scenarioRetryThenSuccess fx
-          result @?= Right "v"
-          left @?= 0,
-        testCase "a duplicate execution that won is adopted" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          result <- scenarioConflictAdopts fx
-          result @?= Right "winner",
-        testCase "a call through a captured parent is refused and records nothing" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          (result, rowCount) <- scenarioCaptureRefused fx
-          result @?= Left (InsideStep "transaction")
-          rowCount @?= 0,
-        testCase "beginSql names every isolation level" $ do
-          beginSql Nothing @?= "BEGIN"
-          beginSql (Just ReadUncommitted) @?= "BEGIN TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
-          beginSql (Just ReadCommitted) @?= "BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED"
-          beginSql (Just RepeatableRead) @?= "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ"
-          beginSql (Just Serializable) @?= "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-        -- IO only: needs a live pool; the sim has no SQL layer. No
-        -- migration ever creates the table, so absence is the assertion.
-        testCase "verify refuses a database without the checkpoint table" $ do
-          withProbeApp $ \app -> do
-            verified <- verifyAppDataSource app
-            case verified of
-              Left _ -> pure ()
-              Right () -> assertFailure "expected refusal: nothing creates the checkpoint table",
-        -- IO only: needs a live pool and scratch DDL; the sim has no SQL layer.
-        testCase "a committed transaction leaves every row" $ do
-          withProbeApp $ \app -> do
-            withProbeTable app $ \table -> do
-              let insert =
-                    Statement.preparable
-                      ("INSERT INTO " <> table <> " (wid, bal) VALUES ('a', 1)")
-                      Encoders.noParams
-                      Decoders.noResult
-              result <- runProbeTx (toDataSource app) Nothing (\(Tx run) -> run insert () >> run insert ())
-              case result of
-                Left err -> assertFailure ("commit failed: " <> show err)
-                Right () -> pure ()
-              count <- countProbe app table
-              count @?= 2,
-        -- IO only: needs a live pool and scratch DDL; the sim has no SQL layer.
-        testCase "a thrown body rolls everything back" $ do
-          withProbeApp $ \app -> do
-            withProbeTable app $ \table -> do
-              let insert =
-                    Statement.preparable
-                      ("INSERT INTO " <> table <> " (wid, bal) VALUES ('a', 1)")
-                      Encoders.noParams
-                      Decoders.noResult
-              attempted <- try (runProbeTx (toDataSource app) Nothing (\(Tx run) -> run insert () >> throwIO (userError "boom"))) :: IO (Either IOError (Either BackendError ()))
-              case attempted of
-                Left _ -> pure ()
-                Right _ -> assertFailure "expected the body failure to escape"
-              count <- countProbe app table
-              count @?= 0,
-        testCase "an ownership move stops the execution instead of adopting" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          wfId <- (("ds-own-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
-          result <- scenarioOwnershipMoved fx wfId
-          case result of
-            Left err -> assertBool "names the owning executor" ("other-executor" `Text.isInfixOf` renderTransactError err)
-            Right _ -> assertFailure "expected the ownership conflict to stop the execution",
-        testCase "a transient pre-check read is retried, then the transaction runs" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          (result, left) <- scenarioPrecheckRetry fx
-          result @?= Right "v"
-          left @?= 0,
-        testCase "outside a workflow the body runs transactionally and checkpoints nothing" $ do
-          (result, rowCount, runs) <- scenarioRunsOutside mkFakeDs
-          result @?= Right "v"
-          rowCount @?= 0
-          runs @?= 1,
-        testCase "deleting from a step drops later checkpoints and re-runs" $ do
-          backend <- getBackend
-          let fx = DsFixture (dsRunOver backend) mkFakeDs
-          (first, second, third, fourth, runs) <- scenarioDeleteCheckpoints fx
-          (first, second, third, fourth) @?= (Right "v", Right "v", Right "v", Right "v")
-          runs @?= 3,
-        -- IO only: the live binding's delete path, over a scratch schema so
-        -- the case owns its checkpoint table.
-        testCase "deleting from a step drops later checkpoints on the live datasource" $ do
-          backend <- getBackend
-          wfId <- (("ds-live-del-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
-          withProbeCheckpointApp $ \app -> do
-            let ds = toDataSource app
-                expected = RecordedOutput (encodeWorkflowValue ("v" :: Text)).serializedText
-            (first, second) <-
-              dsRunOver backend wfId $ \wctx -> do
-                first <- runTxStep ds protoConfig wctx (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
-                second <- runTxStep ds protoConfig wctx (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
-                pure (first, second)
-            (first, second) @?= (Right "v", Right "v")
-            ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right (Just expected))
-            ds.dsCheck (WorkflowId wfId) "proto_step" 1 >>= (@?= Right (Just expected))
-            ds.dsDeleteCheckpoints (WorkflowId wfId) 1 >>= (@?= Right ())
-            ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right (Just expected))
-            ds.dsCheck (WorkflowId wfId) "proto_step" 1 >>= (@?= Right Nothing)
-            ds.dsDeleteCheckpoints (WorkflowId wfId) 0 >>= (@?= Right ())
-            ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right Nothing),
-        -- IO only: the live binding, over a scratch checkpoint table.
-        testCase "a transaction recorded under another name at the same step is refused" $ do
-          backend <- getBackend
-          wfId <- (("ds-live-name-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
-          withProbeCheckpointApp $ \app -> do
-            let ds = toDataSource app
-                first = TransactionConfig {txName = Just "first_step", txIsolation = Just ReadCommitted}
-                second = TransactionConfig {txName = Just "second_step", txIsolation = Just ReadCommitted}
-            written <- dsRunOver backend wfId $ \wctx ->
-              runTxStep ds first wctx (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
-            written @?= Right "v"
-            -- A reordered or renamed body reaches the same step slot under a
-            -- different name: replay must refuse instead of returning "v".
-            replayed <- dsRunOver backend wfId $ \wctx ->
-              runTxStep ds second wctx (\_ _ -> pure (Right ("changed" :: Text))) :: IO (Either (Error EngineOnly) Text)
-            case replayed of
-              Left (ErrorSystemDatabase (SysDB.UnexpectedStep {stepId = recordedStep, expected = want, recorded = got})) -> do
-                recordedStep @?= 0
-                want @?= "second_step"
-                got @?= "first_step"
-              other -> assertFailure ("expected the recorded name to be refused, got: " <> show other),
-        testCase "the datasource registry refuses duplicates and clears checkpoints" $ do
-          backend <- getBackend
-          dbos <- newDBOS (configNew "ds-registry" "postgres://unused")
-          (first, duplicate, rowsBefore, rowsAfter) <- scenarioRegistryLifecycle dbos (dsRunOver backend) "ds-wf-registry"
-          first @?= Right ()
-          case duplicate of
-            Left err -> assertBool "refusal names the datasource" ("datasource" `Text.isInfixOf` renderTransactError err)
-            Right () -> assertFailure "expected the duplicate registration to be refused"
-          rowsBefore @?= 1
-          rowsAfter @?= 0
-      ]
+    let leaf :: String -> (DsFixture IO -> IO a) -> (a -> Either String ()) -> TestTree
+        leaf name scen check = liveCase (mkLiveFixture =<< getBackend) name scen check
+        mkLiveFixture backend = pure (DsFixture (dsRunOver backend) mkFakeDs)
+     in testGroup
+          "Datasource"
+          [ testCase "a default config names nothing and takes the database default isolation" (either fail pure (checkDefaultConfig scenarioDefaultConfig)),
+            leaf "a transaction commits once and replays without re-running" scenarioCommitReplay checkCommitReplay,
+            leaf "a recorded failure decodes back to itself" scenarioErrorReplays checkErrorReplays,
+            leaf "a body failure records, and replay returns it without re-running" scenarioBodyFailureRecorded checkBodyFailureRecorded,
+            leaf "retriable failures are retried, then the body runs" scenarioRetryThenSuccess checkRetryThenSuccess,
+            leaf "a duplicate execution that won is adopted" scenarioConflictAdopts checkConflictAdopts,
+            leaf "a call through a captured parent is refused and records nothing" scenarioCaptureRefused checkCaptureRefused,
+            testCase "beginSql names every isolation level" (either fail pure (checkBeginSql scenarioBeginSql)),
+            -- IO only: needs a live pool; the sim has no SQL layer. No
+            -- migration ever creates the table, so absence is the assertion.
+            testCase "verify refuses a database without the checkpoint table" $ do
+              withProbeApp $ \app -> do
+                verified <- verifyAppDataSource app
+                case verified of
+                  Left _ -> pure ()
+                  Right () -> assertFailure "expected refusal: nothing creates the checkpoint table",
+            -- IO only: needs a live pool and scratch DDL; the sim has no SQL layer.
+            testCase "a committed transaction leaves every row" $ do
+              withProbeApp $ \app -> do
+                withProbeTable app $ \table -> do
+                  let insert =
+                        Statement.preparable
+                          ("INSERT INTO " <> table <> " (wid, bal) VALUES ('a', 1)")
+                          Encoders.noParams
+                          Decoders.noResult
+                  result <- runProbeTx (toDataSource app) Nothing (\(Tx run) -> run insert () >> run insert ())
+                  case result of
+                    Left err -> assertFailure ("commit failed: " <> show err)
+                    Right () -> pure ()
+                  count <- countProbe app table
+                  count @?= 2,
+            -- IO only: needs a live pool and scratch DDL; the sim has no SQL layer.
+            testCase "a thrown body rolls everything back" $ do
+              withProbeApp $ \app -> do
+                withProbeTable app $ \table -> do
+                  let insert =
+                        Statement.preparable
+                          ("INSERT INTO " <> table <> " (wid, bal) VALUES ('a', 1)")
+                          Encoders.noParams
+                          Decoders.noResult
+                  attempted <- try (runProbeTx (toDataSource app) Nothing (\(Tx run) -> run insert () >> throwIO (userError "boom"))) :: IO (Either IOError (Either BackendError ()))
+                  case attempted of
+                    Left _ -> pure ()
+                    Right _ -> assertFailure "expected the body failure to escape"
+                  count <- countProbe app table
+                  count @?= 0,
+            leaf "an ownership move stops the execution instead of adopting" (\fx -> (("ds-own-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId >>= scenarioOwnershipMoved fx) checkOwnershipMoved,
+            leaf "a transient pre-check read is retried, then the transaction runs" scenarioPrecheckRetry checkPrecheckRetry,
+            leaf "outside a workflow the body runs transactionally and checkpoints nothing" (\_ -> scenarioRunsOutside mkFakeDs) checkRunsOutside,
+            leaf "deleting from a step drops later checkpoints and re-runs" scenarioDeleteCheckpoints checkDeleteCheckpoints,
+            -- IO only: the live binding's delete path, over a scratch schema so
+            -- the case owns its checkpoint table.
+            testCase "deleting from a step drops later checkpoints on the live datasource" $ do
+              backend <- getBackend
+              wfId <- (("ds-live-del-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
+              withProbeCheckpointApp $ \app -> do
+                let ds = toDataSource app
+                    expected = RecordedOutput (encodeWorkflowValue ("v" :: Text)).serializedText
+                (first, second) <-
+                  dsRunOver backend wfId $ \wctx -> do
+                    first <- runTxStep ds protoConfig wctx (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
+                    second <- runTxStep ds protoConfig wctx (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
+                    pure (first, second)
+                (first, second) @?= (Right "v", Right "v")
+                ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right (Just expected))
+                ds.dsCheck (WorkflowId wfId) "proto_step" 1 >>= (@?= Right (Just expected))
+                ds.dsDeleteCheckpoints (WorkflowId wfId) 1 >>= (@?= Right ())
+                ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right (Just expected))
+                ds.dsCheck (WorkflowId wfId) "proto_step" 1 >>= (@?= Right Nothing)
+                ds.dsDeleteCheckpoints (WorkflowId wfId) 0 >>= (@?= Right ())
+                ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right Nothing),
+            -- IO only: the live binding, over a scratch checkpoint table.
+            testCase "a transaction recorded under another name at the same step is refused" $ do
+              backend <- getBackend
+              wfId <- (("ds-live-name-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
+              withProbeCheckpointApp $ \app -> do
+                let ds = toDataSource app
+                    first = TransactionConfig {txName = Just "first_step", txIsolation = Just ReadCommitted}
+                    second = TransactionConfig {txName = Just "second_step", txIsolation = Just ReadCommitted}
+                written <- dsRunOver backend wfId $ \wctx ->
+                  runTxStep ds first wctx (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
+                written @?= Right "v"
+                -- A reordered or renamed body reaches the same step slot under a
+                -- different name: replay must refuse instead of returning "v".
+                replayed <- dsRunOver backend wfId $ \wctx ->
+                  runTxStep ds second wctx (\_ _ -> pure (Right ("changed" :: Text))) :: IO (Either (Error EngineOnly) Text)
+                case replayed of
+                  Left (ErrorSystemDatabase (SysDB.UnexpectedStep {stepId = recordedStep, expected = want, recorded = got})) -> do
+                    recordedStep @?= 0
+                    want @?= "second_step"
+                    got @?= "first_step"
+                  other -> assertFailure ("expected the recorded name to be refused, got: " <> show other),
+            liveCase
+              (do
+                backend <- getBackend
+                dbos <- newDBOS (configNew "ds-registry" "postgres://unused")
+                pure (RegistryFixture dbos (DsFixture (dsRunOver backend) mkFakeDs)))
+              "the datasource registry refuses duplicates and clears checkpoints"
+              (\(RegistryFixture dbos fx) -> scenarioRegistryLifecycle dbos fx "ds-wf-registry")
+              checkRegistryLifecycle
+          ]

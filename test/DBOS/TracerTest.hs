@@ -5,7 +5,6 @@ module DBOS.TracerTest
   )
 where
 
-import Control.Monad (forM_, replicateM)
 import Control.Monad.IOSim (runSimTrace, selectTraceEventsDynamic, selectTraceEventsSay)
 import Control.Tracer qualified as CT
 import Data.ByteString.Char8 qualified as ByteString

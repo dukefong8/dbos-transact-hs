@@ -9,8 +9,6 @@ module DBOS.SystemDB.Class
 where
 
 import DBOS.Prelude
-import Control.Monad.Class.MonadTime (MonadTime)
-import Control.Monad.Class.MonadTimer (MonadDelay)
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Word (Word64)

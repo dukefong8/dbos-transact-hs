@@ -137,10 +137,8 @@ module DBOS.SystemDB.Postgres.Statements
   )
 where
 
-import Data.Functor (void)
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
-import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text

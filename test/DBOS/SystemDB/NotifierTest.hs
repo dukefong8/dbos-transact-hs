@@ -5,7 +5,6 @@ module DBOS.SystemDB.NotifierTest (tests) where
 
 import DBOS.Prelude
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import Control.Monad (replicateM_)
 import DBOS.SystemDB
   ( Notifier (..),
     enable,

@@ -42,12 +42,8 @@ module DBOS.Transact.Datasource
 where
 
 import DBOS.Prelude
-import Control.Concurrent.Class.MonadMVar (MonadMVar)
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
-import Control.Concurrent.Class.MonadMVar.Strict (StrictMVar, modifyMVar, modifyMVar_, newMVar, readMVar)
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text, pack)
 import Data.Text qualified as Text
 import Hasql.Statement qualified as Statement

@@ -4,173 +4,45 @@
 -- | In-workflow waits against the live backend, ported from Rust
 -- @tests/waits.rs@: an empty first wait records its refusal and a replay
 -- reads it back, a recorded winner that left the set is refused, and a
--- replayed first wait reads its recorded winner back.
+-- replayed first wait reads its recorded winner back. Scenarios and checks
+-- live in 'DBOS.Transact.WaitCases' and run here over Postgres rows (and
+-- in 'DBOS.Transact.WaitTestSim' over the in-memory backend).
 module DBOS.Transact.WaitTest (tests) where
 
+import DBOS.DualStack (liveCaseWith)
 import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (NewWorkflow (..), Outcome (..), StepRecord (..), Submission (..), WorkflowId (..), newWorkflow, selectStepName)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), Submission (..), WorkflowId (..), newWorkflow, selectStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (Error (..), acquireLoggerBackend, ioTracer, joinWorkflows, nullTracer, selectWorkflow)
-import DBOS.Transact.ContextTest (ctxOver)
+import DBOS.Transact (Identity (..), acquireLoggerBackend, ioTracer, nullTracer, withWorkflow)
+import DBOS.Transact.ContextTest (connOver)
+import DBOS.Transact.WaitCases
+  ( WaitFixture (..),
+    checkCancelled,
+    checkEmptyAll,
+    checkJoinLast,
+    checkJoinSettled,
+    checkRefusal,
+    checkRepeated,
+    checkReplayWinner,
+    checkSelectFirst,
+    checkSelectSettledFirst,
+    checkWinnerLeft,
+    scenarioCancelled,
+    scenarioEmptyAll,
+    scenarioJoinLast,
+    scenarioJoinSettled,
+    scenarioRefusal,
+    scenarioRepeated,
+    scenarioReplayWinner,
+    scenarioSelectFirst,
+    scenarioSelectSettledFirst,
+    scenarioWinnerLeft,
+  )
 import Test.Tasty (TestTree, testGroup, withResource)
-import Test.Tasty.HUnit (assertBool, testCase, (@?=))
-
-tests :: TestTree
-tests =
-  withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
-  testGroup
-    "In-workflow waits"
-    [ testCase "an empty first wait records its refusal and a replay reads it back" $ withWorkflow getBackend "wait-refusal" $ \backend workflowText -> do
-        context <- ctxOver backend nullTracer workflowText
-        first <- selectWorkflow context []
-        case first of
-          Left (InvalidArgument operation detail) -> do
-            operation @?= "select_workflow"
-            detail @?= "no workflow ids to wait for"
-          other -> fail (show other)
-        recorded <- SystemDB.checkStep backend (WorkflowId workflowText) 0 selectStepName
-        case recorded of
-          Right (Just record) -> assertBool "the refusal is recorded as a step error" (record.stepRecordError /= Nothing)
-          other -> fail (show other)
-        -- The replay looks at a set that now has an answer, and still reads
-        -- the refusal back rather than deciding again. A fresh context is the
-        -- replay's start: step ids are taken at the call in this port.
-        replayContext <- ctxOver backend nullTracer workflowText
-        replayed <- selectWorkflow replayContext [WorkflowId workflowText]
-        case replayed of
-          Left (InvalidArgument operation _) -> operation @?= "select_workflow"
-          other -> fail (show other),
-      testCase "a recorded winner that left the set is refused" $ withWorkflow getBackend "wait-winner" $ \backend workflowText -> do
-        settled <- SystemDB.recordWorkflowOutcome backend (WorkflowId workflowText) (OutcomeOutput (Just "null"))
-        case settled of
-          Left err -> fail (show err)
-          Right _ -> pure ()
-        context <- ctxOver backend nullTracer workflowText
-        first <- selectWorkflow context [WorkflowId workflowText]
-        first @?= Right (WorkflowId workflowText)
-        replayContext <- ctxOver backend nullTracer workflowText
-        replayed <- selectWorkflow replayContext [WorkflowId "hs-wait-elsewhere"]
-        case replayed of
-          Left (ErrorSystemDatabase err) -> case err of
-            SystemDB.UnexpectedStep {workflowId, stepId, recorded} -> do
-              workflowId @?= workflowText
-              stepId @?= 0
-              assertBool "the recorded winner is named" (workflowText `Text.isInfixOf` recorded)
-            other -> fail (show other)
-          other -> fail (show other),
-      testCase "an all-wait completes over a settled workflow" $ withWorkflow getBackend "wait-join" $ \backend workflowText -> do
-        settled <- SystemDB.recordWorkflowOutcome backend (WorkflowId workflowText) (OutcomeOutput (Just "null"))
-        case settled of
-          Left err -> fail (show err)
-          Right _ -> pure ()
-        context <- ctxOver backend nullTracer workflowText
-        outcome <- joinWorkflows context [WorkflowId workflowText]
-        outcome @?= Right (),
-      testCase "select reports the first workflow to settle" $ do
-        backend <- getBackend
-        freshId <- UUID.V4.nextRandom
-        let firstText = "hs-l2-wait-first-a-" <> Text.pack (UUID.toString freshId)
-            secondText = "hs-l2-wait-first-b-" <> Text.pack (UUID.toString freshId)
-        let start text = do
-              created <- SystemDB.initWorkflow backend ((newWorkflow text) {newWorkflowName = Just "L2WaitFirst"}) Nothing Fresh Nothing
-              case created of
-                Left err -> fail (show err)
-                Right _ -> pure ()
-        start firstText
-        start secondText
-        settled <- SystemDB.recordWorkflowOutcome backend (WorkflowId secondText) (OutcomeOutput (Just "null"))
-        case settled of
-          Left err -> fail (show err)
-          Right _ -> pure ()
-        context <- ctxOver backend nullTracer firstText
-        first <- selectWorkflow context [WorkflowId firstText, WorkflowId secondText]
-        first @?= Right (WorkflowId secondText)
-        recorded <- SystemDB.checkStep backend (WorkflowId firstText) 0 selectStepName
-        case recorded of
-          Right (Just record) -> case record.stepRecordOutput of
-            Just _ -> pure ()
-            Nothing -> fail "expected the winning select to checkpoint its output"
-          other -> fail (show other),
-      testCase "a replayed first-wait reads its recorded winner back" $ do
-        backend <- getBackend
-        freshId <- UUID.V4.nextRandom
-        let firstText = "hs-l2-wait-replay-a-" <> Text.pack (UUID.toString freshId)
-            secondText = "hs-l2-wait-replay-b-" <> Text.pack (UUID.toString freshId)
-        let start text = do
-              created <- SystemDB.initWorkflow backend ((newWorkflow text) {newWorkflowName = Just "L2WaitReplay"}) Nothing Fresh Nothing
-              case created of
-                Left err -> fail (show err)
-                Right _ -> pure ()
-        start firstText
-        start secondText
-        settled <- SystemDB.recordWorkflowOutcome backend (WorkflowId secondText) (OutcomeOutput (Just "null"))
-        case settled of
-          Left err -> fail (show err)
-          Right _ -> pure ()
-        context <- ctxOver backend nullTracer firstText
-        first <- selectWorkflow context [WorkflowId firstText, WorkflowId secondText]
-        first @?= Right (WorkflowId secondText)
-        -- The replay announces through FastLogger, so the run proves the
-        -- trace seam as well as the winner it reads back.
-        (logger, cleanup) <- acquireLoggerBackend
-        replayContext <- ctxOver backend (ioTracer logger) firstText
-        replayed <- selectWorkflow replayContext [WorkflowId firstText, WorkflowId secondText]
-        cleanup
-        replayed @?= Right (WorkflowId secondText),
-      testCase "a cancelled workflow counts as settled" $ withWorkflow getBackend "wait-cancelled" $ \backend workflowText -> do
-        freshId <- UUID.V4.nextRandom
-        let otherText = "hs-l2-wait-cancelled-other-" <> Text.pack (UUID.toString freshId)
-        created <- SystemDB.initWorkflow backend ((newWorkflow otherText) {newWorkflowName = Just "L2WaitCancelled"}) Nothing Fresh Nothing
-        case created of
-          Left err -> fail (show err)
-          Right _ -> pure ()
-        cancelled <- SystemDB.cancelWorkflows backend [WorkflowId otherText] False Nothing
-        case cancelled of
-          Left err -> fail (show err)
-          Right _ -> pure ()
-        context <- ctxOver backend nullTracer workflowText
-        first <- selectWorkflow context [WorkflowId workflowText, WorkflowId otherText]
-        first @?= Right (WorkflowId otherText),
-      testCase "join returns when the last workflow settles" $ withWorkflow getBackend "wait-join-last" $ \backend workflowText -> do
-        freshId <- UUID.V4.nextRandom
-        let otherText = "hs-l2-wait-join-other-" <> Text.pack (UUID.toString freshId)
-        created <- SystemDB.initWorkflow backend ((newWorkflow otherText) {newWorkflowName = Just "L2WaitJoinOther"}) Nothing Fresh Nothing
-        case created of
-          Left err -> fail (show err)
-          Right _ -> pure ()
-        let settle text = do
-              settled <- SystemDB.recordWorkflowOutcome backend (WorkflowId text) (OutcomeOutput (Just "null"))
-              case settled of
-                Left err -> fail (show err)
-                Right _ -> pure ()
-        settle workflowText
-        settle otherText
-        context <- ctxOver backend nullTracer workflowText
-        outcome <- joinWorkflows context [WorkflowId workflowText, WorkflowId otherText]
-        outcome @?= Right (),
-      testCase "an empty all-wait is satisfied and takes no step" $ withWorkflow getBackend "wait-empty-all" $ \backend workflowText -> do
-        context <- ctxOver backend nullTracer workflowText
-        outcome <- joinWorkflows context []
-        outcome @?= Right ()
-        free <- SystemDB.checkStep backend (WorkflowId workflowText) 0 selectStepName
-        case free of
-          Right Nothing -> pure ()
-          other -> fail (show other),
-      testCase "a repeated id is accepted by both waits" $ withWorkflow getBackend "wait-repeated" $ \backend workflowText -> do
-        settled <- SystemDB.recordWorkflowOutcome backend (WorkflowId workflowText) (OutcomeOutput (Just "null"))
-        case settled of
-          Left err -> fail (show err)
-          Right _ -> pure ()
-        context <- ctxOver backend nullTracer workflowText
-        first <- selectWorkflow context [WorkflowId workflowText, WorkflowId workflowText]
-        first @?= Right (WorkflowId workflowText)
-        outcome <- joinWorkflows context [WorkflowId workflowText, WorkflowId workflowText]
-        outcome @?= Right ()
-    ]
 
 -- | One backend for the whole group: pools are per-backend, so sharing
 -- bounds connections no matter how many tests run or are interrupted.
@@ -181,13 +53,58 @@ acquireSuiteBackend = do
   Postgres.activatePostgresSystemDB backend
   pure backend
 
-withWorkflow :: IO Postgres.PostgresSystemDB -> Text.Text -> (Postgres.PostgresSystemDB -> Text.Text -> IO a) -> IO a
-withWorkflow getBackend label action = do
-  backend <- getBackend
-  freshId <- UUID.V4.nextRandom
-  let workflowText = "hs-l2-" <> label <> "-" <> Text.pack (UUID.toString freshId)
-      initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2WaitTest"}
-  created <- SystemDB.initWorkflow backend initialWorkflow Nothing Fresh Nothing
-  case created of
-    Left err -> fail (show err)
-    Right _ -> action backend workflowText
+waitTestIdentity :: Identity
+waitTestIdentity =
+  Identity
+    { identityAppName = "test-app",
+      identityAppVersion = "1.0.0",
+      identityExecutorId = "test-executor",
+      identityAppId = ""
+    }
+
+-- | One fixture per leaf over the suite backend: labeled fresh ids per
+-- scenario, every run announcing through the leaf's FastLogger backend
+-- (so the replay run proves the trace seam as well as the winner it
+-- reads back).
+mkWaitFixture :: Postgres.PostgresSystemDB -> (WaitFixture IO -> IO a) -> IO a
+mkWaitFixture backend run = do
+  (logger, cleanup) <- acquireLoggerBackend
+  let fixture =
+        WaitFixture
+          { wfFreshWorkflowId = \label -> do
+              freshId <- UUID.V4.nextRandom
+              let workflowText = "hs-l2-wait-" <> label <> "-" <> Text.pack (UUID.toString freshId)
+              created <- SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just "L2WaitTest"}) Nothing Fresh Nothing
+              case created of
+                Left err -> fail (show err)
+                Right _ -> pure (WorkflowId workflowText),
+            wfCtx = \wid action -> do
+              conn <- connOver backend (ioTracer logger)
+              withWorkflow conn waitTestIdentity wid Nothing action,
+            wfSettle = \wid ->
+              SystemDB.recordWorkflowOutcome backend wid (OutcomeOutput (Just "null")) >>= either (fail . show) (const (pure ())),
+            wfCancel = \wid ->
+              SystemDB.cancelWorkflows backend [wid] False Nothing >>= either (fail . show) (const (pure ())),
+            wfCheckStep = \wid ->
+              SystemDB.checkStep backend wid 0 selectStepName >>= either (fail . show) pure
+          }
+  run fixture `finally` cleanup
+
+tests :: TestTree
+tests =
+  withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
+    let leaf :: String -> (WaitFixture IO -> IO a) -> (a -> Either String ()) -> TestTree
+        leaf name scen check = liveCaseWith (\run -> getBackend >>= \backend -> mkWaitFixture backend run) name scen check
+     in testGroup
+          "In-workflow waits"
+          [ leaf "an empty first wait records its refusal and a replay reads it back" scenarioRefusal checkRefusal,
+            leaf "a recorded winner that left the set is refused" scenarioWinnerLeft checkWinnerLeft,
+            leaf "an all-wait completes over a settled workflow" scenarioJoinSettled checkJoinSettled,
+            leaf "select reports the first workflow to settle" scenarioSelectFirst checkSelectFirst,
+            leaf "a settled first id wins over a pending set" scenarioSelectSettledFirst checkSelectSettledFirst,
+            leaf "a replayed first-wait reads its recorded winner back" scenarioReplayWinner checkReplayWinner,
+            leaf "a cancelled workflow counts as settled" scenarioCancelled checkCancelled,
+            leaf "join returns when the last workflow settles" scenarioJoinLast checkJoinLast,
+            leaf "an empty all-wait is satisfied and takes no step" scenarioEmptyAll checkEmptyAll,
+            leaf "a repeated id is accepted by both waits" scenarioRepeated checkRepeated
+          ]

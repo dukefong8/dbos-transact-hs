@@ -9,6 +9,7 @@ common commons
     DuplicateRecordFields
     NoFieldSelectors
     NoImplicitPrelude
+    NoMonomorphismRestriction
     OverloadedLabels
     OverloadedRecordDot
     RecordWildCards
@@ -35,6 +36,7 @@ common commons
     io-sim,
     mtl,
     postgresql-types,
+    rerefined,
     safe-wild-cards,
     stm-containers,
     strict-wrapper,
@@ -113,11 +115,14 @@ test-suite test
     DBOS.SystemDB.IOSimTest
     DBOS.SystemDB.RetryTest
     DBOS.SystemDB.PostgresTest
+    DBOS.Transact.CheckpointCases
     DBOS.Transact.CheckpointTest
+    DBOS.Transact.CheckpointTestSim
     DBOS.Transact.ClientTest
     DBOS.Transact.ConfigTest
     DBOS.Transact.ContextTest
     DBOS.Transact.ContextTestSim
+    DBOS.Transact.DatasourceCases
     DBOS.Transact.DatasourceTest
     DBOS.Transact.DatasourceTestSim
     DBOS.Transact.QueueTestSim
@@ -125,20 +130,28 @@ test-suite test
     DBOS.Transact.WidgetCases
     DBOS.Transact.WidgetSim
     DBOS.Transact.ContextSimData
+    DBOS.Transact.DeadlinesCases
     DBOS.Transact.DeadlinesTest
+    DBOS.Transact.DeadlinesTestSim
     DBOS.Transact.HandleTest
     DBOS.Transact.HandleTestSim
     DBOS.Transact.IdentityTest
     DBOS.Transact.RegistryTest
+    DBOS.Transact.SelectCases
     DBOS.Transact.SelectTest
+    DBOS.Transact.SelectTestSim
+    DBOS.Transact.StepRetryCases
     DBOS.Transact.StepRetryTest
+    DBOS.Transact.StepRetryTestSim
     DBOS.Transact.StepTestSim
     DBOS.Transact.StepTest
     DBOS.Transact.ErrorTest
     DBOS.Transact.EventTest
+    DBOS.Transact.MessageCases
     DBOS.Transact.MessageTest
     DBOS.Transact.MessageTestSim
     DBOS.Transact.MessageSimData
+    DBOS.Transact.WaitCases
     DBOS.Transact.WaitTest
     DBOS.Transact.WaitTestSim
     DBOS.Transact.InstanceTest
@@ -153,6 +166,7 @@ test-suite test
     DBOS.Transact.ManagementSimData
     DBOS.Transact.SimTest
     DBOS.Transact.SleepTest
+    DBOS.Transact.SleepCases
     DBOS.Transact.SleepTestSim
     -- Deleted 2026-09-25: DBOS.SystemDBHasqlTest, DBOS.TransactTest
     -- (Bluefin seam; ADR-0012).

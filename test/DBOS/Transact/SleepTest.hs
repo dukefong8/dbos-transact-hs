@@ -1,22 +1,33 @@
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Durable sleep, mirroring Rust @tests/sleep.rs@: the wait is checkpointed,
 -- a replay adopts the recorded wake time, and a sleep outside a workflow
--- waits plainly.
+-- waits plainly. Scenarios and checks are shared with the sim tree
+-- ('DBOS.Transact.SleepTestSim'); this module owns the Postgres factory.
 module DBOS.Transact.SleepTest (tests) where
 
+import DBOS.DualStack (liveCaseWith)
 import DBOS.Prelude
+import DBOS.Transact.SleepCases
+  ( SleepFixture (..),
+    checkSleepCheckpoint,
+    checkSleepInStep,
+    checkSleepPlain,
+    checkSleepReplay,
+    scenarioSleepCheckpoint,
+    scenarioSleepInStep,
+    scenarioSleepPlain,
+    scenarioSleepReplay,
+  )
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (NewWorkflow (..), StepRecord (..), Submission (..), WorkflowId (..), millisDuration, newWorkflow, sleepStepName)
+import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowId (..), newWorkflow, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (Identity (..), acquireLoggerBackend, ioTracer, nullTracer, sleepPlain, sleepStep, withWorkflow)
+import DBOS.Transact (Identity (..), acquireLoggerBackend, firstStepStatus, ioTracer, nextStepId, nextWorkflowMarker, nullTracer, sleepPlain, sleepStep, withStep, withWorkflow)
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
-import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 -- | One backend for the whole group: pools are per-backend, so sharing
 -- bounds connections no matter how many tests run or are interrupted.
@@ -30,57 +41,48 @@ acquireSuiteBackend = do
 tests :: TestTree
 tests =
   withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
-    testGroup
-      "Durable sleep"
-      [ testCase "a sleep waits and is checkpointed" $ do
-          backend <- getBackend
-          withSleepWorkflow backend "sleep-checkpoint" $ \workflowText -> do
-            conn <- connOver backend nullTracer
-            outcome <- withWorkflow conn sleepTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-              sleepStep wctx (millisDuration 25)
-            outcome @?= Right ()
-            checkpoint <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName
-            case checkpoint of
-              Right (Just record) -> do
-                record.stepRecordStepName @?= sleepStepName
-                assertBool "the sleep recorded a wake time" (record.stepRecordOutput /= Nothing)
-              other -> fail ("expected a recorded sleep checkpoint, got: " <> show other),
-        testCase "a replayed sleep does not start its clock again" $ do
-          backend <- getBackend
-          withSleepWorkflow backend "sleep-replay" $ \workflowText -> do
-            firstConn <- connOver backend nullTracer
-            _ <- withWorkflow firstConn sleepTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-              sleepStep wctx (millisDuration 25)
-            before <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName
-            -- The replay announces through FastLogger, so the run proves
-            -- the trace seam as well as the wake it waits until.
-            (logger, cleanup) <- acquireLoggerBackend
-            replayConn <- connOver backend (ioTracer logger)
-            -- A much longer request still returns at the recorded wake time.
-            replayed <- withWorkflow replayConn sleepTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
-              sleepStep wctx (millisDuration 60000)
-            cleanup
-            replayed @?= Right ()
-            after <- SystemDB.checkStep backend (WorkflowId workflowText) 0 sleepStepName
-            case (before, after) of
-              (Right (Just first), Right (Just second)) -> do
-                second.stepRecordCompletedAt @?= first.stepRecordCompletedAt
-                second.stepRecordOutput @?= first.stepRecordOutput
-              other -> fail ("expected the same recorded sleep, got: " <> show other),
-        testCase "a sleep outside a workflow waits plainly" $ do
-          outcome <- sleepPlain (millisDuration 1)
-          outcome @?= ()
-      ]
+    let leaf :: String -> (SleepFixture IO -> IO a) -> (a -> Either String ()) -> TestTree
+        leaf = liveCaseWith (\run -> getBackend >>= \backend -> mkSleepFixture backend run)
+     in testGroup
+          "Durable sleep"
+          [ leaf "a sleep waits and is checkpointed" scenarioSleepCheckpoint checkSleepCheckpoint,
+            leaf "a replayed sleep does not start its clock again" scenarioSleepReplay checkSleepReplay,
+            leaf "a sleep outside a workflow waits plainly" scenarioSleepPlain checkSleepPlain,
+            leaf "a sleep inside a step takes no id" scenarioSleepInStep checkSleepInStep
+          ]
 
-withSleepWorkflow :: Postgres.PostgresSystemDB -> Text.Text -> (Text.Text -> IO a) -> IO a
-withSleepWorkflow backend label action = do
-  freshId <- UUID.V4.nextRandom
-  let workflowText = "hs-l2-" <> label <> "-" <> Text.pack (UUID.toString freshId)
-      initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2SleepTest"}
-  created <- SystemDB.initWorkflow backend initialWorkflow Nothing Fresh Nothing
-  case created of
-    Left err -> fail (show err)
-    Right _ -> action workflowText
+-- | One fixture per leaf over the suite backend: a fresh workflow id per
+-- scenario, every run announcing through the leaf's FastLogger backend (so
+-- the replay run proves the trace seam as well as the wake it waits until).
+mkSleepFixture :: Postgres.PostgresSystemDB -> (SleepFixture IO -> IO a) -> IO a
+mkSleepFixture backend run = do
+  (logger, cleanup) <- acquireLoggerBackend
+  let fixture =
+        SleepFixture
+          { sfFreshWorkflowId = do
+              freshId <- UUID.V4.nextRandom
+              let workflowText = "hs-l2-sleep-" <> Text.pack (UUID.toString freshId)
+              created <- SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just "L2SleepTest"}) Nothing Fresh Nothing
+              case created of
+                Left err -> fail (show err)
+                Right _ -> pure (WorkflowId workflowText),
+            sfRunSleep = \wid duration -> do
+              conn <- connOver backend (ioTracer logger)
+              withWorkflow conn sleepTestIdentity wid Nothing (\wctx -> sleepStep wctx duration),
+            sfCheckSleep = \wid ->
+              SystemDB.checkStep backend wid 0 sleepStepName >>= either (fail . show) pure,
+            sfPlainSleep = sleepPlain,
+            sfRunInStep = \wid duration -> do
+              conn <- connOver backend (ioTracer logger)
+              withWorkflow conn sleepTestIdentity wid Nothing $ \wctx -> do
+                marker <- nextWorkflowMarker wctx
+                withStep wctx marker (firstStepStatus 0) $ \_stepped -> do
+                  before <- nextStepId wctx
+                  slept <- sleepStep wctx duration
+                  after <- nextStepId wctx
+                  pure (slept, before, after)
+          }
+  run fixture `finally` cleanup
 
 -- | The application identity the scoped sleep cases install.
 sleepTestIdentity :: Identity

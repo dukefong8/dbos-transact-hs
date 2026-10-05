@@ -31,10 +31,9 @@ where
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (STM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, retry, writeTVar)
 import Control.Monad.IOSim (IOSim)
-import Data.List (sort, sortOn)
+import Data.List (nub, sort, sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Text.Read (readMaybe)
@@ -1072,6 +1071,21 @@ memFork db forks options = atomically $ do
 
 -- * Helpers for the in-memory subsystems
 
+-- | Every workflow forked from the root, transitively, excluding the root
+-- itself. Mirrors the live fork expansion over the fork table.
+memDescendants :: Map Text WorkflowRecord -> Text -> [Text]
+memDescendants rows root = go [] [root]
+  where
+    go seen [] = seen
+    go seen (parent : rest) =
+      let children =
+            [ wid
+              | (wid, row) <- Map.toList rows,
+                row.workflowRecordForkedFrom == Just (WorkflowId parent),
+                wid `notElem` seen
+            ]
+       in go (seen <> children) (rest <> children)
+
 widTextOf :: WorkflowId -> Text
 widTextOf (WorkflowId widText) = widText
 
@@ -1132,50 +1146,66 @@ memTimeout micros action = timeout @(IOSim s) micros action
 -- the caller's step. A send writes the messages TVar, which is what wakes
 -- a parked 'recv'.
 memSend :: MemSystemDB s -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> IOSim s (Either Error ())
-memSend db stepName messages serialization caller _sendToForks = do
+memSend db stepName messages serialization caller sendToForks = do
   now <- timestampNow
   atomically $ do
+    rows <- readTVar db.memRows
     stored <- readTVar db.memMessages
     notifications <- readTVar db.memNotifications
     steps <- readTVar db.memSteps
-    let topicOf m = maybe nullTopicSentinel (\(Topic topic) -> topic) m.sendTopic
-        bodyOf m = EncodedValue m.sendMessageBody.serializedText serialization
-        deliveries = [(topicOf m, bodyOf m, m) | m <- messages]
-        stored' = foldr (\(topic, value, _) acc -> Map.insertWith (<>) topic [value] acc) stored deliveries
-        notificationFor topic value =
-          let MessageUUID uuid = MessageUUID (topic <> ":" <> Text.pack (show (length (fromMaybe [] (Map.lookup topic stored)) + 1)))
-           in NotificationRecord
-                { notificationRecordMessageUuid = uuid,
-                  notificationRecordTopic = Just topic,
-                  notificationRecordMessage = value.encodedValue,
-                  notificationRecordSerialization = value.encodedSerialization,
-                  notificationRecordCreatedAt = now,
-                  notificationRecordConsumed = False
-                }
-        notifications' =
-          foldr
-            (\(topic, value, m) acc -> Map.insertWith (<>) (widTextOf m.sendDestinationId) [notificationFor topic value] acc)
-            notifications
-            deliveries
-    writeTVar db.memMessages stored'
-    writeTVar db.memNotifications notifications'
+    -- A replay must not send again: like the live insert, a caller step
+    -- that already stands means this batch went out before.
     case caller of
-      Nothing -> pure ()
-      Just (callerWid, callerStep) -> do
-        let entry =
-              StepRecord
-                { stepRecordWorkflowId = callerWid,
-                  stepRecordStepId = callerStep,
-                  stepRecordStepName = stepName,
-                  stepRecordOutput = Nothing,
-                  stepRecordError = Nothing,
-                  stepRecordChildWorkflowId = Nothing,
-                  stepRecordSerialization = Nothing,
-                  stepRecordStartedAt = Just now,
-                  stepRecordCompletedAt = Just now
-                }
-        writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) entry steps)
-    pure (Right ())
+      Just (callerWid, callerStep)
+        | Map.member (widTextOf callerWid, callerStep) steps -> pure (Right ())
+      _ -> do
+        let topicOf m = maybe nullTopicSentinel (\(Topic topic) -> topic) m.sendTopic
+            bodyOf m = EncodedValue m.sendMessageBody.serializedText serialization
+            -- Mirror the live fan-out: the destination itself plus every
+            -- workflow forked from it, transitively, sorted and deduplicated.
+            expand m =
+              let destination = widTextOf m.sendDestinationId
+               in destination : if sendToForks then sort (nub (memDescendants rows destination)) else []
+            deliveries =
+              [ (topicOf m, bodyOf m, m {sendDestinationId = WorkflowId recipient})
+                | m <- messages,
+                  recipient <- expand m
+              ]
+            stored' = foldr (\(topic, value, _) acc -> Map.insertWith (<>) topic [value] acc) stored deliveries
+            notificationFor topic value =
+              let MessageUUID uuid = MessageUUID (topic <> ":" <> Text.pack (show (length (fromMaybe [] (Map.lookup topic stored)) + 1)))
+               in NotificationRecord
+                    { notificationRecordMessageUuid = uuid,
+                      notificationRecordTopic = Just topic,
+                      notificationRecordMessage = value.encodedValue,
+                      notificationRecordSerialization = value.encodedSerialization,
+                      notificationRecordCreatedAt = now,
+                      notificationRecordConsumed = False
+                    }
+            notifications' =
+              foldr
+                (\(topic, value, m) acc -> Map.insertWith (<>) (widTextOf m.sendDestinationId) [notificationFor topic value] acc)
+                notifications
+                deliveries
+        writeTVar db.memMessages stored'
+        writeTVar db.memNotifications notifications'
+        case caller of
+          Nothing -> pure (Right ())
+          Just (callerWid, callerStep) -> do
+            let entry =
+                  StepRecord
+                    { stepRecordWorkflowId = callerWid,
+                      stepRecordStepId = callerStep,
+                      stepRecordStepName = stepName,
+                      stepRecordOutput = Nothing,
+                      stepRecordError = Nothing,
+                      stepRecordChildWorkflowId = Nothing,
+                      stepRecordSerialization = Nothing,
+                      stepRecordStartedAt = Just now,
+                      stepRecordCompletedAt = Just now
+                    }
+            writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) entry steps)
+            pure (Right ())
 
 memQueueRecord :: NewQueue -> QueueRecord
 memQueueRecord queue =

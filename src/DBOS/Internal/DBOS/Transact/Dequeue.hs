@@ -10,10 +10,7 @@ module DBOS.Transact.Dequeue (QueueEvent (..), dequeuePass, superviseForever) wh
 
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
-import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadThrow qualified as MThrow
-import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
-import Control.Monad (forM_, unless, when)
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Bits (shiftL, shiftR, xor)
 import Data.List (foldl')

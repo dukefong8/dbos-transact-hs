@@ -1,115 +1,160 @@
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
--- | 'DBOS.Transact.MessageTest' mirrored under IOSim over the mock
--- backend: the same call shapes, with the answers the stateless mock
--- returns, each case printing its sim's 'Say' trace inline so a plain
--- @-- $> tasty@ run shows announcements with no extra plumbing. The
--- oracle emits no traces from @message.rs@/@event.rs@ (verified: zero
--- @tracing@ sites), and our send/recv/bulk paths emit none either, so
--- the pane stays quiet here by fidelity, not by omission — the cases
--- already run on the say-carrier, so when the Step sweep mirrors the
--- @step.rs@ run/recorded sites the bulk-send step's announcements will
--- print with no test change. Where a live assertion depends on database
--- state (a sent message reading back on receive, a replay returning the
--- recorded message), the mirror asserts the mock's canned answer and
--- says so; the live semantics stay in 'DBOS.Transact.MessageTest'.
+-- | 'DBOS.Transact.MessageTest' mirrored under IOSim over the in-memory
+-- backend, whose notifier genuinely wakes receivers: sends deliver,
+-- receives take, replays read their recordings, and the fan-out reaches
+-- forks. Scenarios and checks are shared; this module owns the sim
+-- factory and the sim-only extra — the typed 'WorkflowEvent' record,
+-- which only the bulk-send step announces (single sends and receives
+-- checkpoint without a runner, exactly as the oracle's silent
+-- @message.rs@).
 module DBOS.Transact.MessageTestSim (tests) where
 
+import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
+import DBOS.DualStack (simCase)
+import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import Control.Monad.IOSim (IOSim)
-import Data.Text (Text)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
-import DBOS.SystemDB (WorkflowId (..), millisDuration)
-import DBOS.SystemDB.IOSim (simConnectionWith)
-import DBOS.Transact
-  (
-    EngineOnly,
-    Error (..),
-    Identity (..),
-    Message (..),
-    Topic (..),
-    WorkflowCtx,
-    WorkflowId (..),
-    firstStepStatus,
-    nextWorkflowMarker,
-    nextStepId,
-    recv,
-    send,
-    sendBulk,
-    withStep,
-    withWorkflow,
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), Outcome (..), Submission (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
+import DBOS.Transact (WorkflowEvent (..))
+import DBOS.Transact.Connection (nextExecutionIdentity)
+import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState)
+import DBOS.Transact.MessageCases
+  ( MessageFixture (..),
+    checkBulkEmpty,
+    checkBulkSend,
+    checkCapturedRecv,
+    checkCapturedSend,
+    checkFanOut,
+    checkReplayTakes,
+    checkSendDeliveredOnce,
+    checkStepSend,
+    checkThirdParty,
+    checkTopics,
+    scenarioBulkEmpty,
+    scenarioBulkSend,
+    scenarioCapturedRecv,
+    scenarioCapturedSend,
+    scenarioFanOut,
+    scenarioReplayTakes,
+    scenarioSendDeliveredOnce,
+    scenarioStepSend,
+    scenarioThirdParty,
+    scenarioTopics,
   )
-import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.HUnit (assertBool)
 
-simIdentity :: Identity
-simIdentity =
-  Identity
-    { identityAppName = "sim-app",
-      identityAppVersion = "0.0.0",
-      identityExecutorId = "sim-executor",
-      identityAppId = ""
-    }
-
-simRun :: Text -> (forall exec. WorkflowCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
-simRun name action = do
-  conn <- simConnectionWith simTracer
-  withWorkflow conn simIdentity (WorkflowId name) Nothing action
+-- | One fixture per leaf over a fresh in-memory database: labeled sender
+-- and destination rows per scenario, every send and receive sharing the
+-- same store in the same simulation so delivery is genuine. Each workflow
+-- holds one scope per case; replays run fresh scopes that restart it.
+simMessageFixture :: forall s. IOSim s (MessageFixture (IOSim s))
+simMessageFixture = do
+  mem <- newMemDB
+  states <- newTVarIO Map.empty
+  let stateFor widText = do
+        found <- Map.lookup widText <$> readTVarIO states
+        case found of
+          Just st -> pure st
+          Nothing -> do
+            conn <- memConnectionOn mem simTracer
+            identity <- nextExecutionIdentity conn
+            st <- newWorkflowState widText Nothing identity
+            atomically (modifyTVar states (Map.insert widText st))
+            pure st
+  pure
+    MessageFixture
+      { mfFreshPair = \label -> do
+          let sourceText = "sim-message-" <> label <> "-source"
+              destinationText = "sim-message-" <> label <> "-destination"
+              create workflowText workflowName =
+                SystemDB.initWorkflow mem ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Nothing Fresh Nothing
+          sourceCreated <- create sourceText "SimMessageSource"
+          destinationCreated <- create destinationText "SimMessageDestination"
+          case (sourceCreated, destinationCreated) of
+            (Right _, Right _) -> pure (WorkflowId sourceText, WorkflowId destinationText)
+            (Left err, _) -> error (show err)
+            (_, Left err) -> error (show err),
+        mfCtx = \wid action -> do
+          let WorkflowId widText = wid
+          st <- stateFor widText
+          conn <- memConnectionOn mem simTracer
+          ctx <- newWorkflowCtx conn simIdentity st
+          action ctx,
+        mfFreshCtx = \wid action -> do
+          let WorkflowId widText = wid
+          conn <- memConnectionOn mem simTracer
+          identity <- nextExecutionIdentity conn
+          st <- newWorkflowState widText Nothing identity
+          ctx <- newWorkflowCtx conn simIdentity st
+          action ctx,
+        mfNotifyCount = \wid -> do
+          found <- SystemDB.getAllNotifications mem wid
+          pure (either (const 0) length found),
+        mfForkFrom = \wid -> do
+          forked <-
+            SystemDB.forkFrom
+              mem
+              [wid]
+              (ForkStep 0)
+              ForkOptions
+                { forkOptionsApplicationVersion = Nothing,
+                  forkOptionsQueueName = Nothing,
+                  forkOptionsQueuePartitionKey = Nothing,
+                  forkOptionsTimeout = Nothing,
+                  forkOptionsReplacementChildren = []
+                }
+              Nothing
+          case forked of
+            Left err -> error (show err)
+            Right [fork] -> pure fork
+            Right other -> error ("expected one fork, got: " <> show (length other)),
+        mfSettle = \wid ->
+          SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) >>= either (error . show) (const (pure ())),
+        mfCheckStep = \wid name step ->
+          SystemDB.checkStep mem wid step name >>= either (error . show) pure
+      }
 
 tests :: TestTree
 tests =
-  -- Sequential: cases announce through one shared stderr, so parallel
-  -- 'printSimTrace' calls would interleave their lines mid-character.
-  -- 'AllFinish' keeps every case running on a failure, in order.
-  dependentTestGroup
+  testGroup
     "Workflow messages (Sim)"
-    AllFinish
-    [ testCase "a workflow send is accepted" $ do
-        (sent, tr) <- runSimCase $ simRun "sim-message-send" $ \wctx ->
-          send wctx (WorkflowId "sim-message-destination") (Just (Topic "approval")) Nothing ("approved" :: Text)
-        printSimTrace tr
-        sent @?= Right (),
-      testCase "a receive reads the mock's canned body, which is not JSON" $ do
-        (received :: Either (Error EngineOnly) (Maybe Text), tr) <- runSimCase $ simRun "sim-message-recv" $ \wctx ->
-          recv wctx (Just (Topic "approval")) (millisDuration 100)
-        printSimTrace tr
-        -- The mock is stateless: the live test reads back the sent
-        -- message here. The canned "mock-message" body is not valid
-        -- JSON, so the sim surfaces a deserialization refusal.
-        case received of
-          Left (ErrorDeserialization _ _) -> pure ()
-          other -> fail ("expected a deserialization refusal, got: " <> show other),
-      testCase "a bulk send checkpoints once and delivers the batch" $ do
-        (outcome, tr) <- runSimCase $ simRun "sim-bulk" $ \wctx ->
-          sendBulk
-            wctx
-            [ Message (WorkflowId "first") (1 :: Int) Nothing Nothing,
-              Message (WorkflowId "second") (2 :: Int) Nothing Nothing
-            ]
-        printSimTrace tr
-        outcome @?= Right (),
-      testCase "an empty bulk send still takes its step" $ do
-        (outcome, tr) <- runSimCase $ simRun "sim-bulk-empty" $ \wctx ->
-          sendBulk wctx ([] :: [Message Int])
-        printSimTrace tr
-        outcome @?= Right (),
-      testCase "a send through a captured parent is plain and moves no id" $ do
-        (outcome, tr) <- runSimCase $ simRun "sim-captured-send" $ \wctx -> do
-          marker <- nextWorkflowMarker wctx
-          sent <- withStep wctx marker (firstStepStatus 0) $ \_ ->
-            send wctx (WorkflowId "sim-message-destination") (Just (Topic "approval")) Nothing ("ping" :: Text)
-          counter <- nextStepId wctx
-          pure (sent, counter)
-        printSimTrace tr
-        outcome @?= (Right (), 0),
-      testCase "a recv through a captured parent is refused" $ do
-        (received :: Either (Error EngineOnly) (Maybe Text), tr) <- runSimCase $ simRun "sim-captured-recv" $ \wctx -> do
-          marker <- nextWorkflowMarker wctx
-          withStep wctx marker (firstStepStatus 0) $ \_ ->
-            recv wctx (Just (Topic "approval")) (millisDuration 100)
-        printSimTrace tr
-        received @?= Left (InsideStep "recv")
+    [ simCase simMessageFixture "a workflow send is delivered once and recv replays" scenarioSendDeliveredOnce checkSendDeliveredOnce traceMessageSilent,
+      simCase simMessageFixture "a send may fan out to the destination's forks" scenarioFanOut checkFanOut traceMessageSilent,
+      simCase simMessageFixture "a message from another workflow reaches its destination" scenarioThirdParty checkThirdParty traceMessageSilent,
+      simCase simMessageFixture "topics do not cross and absence is a value" scenarioTopics checkTopics traceMessageSilent,
+      simCase simMessageFixture "a replay takes the recorded message and sends once" scenarioReplayTakes checkReplayTakes traceMessageSilent,
+      simCase simMessageFixture "a step may send but may not receive" scenarioStepSend checkStepSend traceStepSend,
+      simCase simMessageFixture "a send through a captured parent is plain and moves no id" scenarioCapturedSend checkCapturedSend traceMessageSilent,
+      simCase simMessageFixture "a recv through a captured parent is refused" scenarioCapturedRecv checkCapturedRecv traceMessageSilent,
+      simCase simMessageFixture "a batch delivers every message and checkpoints once" scenarioBulkSend checkBulkSend traceBulkSend,
+      simCase simMessageFixture "an empty bulk send still takes its step" scenarioBulkEmpty checkBulkEmpty traceBulkEmpty
     ]
+
+-- * Typed-event assertions (sim-only)
+
+-- | Single sends and receives checkpoint without a runner and stay
+-- silent, exactly as the oracle's untraced message paths.
+traceMessageSilent :: SimTrace a -> IO ()
+traceMessageSilent tr =
+  assertBool "no workflow event may fire outside a bulk send" (null (selectTraceEventsDynamic tr :: [WorkflowEvent]))
+
+-- | The probe step announces its start and its recorded output.
+traceStepSend :: SimTrace a -> IO ()
+traceStepSend tr =
+  assertBool "the probe step must announce" (selectTraceEventsDynamic tr == [StepRunning "probe" 0, StepOutputRecorded "probe" 0])
+
+-- | The batch checkpoints once under its bulk step.
+traceBulkSend :: SimTrace a -> IO ()
+traceBulkSend tr =
+  assertBool "the batch must checkpoint once" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.sendBulk" 0])
+
+-- | The empty batch still takes its step.
+traceBulkEmpty :: SimTrace a -> IO ()
+traceBulkEmpty tr =
+  assertBool "the empty batch must take its step" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.sendBulk" 0])

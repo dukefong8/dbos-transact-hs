@@ -84,18 +84,14 @@ module DBOS.SystemDB.Postgres.Backend
 where
 
 import DBOS.Prelude
-import Control.Applicative ((<|>))
-import Control.Monad (join, when)
 
 import Data.Aeson (eitherDecodeStrict)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Types (Parser)
 import Data.ByteString.Lazy qualified as LBS
-import Data.Functor (void)
 import Data.Int (Int64)
 import Data.List qualified as List
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text

@@ -28,7 +28,6 @@ where
 import DBOS.Prelude
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Control.Concurrent.Class.MonadMVar (MonadMVar)
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types
   ( Change (..),

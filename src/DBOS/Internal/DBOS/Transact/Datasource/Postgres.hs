@@ -30,7 +30,6 @@ where
 import DBOS.Prelude
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Int (Int32)
-import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)

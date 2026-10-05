@@ -51,7 +51,7 @@ env:
 	cabal install -w ghc-$(GHC) --enable-documentation \
 		--package-env . --lib \
 		base containers stm-containers unordered-containers vector template-haskell \
-		aeson bytestring text safe-wild-cards strict-wrapper time uuid \
+		aeson bytestring text rerefined safe-wild-cards strict-wrapper time uuid \
 		bluefin contra-tracer contravariant fast-logger io-sim io-classes mtl \
 		hasql ihp-typed-sql hasql-pool hasql-transaction hasql-postgresql-types postgresql-types \
 		ihp-hsx ihp-router lucid2 wai warp http-types unix \

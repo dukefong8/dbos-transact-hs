@@ -33,8 +33,6 @@ module DBOS.Transact.Registry
 where
 
 import DBOS.Prelude
-import Control.Concurrent.Class.MonadMVar (MonadMVar)
-import Control.Concurrent.Class.MonadMVar.Strict (StrictMVar, modifyMVar, modifyMVar_, newMVar)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map

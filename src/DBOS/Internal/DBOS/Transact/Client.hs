@@ -50,7 +50,6 @@ import DBOS.Prelude
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Aeson (Value)
 import Data.Map.Strict (Map)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -85,8 +84,6 @@ import DBOS.SystemDB.Types
 import DBOS.Transact.Serialization (encodeAttributes)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
-import Control.Monad.Class.MonadTime (MonadTime)
-import Control.Monad.Class.MonadTimer (MonadDelay)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), closeConnection, generatedWorkflowId, newConnection, runSystemDB, uuidWorkflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)

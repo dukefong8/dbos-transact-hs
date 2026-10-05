@@ -48,14 +48,8 @@ module DBOS.Transact.Instance
   )
 where
 
-import Control.Concurrent.Class.MonadMVar (MonadMVar)
-import Control.Concurrent.Class.MonadMVar.Strict (StrictMVar, modifyMVar_, newMVar, readMVar, withMVar)
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
-import Control.Monad (when)
-import Control.Monad.Class.MonadFork (MonadFork)
 import Control.Monad.Class.MonadThrow qualified as MThrow
-import Control.Monad.Class.MonadTime (MonadTime)
-import Control.Monad.Class.MonadTimer (MonadDelay)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Int (Int64)
 import Data.Text (Text)

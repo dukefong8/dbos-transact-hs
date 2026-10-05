@@ -19,7 +19,7 @@
 -- 'NominalDiffTime', 'UTCTime', strict @TVar@/@MVar@), so a module cannot
 -- reach the base API behind the port's back.
 module DBOS.Prelude
-  ( module Prelude,
+  ( module Base,
     module MonadThrow,
     module MonadFork,
     module MonadAsync,
@@ -31,6 +31,17 @@ module DBOS.Prelude
   )
 where
 
+import Control.Applicative as Base
+import Control.Arrow as Base hiding (first, second)
+import Control.Monad as Base hiding (fail, forM, forM_, mapM, mapM_, msum, sequence, sequence_)
+import Data.Foldable as Base hiding (All, Any, toList)
+import Data.Function as Base hiding (id, (.))
+import Data.Maybe as Base
+import Data.Monoid as Base hiding (All, Any)
+import Data.Text (Text, pack)
+import Data.Traversable as Base
+import Prelude as Base hiding (All, Any)
+
 import Control.Concurrent.Class.MonadMVar.Strict as MonadMVar
 import Control.Concurrent.Class.MonadSTM.Strict as MonadSTM
 import Control.Monad.Class.MonadAsync as MonadAsync
@@ -38,8 +49,6 @@ import Control.Monad.Class.MonadFork as MonadFork
 import Control.Monad.Class.MonadThrow as MonadThrow
 import Control.Monad.Class.MonadTime as MonadTime
 import Control.Monad.Class.MonadTimer as MonadTimer
-import Data.Text (Text, pack)
-import Prelude hiding ()
 
 -- | Render any 'Show' value as 'Text'. Shared here so every domain-event
 -- renderer uses one spelling.

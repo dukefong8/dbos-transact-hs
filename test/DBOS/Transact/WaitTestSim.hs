@@ -1,101 +1,97 @@
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 
--- | 'DBOS.Transact.WaitTest' mirrored under IOSim: the checkpointed
--- @DBOS.selectWorkflow@ step and the uncheckpointed all-wait, each case
--- printing its sim's 'Say' trace inline so a plain @-- $> tasty@ run
--- shows announcements with no extra plumbing. The mock answers the first
--- id of the set, and its @checkStep@ is empty, so the fresh calls take
--- their step and record; the replay case runs over 'MemSystemDB', whose
--- stateful steps let the second call read the recorded winner back and
--- announce it, the same line the live tree writes through FastLogger.
--- The all-wait takes no placement and stays quiet, as in the oracle.
+-- | 'DBOS.Transact.WaitTest' mirrored under IOSim over the in-memory
+-- backend: the checkpointed @DBOS.selectWorkflow@ step and the
+-- uncheckpointed all-wait with real stored rows. Scenarios and checks are
+-- shared; this module owns the sim factory and the sim-only extra — the
+-- typed 'WaitEvent' record, which fires only when a replay adopts its
+-- recorded winner.
 module DBOS.Transact.WaitTestSim (tests) where
 
+import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
+import DBOS.DualStack (simCase)
+import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import Control.Monad.IOSim (IOSim)
-import Data.Text (Text)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
-import DBOS.SystemDB (WorkflowId (..))
-import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simConnectionWith)
-import DBOS.Transact
-  ( Error (..),
-    Identity (..),
-    joinWorkflows,
-    selectWorkflow,
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), Submission (..), WorkflowId (..), newWorkflow, selectStepName)
+import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
+import DBOS.Transact (WaitEvent (..), withWorkflow)
+import DBOS.Transact.WaitCases
+  ( WaitFixture (..),
+    checkCancelled,
+    checkEmptyAll,
+    checkJoinLast,
+    checkJoinSettled,
+    checkRefusal,
+    checkRepeated,
+    checkReplayWinner,
+    checkSelectFirst,
+    checkSelectSettledFirst,
+    checkWinnerLeft,
+    scenarioCancelled,
+    scenarioEmptyAll,
+    scenarioJoinLast,
+    scenarioJoinSettled,
+    scenarioRefusal,
+    scenarioRepeated,
+    scenarioReplayWinner,
+    scenarioSelectFirst,
+    scenarioSelectSettledFirst,
+    scenarioWinnerLeft,
   )
-import DBOS.Transact.Context
-  ( WorkflowCtx,
-    newWorkflowCtx,
-    newWorkflowState
-  )
-import DBOS.Transact.Connection
-  ( nextExecutionIdentity
-  )
-import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.HUnit (assertBool)
 
-simIdentity :: Identity
-simIdentity =
-  Identity
-    { identityAppName = "sim-app",
-      identityAppVersion = "0.0.0",
-      identityExecutorId = "sim-executor",
-      identityAppId = ""
-    }
+-- | One fixture per leaf over a fresh in-memory database: labeled workflow
+-- ids are minted per scenario and every run — including replays over
+-- changed sets — shares the same store in the same simulation.
+simWaitFixture :: forall s. IOSim s (WaitFixture (IOSim s))
+simWaitFixture = do
+  mem <- newMemDB
+  pure
+    WaitFixture
+      { wfFreshWorkflowId = \label -> do
+          let widText = "sim-wait-" <> label
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitTest"}) Nothing Fresh Nothing
+          case created of
+            Left err -> error (show err)
+            Right _ -> pure (WorkflowId widText),
+        wfCtx = \wid action -> do
+          conn <- memConnectionOn mem simTracer
+          withWorkflow conn simIdentity wid Nothing action,
+        wfSettle = \wid ->
+          SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) >>= either (error . show) (const (pure ())),
+        wfCancel = \wid ->
+          SystemDB.cancelWorkflows mem [wid] False Nothing >>= either (error . show) (const (pure ())),
+        wfCheckStep = \wid ->
+          SystemDB.checkStep mem wid 0 selectStepName >>= either (error . show) pure
+      }
 
 tests :: TestTree
 tests =
-  -- Sequential: cases announce through one shared stderr, so parallel
-  -- 'printSimTrace' calls would interleave their lines mid-character.
-  -- 'AllFinish' keeps every case running on a failure, in order.
-  dependentTestGroup
+  testGroup
     "In-workflow waits (Sim)"
-    AllFinish
-    [ testCase "a first-wait answers with the first id and takes its step" $ do
-        (outcome, tr) <- runSimCase $ do
-          context <- simCtx "sim-wait"
-          selectWorkflow context [WorkflowId "first", WorkflowId "second"]
-        printSimTrace tr
-        outcome @?= Right (WorkflowId "first"),
-      testCase "a first-wait over nothing is refused" $ do
-        (outcome, tr) <- runSimCase $ do
-          context <- simCtx "sim-wait-empty"
-          selectWorkflow context []
-        printSimTrace tr
-        case outcome of
-          Left (InvalidArgument operation detail) -> do
-            operation @?= "select_workflow"
-            detail @?= "no workflow ids to wait for"
-          other -> fail (show other),
-      testCase "a replayed first-wait reads its recorded winner back" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          conn <- memConnectionOn mem simTracer
-          let runOnce = do
-                identity <- nextExecutionIdentity conn
-                state <- newWorkflowState "sim-wait-replay" Nothing identity
-                context <- newWorkflowCtx conn simIdentity state
-                selectWorkflow context [WorkflowId "first", WorkflowId "second"]
-          first <- runOnce
-          second <- runOnce
-          pure (first, second)
-        printSimTrace tr
-        -- The mock's first-id answer is what gets recorded, so the replay
-        -- reads the same winner back and announces it.
-        outcome @?= (Right (WorkflowId "first"), Right (WorkflowId "first")),
-      testCase "an all-wait completes without a step" $ do
-        (outcome, tr) <- runSimCase $ do
-          context <- simCtx "sim-wait-join"
-          joinWorkflows context [WorkflowId "a", WorkflowId "b"]
-        printSimTrace tr
-        outcome @?= Right ()
+    [ simCase simWaitFixture "an empty first wait records its refusal and a replay reads it back" scenarioRefusal checkRefusal traceWaitSilent,
+      simCase simWaitFixture "a recorded winner that left the set is refused" scenarioWinnerLeft checkWinnerLeft traceWaitSilent,
+      simCase simWaitFixture "an all-wait completes over a settled workflow" scenarioJoinSettled checkJoinSettled traceWaitSilent,
+      simCase simWaitFixture "select reports the first workflow to settle" scenarioSelectFirst checkSelectFirst traceWaitSilent,
+      simCase simWaitFixture "a settled first id wins over a pending set" scenarioSelectSettledFirst checkSelectSettledFirst traceWaitSilent,
+      simCase simWaitFixture "a replayed first-wait reads its recorded winner back" scenarioReplayWinner checkReplayWinner traceReplayWinner,
+      simCase simWaitFixture "a cancelled workflow counts as settled" scenarioCancelled checkCancelled traceWaitSilent,
+      simCase simWaitFixture "join returns when the last workflow settles" scenarioJoinLast checkJoinLast traceWaitSilent,
+      simCase simWaitFixture "an empty all-wait is satisfied and takes no step" scenarioEmptyAll checkEmptyAll traceWaitSilent,
+      simCase simWaitFixture "a repeated id is accepted by both waits" scenarioRepeated checkRepeated traceWaitSilent
     ]
-  where
-    simCtx :: Text -> IOSim s (WorkflowCtx () (IOSim s))
-    simCtx name = do
-      conn <- simConnectionWith simTracer
-      identity <- nextExecutionIdentity conn
-      state <- newWorkflowState name Nothing identity
-      newWorkflowCtx conn simIdentity state
+
+-- * Typed-event assertions (sim-only)
+
+-- | Only a replayed winner announces: every other wait path is silent.
+traceWaitSilent :: SimTrace a -> IO ()
+traceWaitSilent tr =
+  assertBool "no wait event may fire outside a replayed win" (null (selectTraceEventsDynamic tr :: [WaitEvent]))
+
+-- | The replay adopts its recorded winner and says so.
+traceReplayWinner :: SimTrace a -> IO ()
+traceReplayWinner tr =
+  assertBool "the replay must announce its recorded winner" (selectTraceEventsDynamic tr == [SelectWorkflowReplaying "sim-wait-replay-b"])

@@ -4,7 +4,6 @@
 module DBOS.SystemDB.NotifyTest (tests) where
 
 import DBOS.Prelude
-import Control.Monad (void)
 import DBOS.SystemDB
   ( Registry,
     Registry (..),

@@ -10,7 +10,6 @@
 module DBOS.Transact.ManagementTest (tests) where
 
 import DBOS.Prelude
-import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Either (isLeft)

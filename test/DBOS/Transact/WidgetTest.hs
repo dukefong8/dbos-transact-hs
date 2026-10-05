@@ -10,7 +10,6 @@
 -- launch, and the SQL observations.
 module DBOS.Transact.WidgetTest (tests) where
 
-import Control.Monad (when)
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)

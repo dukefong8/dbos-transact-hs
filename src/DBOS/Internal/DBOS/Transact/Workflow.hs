@@ -45,20 +45,14 @@ module DBOS.Transact.Workflow
 where
 
 import DBOS.Prelude
-import Control.Monad (void)
 -- NOTE (deviation): the one base import outside the port's prelude. Mapping
 -- the abort channel needs the identity of the exception 'killThread'
 -- throws, and io-classes exposes no async-exception identity — exactly what
 -- the oracle matches with @join.is_cancelled()@. Nothing here forks,
 -- throws, or waits through base; all effects stay on io-classes.
 import Control.Exception (AsyncException (..))
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, newTVarIO, readTVar, retry, writeTVar)
-import Control.Monad.Class.MonadFork (MonadFork, ThreadId, forkIO, killThread, myThreadId)
-import Control.Monad.Class.MonadTime (MonadTime)
-import Control.Monad.Class.MonadTimer (MonadDelay, MonadTimer, timeout)
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Int (Int64)
-import Data.Maybe (fromMaybe)
 import Data.Aeson (FromJSON, ToJSON, Value)
 import Data.Map.Strict (Map)
 import Data.Text (Text)

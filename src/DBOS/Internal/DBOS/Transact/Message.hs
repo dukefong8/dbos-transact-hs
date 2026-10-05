@@ -21,14 +21,12 @@ where
 
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
-import Control.Monad.Class.MonadTime (MonadTime)
-import Control.Monad.Class.MonadTimer (MonadDelay)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextStepId, stepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextStepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
 
@@ -130,10 +128,13 @@ sendBulkWith wctx messages options = do
         [] -> Nothing
   -- 'sendBulk' takes only the workflow view, so it always checkpoints
   -- here; a bulk send through a captured parent degrades inside
-  -- 'runStepWith' by the depth backstop.
+  -- 'runStepWith' by the depth backstop. The batch goes out with no
+  -- caller step: the runner's own output record is the checkpoint, and a
+  -- second record at the same id would race it by the millisecond (the
+  -- send stamps one clock reading, the runner another). Single sends keep
+  -- their caller record — no runner stands behind them.
   runStepWith stepOptionsDefault wctx sendBulkStepName $ \sctx -> do
-    let caller = (\sid -> (WorkflowId (workflowId sctx.stepCtxWorkflow), sid)) <$> stepId sctx
-    plainSend sctx.stepCtxWorkflow encoded serialization caller
+    plainSend sctx.stepCtxWorkflow encoded serialization Nothing
   where
     encodeMessage message =
       let encodedValue = encodeWorkflowValue message.messageValue

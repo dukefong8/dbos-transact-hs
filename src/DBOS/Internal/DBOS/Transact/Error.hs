@@ -1,7 +1,6 @@
-{-# LANGUAGE EmptyCase #-}
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE EmptyCase         #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 
 -- | Everything a durable function can fail with. Mirrors Rust
 -- @error.rs@'s @Error<E>@: 'Application' carries the application's own
@@ -28,12 +27,12 @@ module DBOS.Transact.Error
   )
 where
 
-import DBOS.Prelude
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text (Text, pack)
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import DBOS.Prelude
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Duration, durationAsMillis)
 
@@ -124,7 +123,7 @@ application = Application
 -- 'MaxStepRetriesExceeded' recurse.
 mapApplication :: (e -> f) -> Error e -> Error f
 mapApplication f = \case
-  Application error -> Application (f error)
+  Application err -> Application (f err)
   ErrorConfig detail -> ErrorConfig detail
   ErrorNotLaunched operation -> ErrorNotLaunched operation
   InsideStep operation -> InsideStep operation
@@ -143,7 +142,7 @@ mapApplication f = \case
   WrongInstance operation -> WrongInstance operation
   InvalidArgument operation detail -> InvalidArgument operation detail
   StepBuiltElsewhere step built polled -> StepBuiltElsewhere step built polled
-  StepTimeout step timeout -> StepTimeout step timeout
+  StepTimeout step limit -> StepTimeout step limit
   MaxStepRetriesExceeded step attempts errors -> MaxStepRetriesExceeded step attempts (map (mapApplication f) errors)
 
 -- | Rust @Error::lift@: an engine error carried into any workflow's
@@ -159,7 +158,7 @@ absurd impossible = case impossible of {}
 -- @Display@, and 'Show' is the port's closest.
 renderTransactError :: Show e => Error e -> Text
 renderTransactError = \case
-  Application error -> pack (show error)
+  Application err -> pack (show err)
   ErrorConfig detail -> "invalid configuration: " <> detail
   ErrorNotLaunched operation -> "cannot " <> operation <> " before DBOS is launched"
   InsideStep operation -> operation <> " cannot be called from within a step"
@@ -178,7 +177,7 @@ renderTransactError = \case
   WrongInstance operation -> operation <> " was called on a different DBOS instance than the one running this workflow"
   InvalidArgument operation detail -> "invalid argument to " <> operation <> ": " <> detail
   StepBuiltElsewhere step built polled -> "step " <> step <> " was built " <> built <> " but polled " <> polled <> ": a step takes its id where it is built"
-  StepTimeout step timeout -> "the step " <> step <> " exceeded its " <> pack (show (durationAsMillis timeout)) <> "ms timeout"
+  StepTimeout step limit -> "the step " <> step <> " exceeded its " <> pack (show (durationAsMillis limit)) <> "ms timeout"
   MaxStepRetriesExceeded step attempts _ -> "the step " <> step <> " failed after " <> pack (show attempts) <> " attempts"
 
 
@@ -197,7 +196,7 @@ instance FromJSON EngineOnly where
 -- itself, so it comes back as itself").
 instance ToJSON e => ToJSON (Error e) where
   toJSON = \case
-    Application error -> tagged "Application" (toJSON error)
+    Application err -> tagged "Application" (toJSON err)
     ErrorConfig detail -> tagged "ErrorConfig" (toJSON detail)
     ErrorNotLaunched operation -> tagged "ErrorNotLaunched" (object ["operation" .= operation])
     InsideStep operation -> tagged "InsideStep" (object ["operation" .= operation])
@@ -216,7 +215,7 @@ instance ToJSON e => ToJSON (Error e) where
     WrongInstance operation -> tagged "WrongInstance" (object ["operation" .= operation])
     InvalidArgument operation detail -> tagged "InvalidArgument" (object ["operation" .= operation, "detail" .= detail])
     StepBuiltElsewhere step built polled -> tagged "StepBuiltElsewhere" (object ["step" .= step, "built" .= built, "polled" .= polled])
-    StepTimeout step timeout -> tagged "StepTimeout" (object ["step" .= step, "timeout" .= timeout])
+    StepTimeout step limit -> tagged "StepTimeout" (object ["step" .= step, "timeout" .= limit])
     MaxStepRetriesExceeded step attempts errors -> tagged "MaxStepRetriesExceeded" (object ["step" .= step, "attempts" .= attempts, "errors" .= errors])
     where
       tagged tag payload = object [tag .= payload]
@@ -229,28 +228,28 @@ instance ToJSON e => ToJSON (Error e) where
 instance FromJSON e => FromJSON (Error e) where
   parseJSON = withObject "Error" $ \fields -> case KeyMap.toList fields of
     [(tag, payload)] -> case tag of
-      "Application" -> Application <$> parseJSON payload
-      "ErrorConfig" -> ErrorConfig <$> parseJSON payload
-      "ErrorNotLaunched" -> withObject "ErrorNotLaunched" (\o -> ErrorNotLaunched <$> o .: "operation") payload
-      "InsideStep" -> withObject "InsideStep" (\o -> InsideStep <$> o .: "operation") payload
-      "ErrorAlreadyLaunched" -> withObject "ErrorAlreadyLaunched" (\o -> ErrorAlreadyLaunched <$> o .: "operation") payload
-      "ErrorAlreadyRegistered" -> withObject "ErrorAlreadyRegistered" (\o -> ErrorAlreadyRegistered <$> o .: "key") payload
-      "ErrorSerialization" -> withObject "ErrorSerialization" (\o -> ErrorSerialization <$> o .: "what" <*> o .: "message") payload
-      "ErrorDeserialization" -> withObject "ErrorDeserialization" (\o -> ErrorDeserialization <$> o .: "what" <*> o .: "message") payload
-      "ErrorSystemDatabase" -> fail "a system-database failure is a control signal and is never decoded from an outcome"
-      "StepFailed" -> withObject "StepFailed" (\o -> StepFailed <$> o .: "step" <*> o .: "message") payload
+      "Application"                -> Application <$> parseJSON payload
+      "ErrorConfig"                -> ErrorConfig <$> parseJSON payload
+      "ErrorNotLaunched"           -> withObject "ErrorNotLaunched" (\o -> ErrorNotLaunched <$> o .: "operation") payload
+      "InsideStep"                 -> withObject "InsideStep" (\o -> InsideStep <$> o .: "operation") payload
+      "ErrorAlreadyLaunched"       -> withObject "ErrorAlreadyLaunched" (\o -> ErrorAlreadyLaunched <$> o .: "operation") payload
+      "ErrorAlreadyRegistered"     -> withObject "ErrorAlreadyRegistered" (\o -> ErrorAlreadyRegistered <$> o .: "key") payload
+      "ErrorSerialization"         -> withObject "ErrorSerialization" (\o -> ErrorSerialization <$> o .: "what" <*> o .: "message") payload
+      "ErrorDeserialization"       -> withObject "ErrorDeserialization" (\o -> ErrorDeserialization <$> o .: "what" <*> o .: "message") payload
+      "ErrorSystemDatabase"        -> fail "a system-database failure is a control signal and is never decoded from an outcome"
+      "StepFailed"                 -> withObject "StepFailed" (\o -> StepFailed <$> o .: "step" <*> o .: "message") payload
       "ErrorWorkflowNotRegistered" -> withObject "ErrorWorkflowNotRegistered" (\o -> ErrorWorkflowNotRegistered <$> o .: "key") payload
-      "ErrorWorkflowClaimLost" -> withObject "ErrorWorkflowClaimLost" (\o -> ErrorWorkflowClaimLost <$> o .: "workflowId") payload
-      "Interrupted" -> withObject "Interrupted" (\o -> Interrupted <$> o .: "workflowId") payload
-      "ErrorWorkflowFailed" -> withObject "ErrorWorkflowFailed" (\o -> ErrorWorkflowFailed <$> o .: "workflowId" <*> o .: "message") payload
-      "AwaitedWorkflowCancelled" -> withObject "AwaitedWorkflowCancelled" (\o -> AwaitedWorkflowCancelled <$> o .: "workflowId") payload
-      "NotInWorkflow" -> withObject "NotInWorkflow" (\o -> NotInWorkflow <$> o .: "operation") payload
-      "WrongInstance" -> withObject "WrongInstance" (\o -> WrongInstance <$> o .: "operation") payload
-      "InvalidArgument" -> withObject "InvalidArgument" (\o -> InvalidArgument <$> o .: "operation" <*> o .: "detail") payload
-      "StepBuiltElsewhere" -> withObject "StepBuiltElsewhere" (\o -> StepBuiltElsewhere <$> o .: "step" <*> o .: "built" <*> o .: "polled") payload
-      "StepTimeout" -> withObject "StepTimeout" (\o -> StepTimeout <$> o .: "step" <*> o .: "timeout") payload
-      "MaxStepRetriesExceeded" -> withObject "MaxStepRetriesExceeded" (\o -> MaxStepRetriesExceeded <$> o .: "step" <*> o .: "attempts" <*> o .: "errors") payload
-      _ -> fail ("unknown error variant " <> show tag)
+      "ErrorWorkflowClaimLost"     -> withObject "ErrorWorkflowClaimLost" (\o -> ErrorWorkflowClaimLost <$> o .: "workflowId") payload
+      "Interrupted"                -> withObject "Interrupted" (\o -> Interrupted <$> o .: "workflowId") payload
+      "ErrorWorkflowFailed"        -> withObject "ErrorWorkflowFailed" (\o -> ErrorWorkflowFailed <$> o .: "workflowId" <*> o .: "message") payload
+      "AwaitedWorkflowCancelled"   -> withObject "AwaitedWorkflowCancelled" (\o -> AwaitedWorkflowCancelled <$> o .: "workflowId") payload
+      "NotInWorkflow"              -> withObject "NotInWorkflow" (\o -> NotInWorkflow <$> o .: "operation") payload
+      "WrongInstance"              -> withObject "WrongInstance" (\o -> WrongInstance <$> o .: "operation") payload
+      "InvalidArgument"            -> withObject "InvalidArgument" (\o -> InvalidArgument <$> o .: "operation" <*> o .: "detail") payload
+      "StepBuiltElsewhere"         -> withObject "StepBuiltElsewhere" (\o -> StepBuiltElsewhere <$> o .: "step" <*> o .: "built" <*> o .: "polled") payload
+      "StepTimeout"                -> withObject "StepTimeout" (\o -> StepTimeout <$> o .: "step" <*> o .: "timeout") payload
+      "MaxStepRetriesExceeded"     -> withObject "MaxStepRetriesExceeded" (\o -> MaxStepRetriesExceeded <$> o .: "step" <*> o .: "attempts" <*> o .: "errors") payload
+      _                            -> fail ("unknown error variant " <> show tag)
     _ -> fail "an error records exactly one tagged variant"
 
 -- | The oracle's @Error::control@: a cancellation, an interruption and
@@ -277,7 +276,7 @@ data Failure
 failureOf :: ToJSON e => Error e -> Failure
 failureOf err = case controlOf err of
   Just engine -> FailureControl engine
-  Nothing -> FailureRecorded (encodeErrorText err)
+  Nothing     -> FailureRecorded (encodeErrorText err)
 
 -- | Decode a recorded failure back into a caller's channel. A payload that
 -- cannot be decoded — a row written by older code — falls back to
@@ -287,7 +286,7 @@ failureError workflowText failure = case failure of
   FailureControl engine -> liftEngine engine
   FailureRecorded payload -> case decodeErrorText payload of
     Right err -> err
-    Left _ -> ErrorWorkflowFailed {workflowId = workflowText, message = payload}
+    Left _    -> ErrorWorkflowFailed {workflowId = workflowText, message = payload}
 
 -- | Encode an error as the error column holds it.
 encodeErrorText :: ToJSON e => Error e -> Text

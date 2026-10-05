@@ -3,8 +3,6 @@
 module DBOS.SystemDB.PostgresTest (tests, streamTests) where
 
 import DBOS.Prelude
-import Control.Monad (forM_, replicateM)
-import Data.Foldable (traverse_)
 import Data.Functor.Contravariant (contramap)
 import DBOS.SystemDB
   ( Applications (..),

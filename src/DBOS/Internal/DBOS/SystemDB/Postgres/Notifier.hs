@@ -38,11 +38,8 @@ module DBOS.SystemDB.Postgres.Notifier
 where
 
 import DBOS.Prelude
-import Control.Monad (unless, when)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
-import Data.Foldable (for_)
 import Data.Functor.Contravariant (contramap)
 import Data.Set (Set)
 import Data.Set qualified as Set

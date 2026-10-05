@@ -10,6 +10,7 @@ import DBOS.SystemDB.RetryTest qualified as SystemDBRetry
 import DBOS.SystemDB.TypesTest qualified as SystemDBTypes
 import DBOS.TracerTest qualified as Tracer
 import DBOS.Transact.CheckpointTest qualified as CheckpointTest
+import DBOS.Transact.CheckpointTestSim qualified as CheckpointSim
 import DBOS.Transact.ClientTest qualified as ClientTest
 import DBOS.Transact.ConfigTest qualified as ConfigTest
 import DBOS.Transact.ContextTest qualified as ContextTest
@@ -20,6 +21,7 @@ import DBOS.Transact.QueueTestSim qualified as QueueSim
 import DBOS.Transact.WidgetSim qualified as WidgetSim
 import DBOS.Transact.WidgetTest qualified as WidgetTest
 import DBOS.Transact.DeadlinesTest qualified as DeadlinesTest
+import DBOS.Transact.DeadlinesTestSim qualified as DeadlinesSim
 import DBOS.Transact.ErrorTest qualified as ErrorTest
 import DBOS.Transact.EventTest qualified as EventTest
 import DBOS.Transact.HandleTest qualified as HandleTest
@@ -33,11 +35,13 @@ import DBOS.Transact.MessageTestSim qualified as MessageSim
 import DBOS.Transact.QueueTest qualified as QueueTest
 import DBOS.Transact.RegistryTest qualified as RegistryTest
 import DBOS.Transact.SelectTest qualified as SelectTest
+import DBOS.Transact.SelectTestSim qualified as SelectSim
 import DBOS.Transact.SerializationTest qualified as SerializationTest
 import DBOS.Transact.SimTest qualified as SimTest
 import DBOS.Transact.SleepTest qualified as SleepTest
 import DBOS.Transact.SleepTestSim qualified as SleepSim
 import DBOS.Transact.StepRetryTest qualified as StepRetryTest
+import DBOS.Transact.StepRetryTestSim qualified as StepRetrySim
 import DBOS.Transact.StepTest qualified as StepTest
 import DBOS.Transact.StepTestSim qualified as StepSim
 import DBOS.Transact.WaitTest qualified as WaitTest
@@ -58,6 +62,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SystemDBTypes.tests
 --- $> tasty Tracer.tests
 --- $> tasty CheckpointTest.tests
+--- $> tasty CheckpointSim.tests
 --- $> tasty ClientTest.tests
 --- $> tasty ConfigTest.tests
 --- $> tasty ContextTest.tests
@@ -68,6 +73,7 @@ import Test.Tasty.Options (OptionSet)
 -- $> tasty WidgetSim.tests
 -- $> tasty WidgetTest.tests
 --- $> tasty DeadlinesTest.tests
+--- $> tasty DeadlinesSim.tests
 --- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests
 --- $> tasty HandleTest.tests
@@ -81,11 +87,13 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty QueueTest.tests
 --- $> tasty RegistryTest.tests
 --- $> tasty SelectTest.tests
+--- $> tasty SelectSim.tests
 --- $> tasty SerializationTest.tests
 --- $> tasty SimTest.tests
 --- $> tasty SleepTest.tests
 --- $> tasty SleepSim.tests
 --- $> tasty StepRetryTest.tests
+--- $> tasty StepRetrySim.tests
 --- $> tasty StepTest.tests
 --- $> tasty StepSim.tests
 --- $> tasty WaitTest.tests
@@ -132,6 +140,7 @@ tests =
     , SystemDBTypes.tests
     , Tracer.tests
     , CheckpointTest.tests
+    , CheckpointSim.tests
     , ClientTest.tests
     , ConfigTest.tests
     , ContextTest.tests
@@ -152,6 +161,7 @@ tests =
     , SleepTest.tests
     , StepTest.tests
     , StepRetryTest.tests
+    , StepRetrySim.tests
     , WaitTest.tests
     , WorkflowTest.tests
     ]
@@ -173,4 +183,6 @@ simTests =
   , QueueSim.tests
   , WidgetSim.tests
   , WorkflowSim.tests
+  , SelectSim.tests
+  , DeadlinesSim.tests
   ]

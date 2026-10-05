@@ -75,9 +75,9 @@ See demo apps for code examples:
 - Most code was written by an autonomous coding agent using non-frontier AI models (mostly Tier 3 "flash" models).
 - Harnessing Haskell strengths to steer design and verification:
   - MTL-style polymorphic backends ([`io-classes`](https://hackage.haskell.org/package/io-classes))
-  - Dual-stack tests running against live backends and IOSim ([`io-sim`](https://hackage.haskell.org/package/io-sim))
-  - Agent harness fast reload feedback loop (`ghciwatch`)
-  - Advanced type/effect features enforcing compile-time invariants in agentic coding ([`bluefin`](https://hackage.haskell.org/package/bluefin), [`ihp-typed-sql`](https://github.com/digitallyinduced/ihp/pull/2825))
+  - Dual-stack `cabal test` running against live backends and IOSim ([`io-sim`](https://hackage.haskell.org/package/io-sim))
+  - Advanced type/effect compile-time invariants harnessing coding agent
+  - Integrated `ghciwatch` fast reload feedback loop with coding agent
 - Development commands:
   - `make env`: Provision the local GHC package environment (`.ghc.environment.*`) for GHCi and tooling.
   - `make dev`: Launch `ghciwatch` for fast reloads and eval-based test feedback on file changes.

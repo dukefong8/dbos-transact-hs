@@ -3,32 +3,24 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | 'DBOS.Transact.StepRetryTest' mirrored under IOSim: the same retry,
--- predicate and timeout cases, with the real ported runner
--- ('runStepWith') and backoff/timeouts on virtual time, each case
--- printing its sim's 'Say' trace inline so a plain @-- $> tasty@ run
--- shows announcements with no extra plumbing. Every case asserts its
--- behavior and its exact 'WorkflowEvent' trace — the typed asserts behind
--- the announcements the live tree writes through FastLogger. The replay
--- case runs over 'MemSystemDB', whose stateful steps let the second call
--- read the recorded checkpoint back genuinely (the stateless mock runs
--- the body again); the control-end and preemption emits have no sim case
--- (no sim backend fails a body with a control error or parks a row) and
--- are covered structurally against @step.rs@.
+-- | The step-runner cases under IOSim: 'runStep', nested and pending steps
+-- through the workflow and step views, each case printing its sim's 'Say'
+-- trace inline so a plain @-- $> tasty@ run shows announcements with no
+-- extra plumbing. Every case asserts its behavior and its exact
+-- 'WorkflowEvent' trace. The retry, predicate, timeout, preemption, and
+-- cancellation cases moved to 'DBOS.Transact.StepRetryTestSim', sharing
+-- scenarios and checks with 'DBOS.Transact.StepRetryTest'.
 module DBOS.Transact.StepTestSim (tests) where
 
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import Data.Text (Text)
-import DBOS.SystemDB (millisDuration)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
-import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simConnectionWith)
+import DBOS.SystemDB.IOSim (simConnectionWith)
 import DBOS.Transact
   ( EngineOnly,
     Error (..),
     Identity (..),
-    StepCtx,
-    StepOptions (..),
     StepStatus,
     PendingStep (..),
     WorkflowCtx,
@@ -36,9 +28,7 @@ import DBOS.Transact
     WorkflowId (..),
     firstStepStatus,
     nextWorkflowMarker,
-    nextStepId,
     pendingStep,
-    renderTransactError,
     runNestedStep,
     runStep,
     runStepWith,
@@ -49,7 +39,7 @@ import DBOS.Transact
   )
 import DBOS.Transact.Checkpoint (pendingStepId)
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
-import Test.Tasty.HUnit (assertBool, testCase, (@?=))
+import Test.Tasty.HUnit (testCase, (@?=))
 
 simIdentity :: Identity
 simIdentity =
@@ -71,87 +61,9 @@ tests =
   -- 'printSimTrace' calls would interleave their lines mid-character.
   -- 'AllFinish' keeps every case running on a failure, in order.
   dependentTestGroup
-    "Step retries (Sim)"
+    "Step runners (Sim)"
     AllFinish
-    [ testCase "a step that fails twice succeeds on the third attempt" $ do
-        ((outcome, made), tr) <- runSimCase thirdAttempt
-        printSimTrace tr
-        (outcome, made) @?= (Right 42, 3)
-        traceEvents tr
-          @?= [ StepRetrying "flaky" 0 1 3 1 (renderTransactError (StepFailed "flaky" "boom" :: (Error EngineOnly))),
-                StepRetrying "flaky" 0 2 3 2 (renderTransactError (StepFailed "flaky" "boom" :: (Error EngineOnly))),
-                StepOutputRecorded "flaky" 0
-              ],
-      testCase "exhausted retries carry every attempt's failure" $ do
-        ((outcome, made), tr) <- runSimCase exhausted
-        printSimTrace tr
-        case (outcome, made) of
-          (Left MaxStepRetriesExceeded {step, attempts, errors}, attemptsMade) -> do
-            step @?= "doomed"
-            attempts @?= 2
-            length errors @?= 2
-            attemptsMade @?= 2
-          other -> fail ("expected MaxStepRetriesExceeded, got: " <> show other)
-        -- The second attempt exhausts the policy, so only the first
-        -- failure warns; the recorded error outcome still announces.
-        traceEvents tr
-          @?= [ StepRetrying "doomed" 0 1 2 1 (renderTransactError (StepFailed "doomed" "boom" :: (Error EngineOnly))),
-                StepErrorRecorded "doomed" 0
-              ],
-      testCase "the default does not retry and does not wrap" $ do
-        ((outcome, made), tr) <- runSimCase defaultOnce
-        printSimTrace tr
-        (outcome, made) @?= (Left (StepFailed "plain" "boom"), 1)
-        traceEvents tr @?= [StepErrorRecorded "plain" 0],
-      testCase "a retried step replays from its single checkpoint" $ do
-        ((first, second, made), tr) <- runSimCase replayed
-        printSimTrace tr
-        -- The mock records nothing, so the live test asserts the
-        -- checkpoint here; over stateful steps the replay is genuine and
-        -- the body runs once, not twice.
-        (first, second, made) @?= (Right 7, Right 7, 2)
-        traceEvents tr
-          @?= [ StepRetrying "flaky" 0 1 3 1 (renderTransactError (StepFailed "flaky" "boom" :: (Error EngineOnly))),
-                StepOutputRecorded "flaky" 0,
-                StepReplaying "flaky" 0
-              ],
-      testCase "a declined failure stops retrying immediately" $ do
-        ((outcome, made), tr) <- runSimCase declined
-        printSimTrace tr
-        (outcome, made) @?= (Left (StepFailed "declined" "boom"), 1)
-        traceEvents tr
-          @?= [ StepDeclined "declined" 0 1 (renderTransactError (StepFailed "declined" "boom" :: (Error EngineOnly))),
-                StepErrorRecorded "declined" 0
-              ],
-      testCase "declining mid-policy keeps the earlier failures" $ do
-        ((outcome, made), tr) <- runSimCase declinedMid
-        printSimTrace tr
-        case (outcome, made) of
-          (Left MaxStepRetriesExceeded {attempts, errors}, attemptsMade) -> do
-            attempts @?= 2
-            length errors @?= 2
-            assertBool "the first failure is kept" (any (== StepFailed "pick" "first") errors)
-            assertBool "the declining failure is kept" (any (== StepFailed "pick" "second") errors)
-            attemptsMade @?= 2
-          other -> fail ("expected MaxStepRetriesExceeded, got: " <> show other)
-        traceEvents tr
-          @?= [ StepRetrying "pick" 0 1 3 1 (renderTransactError (StepFailed "pick" "first" :: (Error EngineOnly))),
-                StepDeclined "pick" 0 2 (renderTransactError (StepFailed "pick" "second" :: (Error EngineOnly))),
-                StepErrorRecorded "pick" 0
-              ],
-      testCase "a step that hangs is stopped at its timeout" $ do
-        (outcome, tr) <- runSimCase timedOut
-        printSimTrace tr
-        case outcome of
-          Left StepTimeout {step} -> step @?= "slow"
-          other -> fail ("expected StepTimeout, got: " <> show other)
-        traceEvents tr @?= [StepAttemptTimedOut "slow" 0 5, StepErrorRecorded "slow" 0],
-      testCase "a step within its timeout is unaffected" $ do
-        (outcome, tr) <- runSimCase withinTimeout
-        printSimTrace tr
-        outcome @?= Right 9
-        traceEvents tr @?= [StepOutputRecorded "quick" 0],
-      testCase "a step run announces through the context tracer" $ do
+    [       testCase "a step run announces through the context tracer" $ do
         (outcome, tr) <- runSimCase tracedRun
         printSimTrace tr
         outcome @?= Right 1
@@ -224,113 +136,6 @@ scopedNested = do
         Left err -> error (show err)
 
 -- * The mirrored cases
-
-thirdAttempt :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
-thirdAttempt = do
-  attempts <- newTVarIO (0 :: Int)
-  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-      body _ = do
-        attempt <- readTVarIO attempts
-        atomically (modifyTVar attempts (+ 1))
-        if attempt < 2
-          then pure (Left (StepFailed "flaky" "boom"))
-          else pure (Right (42 :: Int))
-      options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1}
-  outcome <- simRun "sim-step" $ \wctx -> runStepWith options wctx "flaky" body
-  made <- readTVarIO attempts
-  pure (outcome, made)
-
-exhausted :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
-exhausted = do
-  attempts <- newTVarIO (0 :: Int)
-  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-      body _ = do
-        atomically (modifyTVar attempts (+ 1))
-        pure (Left (StepFailed "doomed" "boom"))
-      options = stepOptionsDefault {maxAttempts = 2, interval = millisDuration 1}
-  outcome <- simRun "sim-step" $ \wctx -> runStepWith options wctx "doomed" body
-  made <- readTVarIO attempts
-  pure (outcome, made)
-
-defaultOnce :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
-defaultOnce = do
-  attempts <- newTVarIO (0 :: Int)
-  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-      body _ = do
-        atomically (modifyTVar attempts (+ 1))
-        pure (Left (StepFailed "plain" "boom"))
-  outcome <- simRun "sim-step" $ \wctx -> runStepWith stepOptionsDefault wctx "plain" body
-  made <- readTVarIO attempts
-  pure (outcome, made)
-
-replayed :: forall s. IOSim s (Either (Error EngineOnly) Int, Either (Error EngineOnly) Int, Int)
-replayed = do
-  mem <- newMemDB
-  conn <- memConnectionOn mem simTracer
-  attempts <- newTVarIO (0 :: Int)
-  let runOnce = do
-        let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-            body _ = do
-              attempt <- readTVarIO attempts
-              atomically (modifyTVar attempts (+ 1))
-              if attempt < 1
-                then pure (Left (StepFailed "flaky" "boom"))
-                else pure (Right (7 :: Int))
-            options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1}
-        withWorkflow conn simIdentity (WorkflowId "sim-step-replay") Nothing $ \wctx ->
-          runStepWith options wctx "flaky" body
-  first <- runOnce
-  second <- runOnce
-  made <- readTVarIO attempts
-  pure (first, second, made)
-
-declined :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
-declined = do
-  attempts <- newTVarIO (0 :: Int)
-  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-      body _ = do
-        atomically (modifyTVar attempts (+ 1))
-        pure (Left (StepFailed "declined" "boom"))
-      options =
-        stepOptionsDefault
-          { maxAttempts = 3,
-            interval = millisDuration 1,
-            shouldRetry = Just (const False)
-          }
-  outcome <- simRun "sim-step" $ \wctx -> runStepWith options wctx "declined" body
-  made <- readTVarIO attempts
-  pure (outcome, made)
-
-declinedMid :: forall s. IOSim s (Either (Error EngineOnly) Int, Int)
-declinedMid = do
-  attempts <- newTVarIO (0 :: Int)
-  let body :: forall exec. StepCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-      body _ = do
-        attempt <- readTVarIO attempts
-        atomically (modifyTVar attempts (+ 1))
-        pure (Left (StepFailed "pick" (if attempt == 0 then "first" else "second")))
-      declinesSecond err = case err of
-        StepFailed _ message -> message /= "second"
-        _ -> True
-      options =
-        stepOptionsDefault
-          { maxAttempts = 3,
-            interval = millisDuration 1,
-            shouldRetry = Just declinesSecond
-          }
-  outcome <- simRun "sim-step" $ \wctx -> runStepWith options wctx "pick" body
-  made <- readTVarIO attempts
-  pure (outcome, made)
-
-timedOut :: IOSim s (Either (Error EngineOnly) Int)
-timedOut = do
-  let options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 5)}
-  simRun "sim-step" $ \wctx -> runStepWith options wctx "slow" (\_ -> threadDelay 50000 >> pure (Right (1 :: Int)))
-
-withinTimeout :: IOSim s (Either (Error EngineOnly) Int)
-withinTimeout = do
-  let options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 500)}
-  simRun "sim-step" $ \wctx -> runStepWith options wctx "quick" (\_ -> pure (Right (9 :: Int)))
 
 tracedRun :: IOSim s (Either (Error EngineOnly) Int)
 tracedRun = do

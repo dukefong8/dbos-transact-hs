@@ -824,6 +824,29 @@ the sim forks the real supervisor. Review found and fixed the widget sim
 fixture's duplicate setup launch (two executors/supervisors per case against
 live's one); `memLaunchOn` documents that it always launches.
 
+## Engine + fake findings from S4 (2026-10-04)
+
+- **PG bulk double-record race (fixed).** `sendBulkWith` passed a caller
+  step to `sendMessages`, which records it, and then `runStepWith`
+  recorded its output at the same id — the upsert compares completions,
+  so the send survived only when both clock reads fell in the same
+  millisecond. The batch now goes out with no caller step (the runner's
+  output record is the checkpoint; replay-skip comes from the runner's
+  pre-check). Single sends keep their caller record. The new live bulk
+  twins prove it deterministically.
+- **Mem fan-out was a no-op (fixed).** `memSend` ignored `sendToForks`;
+  it now expands to the destination plus transitive forks over
+  `workflowRecordForkedFrom`, sorted and deduplicated like the live
+  expansion.
+- **Mem replay-send duplicated (fixed).** `memSend` inserted even when
+  the caller step stood; like the live insert it now skips the send
+  (returning success) on a standing caller step.
+- **Open fidelity follow-ups (not fixed).** `memTakeMessage` takes by
+  topic globally, unscoped by destination (harmless in S4: one
+  destination per topic); mem `recordStep` overwrites where PG raises
+  `StepAlreadyRecorded` on genuine rivals; mem notification ids are
+  topic-count scoped where PG scopes per recipient (`{key}::{dest}`).
+
 ## Step 9 — Dual-stack migration of the critical suites (decided 2026-10-04)
 
 Step 8's follow-on removed the last launch asymmetry for the mem-backed
@@ -841,14 +864,14 @@ Survey (2026-10-04; live/sim line counts):
 
 | Suite | Live | Sim | Critical for | State |
 | --- | ---: | ---: | --- | --- |
-| SleepTest | 93 | 88 | durability | near-complete pair, not framed |
-| DatasourceTest | 608 | 178 | transactions | sim is a sketch |
-| StepRetryTest | 352 | — | transactions | no sim half |
-| CheckpointTest | 171 | — | durability/transactions | no sim half |
-| WaitTest | 193 | 101 | concurrency (events) | partial |
-| MessageTest | 273 | 115 | concurrency (delivery) | partial |
-| SelectTest | 129 | — | concurrency | no sim half |
-| DeadlinesTest | 319 | — | concurrency/timing | no sim half |
+| SleepTest | 93 | 88 | durability | framed (`SleepCases.hs`) |
+| DatasourceTest | 608 | 178 | transactions | framed (`DatasourceCases.hs`) |
+| StepRetryTest | 352 | — | transactions | framed (`StepRetryCases.hs` + `StepRetryTestSim.hs`) |
+| CheckpointTest | 171 | — | durability/transactions | framed (`CheckpointCases.hs` + `CheckpointTestSim.hs`) |
+| WaitTest | 193 | 101 | concurrency (events) | framed (`WaitCases.hs`) |
+| MessageTest | 273 | 115 | concurrency (delivery) | framed (`MessageCases.hs`) |
+| SelectTest | 129 | — | concurrency | framed (`SelectCases.hs` + `SelectTestSim.hs`) |
+| DeadlinesTest | 319 | — | concurrency/timing | framed (`DeadlinesCases.hs` + `DeadlinesTestSim.hs`) |
 | QueueTest | 1640 | 149 | concurrency/durability | sim is a sketch |
 | WorkflowTest | 3350 | 827 | durability/concurrency | framed, scenarios not shared |
 | ManagementTest | 1095 | 418 | durability/management | partial |
@@ -868,21 +891,147 @@ Order (criticality first, size ascending inside a tier):
 7. WorkflowTest/Sim → `WorkflowCases.hs` (recovery/replay/children/Tasks).
 8. Management, Context, Handle, Event.
 
+### Trace-seam validation against the Rust oracle (2026-10-04)
+
+Every event the S1–S3 sim traces assert was checked against the Rust
+`tracing!` call sites (structural: emission point + severity + fields;
+prose is the port's own by Rule 5 and is not compared).
+
+- **Step events, 8/9 matched** (`step.rs`): `StepPlain` → :383,
+  `StepReplaying` → :406, `StepControlEnded` → :445, `StepDeclined` →
+  :476, `StepRetrying` → :495 (`warn!` = `SeverityWarning` ✓, the only
+  warning in the family), `StepOutputRecorded` → :534,
+  `StepErrorRecorded` → :560, `StepPreempted` → :669,
+  `StepAttemptTimedOut` (`timedOutAfterMs`) → :681 (`timeout_ms`).
+  The sim's exhausted/mid-decline sequences mirror a real asymmetry:
+  Rust traces every decline but has no exhaustion-specific message, and
+  the port likewise emits `StepDeclined`/`StepErrorRecorded` with no
+  exhausted-only event.
+- **Sleep events, 2/2 matched** (`sleep.rs`): `SleepUncheckpointed`
+  (`sleepDurationMs`) → :63 (`duration_ms`); `SleepUntilWake`
+  (`sleepStepId`, `sleepRemainingMs`) → :81 (`step_id`,
+  `remaining_ms`). Shape differs on replay — Rust logs a separate
+  "replaying sleep" message while the port re-emits `SleepUntilWake`
+  with `remainingMs = 0` — but the information is identical, and the
+  sim's `[25, 0]` assertion pins exactly that distinction.
+- **Transaction events, 0/7 Rust seams — by record, not by omission.**
+  ADR-0021: the transactional-step runner has no Rust counterpart (its
+  oracles are TypeScript `invokeTransactionFunction` and Python
+  `run_tx_step`, branch-for-branch). Rust's `run_transactional_step`
+  (`sysdb/postgres.rs:787`) carries no `tracing!` calls at all, so
+  there is nothing to compare against; the closest Rust seam is
+  `replayed_output`'s "replaying a step" (`postgres.rs:732`), which the
+  port's `TransactionReplaying` mirrors at the runner layer. The event
+  sequences therefore prove port-owned runner behavior (check → run →
+  record, replay adoption, conflict adoption, ownership stop), not
+  oracle log parity. TS/Python log-seam comparison is open.
+- **Two minor gaps.** `StepRunning` is port-added: Rust creates only the
+  `info_span!("step", …)` (:430), never a start event, and only the
+  simple-runner path emits it (`runStepWith` never does — the sim
+  traces confirm). Rust's `observe_cancellation` warn (:729, status
+  unreadable) has no Haskell event; operational-only, unasserted on
+  both sides.
+
+`cargo test` was not run for this pass: it validates behavior, and the
+seam comparison above is format-string-structural per the gate (Rust
+integration tests install no collector; `tests/context.rs` is the only
+one with tracing plumbing, and it asserts none of these messages).
+
+### Trace-seam validation: Steps 7, 8, supervisor (2026-10-04)
+
+Same structural pass over the earlier slices — what each asserts, and
+where the Rust seams are.
+
+- **Engine lifecycle events, 5/6 matched.** `EngineLaunched` →
+  `instance.rs:82` (`info!`, same three fields, same "DBOS launched"
+  prose); `EngineShutdown` → `:383` (`info!`, "DBOS shut down");
+  `EngineRecovered 0/n` → `recovery.rs:47/49` (debug/info split and
+  the `workflows=` count both preserved); `EngineCancelledRunning` →
+  `:218` (`info!`, same prose and count); `EngineVersionStale` →
+  `:471` (`warn!`, same prose and versions). The supervisor slice's
+  whole point — one `launchExecutor` tail emitting the launch event on
+  both stacks — is therefore oracle-faithful on both stacks, though no
+  test asserts the event itself. `EngineNoWorkflows` is port-added (no
+  Rust counterpart), like `StepRunning`. Rust-only and unasserted on
+  both sides: the `:328` already-launched and `:282` dropped-while-
+  launched warns.
+- **Widget behavioral checks need no event seams.** The Step 7/8
+  shared checks judge rows and commit records, which are behavior, not
+  trace — validated by live green runs plus the psql mirror. The
+  engine paths they cover map cleanly: child dispatch and message
+  waits run the same `start`/`send`/`recv` code both stacks (and
+  `message.rs` carries no tracing on either side, so there is nothing
+  to assert there); the crash/relaunch paths run the same
+  `reenqueueForRecovery` + dequeue entries the recovery seams above
+  announce.
+- **Step 8A built-ins are out of oracle scope by construction.**
+  `EventThreadForked`/`EventTxCommitted`/`EventTxBlocked`/`EventTxWakeup`/
+  `EventThreadDelay` are io-sim scheduler mechanics, not engine
+  emissions — no Rust seam could exist. Their role is anti-staging
+  (the race really forked, the wait really blocked, the winner really
+  committed), and their validity rests on simulator determinism, not
+  on the oracle. They assert floors, never exact sequences, so engine
+  forking changes cannot silently break them.
+- **B2/B3 faults mirror engine-native paths.** `killThread` delivers
+  the same `AsyncCancelled` the engine's own shutdown kill uses, so
+  the killed scenarios exercise the real cancellation path (row
+  PENDING, recovery replays) rather than a new one. The lost
+  acknowledgement targets a semantic point Rust documents explicitly:
+  `run_transactional_step`'s contract (`sysdb/postgres.rs:780-787` —
+  a committed-but-unacknowledged attempt is caught by the next
+  pre-check and replayed) — the sim proves that contract, even though
+  neither side emits an event for it.
+
+The behavior leg (`cargo test -p dbos --test recovery/queues`, read-only)
+was not run for S1–S3 or Steps 7–8; it remains the standing
+unexecuted leg wherever the gate requires it.
+
+### Behavior-leg runs for S1–S3 (2026-10-04)
+
+Ran read-only from `~/dev/dbos-transact-rust` (testcontainers, no repo
+changes): `cargo test -p dbos --test sleep --test retries --test
+timeouts` → **3/3, 6/6, 10/10 green**. Per-scenario comparison:
+
+- **S1 sleep: 3/3 mirror, same shapes.** `a_sleep_waits_and_is_checkpointed`
+  (150ms wait + one `DBOS.sleep` step row) ↔ our checkpoint case (25ms +
+  row + wake); `a_replayed_sleep_does_not_start_its_clock_again` (3s
+  request, unmistakable restart) ↔ our replay (60s request, same
+  `completedAt`/output, `[25, 0]` waits); plain ↔ plain. Ours adds the
+  in-step twin, which has no Rust counterpart.
+- **S3 step-retry: 16/16 mirror, name for name** (6 `retries.rs` + 10
+  `timeouts.rs` = our 6 retry + 5 timeout + 5 preemption/token cases),
+  including the single-checkpoint-row assertion on the third attempt
+  (closed 2026-10-04 via the existing `srfListSteps` capability).
+- **Steps 7–8 behavior leg: `recovery` 3/3 + `queues` 36/36 green**
+  (read-only, 2026-10-04), closing the standing unexecuted leg for the
+  crash/recovery and fan-out paths.
+- **S3 checkpoint: no Rust counterpart to run.** `checkpoint.rs`
+  carries zero `#[test]`s; our 11 placement cases are port-added
+  structural coverage of pure logic both stacks evaluate identically.
+- **S2 datasource: no Rust behavior tests exist.** Zero references to
+  `run_transactional_step` in `crates/dbos/tests/` (verified) — the
+  runner's oracles are TypeScript/Python per ADR-0021, so there is no
+  Rust suite to run for it.
+- **Events: nothing to diff.** No Rust integration test asserts trace
+  messages (`tests/context.rs` is the only suite with tracing
+  plumbing, and it asserts values, not messages) — the event
+  comparison stays structural, as recorded above.
+
 ### TODO checklist (execution order)
 
 - [x] **Gate the supervisor slice** (green 2026-10-04: `cabal test all` 657/657, probes 10/10, migrate 114→114, psql mirror 7 rows; review fix: the widget sim fixture's duplicate setup launch was removed, so sim launches once per case like live): `cabal test all`, `make probes`,
       `make db-migrate`, psql mirror, restart the demo on :8090; fold the
       results into Step 8's status.
-- [ ] **S1 SleepTest/Sim** — `SleepCases.hs`: fixture + scenarios + checks;
+- [x] **S1 SleepTest/Sim** (green 2026-10-04: live 4/4 + sim 4/4, `cabal test all` 658/658; the sim replays over the mem backend in one trace with typed `SleepUntilWake` waits `[25, 0]`, live gained the in-step twin) — `SleepCases.hs`: fixture + scenarios + checks;
       both trees through `DualStack`; sim timer extras (`EventThreadDelay`).
-- [ ] **S2 DatasourceTest/Sim** — `DatasourceCases.hs`: shared transaction
+- [x] **S2 DatasourceTest/Sim** (green 2026-10-04: live 18/18 + sim 13/13, `cabal test all` 658/658; exact `TransactionEvent` sequences moved into sim `traceCheck`s with no printing; new sim twin for the registry lifecycle; pure config/SQL cases shared; 5 SQL cases stay IO-only per ADR-0020) — `DatasourceCases.hs`: shared transaction
       scenarios (commit/rollback, isolation, conflict retry, error classing);
       grow the sim fake to model the checkpoint PK and conflicts.
-- [ ] **S3 StepRetry + Checkpoint sim halves** — `StepRetryCases.hs`,
+- [x] **S3 StepRetry + Checkpoint sim halves** (green 2026-10-04: step-retry live 16/16 + sim 16/16, checkpoint live 11/11 + sim 11/11, `cabal test all` 685/685; exact `WorkflowEvent` sequences in sim `traceCheck`s — incl. 8 new timeout/preemption/token twins; checkpoint sim asserts tracer silence; `StepTestSim` keeps its 5 scoped-runner cases) — `StepRetryCases.hs`,
       `CheckpointCases.hs`; durable retry and checkpoint replay.
-- [ ] **S4 Wait + Message** — `WaitCases.hs`, `MessageCases.hs`; wakeup and
+- [x] **S4 Wait + Message** (green 2026-10-04: wait live 10/10 + sim 10/10, message live 10/10 + sim 11/11, `cabal test all` 688/688, Rust `--test waits --test messages` green; typed `WaitEvent`/`WorkflowEvent` extras; `memSend` now fans out and skips replayed sends; engine fix: bulk sends go out with no caller step) — `WaitCases.hs`, `MessageCases.hs`; wakeup and
       delivery exactly-once; sim block/wake scheduler extras.
-- [ ] **S5 Select + Deadlines sim halves** — `SelectCases.hs`,
+- [x] **S5 Select + Deadlines sim halves** (green 2026-10-04: select live 3/3 + sim 3/3, deadlines live 5/5 + sim 5/5, `cabal test all` 688/688, Rust `--test deadlines` 5/5; select sim asserts tracer silence; deadlines sim runs full launch/crash-relaunch lifecycle on virtual time) — `SelectCases.hs`,
       `DeadlinesCases.hs`.
 - [ ] **S6 QueueTest/Sim** — `QueueCases.hs`: fan-out, concurrency limits,
       queue recovery; build the full sim half.
@@ -893,7 +1042,26 @@ Order (criticality first, size ascending inside a tier):
 Per-slice acceptance: identical case names in both trees; the sim leaf
 drives the same engine entry points as its live half (deletion test);
 `dependentTestGroup ... AllFinish` wherever `printSimTrace` prints; an
-exactly-once check for every effectful step; Step 7 gates.
+exactly-once check for every effectful step; Step 7 gates **plus the
+slice's Rust behavior gate below** (read-only,
+`cargo test -p dbos --test <suite>` from `~/dev/dbos-transact-rust`).
+
+### Rust behavior gate per slice (decided 2026-10-04)
+
+Every slice closes with its oracle suites green, read-only. Vacuous
+where the record says no oracle exists.
+
+| Slice | Rust suite | Status |
+| --- | --- | --- |
+| S1 sleep | `--test sleep` | 3/3 green 2026-10-04 |
+| S2 datasource | — | vacuous by record: no Rust counterpart (ADR-0021; TS/Python oracles) |
+| S3 step-retry | `--test retries --test timeouts` | 6/6 + 10/10 green 2026-10-04 |
+| S3 checkpoint | — | vacuous: `checkpoint.rs` has no tests |
+| S4 wait/message | `--test waits --test messages` | green 2026-10-04 |
+| S5 select/deadlines | `--test deadlines` | 5/5 green 2026-10-04 (select has no dedicated Rust suite) |
+| S6 queue | `--test queues` | 36/36 green 2026-10-04 (Steps 7–8 fan-out leg) |
+| S7 workflow | `--test workflows --test recovery --test children` | `recovery` 3/3 green 2026-10-04 (crash leg); rest with S7 |
+| S8 management/etc. | `--test management` (+ per-domain suites) | runs with S8 |
 
 The mock-backed sim trees (`simLaunchWith`/`simConnectionWith`) keep the
 minimal launch until a slice owns their stubs; that seam is recorded on

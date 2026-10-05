@@ -5,7 +5,6 @@
 module DBOS.Transact.InstanceTest (tests) where
 
 import DBOS.Prelude
-import Control.Monad (forM_)
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as Text

@@ -8,9 +8,6 @@
 module DBOS.Transact.Sleep (sleepStep, pendingSleep, sleepPlain, SleepEvent (..)) where
 
 import DBOS.Prelude
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
-import Control.Monad.Class.MonadTime (MonadTime)
-import Control.Monad.Class.MonadTimer (MonadDelay, threadDelay)
 import Data.Int (Int64)
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB

@@ -47,10 +47,6 @@ module DBOS.Transact.Select
 where
 
 import DBOS.Prelude
-import Control.Monad.Class.MonadAsync (race)
-import Control.Monad.Class.MonadTime (MonadTime)
-import Control.Applicative ((<|>))
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB

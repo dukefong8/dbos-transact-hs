@@ -53,7 +53,6 @@ where
 import DBOS.Prelude
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import DBOS.SystemDB.Types (nullTopicSentinel)
 
