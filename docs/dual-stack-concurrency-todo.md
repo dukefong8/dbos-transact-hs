@@ -825,7 +825,6 @@ fixture's duplicate setup launch (two executors/supervisors per case against
 live's one); `memLaunchOn` documents that it always launches.
 
 ## Engine + fake findings from S4 (2026-10-04)
-
 - **PG bulk double-record race (fixed).** `sendBulkWith` passed a caller
   step to `sendMessages`, which records it, and then `runStepWith`
   recorded its output at the same id — the upsert compares completions,
@@ -846,6 +845,33 @@ live's one); `memLaunchOn` documents that it always launches.
   destination per topic); mem `recordStep` overwrites where PG raises
   `StepAlreadyRecorded` on genuine rivals; mem notification ids are
   topic-count scoped where PG scopes per recipient (`{key}::{dest}`).
+
+## Engine + fake findings from S6 (2026-10-05)
+
+- **Mem never stamped `delay_until` (fixed).** `memFreshRow` left
+  `workflowRecordDelayUntil = Nothing`, so a DELAYED row could never come
+  due and any waiter hung: the compiled probe showed delayed/dedup/join
+  HUNG in sim while PG runs them. `initWorkflow` now stamps
+  `newWorkflowDelay >>= addTimeout now`, mirroring the SQL init's
+  `delay_until`. Found by per-case host-timeout probing, not by the
+  watcher (whose hung eval just sat at 99% CPU with no output).
+- **Mem partitioned sweep re-claimed finished heads (fixed).** The head
+  candidate list had no status guard, so after the first heads completed,
+  the next sweep re-claimed the SUCCESS rows and the real second wave
+  never ran (probe: partitioned HUNG, counted passed). The list now
+  requires `Enqueued`, carries the claim's version gate, and tie-breaks on
+  the id like the SQL's `created_at, workflow_uuid` order.
+- **Mem never released dedup keys on completion (fixed).** PG clears
+  `deduplication_id` in `record_workflow_outcome` (the unique index spans
+  every status); mem held the `(queue, key)` map entry forever, so the
+  third enqueue stayed refused and ReturnExisting re-joined a finished
+  row. `recordWorkflowOutcome` now clears the column and drops the hold
+  while it still names the finishing workflow.
+- **Mem queue discovery was unscoped (fixed).** `listQueues ... Unset`
+  showed every queue; PG scopes to the listener's own application plus
+  unclaimed rows — the exact mechanism the peer-queue case pins. Mem now
+  mirrors it, and the framed sim fixture sets the listener application to
+  `sim-app` as the launched connection carries it live.
 
 ## Step 9 — Dual-stack migration of the critical suites (decided 2026-10-04)
 
@@ -1033,8 +1059,37 @@ timeouts` → **3/3, 6/6, 10/10 green**. Per-scenario comparison:
       delivery exactly-once; sim block/wake scheduler extras.
 - [x] **S5 Select + Deadlines sim halves** (green 2026-10-04: select live 3/3 + sim 3/3, deadlines live 5/5 + sim 5/5, `cabal test all` 688/688, Rust `--test deadlines` 5/5; select sim asserts tracer silence; deadlines sim runs full launch/crash-relaunch lifecycle on virtual time) — `SelectCases.hs`,
       `DeadlinesCases.hs`.
-- [ ] **S6 QueueTest/Sim** — `QueueCases.hs`: fan-out, concurrency limits,
+- [x] **S6 QueueTest/Sim** (green 2026-10-05: live 35/35 + sim 37/37 — 34 framed + legacy IO-only marker + 2 claim sketch cases; `cabal test all` 688/688, probes 10/10, migrate 114→114, psql mirror 7 rows, Rust `--test queues` 36/36; mem fixes: delay stamping, partitioned-sweep guards, dedup release, discovery scoping, list queue-name filter) — `QueueCases.hs`: fan-out, concurrency limits,
       queue recovery; build the full sim half.
+      - Slice 1 green 2026-10-05 (validation tier): `QueueCases.hs` fixture
+        (`qfSuffix`/`qfAppName`/`qfDBOS`/`qfLaunch`/`qfShutdown`/`qfUpsertQueue`/
+        `qfReadQueueRow`) + 12 scenarios/checks (defaults, legacy re-scope,
+        reservation, unlaunched, incoherent/unhonourable tables, update
+        coherence, equal limits, rate-limit, partition limits, re-register,
+        legacy-row refusal); both trees carry the identical 12 names
+        (`leaf`/`liveCase` live, `simLeaf`/`simCase` sim, sketch pair kept as
+        sim-only extras); watcher live 35/35 + sim 14/14, `All good
+        (101 modules)`, flip guard failed both halves. New engine seam for
+        the execution slices: `launchOnWithQueues` (facade) + `memLaunchOnWith`
+        (listen-set staffing; `memLaunchOn` delegates with `Nothing`).
+        Remaining: execution/row-read tier, timing tier (incl. legacy-input
+        IO-only marker), app-scoping verdict for the peer-queue case.
+      - Slice 2 green 2026-10-05 (execution/row-read tier): 10 more
+        scenarios/checks (CRUD run/list/update/delete, deadline stamped vs
+        open, partition/priority/sentinel rows, incoherent-enqueue refusal,
+        internal-row immunity, late/ghost registration, inherited deadline);
+        fixture grows `qfReadWorkflowRow`; mem `listWorkflows` now honours
+        the queue-name filter (null never matches non-empty, mirroring the
+        SQL guard); engine-channel pinning helper `orCrash` for the free
+        `startDBOSWorkflowRef` error variable. Watcher live 35/35 + sim
+        24/24, flip guard failed all ten checks on both halves.
+      - Slice 3 green 2026-10-05 (timing/scoping tier): 12 more
+        scenarios/checks (worker concurrency peaks, three listen filters via
+        the new `launchOnWithQueues`/`memLaunchOnWith` seam, delayed/dedup/
+        join lifecycles, priority backlog order, mid-run limit update,
+        partitioned and counted-partitioned peaks, peer-queue invisibility)
+        plus the legacy-input IO-only marker (ADR-0020). Watcher live 35/35
+        + sim 37/37, flip guard failed all twelve checks on both halves.
 - [ ] **S7 WorkflowTest/Sim** — `WorkflowCases.hs`: share the 54 scenario
       bodies; Tasks concurrency cases; recovery/replay/children.
 - [ ] **S8 Management/Context/Handle/Event** — `*Cases.hs` per domain.

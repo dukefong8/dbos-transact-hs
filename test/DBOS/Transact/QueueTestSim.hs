@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 
 -- | The queue claim's application scoping, deterministic under io-sim.
 --
@@ -21,9 +22,11 @@
 module DBOS.Transact.QueueTestSim (tests) where
 
 import DBOS.Prelude
-import Control.Monad.IOSim (IOSim, SimEventType (..), selectTraceEvents)
+import Control.Monad.IOSim (IOSim, SimEventType (..), SimTrace, selectTraceEvents)
 import Data.Text (Text)
-import DBOS.IOSimTracer (printSimTrace, runSimCase)
+import Data.Text qualified as Text
+import DBOS.DualStack (simCase)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB
   ( Error,
     NewWorkflow (..),
@@ -40,8 +43,80 @@ import DBOS.SystemDB
     startQueuedWorkflows,
     upsertQueue,
   )
-import DBOS.SystemDB.IOSim (MemSystemDB, memSetApplication, newMemDBWithApplication)
-import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
+import DBOS.SystemDB.IOSim (MemSystemDB, memLaunchOnWith, memSetApplication, newMemDB, newMemDBWithApplication, simInstance)
+import DBOS.Transact (shutdown)
+import DBOS.Transact.QueueCases
+  ( QueueFixture (..),
+    checkBadEnqueue,
+    checkCountedPartitioned,
+    checkDedup,
+    checkDelayed,
+    checkJoin,
+    checkListenInternal,
+    checkListenNarrow,
+    checkListenNone,
+    checkPartitioned,
+    checkPeerQueue,
+    checkPriority,
+    checkUpdateHonoured,
+    checkWorkerConcurrency,
+    checkCrud,
+    checkDeadlineStamped,
+    checkEqualLimits,
+    checkGhostQueue,
+    checkIncoherent,
+    checkInheritedDeadline,
+    checkInternalRow,
+    checkLateQueue,
+    checkLegacyRescope,
+    checkLegacyUpdateRefused,
+    checkNoDeadlineYet,
+    checkPartitionLimits,
+    checkPartitionRow,
+    checkQueueDefaults,
+    checkRateLimit,
+    checkReregister,
+    checkReserved,
+    checkSentinel,
+    checkUnhonourable,
+    checkUnlaunched,
+    checkUpdateCoherent,
+    scenarioBadEnqueue,
+    scenarioCountedPartitioned,
+    scenarioDedup,
+    scenarioDelayed,
+    scenarioJoin,
+    scenarioListenInternal,
+    scenarioListenNarrow,
+    scenarioListenNone,
+    scenarioPartitioned,
+    scenarioPeerQueue,
+    scenarioPriority,
+    scenarioUpdateHonoured,
+    scenarioWorkerConcurrency,
+    scenarioCrud,
+    scenarioDeadlineStamped,
+    scenarioEqualLimits,
+    scenarioGhostQueue,
+    scenarioIncoherent,
+    scenarioInheritedDeadline,
+    scenarioInternalRow,
+    scenarioLateQueue,
+    scenarioLegacyRescope,
+    scenarioLegacyUpdateRefused,
+    scenarioNoDeadlineYet,
+    scenarioPartitionLimits,
+    scenarioPartitionRow,
+    scenarioQueueDefaults,
+    scenarioRateLimit,
+    scenarioReregister,
+    scenarioReserved,
+    scenarioSentinel,
+    scenarioUnhonourable,
+    scenarioUnlaunched,
+    scenarioUpdateCoherent,
+  )
+import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 
 -- * Staging
@@ -122,28 +197,116 @@ scenarioScoped = do
 
 -- * Cases
 
+-- | One fixture per leaf over a fresh in-memory database: the instance
+-- launches over it with the shared launch tail, and the listen filter is
+-- derived from the leaf's suffix like the live config.
+simQueueFixture :: (Text -> Maybe [Text]) -> forall s. IOSim s (QueueFixture (IOSim s))
+simQueueFixture listenOf = do
+  mem <- newMemDB
+  -- The listener's application, as the launched connection carries it live:
+  -- queue discovery and claims scope to this plus unclaimed rows, so a
+  -- peer's queue stays invisible to this fixture's supervisor.
+  memSetApplication (Just "sim-app") mem
+  dbos <- simInstance
+  let suffix = "sim"
+  pure
+    QueueFixture
+      { qfSuffix = suffix,
+        qfAppName = "sim-app",
+        qfDBOS = dbos,
+        qfLaunch = memLaunchOnWith mem simTracer dbos (listenOf suffix),
+        qfShutdown = shutdown dbos,
+        qfUpsertQueue = \new onExisting -> upsertQueue mem new onExisting,
+        qfReadQueueRow = \name -> do
+          found <- getQueue mem name
+          case found of
+            Left err -> error (show err)
+            Right record -> pure record,
+        qfReadWorkflowRow = \wid -> do
+          found <- getWorkflow mem wid
+          case found of
+            Left err -> error (show err)
+            Right record -> pure record
+      }
+
+-- | One framed leaf over the per-leaf fixture. Validation cases emit no
+-- engine events, so the trace check is silence.
+simLeaf :: (Text -> Maybe [Text]) -> String -> (forall s. QueueFixture (IOSim s) -> IOSim s a) -> (a -> Either String ()) -> TestTree
+simLeaf listenOf name scen judge = simCase (simQueueFixture listenOf) name scen judge noTrace
+  where
+    noTrace :: forall x. SimTrace x -> IO ()
+    noTrace _ = pure ()
+
 tests :: TestTree
 tests =
-  dependentTestGroup
-    "Queue claims (IOSim)"
-    AllFinish
-    [ testCase "two listeners race for an unclaimed row; the first claims it" $ do
-        ((firstClaimed, secondClaimed, executor, forked), tr) <- runSimCase scenarioRace
-        printSimTrace tr
-        firstClaimed @?= Right [WorkflowId "race"]
-        secondClaimed @?= Right []
-        executor @?= Just "foreign"
-        -- The fork order the scheduler used is the fork order we created,
-        -- so the winner is fixed by the schedule, not by timing.
-        selectTraceEvents (\_ -> \case EventThreadForked tid -> Just tid; _ -> Nothing) tr @?= forked
-        -- No timer events: the race is decided by the cooperative
-        -- schedule alone, which is what makes the reproduction
-        -- deterministic.
-        selectTraceEvents (\_ -> \case EventThreadDelay _ _ -> Just (); _ -> Nothing) tr @?= [],
-      testCase "an application-scoped row is claimed only by its application" $ do
-        ((foreignClaim, owner, executor), tr) <- runSimCase scenarioScoped
-        printSimTrace tr
-        foreignClaim @?= Right []
-        owner @?= Right [WorkflowId "scoped"]
-        executor @?= Just "owner"
+  testGroup
+    "Workflow queues (Sim)"
+    [ dependentTestGroup
+        "Queue claims (IOSim)"
+        AllFinish
+        [ testCase "two listeners race for an unclaimed row; the first claims it" $ do
+            ((firstClaimed, secondClaimed, executor, forked), tr) <- runSimCase scenarioRace
+            printSimTrace tr
+            firstClaimed @?= Right [WorkflowId "race"]
+            secondClaimed @?= Right []
+            executor @?= Just "foreign"
+            -- The fork order the scheduler used is the fork order we created,
+            -- so the winner is fixed by the schedule, not by timing.
+            selectTraceEvents (\_ -> \case EventThreadForked tid -> Just tid; _ -> Nothing) tr @?= forked
+            -- No timer events: the race is decided by the cooperative
+            -- schedule alone, which is what makes the reproduction
+            -- deterministic.
+            selectTraceEvents (\_ -> \case EventThreadDelay _ _ -> Just (); _ -> Nothing) tr @?= [],
+          testCase "an application-scoped row is claimed only by its application" $ do
+            ((foreignClaim, owner, executor), tr) <- runSimCase scenarioScoped
+            printSimTrace tr
+            foreignClaim @?= Right []
+            owner @?= Right [WorkflowId "scoped"]
+            executor @?= Just "owner"
+        ],
+      testGroup
+        "Workflow queues"
+        [ simCase (simQueueFixture (const Nothing)) "queue options default to no limits and poll once a second" scenarioQueueDefaults checkQueueDefaults noTrace,
+          simCase (simQueueFixture (const Nothing)) "a legacy-partitioned row re-scopes its limits" scenarioLegacyRescope checkLegacyRescope noTrace,
+          simLeaf (const Nothing) "the internal queue name is reserved" scenarioReserved checkReserved,
+          simLeaf (const Nothing) "registering before launch is refused" scenarioUnlaunched checkUnlaunched,
+          simLeaf (const Nothing) "incoherent limits are refused before they reach the row" scenarioIncoherent checkIncoherent,
+          simLeaf (const Nothing) "an update cannot leave a queue incoherent" scenarioUpdateCoherent checkUpdateCoherent,
+          simLeaf (const Nothing) "an unhonourable queue configuration is refused" scenarioUnhonourable checkUnhonourable,
+          simLeaf (const Nothing) "a per-process limit may equal the fleet limit" scenarioEqualLimits checkEqualLimits,
+          simLeaf (const Nothing) "a queue carries a rate limit and priority ordering" scenarioRateLimit checkRateLimit,
+          simLeaf (const Nothing) "per-partition limits partition a queue" scenarioPartitionLimits checkPartitionLimits,
+          simLeaf (const Nothing) "re-registering updates the stored limits" scenarioReregister checkReregister,
+          simLeaf (const Nothing) "adding a per-partition limit to a legacy row is refused" scenarioLegacyUpdateRefused checkLegacyUpdateRefused,
+          simLeaf (const Nothing) "a registered queue updates, lists and deletes through the instance" scenarioCrud checkCrud,
+          simLeaf (const Nothing) "a dequeue stamps the deadline an enqueue left open" scenarioDeadlineStamped checkDeadlineStamped,
+          simLeaf (const Nothing) "an explicit timeout on a queued workflow records no deadline yet" scenarioNoDeadlineYet checkNoDeadlineYet,
+          simLeaf (const Nothing) "a partition key is recorded on the row" scenarioPartitionRow checkPartitionRow,
+          simLeaf (const Nothing) "an unprioritised workflow stores the sentinel" scenarioSentinel checkSentinel,
+          simLeaf (const Nothing) "an incoherent enqueue is refused" scenarioBadEnqueue checkBadEnqueue,
+          simLeaf (const Nothing) "a stored row cannot redefine the internal queue" scenarioInternalRow checkInternalRow,
+          simLeaf (const Nothing) "a queue registered after launch is dequeued from" scenarioLateQueue checkLateQueue,
+          simLeaf (const Nothing) "a queue this process never registered is dequeued from" scenarioGhostQueue checkGhostQueue,
+          simLeaf (const Nothing) "an inherited deadline reaches a queued child" scenarioInheritedDeadline checkInheritedDeadline,
+          simLeaf (const Nothing) "a queue's worker concurrency runs that many at once in one process" scenarioWorkerConcurrency checkWorkerConcurrency,
+          simLeaf (\s -> Just ["hs-l2-listen-fast-" <> Text.take 12 s]) "listen queues narrow what this process dequeues" scenarioListenNarrow checkListenNarrow,
+          simLeaf (const (Just [])) "an empty listen set dequeues from no registered queue" scenarioListenNone checkListenNone,
+          simLeaf (\s -> Just ["hs-l2-listen-other-" <> Text.take 12 s]) "listen queues never exclude the internal queue" scenarioListenInternal checkListenInternal,
+          simLeaf (const Nothing) "a delayed enqueue waits before it is dequeued" scenarioDelayed checkDelayed,
+          simLeaf (const Nothing) "a deduplication id admits one waiting workflow" scenarioDedup checkDedup,
+          simLeaf (const Nothing) "return existing joins the workflow holding the key" scenarioJoin checkJoin,
+          simLeaf (const Nothing) "priority orders the backlog lower first" scenarioPriority checkPriority,
+          simLeaf (const Nothing) "updating a queue changes what a running worker honours" scenarioUpdateHonoured checkUpdateHonoured,
+          simLeaf (const Nothing) "a partitioned queue runs one workflow per key at a time" scenarioPartitioned checkPartitioned,
+          simLeaf (const Nothing) "a counted partitioned queue runs its limit per key" scenarioCountedPartitioned checkCountedPartitioned,
+          simLeaf (const Nothing) "another application's queue is not dequeued from" scenarioPeerQueue checkPeerQueue,
+          -- IO only: the fixture rewrites the row through raw SQL into the
+          -- pre-109 shape (input moved into the status column, payload-table
+          -- row dropped), and MemSystemDB keeps no separate workflow_input
+          -- table to rewrite.
+          testCase "a queued workflow with a legacy input runs with it" (pure ())
+        ]
     ]
+  where
+    noTrace :: forall x. SimTrace x -> IO ()
+    noTrace _ = pure ()

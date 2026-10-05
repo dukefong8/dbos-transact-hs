@@ -20,6 +20,7 @@ module DBOS.Transact.Instance
     launch,
     launchWithEnvironment,
     launchOn,
+    launchOnWithQueues,
     launchExecutor,
     shutdown,
     requireExecutor,
@@ -477,6 +478,15 @@ launchOn dbos conn identity = do
   let executor = Executor {conn = conn, identity = identity, datasources = dbos.dbos_datasources, workflows = workflows, listen_queues = Nothing, tasks = tasks, releaseTracer = pure ()}
   modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
   pure executor
+
+-- | 'launchOn' with an explicit listen set: the programmatic counterpart
+-- of 'Config.configListenQueues', which the config-file launch path
+-- installs. Test backends use it to staff filtered supervisors;
+-- 'launchOn' itself keeps listening to nothing.
+launchOnWithQueues :: (MonadSTM m, MonadMVar m) => DBOS m -> Connection m -> Identity -> Maybe [Text] -> m (Executor m)
+launchOnWithQueues dbos conn identity listen = do
+  executor <- launchOn dbos conn identity
+  pure executor {listen_queues = listen}
 
 -- | Complete a launch over an executor a caller has built: register the
 -- application version, recover this executor's pending rows, announce the

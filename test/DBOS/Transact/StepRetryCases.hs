@@ -125,7 +125,7 @@ scenarioRetryDefault fx = do
 
 -- | A retried step replays from its single checkpoint: the second run
 -- reads the recording without running the body again.
-scenarioRetryReplay :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Either (Error EngineOnly) Int, Int)
+scenarioRetryReplay :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int, Either (Error EngineOnly) Int, Int)
 scenarioRetryReplay fx = do
   wid <- fx.srfFreshWorkflowId
   attempts <- newTVarIO (0 :: Int)
@@ -138,9 +138,10 @@ scenarioRetryReplay fx = do
           else pure (Right (7 :: Int))
       options = stepOptionsDefault {maxAttempts = 3, interval = millisDuration 1}
   first <- runStepScope fx wid $ \wctx -> runStepWith options wctx "flaky" body
+  midRuns <- readTVarIO attempts
   second <- runStepScope fx wid $ \wctx -> runStepWith options wctx "flaky" body
   made <- readTVarIO attempts
-  pure (first, second, made)
+  pure (first, midRuns, second, made)
 
 -- | A declined failure stops retrying immediately.
 scenarioRetryDeclined :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
@@ -358,9 +359,10 @@ checkRetryDefault (outcome, made) = do
   unless (made == 1) $ Left ("expected one attempt, got: " <> show made)
 
 -- | The replay returns the recording without running the body again.
-checkRetryReplay :: (Either (Error EngineOnly) Int, Either (Error EngineOnly) Int, Int) -> Either String ()
-checkRetryReplay (first, second, made) = do
+checkRetryReplay :: (Either (Error EngineOnly) Int, Int, Either (Error EngineOnly) Int, Int) -> Either String ()
+checkRetryReplay (first, midRuns, second, made) = do
   unless (first == Right 7) $ Left ("expected 7 from the first run, got: " <> show first)
+  unless (midRuns == 2) $ Left ("expected the first run to retry once, got: " <> show midRuns)
   unless (second == Right 7) $ Left ("expected 7 from the replay, got: " <> show second)
   unless (made == 2) $ Left ("expected two body runs, got: " <> show made)
 

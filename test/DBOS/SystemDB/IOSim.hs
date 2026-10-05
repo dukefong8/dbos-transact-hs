@@ -17,6 +17,7 @@ module DBOS.SystemDB.IOSim
     memSetApplication,
     memConnectionOn,
     memLaunchOn,
+    memLaunchOnWith,
     memDBOSOn,
     simConnectionWith,
     simInstance,
@@ -115,6 +116,7 @@ import DBOS.Transact
     configNew,
     launchExecutor,
     launchOn,
+    launchOnWithQueues,
     newDBOS,
   )
 import DBOS.Transact.Connection
@@ -414,9 +416,16 @@ memConnectionOn mem tracer = do
 -- existing-executor guard, so callers must launch once per executor
 -- lifetime and relaunch only after 'shutdown'.
 memLaunchOn :: MemSystemDB s -> SomeTracer (IOSim s) -> DBOS (IOSim s) -> IOSim s (Executor (IOSim s))
-memLaunchOn mem tracer dbos = do
+memLaunchOn mem tracer dbos = memLaunchOnWith mem tracer dbos Nothing
+
+-- | 'memLaunchOn' with an explicit listen set for the supervisor: the sim
+-- counterpart of a config carrying 'configListenQueues'. The engine's
+-- queue discovery and worker staffing run unchanged; only the filter the
+-- supervisor staffs from differs.
+memLaunchOnWith :: MemSystemDB s -> SomeTracer (IOSim s) -> DBOS (IOSim s) -> Maybe [Text] -> IOSim s (Executor (IOSim s))
+memLaunchOnWith mem tracer dbos listen = do
   conn <- memConnectionOn mem tracer
-  executor <- launchOn dbos conn simIdentity
+  executor <- launchOnWithQueues dbos conn simIdentity listen
   -- The same launch tail the IO path runs: application-version registration,
   -- recovery of this executor's pending rows, the launch announcement, and
   -- the supervisor fork — over the simulated backends.
@@ -504,24 +513,29 @@ memInitResult row =
     }
 
 instance SystemDB (MemSystemDB s) (IOSim s) where
-  initWorkflow db new _maxAttempts _submission caller = atomically $ do
-    rows <- readTVar db.memRows
-    case Map.lookup new.newWorkflowId rows of
-      Just row -> pure (Right (memInitResult row))
-      Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
-        (Just queue, Just key) -> do
-          held <- readTVar db.memDedup
-          case Map.lookup (queue, key) held of
-            Just _ ->
-              pure (Left (QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queue, deduplicationId = key}))
-            Nothing -> do
-              writeTVar db.memDedup (Map.insert (queue, key) new.newWorkflowId held)
-              insertFresh rows
-        _ -> insertFresh rows
+  initWorkflow db new _maxAttempts _submission caller = do
+    -- The wake instant a delayed enqueue waits for, as the SQL init's
+    -- @delay_until@: without it a DELAYED row would never come due and the
+    -- transition would pass it by forever.
+    now <- timestampNow
+    atomically $ do
+      rows <- readTVar db.memRows
+      case Map.lookup new.newWorkflowId rows of
+        Just row -> pure (Right (memInitResult row))
+        Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
+          (Just queue, Just key) -> do
+            held <- readTVar db.memDedup
+            case Map.lookup (queue, key) held of
+              Just _ ->
+                pure (Left (QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queue, deduplicationId = key}))
+              Nothing -> do
+                writeTVar db.memDedup (Map.insert (queue, key) new.newWorkflowId held)
+                insertFresh rows now
+          _ -> insertFresh rows now
     where
-      insertFresh rows = do
+      insertFresh rows now = do
         owner <- simOwnerText db
-        let row = memFreshRow new caller owner
+        let row = (memFreshRow new caller owner) {workflowRecordDelayUntil = new.newWorkflowDelay >>= addTimeout now}
         writeTVar db.memRows (Map.insert new.newWorkflowId row rows)
         case caller of
           -- The init caller records the parent's start step in the same
@@ -560,10 +574,19 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     pure
       ( Right
           ( case filters.workflowFilterWorkflowIds of
-              [] -> Map.elems rows
-              ids -> [row | wid <- ids, Just row <- [Map.lookup wid rows]]
+              [] -> [row | row <- Map.elems rows, queuedHere row]
+              ids -> [row | wid <- ids, Just row <- [Map.lookup wid rows], queuedHere row]
           )
       )
+    where
+      -- The only list guard the sim halves assert: a queue-name filter
+      -- admits a row only when the row names a listed queue, as the SQL
+      -- @cardinality = 0 or queue_name = any@ guard does (a null queue
+      -- never matches a non-empty filter). Every other filter stays
+      -- unmirrored.
+      queuedHere row = case filters.workflowFilterQueueNames of
+        [] -> True
+        names -> row.workflowRecordQueueName `elem` (Just <$> names)
   getWorkflowChildren db (WorkflowId wid) = do
     rows <- readTVarIO db.memRows
     pure (Right [row.workflowRecordId | row <- Map.elems rows, row.workflowRecordParentWorkflowId == Just (WorkflowId wid)])
@@ -572,7 +595,20 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     case Map.lookup wid rows of
       Nothing -> pure (Right Recorded)
       Just row -> do
-        writeTVar db.memRows (Map.insert wid (memApplyOutcome outcome row) rows)
+        -- Finishing releases the deduplication key, as the SQL outcome's
+        -- @deduplication_id = null@ does: a key left on a finished row
+        -- would be held forever, and the unique index spans every status.
+        -- The hold drops only while it still names this workflow, so a
+        -- reassigned key is never clobbered.
+        let row' = (memApplyOutcome outcome row) {workflowRecordDeduplicationId = Nothing}
+        writeTVar db.memRows (Map.insert wid row' rows)
+        case (row.workflowRecordQueueName, row.workflowRecordDeduplicationId) of
+          (Just queue, Just key) -> do
+            held <- readTVar db.memDedup
+            case Map.lookup (queue, key) held of
+              Just holder | holder == wid -> writeTVar db.memDedup (Map.delete (queue, key) held)
+              _ -> pure ()
+          _ -> pure ()
         pure (Right Recorded)
     where
       memApplyOutcome (OutcomeOutput output) row =
@@ -888,9 +924,13 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     atomically $ do
       rows <- readTVar db.memRows
       application <- readTVar db.memApplicationName
+      versions0 <- readTVar db.memVersions
       let queueName = queue.queueRecordName
           cap = fromIntegral dequeueSweepCap
           limit = maybe cap (min cap) (fromIntegral <$> maxTasks)
+          versions = sortOn (.versionInfoTimestamp) versions0
+          latest = case versions of [] -> Nothing; vs -> Just (last vs).versionInfoName
+          isLatest = maybe True (== applicationVersion) latest
           keys =
             [ key
               | key <- sort (Set.toList (Set.fromList [key | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordQueueName == Just queueName, row.workflowRecordStatus == Enqueued, Just key <- [row.workflowRecordQueuePartitionKey]])),
@@ -901,11 +941,13 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               [ widText
                 | key <- keys,
                   (widText, _) : _ <-
-                    [ sortOn (\(_, row) -> (row.workflowRecordPriority, row.workflowRecordCreatedAt))
+                    [ sortOn (\(widText, row) -> (row.workflowRecordPriority, row.workflowRecordCreatedAt, widText))
                         [ (widText, row)
                           | (widText, row) <- Map.toList rows,
                             row.workflowRecordQueueName == Just queueName,
                             visibleToApplication application row,
+                            row.workflowRecordStatus == Enqueued,
+                            row.workflowRecordApplicationVersion == Just applicationVersion || (isLatest && isNothing row.workflowRecordApplicationVersion),
                             row.workflowRecordQueuePartitionKey == Just key
                         ]
                     ]
@@ -917,8 +959,14 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     pure (Right (Map.lookup name queues))
   listQueues db applications = do
     queues <- readTVarIO db.memQueues
+    application <- readTVarIO db.memApplicationName
     let visible row = case applications of
-          Unset -> True
+          -- The listener's own application plus the unclaimed rows, as the
+          -- SQL claim's @$1 is null or application_name = $1@ guard does: a
+          -- listener with no application sees everything.
+          Unset -> case application of
+            Nothing -> True
+            Just name -> row.queueRecordApplicationName == Nothing || row.queueRecordApplicationName == Just name
           Named [] -> True
           Named names -> maybe True (`elem` names) row.queueRecordApplicationName
           Any -> True

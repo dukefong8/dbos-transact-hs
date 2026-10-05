@@ -55,6 +55,7 @@ IO-only cases (running list):
 - "a replayed parent reads the recorded outcome rather than waiting again" — recorded-await replay across two launches; needs the recovery sweep.
 - "a foreign error is converted at the boundary" — the body performs real IO (the foreign charge call), which the simulator cannot run.
 - "select reports the first workflow to settle, not the first started" — first-to-settle timing is wall-clock-bound.
+- "a queued workflow with a legacy input runs with it" — the fixture rewrites the row through raw SQL into the pre-109 shape (input moved into the status column, payload-table row dropped); `MemSystemDB` keeps no separate `workflow_input` table to rewrite.
 
 Recorded 2026-10-01; extended 2026-10-01 (same-tree marking).
 

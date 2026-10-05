@@ -13,7 +13,7 @@ common commons
     OverloadedLabels
     OverloadedRecordDot
     RecordWildCards
-  ghc-options: -Wall -threaded
+  ghc-options: -Wall -threaded -Wno-ambiguous-fields
   build-depends:
     aeson,
     base >=4.21 && <5,
@@ -126,6 +126,7 @@ test-suite test
     DBOS.Transact.DatasourceTest
     DBOS.Transact.DatasourceTestSim
     DBOS.Transact.QueueTestSim
+    DBOS.Transact.QueueCases
     DBOS.Transact.WidgetTest
     DBOS.Transact.WidgetCases
     DBOS.Transact.WidgetSim
