@@ -54,8 +54,8 @@ import Data.Traversable as Base
 import Data.Tuple as Base
 import Data.Word as Base
 import Debug.Trace as Base
-import Prelude as Base hiding (Read, all, and, any, elem, foldl, foldl1, foldr, foldr1, id, mapM, mapM_, maximum, minimum, notElem, or, product, sequence, sequence_, sum)
-
+import Prelude as Base hiding (Read, all, and, any, elem, foldl, foldl1, foldr, foldr1, mapM, mapM_, maximum, minimum, notElem, or, product, sequence, sequence_, sum, (.))
+import Text.Read as Base (Read (..), readEither, readMaybe)
 
 import Control.Concurrent.Class.MonadMVar.Strict as Monad
 import Control.Concurrent.Class.MonadSTM.Strict as Monad
