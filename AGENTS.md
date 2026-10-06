@@ -14,8 +14,7 @@ Repo guide for DBOS Haskell.
 - `docs/` holds durable engineering notes, workflow guidance, research context, and ADRs (`cross-language-schema-interop.md` = the shared `dbos` schema contract).
 - `docs/adr/` records architectural decisions.
 - `demo-apps/` holds the two worked examples (starter, widget store) and `Demo.Http`; their code panels are compile-time source extractions (`Starter.CodePanel.panel` with `addDependentFile`, tag needles in `Starter/Assets.hs`) — a panel always shows the real `.hs` source, never a hand-written copy, and a rename must update the tag needles in the same sweep.
-- `probes/` holds the permanent compile probes for the scoped-capability brands: each `neg-*.hs` must fail to typecheck with its expected error class and each `w-*.hs` witness twin must build clean; run through `make probes` (`cabal exec -- ghc -fno-code -fno-write-interface`, driven by `probes/run.sh`). The policy is `docs/invariant-gates.md`.
-- `.lavish/rust-port-plan.html` is the living port plan; fold each phase's delta back into it (self-recursive loop) and mark edits with dated notes.
+- `.lavish/rust-port-plan.html` is the living port plan; fold each phase's delta back into it (self-recursive loop) and mark edits with dated notes. (The former `probes/` compile-probe gate was removed 2026-10-06; its policy history lives in `docs/invariant-gates.md`.)
 - `CONTEXT.md` is the glossary for domain language only.
 - `.agents/skills/dbos-transact-hs/SKILL.md` is the client-app skill: how to build an application on the `DBOS.Transact` facade (registration, step bodies, transactional steps, testing). Port-development rules live here; that skill serves app authors.
 

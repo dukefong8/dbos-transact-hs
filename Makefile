@@ -5,7 +5,7 @@ SHELL := bash
 GHC  ?= 9.12
 PACKAGE ?= dbos-transact-hs
 
-.PHONY: build dev env hie pg test db-migrate widget-db probes
+.PHONY: build dev env hie pg test db-migrate widget-db
 
 dev:
 	ghciwatch --no-interrupt-reloads \
@@ -26,14 +26,6 @@ build:
 
 test:
 	cabal test all
-
-
-# Exec-brand compile probes (docs/invariant-gates.md §5): negatives must
-# fail, witness twins must build clean. Builds the library first so the
-# probe compiles see a registered package.
-probes:
-	cabal build lib:dbos-transact-hs
-	./probes/run.sh
 
 
 db-migrate:

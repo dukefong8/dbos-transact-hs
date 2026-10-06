@@ -3,8 +3,9 @@ rust-migrate/target/
 .haskell.hoo
 .build/
 .ghc.environment.*
-ghcid.txt
-.ghcid.txt
 .agent/
+.claude/
 .envrc
 tags*
+*.tags*
+ghcid.txt

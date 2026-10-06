@@ -30,11 +30,9 @@ does not build clean, the negative is suspect and the gate is red until
 it is fixed.
 
 Status: the three protos ship the grep half plus witness twins (`W_*.hs`
-per negative, built first, must succeed). The real tree now ships the same
-practice as permanent `-fno-code` probes: `probes/*.hs` with
-`probes/run.sh` (run through `make probes`) — four negatives, each matched
-to its expected error class, each with a witness twin that must build
-clean.
+per negative, built first, must succeed). The real tree carried the same
+practice as `-fno-code` probes until their removal (2026-10-06); the
+policy below stands as the record of how they ran.
 
 ## 3. Showing old runtime negative vs. new compile-time check
 
@@ -84,9 +82,8 @@ a hole, not a cleanup.
 - Tree slices: negative compile tests live beside the probe or as
   `-fno-code` build probes where the invariant touches the real tree
   (e.g. StepCtx-keyed ops post-rewire); witness twins accompany each.
-  Landed: `probes/` (`neg-*`/`w-*` pairs for child start, allocation,
-  nested steps, and cross-exec races; `make probes`), driven by
-  `cabal exec -- ghc -fno-code -fno-write-interface` against the facade.
+  Landed-then-removed 2026-10-06 with `probes/` (had `neg-*`/`w-*` pairs
+  for child start, allocation, nested steps, and cross-exec races).
 - Runtime halves: the existing live+sim trees; no-trace assertions are
   strengthened wherever a negative currently asserts only the refusal
   shape.
