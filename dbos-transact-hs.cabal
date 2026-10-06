@@ -35,7 +35,6 @@ common commons
     io-classes:strict-stm,
     io-sim,
     mtl,
-    postgresql-types,
     rerefined,
     safe-wild-cards,
     stm-containers,
@@ -43,6 +42,7 @@ common commons
     template-haskell,
     text,
     time,
+    transformers,
     unordered-containers,
     uuid,
     vector,
@@ -134,6 +134,7 @@ test-suite test
     DBOS.Transact.DeadlinesCases
     DBOS.Transact.DeadlinesTest
     DBOS.Transact.DeadlinesTestSim
+    DBOS.Transact.HandleCases
     DBOS.Transact.HandleTest
     DBOS.Transact.HandleTestSim
     DBOS.Transact.IdentityTest
@@ -144,10 +145,13 @@ test-suite test
     DBOS.Transact.StepRetryCases
     DBOS.Transact.StepRetryTest
     DBOS.Transact.StepRetryTestSim
+    DBOS.Transact.StepCases
     DBOS.Transact.StepTestSim
     DBOS.Transact.StepTest
     DBOS.Transact.ErrorTest
+    DBOS.Transact.EventCases
     DBOS.Transact.EventTest
+    DBOS.Transact.EventTestSim
     DBOS.Transact.MessageCases
     DBOS.Transact.MessageTest
     DBOS.Transact.MessageTestSim
@@ -158,10 +162,12 @@ test-suite test
     DBOS.Transact.InstanceTest
     DBOS.Transact.WorkflowTest
     DBOS.Transact.WorkflowTestSim
+    DBOS.Transact.WorkflowCases
     DBOS.Transact.WorkflowSimData
     DBOS.Transact.QueueTest
     DBOS.SystemDB.NotifyTest
     DBOS.SystemDB.NotifierTest
+    DBOS.Transact.ManagementCases
     DBOS.Transact.ManagementTest
     DBOS.Transact.ManagementTestSim
     DBOS.Transact.ManagementSimData
@@ -169,11 +175,6 @@ test-suite test
     DBOS.Transact.SleepTest
     DBOS.Transact.SleepCases
     DBOS.Transact.SleepTestSim
-    -- Deleted 2026-09-25: DBOS.SystemDBHasqlTest, DBOS.TransactTest
-    -- (Bluefin seam; ADR-0012).
-    -- Deleted 2026-09-29: DBOS.SystemDBTest, folded into
-    -- DBOS.SystemDB.TypesTest as notificationTests (mirrors the
-    -- DBOS.SystemDB.Types home of notificationRowForMessage).
   build-depends:
     breakpoint,
     bytestring,

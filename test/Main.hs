@@ -24,6 +24,7 @@ import DBOS.Transact.DeadlinesTest qualified as DeadlinesTest
 import DBOS.Transact.DeadlinesTestSim qualified as DeadlinesSim
 import DBOS.Transact.ErrorTest qualified as ErrorTest
 import DBOS.Transact.EventTest qualified as EventTest
+import DBOS.Transact.EventTestSim qualified as EventSim
 import DBOS.Transact.HandleTest qualified as HandleTest
 import DBOS.Transact.HandleTestSim qualified as HandleSim
 import DBOS.Transact.IdentityTest qualified as IdentityTest
@@ -76,6 +77,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty DeadlinesSim.tests
 --- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests
+--- $> tasty EventSim.tests
 --- $> tasty HandleTest.tests
 --- $> tasty HandleSim.tests
 --- $> tasty IdentityTest.tests
@@ -173,6 +175,7 @@ simTests :: [TestTree]
 simTests =
   [ SimTest.tests
   , ContextSim.tests
+  , EventSim.tests
   , HandleSim.tests
   , ManagementSim.tests
   , MessageSim.tests

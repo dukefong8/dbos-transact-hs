@@ -452,9 +452,9 @@ registerDataSource registry source = do
     then pure (Left (ErrorAlreadyLaunched "register_datasource"))
     else
       modifyMVar registry.dsrSources $ \sources ->
-        case filter ((== source.dsName) . (.dsName)) sources of
-          _ : _ -> pure (sources, Left (ErrorAlreadyRegistered ("datasource " <> source.dsName)))
-          [] -> pure (source : sources, Right ())
+        case find ((== source.dsName) . (.dsName)) sources of
+          Just _ -> pure (sources, Left (ErrorAlreadyRegistered ("datasource " <> source.dsName)))
+          Nothing -> pure (source : sources, Right ())
 
 -- | The registered datasources, oldest first.
 snapshotDatasources :: MonadMVar m => DataSourceRegistry m -> m [DataSource m]

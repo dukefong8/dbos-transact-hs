@@ -2,130 +2,105 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 
--- | 'DBOS.Transact.HandleTest' mirrored under IOSim over the mock
--- backend: the real handle code over canned rows, each case printing its
--- sim's 'Say' trace inline so a plain @-- $> tasty@ run shows
--- announcements with no extra plumbing. The mock answers @Just@ for
--- every id but @"missing"@, so the deleted-row case is mirrored as that
--- id; the failed-run and handle-drop cases stay live-only (the mock
--- await always succeeds, and there are no real tasks to outlive a
--- handle). The oracle has exactly one @handle.rs@ trace site (the
--- child-await finding an already-recorded outcome, debug): our replay
--- join announces the same moment through @WorkflowChildJoined@ and the
--- already-finished start through @WorkflowSuperseded@, so no
--- handle-domain event is missing — the pane stays quiet here by
--- fidelity. The cases run on the say-carrier regardless, so any future
--- handle announcement prints with no test change.
+-- | 'DBOS.Transact.HandleTest' mirrored over simulated data: the same
+-- scenarios and the same checks as the live tree, with values asserted
+-- here — including the 'IOSim' typed trace assertions, which stay in this
+-- module. The memory backend ('MemSystemDB', fresh per case) records rows
+-- and steps for real, so retrieves, results, and awaits assert what live
+-- asserts. Nothing prints: traces speak through types, not lines.
 module DBOS.Transact.HandleTestSim (tests) where
 
+import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
+import DBOS.DualStack (simCase)
+import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import Control.Monad.IOSim (IOSim)
-import Data.Text (Text)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
-import DBOS.SystemDB (SerializedWorkflowValue (..), WorkflowId (..), WorkflowStatus (..))
-import DBOS.SystemDB.IOSim (simConnectionWith, simDBOSWith)
-import DBOS.Transact (
-    EngineOnly,DBOS, Error, Identity (..), WorkflowHandle (workflowId), awaitChild, handleResult, handleStatus, retrieveWorkflow, withWorkflow)
-import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import DBOS.SystemDB (WorkflowId (..))
+import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
+import DBOS.Transact (EngineEvent (..), WorkflowEvent (..), configNew)
+import DBOS.Transact.Connection (SomeSystemDB (..))
+import DBOS.Transact.HandleCases
+  ( HandleFixture (..),
+    checkDeletedAbsent,
+    checkDropHandle,
+    checkFailError,
+    checkResultAdopts,
+    checkRetrieveStatus,
+    checkScopedAwait,
+    mkHandleFixture,
+    scenarioDeletedAbsent,
+    scenarioDropHandle,
+    scenarioFailError,
+    scenarioResultAdopts,
+    scenarioRetrieveStatus,
+    scenarioScopedAwait,
+  )
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.HUnit ((@?=))
 
-simSayDBOS :: IOSim s (DBOS (IOSim s))
-simSayDBOS = simDBOSWith simTracer
+-- | The sim half of the shared handle fixture: a fresh 'MemSystemDB' per
+-- case (so cases stay isolated) passed in as 'SomeSystemDB' with the sim
+-- carrier as 'SomeTracer', over the same 'mkHandleFixture' builder live
+-- uses. Only the atoms differ.
+simHandleFixture :: forall s. IOSim s (HandleFixture (IOSim s))
+simHandleFixture = do
+  mem <- newMemDB
+  ids <- newTVarIO 0
+  entropy <- newTVarIO 0
+  mkHandleFixture
+    (configNew "sim-app" "")
+    simIdentity
+    "sim-app"
+    (WorkflowId . ("sim-" <>))
+    (simGeneratedId ids)
+    (simEntropy entropy)
+    (SomeSystemDB mem)
+    simTracer
 
 tests :: TestTree
 tests =
-  -- Sequential: cases announce through one shared stderr, so parallel
-  -- 'printSimTrace' calls would interleave their lines mid-character.
-  -- 'AllFinish' keeps every case running on a failure, in order.
-  dependentTestGroup
+  testGroup
     "Workflow handle (Sim)"
-    AllFinish
-    [ testCase "a retrieved handle names its workflow and reads its status" $ do
-        (outcome, tr) <- runSimCase (retrieveAndStatus "sim-handle")
-        printSimTrace tr
-        case outcome of
-          Left err -> fail (show err)
-          Right (named, status) -> do
-            named @?= "sim-handle"
-            case status of
-              Right (Just Pending) -> pure ()
-              other -> fail (show other),
-      testCase "a handle result adopts the recorded output" $ do
-        (outcome, tr) <- runSimCase (retrieveAndResult "sim-handle")
-        printSimTrace tr
-        case outcome of
-          Right (Just SerializedWorkflowValue {serializedText = storedText}) -> storedText @?= "mock-output"
-          other -> fail (show other),
-      testCase "a handle over a deleted row reports its absence" $ do
-        (outcome, tr) <- runSimCase (retrieveAndCheck "missing")
-        printSimTrace tr
-        outcome @?= Right Nothing,
-      testCase "a scoped await adopts the settled child" $ do
-        (outcome, tr) <- runSimCase scopedAwait
-        printSimTrace tr
-        case outcome of
-          Right (Just SerializedWorkflowValue {serializedText = storedText}) -> storedText @?= "mock-output"
-          other -> fail (show other)
+    [ simCase simHandleFixture "a retrieved handle names its workflow and reads its status" scenarioRetrieveStatus checkRetrieveStatus traceRetrieveStatus,
+      simCase simHandleFixture "a handle result adopts the recorded output" scenarioResultAdopts checkResultAdopts traceResultAdopts,
+      simCase simHandleFixture "a handle result reports the error a failed run recorded" scenarioFailError checkFailError traceFailError,
+      simCase simHandleFixture "a handle over a deleted row reports its absence" scenarioDeletedAbsent checkDeletedAbsent traceDeletedAbsent,
+      simCase simHandleFixture "dropping a handle does not stop the workflow" scenarioDropHandle checkDropHandle traceDropHandle,
+      simCase simHandleFixture "a scoped await records the child's result under the parent" scenarioScopedAwait checkScopedAwait traceScopedAwait
     ]
 
--- * Engine-only driver aliases
+-- | The run records its step and completes; the shutdown ends the run.
+traceRetrieveStatus :: forall a. SimTrace a -> IO ()
+traceRetrieveStatus tr = do
+  selectTraceEventsDynamic tr @?= [StepRunning "double" 0, StepOutputRecorded "double" 0, WorkflowCompleted "sim-handle-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
--- | The engine-only driver aliases the tree below reads through. Local
--- copies are deliberate: this module carries only the aliases it uses.
-retrieveWfSim :: DBOS (IOSim s) -> WorkflowId -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
-retrieveWfSim = retrieveWorkflow
+-- | Same shape as the retrieval: one step, one completion.
+traceResultAdopts :: forall a. SimTrace a -> IO ()
+traceResultAdopts tr = do
+  selectTraceEventsDynamic tr @?= [StepRunning "double" 0, StepOutputRecorded "double" 0, WorkflowCompleted "sim-handle-res-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
-resultWfSim :: WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-resultWfSim = handleResult
+-- | The body's own failure is recorded as the workflow's failure.
+traceFailError :: forall a. SimTrace a -> IO ()
+traceFailError tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowFailed "sim-handle-fail-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
-statusWfSim :: WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe WorkflowStatus))
-statusWfSim = handleStatus
+-- | The stepless body completes; the delete leaves no further trace.
+traceDeletedAbsent :: forall a. SimTrace a -> IO ()
+traceDeletedAbsent tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "sim-handle-del-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
--- | The scoped await over the stateless mock: the retrieved handle's
--- settle answers with the canned outcome, and the await records under the
--- awaiter's own workflow id.
-scopedAwait :: IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-scopedAwait = do
-  dbos <- simSayDBOS
-  retrieved <- retrieveWfSim dbos (WorkflowId "sim-handle-await")
-  case retrieved of
-    Left err -> pure (Left err)
-    Right handle -> do
-      conn <- simConnectionWith simTracer
-      withWorkflow conn simIdentity (WorkflowId "sim-awaiter") Nothing $ \wctx ->
-        awaitChild wctx handle
+-- | Same shape as the retrieval: the dropped handle changes nothing.
+traceDropHandle :: forall a. SimTrace a -> IO ()
+traceDropHandle tr = do
+  selectTraceEventsDynamic tr @?= [StepRunning "double" 0, StepOutputRecorded "double" 0, WorkflowCompleted "sim-handle-drop-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
-simIdentity :: Identity
-simIdentity =
-  Identity
-    { identityAppName = "sim-app",
-      identityAppVersion = "0.0.0",
-      identityExecutorId = "sim-executor",
-      identityAppId = ""
-    }
-
-retrieveAndStatus :: Text -> IOSim s (Either (Error EngineOnly) (Text, Either (Error EngineOnly) (Maybe WorkflowStatus)))
-retrieveAndStatus wid = do
-  dbos <- simSayDBOS
-  retrieved <- retrieveWfSim dbos (WorkflowId wid)
-  case retrieved of
-    Left err -> pure (Left err)
-    Right handle -> do
-      status <- statusWfSim handle
-      pure (Right (handle.workflowId, status))
-
-retrieveAndResult :: Text -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-retrieveAndResult wid = do
-  dbos <- simSayDBOS
-  retrieved <- retrieveWfSim dbos (WorkflowId wid)
-  case retrieved of
-    Left err -> pure (Left err)
-    Right handle -> resultWfSim handle
-
-retrieveAndCheck :: Text -> IOSim s (Either (Error EngineOnly) (Maybe WorkflowStatus))
-retrieveAndCheck wid = do
-  dbos <- simSayDBOS
-  retrieved <- retrieveWfSim dbos (WorkflowId wid)
-  case retrieved of
-    Left err -> pure (Left err)
-    Right handle -> statusWfSim handle
+-- | The child records its step and completes; the parent-side await adopts
+-- the recorded output without launching the parent.
+traceScopedAwait :: forall a. SimTrace a -> IO ()
+traceScopedAwait tr = do
+  selectTraceEventsDynamic tr @?= [StepRunning "double" 0, StepOutputRecorded "double" 0, WorkflowCompleted "sim-handle-await-child"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]

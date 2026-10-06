@@ -9,6 +9,7 @@
 -- this group is the launched-instance behavior.
 module DBOS.Transact.ManagementTest (tests) where
 
+import DBOS.DualStack (liveCase)
 import DBOS.Prelude
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
@@ -56,6 +57,7 @@ import DBOS.Transact
     Error (..),
     Identity (..),
     QueueConflict (..),
+    SomeTracer (..),
     StartOptions (..),
     WorkflowHandle (workflowId),
     WorkflowKey,
@@ -109,7 +111,51 @@ import DBOS.Transact
     resumeWorkflowsInWorkflow,
     startChildWorkflow,
   )
+import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
+import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.Transact.ContextTest (connOver)
+import DBOS.Transact.ManagementCases
+  ( MgmtFixture (..),
+    checkCancelMissing,
+    checkCancelMissing,
+    checkCancelResumeRun,
+    checkCancelTree,
+    checkDelete,
+    checkForkFromBeginning,
+    checkForkFromFailure,
+    checkForkFromStep,
+    checkForkTakesIdAndQueue,
+    checkBulkCancelResume,
+    checkBulkFork,
+    checkForkPartitioned,
+    checkAttributes,
+    checkDelayRelease,
+    checkDelete,
+    checkResumeMissing,
+    checkResumeOntoQueue,
+    checkRetrieve,
+    checkUnlaunched,
+    mkMgmtFixture,
+    mkMgmtFixture,
+    scenarioCancelMissing,
+    scenarioCancelResumeRun,
+    scenarioCancelTree,
+    scenarioDelete,
+    scenarioForkFromBeginning,
+    scenarioForkFromFailure,
+    scenarioForkFromStep,
+    scenarioForkTakesIdAndQueue,
+    scenarioBulkCancelResume,
+    scenarioBulkFork,
+    scenarioForkPartitioned,
+    scenarioAttributes,
+    scenarioDelayRelease,
+    scenarioDelete,
+    scenarioResumeMissing,
+    scenarioResumeOntoQueue,
+    scenarioRetrieve,
+    scenarioUnlaunched,
+  )
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
@@ -125,362 +171,24 @@ mgmtTestIdentity =
 
 tests :: TestTree
 tests =
-  withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
+  withResource acquireSuiteBackend releaseSuiteBackend $ \getBackend ->
   withResource acquireLoggerBackend snd $ \getLogger ->
   testGroup
     "Workflow management"
-    [ testCase "the management surface needs a launched instance" $ do
-        suffix <- freshSuffix
-        base <- configFromEnv ("hs-l2-mgmt-unlaunched-" <> Text.take 16 suffix)
-        dbos <- newDBOS base
-        refused <- cancelWorkflows dbos [WorkflowId "never-launched"] False
-        case refused of
-          Left ErrorNotLaunched {} -> pure ()
-          other -> fail ("expected a not-launched refusal, got: " <> show other),
-      testCase "cancelling a workflow that does not exist is not an error" $
-        withInstance "mgmt-cancel-missing" $ \dbos _suffix -> do
-          exec <- launchOrFail dbos
-          cancelled <- cancelWorkflows dbos [WorkflowId "never-existed"] False
-          assertEqual "a missing row cancels to nothing" (Right []) cancelled,
-      testCase "resuming a workflow that does not exist is an error" $
-        withInstance "mgmt-resume-missing" $ \dbos _suffix -> do
-          exec <- launchOrFail dbos
-          resumed <- resumeWorkflows dbos [WorkflowId "never-existed"] Nothing
-          case resumed of
-            Left (ErrorSystemDatabase (SystemDB.NonExistentWorkflow {workflowIds})) ->
-              workflowIds @?= ["never-existed"]
-            other -> fail ("expected a non-existent-workflow refusal, got: " <> show other),
-      testCase "cancelling makes a workflow terminal and leaves it resumable" $
-        withInstance "mgmt-cancel-resume" $ \dbos suffix -> do
-          ran <- newIORef (0 :: Int)
-          let key = newWorkflowKey "cancellable"
-              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body input _ = do
-                modifyIORef' ran (+ 1)
-                pure (Right (input + 5))
-              workflowText = "hs-l2-mgmt-cancel-resume-" <> suffix
-              workflowId = WorkflowId workflowText
-          ref <- registerRefOrFail dbos key body
-          exec <- launchOrFail dbos
-          started <-
-            startWfRef
-              exec
-              ref
-              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew "no-runner-here")})
-              (Just (encodeWorkflowValue (0 :: Int)))
-          case started of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          cancelled <- cancelWorkflows dbos [workflowId] False
-          assertEqual "the cancel reports the id it moved" (Right [workflowId]) cancelled
-          handle <- retrieveOrFail dbos workflowId
-          status <- statusWf handle
-          assertEqual "the row is terminal" (Right (Just Cancelled)) status
-          assertEqual "a cancelled workflow did not run" 0 =<< readIORef ran
-          resumed <- resumeWorkflows dbos [workflowId] Nothing
-          case resumed of
-            Left err -> fail (show err)
-            Right ids -> ids @?= [workflowId]
-          waited <- waitForWorkflow dbos workflowId
-          case waited of
-            Right (AwaitedSucceeded (Just output) _) -> decodeResult output @?= Right (5 :: Int)
-            other -> fail ("expected the resumed workflow's result, got: " <> show other)
-          assertEqual "the resumed workflow ran once" 1 =<< readIORef ran,
-      testCase "resuming onto a named queue puts the workflow there" $
-        withInstance "mgmt-resume-queue" $ \dbos suffix -> do
-          let queueName = "hs-l2-mgmt-queue-" <> suffix
-              key = newWorkflowKey "resumable"
-              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body input _ = pure (Right input)
-              workflowText = "hs-l2-mgmt-resume-queue-" <> suffix
-              workflowId = WorkflowId workflowText
-          ref <- registerRefOrFail dbos key body
-          exec <- launchOrFail dbos
-          queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
-          case queueRegistered of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          started <-
-            startWfRef
-              exec
-              ref
-              (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew "no-runner-here")})
-              (Just (encodeWorkflowValue (7 :: Int)))
-          case started of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          _ <- cancelWorkflows dbos [workflowId] False
-          resumed <- resumeWorkflows dbos [workflowId] (Just queueName)
-          case resumed of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          waited <- waitForWorkflow dbos workflowId
-          case waited of
-            Right (AwaitedSucceeded (Just output) _) -> decodeResult output @?= Right (7 :: Int)
-            other -> fail ("expected the queued resume to run, got: " <> show other),
-      testCase "cancelling a tree reaches the children" $
-        withInstance "mgmt-cancel-tree" $ \dbos suffix -> do
-          -- Both ends wait: the child blocks on the gate, so it is
-          -- PENDING (not finished) when the cancel arrives — a detached
-          -- child that already finished could no longer be cancelled.
-          childStarted <- newEmptyMVar
-          gate <- newEmptyMVar
-          let childKey = newWorkflowKey "tree-child"
-              parentKey = newWorkflowKey "tree-parent"
-              childBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              childBody () _ = putMVar childStarted () >> takeMVar gate >> pure (Right 1)
-              parentText = "hs-l2-mgmt-tree-parent-" <> suffix
-              parentId = WorkflowId parentText
-          childRef <- registerRefOrFail dbos childKey childBody
-          let parentBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
-              parentBody () wctx = do
-                started <- startChildWorkflow wctx childRef startOptionsDefault Nothing
-                case started of
-                  Left err -> pure (Left err)
-                  Right handle -> do
-                    -- The child exists and has begun before the parent
-                    -- returns, so the cancel below cannot miss it.
-                    takeMVar childStarted
-                    pure (Right (workflowTextOf handle))
-          registered <- registerDBOSWorkflow dbos parentKey parentBody
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          ran <- runWf exec parentKey parentId Nothing
-          childId <- case ran of
-            Left err -> fail (show err)
-            Right (Just output) -> case decodeSerializedChildId output of
-              Left err -> fail (show err)
-              Right childText -> pure (WorkflowId childText)
-            Right Nothing -> fail "the parent recorded no child"
-          cancelled <- cancelWorkflows dbos [parentId] True
-          case cancelled of
-            Left err -> fail (show err)
-            Right ids -> assertBool "the tree cancel names the child" (childId `elem` ids)
-          handle <- retrieveOrFail dbos childId
-          status <- statusWf handle
-          assertEqual "the child is terminal" (Right (Just Cancelled)) status,
-      testCase "deleting a workflow removes its row" $
-        withInstance "mgmt-delete" $ \dbos suffix -> do
-          let key = newWorkflowKey "deletable"
-              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body input wctx = runStep wctx "work" (const (pure input))
-              workflowText = "hs-l2-mgmt-delete-" <> suffix
-              workflowId = WorkflowId workflowText
-          registered <- registerDBOSWorkflow dbos key body
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          ran <- runWf exec key workflowId (Just (encodeWorkflowValue (1 :: Int)))
-          case ran of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          deleted <- deleteWorkflows dbos [workflowId] True
-          assertEqual "one row was deleted" (Right 1) deleted
-          handle <- retrieveOrFail dbos workflowId
-          status <- statusWf handle
-          assertEqual "the row is gone" (Right Nothing) status,
-      testCase "a workflow can be retrieved by id" $
-        withInstance "mgmt-retrieve" $ \dbos suffix -> do
-          let key = newWorkflowKey "retrievable"
-              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body input _ = pure (Right (input * 3))
-              workflowText = "hs-l2-mgmt-retrieve-" <> suffix
-              workflowId = WorkflowId workflowText
-          registered <- registerDBOSWorkflow dbos key body
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          ran <- runWf exec key workflowId (Just (encodeWorkflowValue (2 :: Int)))
-          case ran of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          handle <- retrieveOrFail dbos workflowId
-          status <- statusWf handle
-          assertEqual "the retrieved row reports success" (Right (Just Success)) status
-          result <- resultWf handle
-          case result of
-            Right (Just output) -> decodeSerializedResult output @?= Right (6 :: Int)
-            other -> fail ("expected the retrieved result, got: " <> show other),
-      testCase "forking from the beginning runs the workflow again under a new id" $
-        withInstance "mgmt-fork-beginning" $ \dbos suffix -> do
-          attempts <- newIORef (0 :: Int)
-          let key = newWorkflowKey "forkable"
-              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body _ _ = do
-                attempt <- readIORef attempts
-                modifyIORef' attempts (+ 1)
-                if attempt == 0
-                  then pure (Left (ErrorConfig "the first attempt fails"))
-                  else pure (Right 8)
-              sourceText = "hs-l2-mgmt-fork-source-" <> suffix
-              sourceId = WorkflowId sourceText
-          registered <- registerDBOSWorkflow dbos key body
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          first <- runWf exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
-          assertBool "the source was supposed to fail" (isLeft first)
-          forked <- forkWorkflows dbos [forkNew sourceText] defaultForkOptions
-          forkedIds <- case forked of
-            Left err -> fail (show err)
-            Right ids -> pure ids
-          case forkedIds of
-            [forkedId] -> do
-              assertBool "the fork got its own id" (forkedId /= sourceId)
-              waited <- waitForWorkflow dbos forkedId
-              case waited of
-                Right (AwaitedSucceeded (Just output) _) -> decodeResult output @?= Right (8 :: Int)
-                other -> fail ("expected the fork to run, got: " <> show other)
-            other -> fail ("expected exactly one fork, got: " <> show other)
-          sourceHandle <- retrieveOrFail dbos sourceId
-          sourceStatus <- statusWf sourceHandle
-          assertEqual "the source keeps its outcome" (Right (Just Error)) sourceStatus,
-      testCase "a fork takes the id and queue it is given" $
-        withInstance "mgmt-fork-placed" $ \dbos suffix -> do
-          let key = newWorkflowKey "placed"
-              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body input _ = pure (Right input)
-              sourceText = "hs-l2-mgmt-fork-placed-source-" <> suffix
-              forkedText = "hs-l2-mgmt-fork-placed-fork-" <> suffix
-              queueName = "hs-l2-mgmt-fork-queue-" <> suffix
-              sourceId = WorkflowId sourceText
-          registered <- registerDBOSWorkflow dbos key body
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
-          case queueRegistered of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          ran <- runWf exec key sourceId (Just (encodeWorkflowValue (4 :: Int)))
-          case ran of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          forked <-
-            forkWorkflows
-              dbos
-              [(forkNew sourceText) {forkForkedId = Just forkedText}]
-              (defaultForkOptions {forkOptionsQueueName = Just queueName})
-          case forked of
-            Left err -> fail (show err)
-            Right ids -> ids @?= [WorkflowId forkedText]
-          waited <- waitForWorkflow dbos (WorkflowId forkedText)
-          case waited of
-            Right (AwaitedSucceeded (Just output) _) -> decodeResult output @?= Right (4 :: Int)
-            other -> fail ("expected the placed fork to run, got: " <> show other),
-      testCase "forking from a chosen step replays the steps below it" $
-        withInstance "mgmt-fork-step" $ \dbos suffix -> do
-          ran <- newIORef ([] :: [Text])
-          let key = newWorkflowKey "staged"
-              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body _ wctx = do
-                outcomes <-
-                  mapM
-                    (\name -> runStep wctx name (const (modifyIORef' ran (<> [name]) >> pure (0 :: Int))))
-                    ["one", "two", "three"]
-                pure (fmap (const 0) (sequence outcomes))
-              sourceText = "hs-l2-mgmt-fork-step-source-" <> suffix
-              sourceId = WorkflowId sourceText
-          registered <- registerDBOSWorkflow dbos key body
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          first <- runWf exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
-          case first of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          readIORef ran >>= (@?= ["one", "two", "three"])
-          writeIORef ran []
-          forked <- forkFrom dbos [sourceId] (ForkStep 1) defaultForkOptions
-          forkedIds <- case forked of
-            Left err -> fail (show err)
-            Right ids -> pure ids
-          case forkedIds of
-            [forkedId] -> do
-              waited <- waitForWorkflow dbos forkedId
-              case waited of
-                Right (AwaitedSucceeded _ _) -> pure ()
-                other -> fail ("expected the fork to run, got: " <> show other)
-              readIORef ran >>= (@?= ["two", "three"])
-            other -> fail ("expected exactly one fork, got: " <> show other),
-      testCase "bulk cancel and resume hand back every id" $
-        withInstance "mgmt-bulk" $ \dbos suffix -> do
-          let key = newWorkflowKey "queued"
-              echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
-              echoWorkflow message _ = pure (Right message)
-          registered <- registerDBOSWorkflow dbos key echoWorkflow
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          let first = WorkflowId ("hs-l2-mgmt-bulk-1-" <> suffix)
-              second = WorkflowId ("hs-l2-mgmt-bulk-2-" <> suffix)
-              enqueueOne wid = do
-                enqueued <-
-                  enqueueDBOSWorkflow
-                    dbos
-                    key
-                    wid
-                    (Just (encodeWorkflowValue ("hello" :: Text)))
-                    ("bulk-" <> suffix)
-                case enqueued of
-                  Left err -> fail (show err)
-                  Right _ -> pure ()
-          mapM_ enqueueOne [first, second]
-          cancelled <- cancelWorkflows dbos [first, second] False
-          case cancelled of
-            Left err -> fail (show err)
-            Right ids -> do
-              length ids @?= 2
-              assertBool "both cancelled ids come back" (all (`elem` ids) [first, second])
-          resumed <- resumeWorkflows dbos [first, second] Nothing
-          case resumed of
-            Left err -> fail (show err)
-            Right ids -> do
-              length ids @?= 2
-              assertBool "both resumed ids come back" (all (`elem` ids) [first, second]),
-      testCase "bulk forking hands back one new id per source, in order" $
-        withInstance "mgmt-bulk-fork" $ \dbos suffix -> do
-          let key = newWorkflowKey "doubling"
-              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body input _ = pure (Right (input * 2))
-              first = WorkflowId ("hs-l2-mgmt-bulk-fork-1-" <> suffix)
-              second = WorkflowId ("hs-l2-mgmt-bulk-fork-2-" <> suffix)
-          registered <- registerDBOSWorkflow dbos key body
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          let runOne wid input = do
-                ran <- runWf exec key wid (Just (encodeWorkflowValue input))
-                case ran of
-                  Right _ -> pure ()
-                  other -> fail ("expected the source to run, got: " <> show other)
-          runOne first (9 :: Int)
-          runOne second (10 :: Int)
-          forked <- forkWorkflows dbos [(forkNew ("hs-l2-mgmt-bulk-fork-1-" <> suffix)), (forkNew ("hs-l2-mgmt-bulk-fork-2-" <> suffix))] defaultForkOptions
-          case forked of
-            Left err -> fail (show err)
-            Right [forkedFirst, forkedSecond] -> do
-              assertBool "a fork reuses neither source id" (all (`notElem` [first, second]) [forkedFirst, forkedSecond])
-              assertBool "the two forks differ" (forkedFirst /= forkedSecond)
-              let awaitOne fwid expected = do
-                    waited <- waitForWorkflow dbos fwid
-                    case waited of
-                      Right (AwaitedSucceeded (Just output) _) -> decodeResult output @?= Right expected
-                      other -> fail ("expected the fork to run, got: " <> show other)
-              -- Positional: the i-th fork replays the i-th source's input.
-              awaitOne forkedFirst (18 :: Int)
-              awaitOne forkedSecond (20 :: Int)
-            other -> fail ("expected one fork per source, got: " <> show other),
-      testCase "resuming onto a named queue puts the workflow there" $
+    [ liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "the management surface needs a launched instance" scenarioUnlaunched checkUnlaunched,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "cancelling a workflow that does not exist is not an error" scenarioCancelMissing checkCancelMissing,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "resuming a workflow that does not exist is an error" scenarioResumeMissing checkResumeMissing,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "cancelling makes a workflow terminal and leaves it resumable" scenarioCancelResumeRun checkCancelResumeRun,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "resuming onto a named queue puts the workflow there" scenarioResumeOntoQueue checkResumeOntoQueue,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "cancelling a tree reaches the children" scenarioCancelTree checkCancelTree,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "deleting a workflow removes its row" scenarioDelete checkDelete,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow can be retrieved by id" scenarioRetrieve checkRetrieve,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from the beginning runs the workflow again under a new id" scenarioForkFromBeginning checkForkFromBeginning,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a fork takes the id it is given" scenarioForkTakesIdAndQueue checkForkTakesIdAndQueue,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from a chosen step replays the steps below it" scenarioForkFromStep checkForkFromStep,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "bulk cancel and resume hand back every id" scenarioBulkCancelResume checkBulkCancelResume,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "bulk forking hands back one new id per source, in order" scenarioBulkFork checkBulkFork,
+      testCase "resuming onto a named queue through a full launch puts the workflow there" $
         withInstance "mgmt-resume-queue" $ \dbos suffix -> do
           let key = newWorkflowKey "queued"
               wid = WorkflowId ("hs-l2-mgmt-resume-q-" <> suffix)
@@ -505,116 +213,10 @@ tests =
           resumed @?= Right [wid]
           WorkflowRecord {workflowRecordQueueName = queue} <- readRow getBackend wid
           queue @?= Just ("to-" <> suffix),
-      testCase "a fork onto a partitioned queue carries the key it is given" $
-        withInstance "mgmt-fork-key" $ \dbos suffix -> do
-          let key = newWorkflowKey "queued"
-              sourceId = WorkflowId ("hs-l2-mgmt-fork-key-src-" <> suffix)
-              echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
-              echoWorkflow message _ = pure (Right message)
-          registered <- registerDBOSWorkflow dbos key echoWorkflow
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          enqueued <-
-            enqueueDBOSWorkflow
-              dbos
-              key
-              sourceId
-              (Just (encodeWorkflowValue ("hello" :: Text)))
-              ("keyed-" <> suffix)
-          case enqueued of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          forked <-
-            forkFrom
-              dbos
-              [sourceId]
-              (ForkStep 0)
-              (defaultForkOptions {forkOptionsQueuePartitionKey = Just "pk-7"})
-          forkedId <- case forked of
-            Left err -> fail (show err)
-            Right [forkedId] -> pure forkedId
-            other -> fail ("expected exactly one fork, got: " <> show other)
-          WorkflowRecord {workflowRecordQueuePartitionKey = partition} <- readRow getBackend forkedId
-          partition @?= Just "pk-7",
-      testCase "forking from the last failure restarts at the failed step" $
-        withInstance "mgmt-fork-failure" $ \dbos suffix -> do
-          calls <- newIORef (0 :: Int)
-          let key = newWorkflowKey "flaky"
-              sourceId = WorkflowId ("hs-l2-mgmt-fork-fail-src-" <> suffix)
-              flakyBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              flakyBody _ wctx = do
-                first <- runStep wctx "one" (const (pure (0 :: Int)))
-                case first of
-                  Left err -> pure (Left err)
-                  Right _ -> do
-                    attempt <- readIORef calls
-                    modifyIORef' calls (+ 1)
-                    if attempt < 1
-                      then pure (Left (StepFailed "two" "boom"))
-                      else runStep wctx "two" (const (pure 99))
-          registered <- registerDBOSWorkflow dbos key flakyBody
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          first <- runWf exec key sourceId (Just (encodeWorkflowValue ("hi" :: Text)))
-          case first of
-            Left (StepFailed step _) -> step @?= "two"
-            other -> fail ("expected the step failure, got: " <> show other)
-          forked <- forkFrom dbos [sourceId] ForkLastFailure defaultForkOptions
-          forkedId <- case forked of
-            Left err -> fail (show err)
-            Right [forkedId] -> pure forkedId
-            other -> fail ("expected exactly one fork, got: " <> show other)
-          assertBool "the fork restarts under a new id" (forkedId /= sourceId)
-          waited <- waitForWorkflow dbos forkedId
-          case waited of
-            Right (AwaitedSucceeded (Just output) _) -> decodeResult output @?= Right (99 :: Int)
-            other -> fail ("expected the fork to recover, got: " <> show other),
-      testCase "attributes are replaced and can be searched" $
-        withInstance "mgmt-attributes" $ \dbos suffix -> do
-          let key = newWorkflowKey "tagged"
-              body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body () _ = pure (Right 0)
-              wid = WorkflowId ("hs-l2-mgmt-attributes-" <> suffix)
-              tenant = "acme-" <> Text.take 12 suffix
-              full = "{\"tenant\":\"" <> tenant <> "\",\"tier\":\"gold\"}"
-              tenantOnly = "{\"tenant\":\"" <> tenant <> "\"}"
-              tierOnly = "{\"tier\":\"gold\"}"
-          registered <- registerDBOSWorkflow dbos key body
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          ran <- runWf exec key wid Nothing
-          case ran of
-            Right _ -> pure ()
-            other -> fail ("expected the workflow to run, got: " <> show other)
-          updated <- updateWorkflowAttributes dbos wid (Just full)
-          case updated of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          -- Containment, not equality: one key out of two matches.
-          found <- listWorkflows dbos (defaultWorkflowFilter {workflowFilterAttributes = Just tenantOnly})
-          case found of
-            Right rows -> map (.workflowRecordId) rows @?= [wid]
-            other -> fail ("expected the tagged workflow, got: " <> show other)
-          -- A replacement, not a merge: the key not sent again is gone.
-          fewer <- updateWorkflowAttributes dbos wid (Just tenantOnly)
-          case fewer of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          afterReplacement <- listWorkflows dbos (defaultWorkflowFilter {workflowFilterAttributes = Just tierOnly})
-          afterReplacement @?= Right []
-          -- And None clears them.
-          cleared <- updateWorkflowAttributes dbos wid Nothing
-          case cleared of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          row <- readRow getBackend wid
-          row.workflowRecordAttributes @?= Nothing,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a fork onto a partitioned queue carries the key it is given" scenarioForkPartitioned checkForkPartitioned,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from the last failure restarts at the failed step" scenarioForkFromFailure checkForkFromFailure,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "attributes are replaced and can be searched" scenarioAttributes checkAttributes,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a delayed workflow can be released sooner" scenarioDelayRelease checkDelayRelease,
       testCase "a workflow cannot delete itself" $
         withInstance "mgmt-self-delete" $ \dbos suffix -> do
           let key = newWorkflowKey "self-deleter"
@@ -952,47 +554,7 @@ tests =
         case listed of
           Right [StepRecord {stepRecordStepId = sid, stepRecordStepName = name}] ->
             (sid, name) @?= (0, "DBOS.forkWorkflow")
-          other -> fail ("expected the empty batch at step zero, got: " <> show other),
-      testCase "a delayed workflow can be released sooner" $
-        withInstance "mgmt-delay-release" $ \dbos suffix -> do
-          -- Far enough out that the test is not racing the supervisor.
-          let key = newWorkflowKey "delayable"
-              queueName = "hs-l2-delayed-work-" <> Text.take 12 suffix
-              wid = WorkflowId ("hs-l2-delayed-" <> suffix)
-              body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-              body () _ = pure (Right 2)
-          registered <- registerDBOSWorkflowRef dbos key body
-          ref <- case registered of
-            Left err -> fail (show err)
-            Right ref -> pure ref
-          exec <- launchOrFail dbos
-          queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
-          case queueRegistered of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          started <-
-            startWfRef
-              exec
-              ref
-              (startOptionsDefault {startWorkflowId = Just (WorkflowId ("hs-l2-delayed-" <> suffix)), startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 3600)})})
-              Nothing
-          case started of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          waiting <- readRow getBackend wid
-          waiting.workflowRecordStatus @?= Delayed
-          -- Bring it forward to now, and the supervisor releases it on
-          -- its next pass.
-          released <- setWorkflowDelay dbos wid (DelayFor (secondsDuration 0))
-          case released of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          settled <- timeout 15000000 (waitForWorkflow dbos wid)
-          case settled of
-            Just (Right (AwaitedSucceeded (Just output) _)) -> do
-              let decoded = decodeWorkflowValue "result" (Just (SerializedWorkflowValue output Nothing)) :: Either CodecError Int
-              assertEqual "the released workflow runs" (Right 2) decoded
-            other -> fail ("expected the released run, got: " <> show other)
+          other -> fail ("expected the empty batch at step zero, got: " <> show other)
     ]
 
 -- * Engine-only driver aliases
@@ -1030,6 +592,63 @@ acquireSuiteBackend = do
   backend <- Postgres.acquirePostgresSystemDB config nullTracer
   Postgres.activatePostgresSystemDB backend
   pure backend
+
+-- | The queue-name prefixes this suite's legacy cases register. No other live
+-- suite registers under them, so the release can delete by prefix without
+-- racing a running peer (tasty runs groups in parallel; names are unique per
+-- case). The framed 'ManagementCases' scenarios register no queue rows.
+suiteQueuePrefixes :: [Text]
+suiteQueuePrefixes = ["hs-l2-mgmt-fork-queue-", "hs-l2-mgmt-run-", "hs-l2-delayed-work-"]
+
+-- | Delete this suite's fixture queues after the group finishes: the shared
+-- database keeps a queue row per run, and every unscoped sweep pays one claim
+-- query per row. Runs in the 'withResource' release, after every case, so it
+-- never races a running case. Best-effort: a refusal is ignored rather than
+-- failing the suite. Workflow rows are left alone; without their queue row
+-- no sweep will ever enumerate them.
+releaseSuiteBackend :: Postgres.PostgresSystemDB -> IO ()
+releaseSuiteBackend backend = do
+  listed <- SystemDB.listQueues backend SystemDB.Unset
+  case listed of
+    Left _ -> pure ()
+    Right records -> mapM_ (\name -> SystemDB.deleteQueue backend name >> pure ()) names
+      where
+        names = [name | record <- records, let name = record.queueRecordName, any (`Text.isPrefixOf` name) suiteQueuePrefixes]
+  Postgres.releasePostgresSystemDB backend
+
+-- | The shared tree over a real backend: every test owns its rows via
+-- fresh UUIDs (application, executor, workflow id). The tracer arrives
+-- as a parameter — FastLogger here, the sim carrier in
+-- 'DBOS.Transact.ManagementTestSim' — and launches go through it over an
+-- explicitly built connection, so each scenario drives the same engine
+-- calls on both stacks.
+liveMgmtFixture :: IO Postgres.PostgresSystemDB -> IO (SomeTracer IO) -> IO (MgmtFixture IO)
+liveMgmtFixture getBackend getTracer = do
+  fresh <- UUID.V4.nextRandom
+  let suffix = Text.pack (UUID.toString fresh)
+      appName = "hs-l2-mgmt-" <> Text.take 12 suffix
+      appVersion = "hs-l2-mgmt-version-" <> suffix
+      executorId = "hs-l2-mgmt-executor-" <> suffix
+  config0 <- configFromEnv appName
+  let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
+      identity =
+        Identity
+          { identityAppName = appName,
+            identityAppVersion = appVersion,
+            identityExecutorId = executorId,
+            identityAppId = ""
+          }
+  backend <- getBackend
+  tracer <- getTracer
+  mkMgmtFixture
+    config
+    identity
+    appName
+    uuidWorkflowId
+    uuidEntropy
+    (SomeSystemDB backend)
+    tracer
+    (pure suffix)
 
 -- | One workflow row as stored: a reader over the suite backend.
 readRow :: IO Postgres.PostgresSystemDB -> WorkflowId -> IO WorkflowRecord

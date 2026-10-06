@@ -1798,7 +1798,7 @@ queueByNameStatement =
     (Decoders.rowMaybe queueRowDecoder)
 
 -- | Every queue this handle may see, ordered by name. A null scope narrows
--- nothing, which is what @Any@ and an empty @Named@ list both mean. Mirrors
+-- nothing, which is what @AnyApplication@ and an empty @Named@ list both mean. Mirrors
 -- @list_queues@.
 queueListStatement :: Statement.Statement (Maybe [Text]) [QueueRowRaw]
 queueListStatement =

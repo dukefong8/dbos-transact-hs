@@ -481,12 +481,15 @@ launchOn dbos conn identity = do
 
 -- | 'launchOn' with an explicit listen set: the programmatic counterpart
 -- of 'Config.configListenQueues', which the config-file launch path
--- installs. Test backends use it to staff filtered supervisors;
--- 'launchOn' itself keeps listening to nothing.
+-- installs. Like 'launchOn', the instance ends up holding the executor —
+-- the filtered one — so the dequeue sweep and a later 'launchExecutor'
+-- see the listen set rather than a filtered copy that was dropped.
 launchOnWithQueues :: (MonadSTM m, MonadMVar m) => DBOS m -> Connection m -> Identity -> Maybe [Text] -> m (Executor m)
 launchOnWithQueues dbos conn identity listen = do
   executor <- launchOn dbos conn identity
-  pure executor {listen_queues = listen}
+  let listened = executor {listen_queues = listen}
+  modifyMVar_ dbos.dbos_executor (const (pure (Just listened)))
+  pure listened
 
 -- | Complete a launch over an executor a caller has built: register the
 -- application version, recover this executor's pending rows, announce the

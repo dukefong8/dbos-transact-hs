@@ -18,22 +18,15 @@
 module DBOS.Transact.WorkflowTestSim (tests) where
 
 import Control.Monad.IOSim (IOSim, SimTrace, runSimOrThrow, selectTraceEventsDynamic)
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object)
-import Data.Map.Strict qualified as Map
-import Data.Text (Text)
-import Data.Text qualified as Text
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (runSimCase, simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (AwaitedOutcome (..), Outcome (..), StepRecord (..), Timestamp (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, defaultWorkflowFilter, getWorkflow, listSteps)
-import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simEntropy, simGeneratedId, simIdentity, simInstance)
-import DBOS.Transact (CodecError, DBOS, Executor, WorkflowCtx, DuplicationPolicy (..), EngineEvent (..), EngineOnly, Enqueue (..), Error (..), Provenance (..), RunOptions (..), SelectArm (..), Serialization (..), SerializedWorkflowValue (..), StartOptions (..), Timeout (..), WorkflowEvent (..), WorkflowHandle (..), WorkflowKey, WorkflowRef, application, awaitChild, configNew, decodeErrorText, decodeWorkflowValue, encodeWorkflowValue, enqueueNew, firstStepStatus, handleResult, handleStatus, millisDuration, newWorkflowKey, pendingAwait, pendingStepWith, registerDBOSWorkflowRef, registerDBOSWorkflow, resolveTimeoutDeadline, retrieveWorkflow, runDBOSWorkflow, runDBOSWorkflowRef, runOptionsDefault, runOptionsToStartOptions, runTracer, runStep, runStepWith, secondsDuration, selectStep, shutdown, startDBOSWorkflowRef, startOptionsDefault, stepOptionsDefault, timeoutBudget, waitForWorkflow, startChildWorkflow)
-import DBOS.Transact.Workflow (childWorkflowId)
+import DBOS.SystemDB (WorkflowId (..))
+import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
+import DBOS.Transact (EngineEvent (..), WorkflowEvent (..), configNew, runTracer)
 import DBOS.Transact.Connection (SomeSystemDB (..))
-import DBOS.Transact.WorkflowTest
-  ( JoinOutcome (..),
-    WfFixture (..),
+import DBOS.Transact.WorkflowCases
+  ( WfFixture (..),
     checkAppErrorRoundtrip,
     checkAwaitInsideStep,
     checkAwaitRecorded,
@@ -49,12 +42,14 @@ import DBOS.Transact.WorkflowTest
     checkDropFuture,
     checkAttributes,
     checkShutdownCancels,
+    checkBudgetCancels,
     checkStepErrorRecorded,
     checkStepsTaken,
     checkWrongInstance,
     checkDeclinedDeadline,
     checkFanout,
     checkFreshJoinPolls,
+    checkJoinHeldKey,
     checkJoinTakesId,
     checkLiftChildError,
     checkLosingTokenFired,
@@ -75,9 +70,11 @@ import DBOS.Transact.WorkflowTest
     checkUnawaitedChild,
     checkZeroNoInput,
     mkWfFixture,
+    timeoutOptionsCase,
     scenarioAppErrorRoundtrip,
     scenarioAwaitInsideStep,
     scenarioAwaitRecorded,
+    scenarioBudgetCancels,
     scenarioCancelledChildAwaited,
     scenarioCascadeDeadline,
     scenarioCaptureChildRefused,
@@ -90,12 +87,14 @@ import DBOS.Transact.WorkflowTest
     scenarioDropFuture,
     scenarioAttributes,
     scenarioShutdownCancels,
+    scenarioBudgetCancels,
     scenarioStepErrorRecorded,
     scenarioStepsTaken,
     scenarioWrongInstance,
     scenarioDeclinedDeadline,
     scenarioFanout,
     scenarioFreshJoinPolls,
+    scenarioJoinHeldKey,
     scenarioJoinTakesId,
     scenarioLiftChildError,
     scenarioLosingTokenFired,
@@ -114,7 +113,6 @@ import DBOS.Transact.WorkflowTest
     scenarioStepIdPairs,
     scenarioUnawaitedChild,
     scenarioZeroNoInput,
-    simWaitDeparture,
     taskAbortAllWaits,
     taskEarlyFinishNotSwept,
     taskEmptySweep,
@@ -122,7 +120,7 @@ import DBOS.Transact.WorkflowTest
     taskRefusedAfterSweep
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup, testGroup)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
+import Test.Tasty.HUnit (testCase, (@?=))
 
 tests :: TestTree
 tests =
@@ -138,24 +136,7 @@ tests =
       testCase "a recovery run replays completed steps after a body interruption" (pure ()),
       -- IO only: same recovery sweep as above.
       testCase "an unregistered workflow is skipped and the rest recover" (pure ()),
-      testCase "timeouts, options, and child ids compose without a database" $ do
-        let budget = secondsDuration 60
-            now = Timestamp 1000
-        timeoutBudget Inherit @?= Nothing
-        timeoutBudget None @?= Nothing
-        timeoutBudget (Explicit budget) @?= Just budget
-        resolveTimeoutDeadline (Explicit budget) (Just (enqueueNew "q")) Nothing now @?= Nothing
-        resolveTimeoutDeadline (Explicit budget) Nothing Nothing now @?= addTimeout now budget
-        resolveTimeoutDeadline None Nothing (Just now) now @?= Nothing
-        resolveTimeoutDeadline Inherit Nothing (Just now) now @?= Just now
-        resolveTimeoutDeadline Inherit Nothing Nothing now @?= Nothing
-        runOptionsDefault @?= RunOptions Nothing Inherit Nothing
-        startOptionsDefault @?= StartOptions Nothing Inherit Nothing Nothing
-        runOptionsToStartOptions runOptionsDefault @?= startOptionsDefault
-        childWorkflowId (Just (WorkflowId "chosen")) (Just ("parent", 3)) "generated" @?= "chosen"
-        childWorkflowId Nothing (Just ("parent", 0)) "generated" @?= "parent-0"
-        childWorkflowId Nothing (Just ("parent", 2)) "generated" @?= "parent-2"
-        childWorkflowId Nothing Nothing "generated" @?= "generated",
+      testCase "timeouts, options, and child ids compose without a database" timeoutOptionsCase,
       simCase simWfFixture "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId traceJoinTakesId,
       simCase simWfFixture "a fresh start is local and a join polls" scenarioFreshJoinPolls checkFreshJoinPolls traceFreshJoinPolls,
       simCase simWfFixture "awaiting a child is recorded as a step" scenarioAwaitRecorded checkAwaitRecorded traceAwaitRecorded,
@@ -191,70 +172,7 @@ tests =
       simCase simWfFixture "a workflow started outside a workflow has no parent" scenarioRootNoParent checkRootNoParent traceRootNoParent,
       simCase simWfFixture "a start position holding a plain step is refused" scenarioPlainStepAtStart checkPlainStepAtStart tracePlainStepAtStart,
       simCase simWfFixture "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance traceWrongInstance,
-      testCase "a child joining a held key is recorded as the workflow it joined" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let childKey = newWorkflowKey "child"
-              parentKey = newWorkflowKey "joiner"
-              queueName = "sim-join-q"
-              dedupKey = "order-42"
-              holderText = "sim-join-holder"
-              parentText = "sim-join-parent"
-              derivedText = parentText <> "-0"
-              joinQueue =
-                (enqueueNew queueName)
-                  { deduplicationId = Just dedupKey,
-                    duplicationPolicy = ReturnExisting
-                  }
-              childBody = joinChildBody
-          childRef <- registerUnitRef dbos childKey childBody
-          orFail =<< registerWfSim dbos parentKey (joinParentBody childRef joinQueue)
-          exec <- memLaunchOn mem simTracer dbos
-          -- The holder parks on its queue with the key held; nothing runs
-          -- it here, so the test stages what the queue runner would do and
-          -- records its completion directly. (Live parks it on a delay
-          -- instead and the supervisor runs it; the asserted join is the
-          -- same.)
-          holderStarted <-
-            startWfRefSim
-              exec
-              childRef
-              (startOptionsDefault {startWorkflowId = Just (WorkflowId holderText), startQueue = Just (enqueueNew queueName) {deduplicationId = Just dedupKey}})
-              Nothing
-          case holderStarted of
-            Left err -> throwIO (userError (show err))
-            Right _  -> pure ()
-          orFailSys =<< SystemDB.recordWorkflowOutcome mem (WorkflowId holderText) (OutcomeOutput (Just "9"))
-          outcome <- runWfSim exec parentKey (WorkflowId parentText) Nothing
-          derived <- getWorkflow mem (WorkflowId derivedText)
-          listed <- SystemDB.listSteps mem (WorkflowId parentText) False Nothing Nothing Nothing
-          children <- SystemDB.getWorkflowChildren mem (WorkflowId parentText)
-          pure (outcome, derived, listed, children)
-        case outcome of
-          (outcome, derived, listed, children) -> do
-            case outcome of
-              Right (Just stored) -> do
-                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
-                assertEqual "the parent reads the joined workflow's output" (Right 9) decoded
-              other -> fail ("expected the joined output, got: " <> show other)
-            derived @?= Right Nothing
-            case listed of
-              Right
-                [ StepRecord {stepRecordStepName = startName, stepRecordChildWorkflowId = Just (WorkflowId startedChild)},
-                  StepRecord
-                    { stepRecordStepName = awaitName,
-                      stepRecordOutput = Just awaitOutput,
-                      stepRecordChildWorkflowId = Just (WorkflowId awaitedChild)
-                    }
-                  ] -> do
-                  startName @?= "child"
-                  startedChild @?= "sim-join-holder"
-                  awaitName @?= "DBOS.getResult"
-                  awaitOutput @?= "9"
-                  awaitedChild @?= "sim-join-holder"
-              other -> fail ("expected the joining start and its recorded await, got: " <> show other)
-            children @?= Right [],
+      simCase simWfFixture "a child joining a held key is recorded as the workflow it joined" scenarioJoinHeldKey checkJoinHeldKey traceJoinHeldKey,
       simCase simWfFixture "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
       simCase simWfFixture "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
       simCase simWfFixture "a panicking workflow leaves its row pending" scenarioPanic checkPanic tracePanic,
@@ -264,34 +182,7 @@ tests =
       simCase simWfFixture "a workflow records the steps it took" scenarioStepsTaken checkStepsTaken traceStepsTaken,
       simCase simWfFixture "shutdown cancels a running workflow and leaves it pending" scenarioShutdownCancels checkShutdownCancels traceShutdownCancels,
       simCase simWfFixture "dropping the future does not stop the workflow" scenarioDropFuture checkDropFuture traceDropFuture,
-      -- Sim only: not yet mirrored on IO (needs wall-clock
-      -- budget/body scaling).
-      testCase "a budget cancels the workflow durably" $ do
-        (outcome, tr) <- runSimCase $ do
-          mem <- newMemDB
-          dbos <- simInstance
-          let key = newWorkflowKey "slow"
-              workflowText = "sim-budget-id"
-          ref <- registerUnitRef dbos key budgetBody
-          exec <- memLaunchOn mem simTracer dbos
-          -- A millisecond budget against a second-long body: the clock
-          -- wins on virtual time, deterministically.
-          ran <-
-            runWfRefSim
-              exec
-              ref
-              (runOptionsDefault {runWorkflowId = Just (WorkflowId workflowText), runTimeout = Explicit (millisDuration 1)})
-              Nothing
-          row <- getWorkflow mem (WorkflowId workflowText)
-          pure (ran, row)
-        case outcome of
-          (ran, row) -> do
-            case ran of
-              Left (ErrorSystemDatabase (SystemDB.WorkflowCancelled {})) -> pure ()
-              other                                                      -> fail ("expected the durable cancellation, got: " <> show other)
-            case row of
-              Right (Just found) -> found.workflowRecordStatus @?= Cancelled
-              other              -> fail ("expected the row CANCELLED, got: " <> show other),
+      simCase simWfFixture "a budget cancels the workflow durably" scenarioBudgetCancels checkBudgetCancels traceBudgetCancels,
       simCase simWfFixture "a started workflow carries the attributes it was given" scenarioAttributes checkAttributes traceAttributes,
       simCase simWfFixture "a step error is recorded in its column" scenarioStepErrorRecorded checkStepErrorRecorded traceStepErrorRecorded,
       -- Sim only: typed trace assertions live only in sim.
@@ -334,12 +225,12 @@ tasksSimTests =
         let simRun :: forall s. IOSim s Int
             simRun = taskEmptySweep @(IOSim s)
         (@?= 0) (runSimOrThrow simRun),
+      -- IO only: real preemption, not cooperation.
+      testCase "a spawn refused after abort fills its channel instead of hanging" (pure ()),
       testCase "a task finishing before registration is not swept as aborted" $ do
         let simRun :: forall s. IOSim s [Int]
             simRun = taskEarlyFinishNotSwept @(IOSim s) simWaitDeparture
-        checkNoMiscounts (runSimOrThrow simRun),
-      -- IO only: real preemption, not cooperation.
-      testCase "a spawn refused after abort fills its channel instead of hanging" (pure ())
+        checkNoMiscounts (runSimOrThrow simRun)
     ]
 
 -- | The announcement shapes no staged case reaches: a superseded write,
@@ -451,6 +342,25 @@ traceStepErrorRecorded tr = do
   selectTraceEventsDynamic tr
     @?= [ StepErrorRecorded "charge" 0,
           WorkflowFailed "sim-step-err-id"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The millisecond budget cancels the run: the deadline event names the
+-- workflow, then the executor shuts down.
+traceBudgetCancels :: forall a. SimTrace a -> IO ()
+traceBudgetCancels tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowDeadlineCancelled "sim-budget-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The holder enqueues, the parent joins it by key, both complete: the
+-- recorded start and await name the holder.
+traceJoinHeldKey :: forall a. SimTrace a -> IO ()
+traceJoinHeldKey tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowEnqueued "sim-join-holder" "join-q-sim-join-holder",
+          WorkflowDedupJoined "sim-join-holder" "order-42-sim-join-holder",
+          WorkflowCompleted "sim-join-holder",
+          WorkflowCompleted "sim-join-parent"
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
@@ -703,125 +613,9 @@ traceStaleAwaitRefused tr = do
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
--- | The join case's bodies, top-level so their rank-2 signatures can
--- name the simulation: the parent's view carries the ref and queue it
--- captured.
-joinChildBody :: forall exec s. () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-joinChildBody () _ = pure (Right 9)
-
-joinParentBody :: forall s. WorkflowRef (IOSim s) EngineOnly -> Enqueue -> forall exec. () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-joinParentBody childRef joinQueue () wctx = do
-  started <- startChildWorkflow wctx childRef (startOptionsDefault {startQueue = Just joinQueue}) Nothing
-  case started of
-    Left err -> pure (Left err)
-    Right handle -> do
-      result <- awaitWfSim wctx handle
-      case result of
-        Left err -> pure (Left err)
-        Right (Just stored) ->
-          case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
-            Right n -> pure (Right n)
-            Left _ -> pure (Left (StepFailed "parent" "bad child output"))
-        Right _ -> pure (Left (StepFailed "parent" "no child output"))
-
--- | The budget case's body: no captures, so a bare polymorphic name.
-budgetBody :: forall exec s. () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
-budgetBody () _ = threadDelay 1000000 >> pure (Right 7)
-
--- * Engine-only driver aliases
-
--- | The engine-only driver aliases the tree above reads through. Local
--- copies are deliberate: this module carries only the aliases it uses.
-runWfSim :: Executor (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWfSim = runDBOSWorkflow
-
-runWfRefSim :: Executor (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWfRefSim = runDBOSWorkflowRef
-
-startWfRefSim :: Executor (IOSim s) -> WorkflowRef (IOSim s) EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
-startWfRefSim = startDBOSWorkflowRef
-
-retrieveWfSim :: DBOS (IOSim s) -> WorkflowId -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
-retrieveWfSim = retrieveWorkflow
-
-awaitWfSim :: WorkflowCtx exec (IOSim s) -> WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-awaitWfSim = awaitChild
-
-resultWfSim :: WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-resultWfSim = handleResult
-
-statusWfSim :: WorkflowHandle (IOSim s) EngineOnly -> IOSim s (Either (Error EngineOnly) (Maybe WorkflowStatus))
-statusWfSim = handleStatus
-
--- | The sim-side registration aliases: a locally defined body has no
--- signature, so the channel's @e@ stays ambiguous; these pin it while
--- leaving @s@ universally quantified.
-registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
-registerWfSim = registerDBOSWorkflow
-
-registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
-registerWfRefSim = registerDBOSWorkflowRef
-
--- * Helpers
-
--- | A started reader for inspecting a row's status: polls until the row
--- appears, so background starts are observed rather than raced. Virtual
--- time makes the settling instant.
-waitForRow :: DBOS (IOSim s) -> WorkflowId -> IOSim s WorkflowStatus
-waitForRow dbos wid = go (20 :: Int)
-  where
-    go 0 = throwIO (userError "the workflow row never appeared")
-    go n = do
-      retrieved <- retrieveWfSim dbos wid
-      case retrieved of
-        Left err -> throwIO (userError (show err))
-        Right handle -> do
-          status <- statusWfSim handle
-          case status of
-            Left err           -> throwIO (userError (show err))
-            Right (Just found) -> pure found
-            Right Nothing      -> threadDelay 1000 >> go (n - 1)
-
--- | Register a @() -> Int@ body under IOSim, pinning the JSON types the
--- polymorphic registration cannot infer from a local binding.
-registerUnitRef :: DBOS (IOSim s) -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
-registerUnitRef dbos key body = orFail =<< registerWfRefSim dbos key body
-
--- | Register an @Int -> Int@ body under IOSim, pinning the JSON types the
--- polymorphic registration cannot infer from a local binding.
-registerIntRef :: DBOS (IOSim s) -> WorkflowKey -> (forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
-registerIntRef dbos key body = orFail =<< registerWfRefSim dbos key body
-
--- | Register a body at its own error channel, leaving @s@ and @e@ to the
--- call site: the polymorphic registration cannot infer them from a local
--- binding, and a locally written channel is the point of the lift case.
-registerRefOf :: forall e s a r. (FromJSON a, ToJSON r, ToJSON e) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error e) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) e))
-registerRefOf = registerDBOSWorkflowRef
-
-orFail :: Either (Error EngineOnly) a -> IOSim s a
-orFail result = case result of
-  Left err    -> throwIO (userError (show err))
-  Right value -> pure value
-
-orFailSys :: Either SystemDB.Error a -> IOSim s a
-orFailSys result = case result of
-  Left err    -> throwIO (userError (show err))
-  Right value -> pure value
-
-data Refused = Refused
-  deriving stock (Eq, Show)
-
-instance ToJSON Refused where
-  toJSON _ = object []
-
-instance FromJSON Refused where
-  parseJSON _ = pure Refused
-
-data GaveUp = GaveUp
-  deriving stock (Eq, Show)
-
-instance ToJSON GaveUp where
-  toJSON _ = object []
-
-instance FromJSON GaveUp where
-  parseJSON _ = pure GaveUp
+-- | The IOSim half of the departure wait: nothing to observe, because the
+-- simulator advances time only when no thread is runnable — a parent
+-- parked in a tick cannot resume before a self-terminating child has run
+-- to completion, its departure commit included.
+simWaitDeparture :: forall s. ThreadId (IOSim s) -> IOSim s ()
+simWaitDeparture _ = threadDelay 1000

@@ -85,6 +85,10 @@ module DBOS.Transact.QueueCases
     checkCountedPartitioned,
     scenarioPeerQueue,
     checkPeerQueue,
+    scenarioWorkerConcurrency,
+    checkWorkerConcurrency,
+    scenarioWorkerBudgetExhausted,
+    checkWorkerBudgetExhausted,
   )
 where
 
@@ -116,6 +120,7 @@ import DBOS.Transact
     defaultQueueOptions,
     decodeWorkflowValue,
     deleteQueue,
+    dequeueDBOSWorkflows,
     encodeWorkflowValue,
     enqueueDBOSWorkflow,
     enqueueNew,
@@ -1329,3 +1334,55 @@ checkPeerQueue :: (Int, Maybe WorkflowStatus) -> Either String ()
 checkPeerQueue (early, status) = do
   unless (early == 0) $ Left ("expected the peer queue untouched, got: " <> show early)
   unless (status == Just Enqueued) $ Left ("expected the workflow left ENQUEUED, got: " <> show status)
+
+-- | A worker concurrency cap admits one run at a time: three rows wait on a
+-- cap-one queue, and the supervisor runs them with at most one in flight
+-- while every row eventually succeeds. A gate holds the runs until the peak
+-- in-flight count pins the cap, and the settled statuses pin completion.
+-- Returns the peak in-flight count with the settled statuses.
+scenarioWorkerBudgetExhausted :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m, MonadCatch m) => QueueFixture m -> m (Int, [WorkflowStatus], [Maybe WorkflowStatus])
+scenarioWorkerBudgetExhausted fx = do
+  gate <- newTVarIO False
+  active <- newTVarIO (0 :: Int)
+  peak <- newTVarIO (0 :: Int)
+  let key = newWorkflowKey "capped"
+      body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+      body input _ = do
+        atomically $ do
+          now <- readTVar active
+          let running = now + 1
+          writeTVar active running
+          high <- readTVar peak
+          when (running > high) (writeTVar peak running)
+        atomically $ do
+          open <- readTVar gate
+          if open then pure () else retry
+        atomically (modifyTVar active (subtract 1))
+        pure (Right input)
+      queueName = "hs-l2-budget-q-" <> Text.take 12 fx.qfSuffix
+      texts = ["hs-l2-budget-1-" <> fx.qfSuffix, "hs-l2-budget-2-" <> fx.qfSuffix, "hs-l2-budget-3-" <> fx.qfSuffix]
+  _ <- registerDBOSWorkflow fx.qfDBOS key body >>= either (error . show) pure
+  _ <- fx.qfLaunch
+  _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {workerConcurrency = Just 1}) AlwaysUpdate >>= either (error . show) pure
+  mapM_
+    ( \text -> do
+        _ <- enqueueDBOSWorkflow fx.qfDBOS key (WorkflowId text) (Just (encodeWorkflowValue (1 :: Int))) queueName >>= either (error . show) pure
+        pure ()
+    )
+    texts
+  -- The supervisor claims the first row and parks it on the gate; the rest
+  -- wait out the exhausted budget behind it.
+  _ <- pollUntil (10 * 1000000) (atomically (readTVar active) >>= \running -> pure (running >= 1))
+  waiting <- mapM (\text -> fx.qfReadWorkflowRow (WorkflowId text) >>= maybe (error "expected the queued row") (pure . (.workflowRecordStatus))) texts
+  atomically (writeTVar gate True)
+  _ <- pollUntil (30 * 1000000) (mapM (\text -> fx.qfReadWorkflowRow (WorkflowId text) >>= maybe (error "expected the queued row") (pure . (.workflowRecordStatus))) texts >>= \statuses -> pure (statuses == [Success, Success, Success]))
+  high <- readTVarIO peak
+  statuses <- mapM (\text -> fx.qfReadWorkflowRow (WorkflowId text) >>= maybe (error "expected the queued row") (pure . Just . (.workflowRecordStatus))) texts
+  fx.qfShutdown
+  pure (high, waiting, statuses)
+
+checkWorkerBudgetExhausted :: (Int, [WorkflowStatus], [Maybe WorkflowStatus]) -> Either String ()
+checkWorkerBudgetExhausted (high, waiting, statuses) = do
+  unless (high == 1) $ Left ("expected at most one run in flight, got: " <> show high)
+  unless (length waiting == 3 && length (filter (== Pending) waiting) == 1) $ Left ("expected one parked run behind two waiting rows, got: " <> show waiting)
+  unless (statuses == [Just Success, Just Success, Just Success]) $ Left ("expected every row SUCCESS, got: " <> show statuses)

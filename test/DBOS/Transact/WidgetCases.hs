@@ -464,7 +464,8 @@ scenarioTableReserveRace wf = do
   a <- wait first
   b <- wait second
   state <- readTableState wf
-  pure (length (filter id [a, b]), state)
+  let winners = (if a then 1 else 0) + (if b then 1 else 0) :: Int
+  pure (winners, state)
 
 -- | The canned third-call refusal: the first two ops stand, the third —
 -- including anything it wrote — is absent.

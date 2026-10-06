@@ -100,32 +100,30 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word16, Word32)
 import DBOS.SystemDB.Class (SystemDB (..))
-import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.Tracer (SomeTracer, runTracer)
-import DBOS.SystemDB.Types (MessageUUID (..), NotificationRow (..), OnExistingQueue (..), QueueName (..), SendMessage (..), Topic (..), WorkflowStatus (..), messageUUIDForSend, nullTopicSentinel, parseWorkflowStatus, recvStepName, workflowStatusText)
-import DBOS.SystemDB.Notify (Registry, Subscription, eventsChannel, eventKey, messageKey, newRegistry, notified, subscribe, subscribeExclusive, unsubscribe)
+import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput)
+import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, messageKey, newRegistry, notified, subscribe, subscribeExclusive, unsubscribe)
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
-import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), Applications (..), ApplicationVersion (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdempotencyKey (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowName (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, debounceStepName, debounceValidate, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, createScheduleStepName, getScheduleStepName, deleteScheduleStepName, pauseScheduleStepName, resumeScheduleStepName, listSchedulesStepName, updateScheduleStepName, upsertScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, validateAttributes, validateNewWorkflow)
+import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdempotencyKey (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, workflowStatusText)
 import DBOS.SystemDB.Types qualified as Types
+import DBOS.Tracer (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
 import Hasql.Decoders qualified as Decoders
 import Hasql.Errors qualified as Errors
 import Hasql.Pool qualified as Pool
-import Hasql.Session qualified as Session
 import Hasql.Pool.Config qualified as PoolConfig
+import Hasql.Session (Session)
+import Hasql.Session qualified as Session
 import Hasql.Transaction qualified as Tx
 import Hasql.Transaction.Sessions qualified as TxSessions
-import Hasql.PostgresqlTypes ()
-import Hasql.Session (Session)
 import IHP.TypedSql.Hasql (sqlExecTypedSession, sqlQueryTypedSession, typedSql)
 
 import IHP.TypedSql.Id (Id' (..), PrimaryKey)
 import IHP.TypedSql.Row (TypedSqlRow (..))
-import System.Timeout qualified as Timeout
 import IHP.TypedSql.RowType (SqlRow)
 import System.Environment (lookupEnv)
+import System.Timeout qualified as Timeout
 import Text.Read (readMaybe)
 
 type NotificationRaw =
@@ -877,25 +875,25 @@ sessionKind sessionError = case sessionError of
   Errors.ConnectionSessionError _ -> Connection
   Errors.StatementSessionError _ _ _ _ _ (Errors.ServerStatementError (Errors.ServerError code message _ _ _)) ->
     case Text.take 2 code of
-      "40" -> Transient
-      "08" -> Connection
-      "53" -> Connection
-      "57" -> Connection
+      "40"                              -> Transient
+      "08"                              -> Connection
+      "53"                              -> Connection
+      "57"                              -> Connection
       "XX" | isTransportFailure message -> Connection
-      _ -> Permanent
+      _                                 -> Permanent
   _ -> Permanent
 
 -- | The SQLSTATE a session failure carries, if the server reported one.
 sessionSqlState :: Errors.SessionError -> Maybe Text
 sessionSqlState (Errors.StatementSessionError _ _ _ _ _ (Errors.ServerStatementError (Errors.ServerError code _ _ _ _))) = Just code
-sessionSqlState _ = Nothing
+sessionSqlState _                                                                                                        = Nothing
 
 -- | Connection-establishment failures: networking trouble and uncategorized
 -- libpq errors may pass; authentication and compatibility failures will not.
 connectionKind :: Errors.ConnectionError -> BackendErrorKind
 connectionKind (Errors.NetworkingConnectionError _) = Connection
-connectionKind (Errors.OtherConnectionError _) = Connection
-connectionKind _ = Permanent
+connectionKind (Errors.OtherConnectionError _)      = Connection
+connectionKind _                                    = Permanent
 
 -- Backend handle (postgres.rs rewrite, Phase 7). New code lands here behind
 -- the @Postgres.*@ names the facade no longer re-exports; the old
@@ -910,11 +908,11 @@ connectionKind _ = Permanent
 -- must be @"dbos"@ (ADR-0010), and @notificationCoalesce@ is the notifier's
 -- coalescing window ('Nothing' takes the default).
 data Settings = Settings
-  { settingsSchema :: Text,
-    settingsRetry :: RetryPolicy,
-    settingsExecutorId :: Maybe Text,
-    settingsApplicationName :: Maybe Text,
-    settingsPollingConcurrency :: Maybe Word32,
+  { settingsSchema               :: Text,
+    settingsRetry                :: RetryPolicy,
+    settingsExecutorId           :: Maybe Text,
+    settingsApplicationName      :: Maybe Text,
+    settingsPollingConcurrency   :: Maybe Word32,
     settingsNotificationCoalesce :: Maybe Duration
   }
   deriving stock (Eq, Show)
@@ -938,9 +936,9 @@ defaultSettings =
 -- migrations; 'acquirePostgresSystemDB' verifies instead). @maxConnections@
 -- defaults to 10, as in @Config::new@.
 data Config = Config
-  { configUrl :: Text,
+  { configUrl            :: Text,
     configMaxConnections :: Word32,
-    configSettings :: Settings
+    configSettings       :: Settings
   }
   deriving stock (Eq, Show)
 
@@ -995,18 +993,18 @@ configFromEnv = do
 -- whose flush loop the engine spawns in P7.6; @psdbLog@ is the explicit
 -- logger the retry loop warns through (Rule 5).
 data PostgresSystemDB = PostgresSystemDB
-  { psdbPool :: Pool.Pool,
-    psdbRetry :: RetryPolicy,
-    psdbExecutorId :: Maybe Text,
+  { psdbPool            :: Pool.Pool,
+    psdbRetry           :: RetryPolicy,
+    psdbExecutorId      :: Maybe Text,
     psdbApplicationName :: Maybe Text,
-    psdbPollingPermits :: StrictTVar IO Int,
-    psdbNotify :: Registry,
-    psdbNotifier :: Notifier,
+    psdbPollingPermits  :: StrictTVar IO Int,
+    psdbNotify          :: Registry,
+    psdbNotifier        :: Notifier,
     -- | The notifier's flush loop, once 'activatePostgresSystemDB' has
     -- spawned it. Mirrors the oracle's @notifier_task@: 'close' takes it,
     -- waits out the final flush, and only then releases the pool.
-    psdbNotifierTask :: StrictMVar IO (Maybe (Async IO ())),
-    psdbLog :: SomeTracer IO
+    psdbNotifierTask    :: StrictMVar IO (Maybe (Async IO ())),
+    psdbLog             :: SomeTracer IO
   }
 
 -- | Builds a handle around a live pool. Mirrors Rust @from_pool@: the pool
@@ -1078,7 +1076,7 @@ releasePostgresSystemDB env = do
   stopped <- takeMVar env.psdbNotifierTask
   putMVar env.psdbNotifierTask Nothing
   case stopped of
-    Nothing -> pure ()
+    Nothing   -> pure ()
     Just task -> wait task
   Pool.release env.psdbPool
 
@@ -1122,7 +1120,7 @@ runSession env operation session =
   withRetry env.psdbRetry operation env.psdbLog uuidEntropy $ do
     result <- Pool.use env.psdbPool session
     pure $ case result of
-      Left usage -> Left (classifyUsageError usage)
+      Left usage  -> Left (classifyUsageError usage)
       Right value -> Right value
 
 -- | The polling cap for a pool of @poolSize@ connections. Mirrors Rust
@@ -1132,8 +1130,8 @@ runSession env operation session =
 pollingLimit :: Maybe Word32 -> Word32 -> Int
 pollingLimit configured poolSize =
   case configured of
-    Just 0 -> maxBound
-    Just n -> fromIntegral n
+    Just 0  -> maxBound
+    Just n  -> fromIntegral n
     Nothing -> max 1 (fromIntegral poolSize `div` 2)
 
 -- | Whether a failure is a primary-key or unique-index collision.
@@ -1157,7 +1155,7 @@ isForeignKeyViolation sessionError = sessionSqlState sessionError == Just "23503
 workflowRecordFromRow :: Statements.WorkflowRowRaw -> Either Error WorkflowRecord
 workflowRecordFromRow row = do
   status <- case parseWorkflowStatus row.status of
-    Left _ -> Left (Malformed ("unknown workflow status \"" <> row.status <> "\""))
+    Left _       -> Left (Malformed ("unknown workflow status \"" <> row.status <> "\""))
     Right parsed -> Right parsed
   roles <- decodeRoles row.authenticated_roles
   pure
@@ -1209,7 +1207,7 @@ decodeRoles :: Maybe Text -> Either Error [Text]
 decodeRoles Nothing = Right []
 decodeRoles (Just json) =
   case eitherDecodeStrict (encodeUtf8 json) :: Either String [Text] of
-    Left err -> Left (Malformed ("authenticated_roles is not a JSON array of strings: " <> Text.pack err))
+    Left err    -> Left (Malformed ("authenticated_roles is not a JSON array of strings: " <> Text.pack err))
     Right roles -> Right roles
 
 -- | Resolves a filter into the guards the listing binds. Mirrors
@@ -1217,7 +1215,7 @@ decodeRoles (Just json) =
 -- prefixes get their wildcards escaped (so a caller's @%@ or @_@ is
 -- literal) with @%@ appended, and application scoping is decided here
 -- because it depends on the handle too — @Unset@ with no explicit ids means
--- the handle's own application plus the unclaimed rows, while @Any@ and an
+-- the handle's own application plus the unclaimed rows, while @AnyApplication@ and an
 -- id-keyed read see everything. NOTE: @caller@ is not yet recorded as the
 -- @DBOS.listWorkflows@ step; that checkpoint lands with 'recordStep'.
 listParams :: PostgresSystemDB -> WorkflowFilter -> Statements.WorkflowListParams
@@ -1263,7 +1261,7 @@ listParams env workflowFilter =
     idKeyed = not (null workflowFilter.workflowFilterWorkflowIds)
     (namedApplications, unsetApplication) =
       case workflowFilter.workflowFilterApplications of
-        Any -> (Nothing, Nothing)
+        AnyApplication -> (Nothing, Nothing)
         Named names
           | null names -> (Nothing, Nothing)
           | otherwise -> (Just names, Nothing)
@@ -1279,9 +1277,9 @@ escapeLike = (<> "%") . Text.concatMap escape
   where
     escape char = case char of
       '\\' -> "\\\\"
-      '%' -> "\\%"
-      '_' -> "\\_"
-      _ -> Text.singleton char
+      '%'  -> "\\%"
+      '_'  -> "\\_"
+      _    -> Text.singleton char
 
 -- | Resolves a 'NewWorkflow' and the submission's decisions into the bind
 -- list. The owner identity and the clock reading are parameters because the
@@ -1379,7 +1377,7 @@ finishInit env new maxRecoveryAttempts claiming ownerXid row =
                 recoveryAttempts = fromMaybe 0 row.recovery_attempts
                 spent = case maxRecoveryAttempts of
                   Just limit -> not (isTerminal status) && recoveryAttempts > limit + 1 && ownerDiffers
-                  Nothing -> False
+                  Nothing    -> False
             if spent
               then do
                 _ <- runSession env "park_workflow" (Statements.parkWorkflowSession new.newWorkflowId)
@@ -1465,7 +1463,7 @@ checkpointSleep env kind wid stepId duration = do
         Right (Just step) -> pure (decodeWakeTime wid stepId step.stepRecordOutput)
         Right Nothing -> do
           let completedAt = case kind of
-                DurableSleep -> wakeAt
+                DurableSleep  -> wakeAt
                 DeadlineSleep -> startedAt
           recorded <-
             recordStep env
@@ -1475,15 +1473,15 @@ checkpointSleep env kind wid stepId duration = do
                   (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
                   (Just portableJson)
                   (Just (StepTiming startedAt completedAt))
-              
+
           case recorded of
             Right () -> pure (Right wakeAt)
             Left (StepAlreadyRecorded {}) -> do
               adopted <- checkStep env wid stepId sleepStepName
               pure $ case adopted of
-                Left err -> Left err
+                Left err          -> Left err
                 Right (Just step) -> decodeWakeTime wid stepId step.stepRecordOutput
-                Right Nothing -> Left (Malformed "sleep reported as recorded but cannot be read back")
+                Right Nothing     -> Left (Malformed "sleep reported as recorded but cannot be read back")
             Left err -> pure (Left err)
 
 -- | The wait's re-read cadence with nothing pushing: one second, the short
@@ -1533,7 +1531,7 @@ runTransactionAt env isolation operation transaction =
   withRetry env.psdbRetry operation env.psdbLog uuidEntropy $ do
     result <- Pool.use env.psdbPool (TxSessions.transactionNoRetry isolation TxSessions.Write transaction)
     pure $ case result of
-      Left usage -> Left (classifyUsageError usage)
+      Left usage  -> Left (classifyUsageError usage)
       Right value -> Right value
 
 
@@ -1637,7 +1635,7 @@ instance Aeson.FromJSON Debounce where
 
 bouncedId :: Aeson.Value -> Parser Text
 bouncedId (Aeson.Object inner) = inner Aeson..: "workflow_id"
-bouncedId _ = fail "Bounced must hold an object"
+bouncedId _                    = fail "Bounced must hold an object"
 
 -- | The stored output of a debounce step as the value it records. A missing
 -- output, or one this build cannot read, is malformed — a step that ran has
@@ -1746,7 +1744,7 @@ queueRecordFromRow row = do
 pairedRateLimit :: Maybe Int -> Maybe Double -> Text -> Either Error (Maybe RateLimit)
 pairedRateLimit (Just limit) (Just secs) column =
   case durationFromSecs secs of
-    Nothing -> Left (Malformed (column <> " is not a duration: " <> Text.pack (show secs)))
+    Nothing     -> Left (Malformed (column <> " is not a duration: " <> Text.pack (show secs)))
     Just period -> Right (Just (RateLimit {rateLimitLimit = limit, rateLimitPeriod = period}))
 pairedRateLimit _ _ _ = Right Nothing
 
@@ -1766,7 +1764,7 @@ debounceCallerTx app callerWid callerText callerStep startedAt completedAt reque
     Just (Just _) -> case checked of
       Just raw -> case stepCheckToRecord callerWid callerStep debounceStepName raw of
         Left err -> pure (Left err)
-        Right _ -> pure (replayedDebounce callerWid callerStep raw)
+        Right _  -> pure (replayedDebounce callerWid callerStep raw)
       Nothing -> pure (Left (Malformed "unreachable: recorded step vanished"))
     _ -> do
       bounced <- Tx.statement (debounceBounceParams request app) Statements.debounceBounceStatement
@@ -1816,7 +1814,7 @@ instance Aeson.ToJSON ScheduleStatus where
 instance Aeson.FromJSON ScheduleStatus where
   parseJSON (Aeson.String "Active") = pure Active
   parseJSON (Aeson.String "Paused") = pure Paused
-  parseJSON _ = fail "ScheduleStatus must be Active or Paused"
+  parseJSON _                       = fail "ScheduleStatus must be Active or Paused"
 
 -- | A schedule row as step-output JSON. Field names follow the record, so a
 -- replay in any SDK reads what this one wrote.
@@ -1896,7 +1894,7 @@ runCallerStep env stepName callerWid callerStep startedAt work = do
       Just (Just _) -> case checked of
         Just raw -> case stepCheckToRecord callerWid callerStep stepName raw of
           Left err -> pure (Left err)
-          Right _ -> pure (replayStepOutput callerWid callerStep stepName raw)
+          Right _  -> pure (replayStepOutput callerWid callerStep stepName raw)
         Nothing -> pure (Left (Malformed "unreachable: recorded step vanished"))
       _ -> do
         outcome <- work
@@ -2027,7 +2025,7 @@ scheduleUpdateParams name update =
     named = not . changeIsLeave
 
 -- | The listing's narrowings with the application scope already resolved:
--- @Unset@ means the handle's own application plus the unclaimed, @Any@ and
+-- @Unset@ means the handle's own application plus the unclaimed, @AnyApplication@ and
 -- an empty @Named@ narrow nothing, and a @Named@ list keeps the unclaimed.
 -- A prefix arrives escaped with @%@ appended, so a caller's wildcard matches
 -- itself. Mirrors @list_schedules@.
@@ -2038,10 +2036,10 @@ scheduleListParams env scheduleFilter =
       listScheduleWorkflowNames = scheduleFilter.scheduleFilterWorkflowNames,
       listScheduleNamePrefixes = escapeLike <$> scheduleFilter.scheduleFilterNamePrefixes,
       listScheduleApplications = case scheduleFilter.scheduleFilterApplications of
-        Any -> Nothing
-        Named [] -> Nothing
-        Named names -> Just names
-        Unset -> (: []) <$> env.psdbApplicationName
+        AnyApplication -> Nothing
+        Named []       -> Nothing
+        Named names    -> Just names
+        Unset          -> (: []) <$> env.psdbApplicationName
     }
 
 -- | Whether a create's failure is a unique-index collision, and which index
@@ -2134,7 +2132,7 @@ renameInBatches env table source newName batching =
                   "rename_row_batch"
                   (Session.statement (newName, watermark, upper) (Statements.renameBatchRangeStatement table source))
               case moved of
-                Left err -> pure (Left err)
+                Left err   -> pure (Left err)
                 Right rows -> loop (Just upper) (total + rows)
     _ -> runSession env "rename_rows" (Session.statement (newName, renamedFrom) (Statements.renameRowsStatement table source ""))
   where
@@ -2165,9 +2163,9 @@ runFork env sources forkedIds steps options =
               }
       result <- runTransaction env "fork_workflows" (Statements.forkTx params)
       pure $ case result of
-        Left err -> Left err
+        Left err             -> Left err
         Right (Just missing) -> Left (NonExistentWorkflow {workflowIds = missing})
-        Right Nothing -> Right (map Types.WorkflowId forkedIds)
+        Right Nothing        -> Right (map Types.WorkflowId forkedIds)
   where
     unwrapQueueName (QueueName name) = name
     forkTimeoutMs Nothing = Right Nothing
@@ -2187,7 +2185,7 @@ sendInternal _ _ messages _ Nothing _ | null messages = pure (Right ())
 sendInternal env stepName messages serialization caller sendToForks = do
   expanded <- if sendToForks then expandForks env messages else pure (Right messages)
   case expanded of
-    Left err -> pure (Left err)
+    Left err         -> pure (Left err)
     Right recipients -> deliverTo env stepName recipients serialization caller
 
 -- | Every message copied once per recipient: the destination itself and
@@ -2272,7 +2270,7 @@ deliverTo env stepName messages serialization caller =
 -- not exist, so a message can never be left pointing at nothing.
 foreignKeyError :: Error -> Bool
 foreignKeyError (Backend backend) = backend.backendSqlState == Just "23503"
-foreignKeyError _ = False
+foreignKeyError _                 = False
 
 -- | The keys a batch may carry: an empty key is a caller error, and two
 -- messages under one key would give two rows the same primary key, so the
@@ -2345,7 +2343,7 @@ encodeRoles roles =
 
 -- | Rust's @Debug@ spelling of an optional string, for the conflict detail.
 debugOption :: Maybe Text -> Text
-debugOption Nothing = "None"
+debugOption Nothing      = "None"
 debugOption (Just value) = "Some(\"" <> value <> "\")"
 
 -- | What a polled row says about settling. Mirrors @await_workflow_result@'s
@@ -2357,12 +2355,12 @@ settledOutcome wid row = do
   status <- case row.status of
     Nothing -> Left (Malformed ("workflow " <> wid <> " has a null status"))
     Just raw -> case parseWorkflowStatus raw of
-      Left _ -> Left (Malformed ("unknown workflow status \"" <> raw <> "\""))
+      Left _       -> Left (Malformed ("unknown workflow status \"" <> raw <> "\""))
       Right parsed -> Right parsed
   case status of
     Success -> Right (Just (AwaitedSucceeded row.output row.serialization))
     Error -> case row.error of
-      Nothing -> Left (Malformed ("workflow " <> wid <> " failed with no error recorded"))
+      Nothing      -> Left (Malformed ("workflow " <> wid <> " failed with no error recorded"))
       Just message -> Right (Just (AwaitedFailed message row.serialization))
     Cancelled -> Right (Just AwaitedCancelled)
     MaxRecoveryAttemptsExceeded -> Right (Just (AwaitedParked (fromMaybe 0 row.recovery_attempts)))
@@ -2391,7 +2389,7 @@ runPolling env operation session =
     withPollingPermit env $ do
       result <- Pool.use env.psdbPool session
       pure $ case result of
-        Left usage -> Left (classifyUsageError usage)
+        Left usage  -> Left (classifyUsageError usage)
         Right value -> Right value
 
 -- | One polling-concurrency permit, held for the length of a query.
@@ -2555,9 +2553,9 @@ instance SystemDB PostgresSystemDB IO where
             | failIfMissing -> pure (Left (NonExistentWorkflow {workflowIds = [widText]}))
             | otherwise -> sleepThen env widText
           Right (Just row) -> case settledOutcome widText row of
-            Left err -> pure (Left err)
+            Left err             -> pure (Left err)
             Right (Just outcome) -> pure (Right outcome)
-            Right Nothing -> sleepThen env widText
+            Right Nothing        -> sleepThen env widText
       sleepThen env widText = do
         threadDelay (durationMicros pollInterval)
         loop env widText
@@ -2634,7 +2632,7 @@ instance SystemDB PostgresSystemDB IO where
           then do
             descendants <- traverse (\wid -> getWorkflowChildren env wid) workflowIds
             case sequence descendants of
-              Left err -> pure (Left err)
+              Left err     -> pure (Left err)
               Right levels -> pure (Right (map unwrap workflowIds <> concatMap (map unwrap) levels))
           else pure (Right (map unwrap workflowIds))
         case targets of
@@ -2719,10 +2717,10 @@ instance SystemDB PostgresSystemDB IO where
           Right () -> do
             let sources = map unwrap workflowIds
             points <- case point of
-              ForkStep step -> pure (Right (replicate (length sources) step))
+              ForkStep step      -> pure (Right (replicate (length sources) step))
               ForkStepNamed name -> resolvePoints env sources "MAX(function_id)" (Just name)
-              ForkLastStep -> resolvePoints env sources "MAX(function_id)" Nothing
-              ForkLastFailure -> resolvePoints env sources "COALESCE(MAX(function_id) FILTER (WHERE error IS NOT NULL), MAX(function_id))" Nothing
+              ForkLastStep       -> resolvePoints env sources "MAX(function_id)" Nothing
+              ForkLastFailure    -> resolvePoints env sources "COALESCE(MAX(function_id) FILTER (WHERE error IS NOT NULL), MAX(function_id))" Nothing
             case points of
               Left err -> pure (Left err)
               Right steps -> do
@@ -2804,8 +2802,8 @@ instance SystemDB PostgresSystemDB IO where
   checkStep env wid stepId stepName = do
     result <- runSession env "check_step" (Statements.checkStepSession (unwrap wid) stepId)
     pure $ case result of
-      Left err -> Left err
-      Right Nothing -> Left (NonExistentWorkflow {workflowIds = [unwrap wid]})
+      Left err         -> Left err
+      Right Nothing    -> Left (NonExistentWorkflow {workflowIds = [unwrap wid]})
       Right (Just row) -> stepCheckToRecord wid stepId stepName row
     where
       unwrap (Types.WorkflowId widText) = widText
@@ -3003,7 +3001,7 @@ instance SystemDB PostgresSystemDB IO where
                 _ <- Tx.statement (queueInsertParams queue updatedAt owner) (Statements.queueInsertStatement onExisting)
                 pure (Right ())
           case outcome of
-            Left err -> pure (Left err)
+            Left err         -> pure (Left err)
             Right (Left err) -> pure (Left err)
             Right (Right ()) -> pure (Right (isNothing existing))
   startQueuedWorkflows env queue executorId applicationVersion partitionKey localRunning partitionLocalRunning =
@@ -3121,10 +3119,10 @@ instance SystemDB PostgresSystemDB IO where
     pure (result >>= traverse queueRecordFromRow)
   listQueues env applications = do
     let scope = case applications of
-          Any -> Nothing
-          Named [] -> Nothing
-          Named names -> Just names
-          Unset -> (: []) <$> env.psdbApplicationName
+          AnyApplication -> Nothing
+          Named []       -> Nothing
+          Named names    -> Just names
+          Unset          -> (: []) <$> env.psdbApplicationName
     result <- runSession env "list_queues" (Session.statement scope Statements.queueListStatement)
     pure (result >>= traverse queueRecordFromRow)
   updateQueue env name update validate = do
@@ -3142,11 +3140,11 @@ instance SystemDB PostgresSystemDB IO where
                 Right () -> do
                   written <- Tx.statement (queueUpdateParams name (applyQueueUpdate update record) updatedAt) Statements.queueUpdateStatement
                   case written of
-                    Nothing -> pure (Right (Left (Malformed "the update wrote no queue row")))
+                    Nothing  -> pure (Right (Left (Malformed "the update wrote no queue row")))
                     Just row -> pure (Right (queueRecordFromRow row))
     case result of
-      Left err -> pure (Left err)
-      Right (Left err) -> pure (Left err)
+      Left err              -> pure (Left err)
+      Right (Left err)      -> pure (Left err)
       Right (Right outcome) -> pure outcome
   debounceDelayedWorkflow env request caller =
     case caller of
@@ -3203,7 +3201,7 @@ instance SystemDB PostgresSystemDB IO where
               Tx.statement (scheduleInsertParams new scheduleId resolvedOwner) Statements.scheduleInsertStatement
               pure (Right ())
         collide result = case result of
-          Left err -> Left (scheduleCollision scheduleId new.newScheduleName err)
+          Left err      -> Left (scheduleCollision scheduleId new.newScheduleName err)
           Right outcome -> outcome
     case caller of
       Just (callerWid, callerStep) -> do

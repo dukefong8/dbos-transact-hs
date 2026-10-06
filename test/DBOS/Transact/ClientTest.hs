@@ -11,7 +11,8 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (Fork (..), ForkOptions (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
+import DBOS.SystemDB (Applications (..), Fork (..), ForkOptions (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
+import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
@@ -54,6 +55,7 @@ import DBOS.Transact
     dequeueDBOSWorkflows,
     encodeWorkflowValue,
     enqueueClientWorkflowWith,
+    enqueueClientWorkflow,
     enqueueNew,
     enqueueOptionsNew,
     enqueueOptionsOn,
@@ -93,7 +95,7 @@ launchClientExec dbos env = do
 
 tests :: TestTree
 tests =
-  withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
+  withResource acquireSuiteBackend releaseSuiteBackend $ \getBackend ->
   testGroup
     "Client"
     [ testCase "connect reports a missing url by the name of the variable that sets it" $ do
@@ -110,7 +112,9 @@ tests =
             queueName = "hs-l2-client-q-" <> Text.take 12 suffix
             key = newWorkflowKey "double"
         config0 <- configFromEnv appName
-        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
+        -- The driven dequeue and the background supervisor sweep this case's
+        -- queue only, not every fixture queue on the shared database.
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [queueName]}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
@@ -168,7 +172,9 @@ tests =
             shape = (enqueueNew queueName) {deduplicationId = Just ("dup-" <> suffix), duplicationPolicy = ReturnExisting}
             options = (enqueueOptionsOn shape) {appVersion = Just appVersion}
         config0 <- configFromEnv appName
-        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
+        -- The driven dequeue and the background supervisor sweep this case's
+        -- queue only, not every fixture queue on the shared database.
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [queueName]}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
@@ -344,7 +350,9 @@ tests =
                 Right Nothing -> pure (Left (StepFailed "recv" "nothing arrived"))
                 Right (Just value) -> pure (Right value)
         config0 <- configFromEnv appName
-        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
+        -- The driven dequeue and the background supervisor sweep this case's
+        -- queue only, not every fixture queue on the shared database.
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [queueName]}
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
           case registered of
@@ -400,7 +408,9 @@ tests =
                 (_, Left err) -> Left err
                 _ -> Left (StepFailed "recv" "a message never arrived")
         config0 <- configFromEnv appName
-        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
+        -- The driven dequeue and the background supervisor sweep this case's
+        -- queue only, not every fixture queue on the shared database.
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [queueName]}
         bracket (newDBOS config) shutdown $ \dbos -> do
           registered <- registerDBOSWorkflow dbos key body
           case registered of
@@ -620,7 +630,64 @@ tests =
               Left err -> fail (show err)
               Right records -> do
                 let ids = [wid | WorkflowRecord {workflowRecordId = wid} <- records]
-                assertBool "both workflows are listed" (all (`elem` ids) [WorkflowId firstText, WorkflowId secondText])
+                assertBool "both workflows are listed" (all (`elem` ids) [WorkflowId firstText, WorkflowId secondText]),
+      testCase "a client enqueues without options and the row is unversioned" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-plain-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-plain-q-" <> Text.take 12 suffix
+            key = newWorkflowKey "double"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerDBOSWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            enqueued <- enqueueClientWorkflow client "double" queueName (Just (encodeWorkflowValue (21 :: Int)))
+            handle <- case enqueued of
+              Left err -> fail (show err)
+              Right handle -> pure handle
+            -- No options names no version: the row is claimed only by the
+            -- latest registered version.
+            row <- readRow getBackend (WorkflowId handle.workflowId)
+            row.workflowRecordApplicationVersion @?= Nothing,
+      testCase "a client cancelling a missing workflow gets nothing back" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-cancel-missing-" <> Text.take 12 suffix
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          cancelled <- clientCancelWorkflows client [WorkflowId "never-existed"] False
+          cancelled @?= Right [],
+      testCase "a client getEvent with no sender waits out its timeout" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-evt-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-evt-id-" <> suffix
+            key = newWorkflowKey "quiet"
+            body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
+            body () _ = pure (Right ())
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerDBOSWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          _ <- runWf exec key (WorkflowId workflowText) Nothing
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            waited <- clientGetEvent client (WorkflowId workflowText) "absent" (millisDuration 200)
+            waited @?= Right Nothing
     ]
 
 -- * Engine-only driver aliases
@@ -651,6 +718,29 @@ acquireSuiteBackend = do
   backend <- Postgres.acquirePostgresSystemDB config nullTracer
   Postgres.activatePostgresSystemDB backend
   pure backend
+
+-- | The queue-name prefix this suite's cases register under. No other live
+-- suite registers under it, so the release can delete by prefix without
+-- racing a running peer (tasty runs groups in parallel; names are unique
+-- per case).
+suiteQueuePrefix :: Text
+suiteQueuePrefix = "hs-l2-client-"
+
+-- | Delete this suite's fixture queues after the group finishes: the shared
+-- database keeps a queue row per run, and every unscoped sweep pays one claim
+-- query per row. Runs in the 'withResource' release, after every case, so it
+-- never races a running case. Best-effort: a refusal is ignored rather than
+-- failing the suite. Workflow rows are left alone; without their queue row
+-- no sweep will ever enumerate them.
+releaseSuiteBackend :: Postgres.PostgresSystemDB -> IO ()
+releaseSuiteBackend backend = do
+  listed <- SystemDB.listQueues backend Unset
+  case listed of
+    Left _ -> pure ()
+    Right records -> mapM_ (\name -> SystemDB.deleteQueue backend name >> pure ()) names
+      where
+        names = [name | record <- records, let name = record.queueRecordName, Text.isPrefixOf suiteQueuePrefix name]
+  Postgres.releasePostgresSystemDB backend
 
 -- | One workflow row as stored: a reader over the suite backend.
 readRow :: IO Postgres.PostgresSystemDB -> WorkflowId -> IO WorkflowRecord

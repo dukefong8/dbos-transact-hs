@@ -70,6 +70,7 @@ data QueueEvent
   | InternalQueueLimitsIgnored
   | DelayedTransitionFailed { queueDetail :: Text }
   | DelayedWorkflowsEnqueued { queueMoved :: Word64 }
+  | DequeuePassSlow { queueSwept :: Int, queueClaimed :: Int, queueElapsedMs :: Integer }
   deriving stock (Eq, Show)
 
 instance LogEvent QueueEvent where
@@ -84,6 +85,7 @@ instance LogEvent QueueEvent where
   eventSeverity InternalQueueLimitsIgnored    = SeverityWarning
   eventSeverity DelayedTransitionFailed {}    = SeverityWarning
   eventSeverity DelayedWorkflowsEnqueued {}   = SeverityDebug
+  eventSeverity DequeuePassSlow {}            = SeverityWarning
 
   renderEvent (QueueWorkerStopping queue) = "the queue " <> queue <> " is no longer registered; stopping its worker"
   renderEvent DequeueBackoff = "a peer is mid-dequeue; backing off"
@@ -101,6 +103,13 @@ instance LogEvent QueueEvent where
     "the queues table holds a row for the engine's internal queue; its stored limits are ignored. Delete the row: it can only throttle `resume` and `fork`"
   renderEvent (DelayedTransitionFailed detail) = "could not transition delayed workflows: " <> detail
   renderEvent (DelayedWorkflowsEnqueued moved) = "delayed workflows are now enqueued: " <> showText moved
+  renderEvent (DequeuePassSlow swept claimed elapsedMs) =
+    "a dequeue pass took longer than a second: queues "
+      <> showText swept
+      <> ", claimed "
+      <> showText claimed
+      <> ", elapsed_ms "
+      <> showText elapsedMs
 
 instance ToLogStr QueueEvent where
   toLogStr = toLogStr . renderLine
@@ -501,9 +510,12 @@ superviseForever tasks conn identity workflows listenQueues = do
 
 -- | One pass of the sweep outside the supervisor: a fresh tally, one poll
 -- per queue, and the ids it claimed. Dispatch is concurrent; the caller
--- only learns what was claimed.
+-- only learns what was claimed. A stored internal-queue row is skipped like
+-- the supervisor skips it: the synthetic record's no-limit cadence always
+-- wins, and the row's presence is said out loud.
 dequeuePass :: (MonadSTM m, MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeuePass tasks conn identity workflows listenQueues = do
+  passStart <- getCurrentTime
   transitioned <- runSystemDB conn.connSysdb (\db -> SystemDB.transitionDelayedWorkflows db)
   case transitioned of
     Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
@@ -513,10 +525,29 @@ dequeuePass tasks conn identity workflows listenQueues = do
         Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
         Right records -> do
           running <- newRunning
-          let visible = filter (listensTo listenQueues) records
+          let internalName = case internalQueueName of QueueName name -> name
+              visible = filter (\record -> record.queueRecordName /= internalName && listensTo listenQueues record) records
               queues = internalQueueRecord : visible
+          when (any (\record -> record.queueRecordName == internalName) records) $
+            runTracer conn.connTracer InternalQueueLimitsIgnored
           claimedByQueue <- traverse (\queue -> pollOnce conn identity workflows tasks running queue) queues
-          pure (Right (concatMap snd claimedByQueue))
+          let claimed = concatMap snd claimedByQueue
+          reportSlowPass conn passStart (length queues) (length claimed)
+          pure (Right claimed)
+
+-- | Warns when a driven pass takes longer than a second: a slow pass is how
+-- a queue-dense database first shows itself (one claim query per swept queue
+-- per pass), and the sweep is otherwise silent. Threshold-gated, so healthy
+-- passes stay quiet; virtual-time sim runs measure nothing and never fire.
+slowPassThresholdMs :: Integer
+slowPassThresholdMs = 1000
+
+reportSlowPass :: MonadTime m => Connection m -> UTCTime -> Int -> Int -> m ()
+reportSlowPass conn started swept claimed = do
+  ended <- getCurrentTime
+  let elapsedMs = round (diffUTCTime ended started * 1000)
+  when (elapsedMs > slowPassThresholdMs) $
+    runTracer conn.connTracer (DequeuePassSlow swept claimed elapsedMs)
 
 listensTo :: Maybe [Text] -> QueueRecord -> Bool
 listensTo Nothing _ = True

@@ -828,7 +828,7 @@ spawnTracked tasks action = MThrow.mask $ \restore ->
         atomically $ do
           st <- readTVar tasks.tasksState
           if tid `elem` st.orphaned
-            then writeTVar tasks.tasksState st { orphaned = filter (/= tid) st.orphaned }
+            then writeTVar tasks.tasksState st { orphaned = mapMaybe (\t -> if t == tid then Nothing else Just t) st.orphaned }
             else writeTVar tasks.tasksState st { running = tid : st.running }
         pure (Just tid)
 
@@ -865,7 +865,7 @@ departed :: (MonadFork m, MonadSTM m) => Tasks m -> ThreadId m -> m ()
 departed tasks tid = atomically $ do
   st <- readTVar tasks.tasksState
   if tid `elem` st.running
-    then writeTVar tasks.tasksState st { live = max 0 (st.live - 1), running = filter (/= tid) st.running }
+    then writeTVar tasks.tasksState st { live = max 0 (st.live - 1), running = mapMaybe (\t -> if t == tid then Nothing else Just t) st.running }
     else if st.closed || tid `elem` st.orphaned
       then writeTVar tasks.tasksState st { live = max 0 (st.live - 1) }
       else writeTVar tasks.tasksState st { live = max 0 (st.live - 1), orphaned = tid : st.orphaned }

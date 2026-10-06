@@ -8,6 +8,7 @@
 - Fixed replayed `sleepStep` waiting out the recorded remainder (`reads` on the bare stored text, not its `show`).
 - Scoped generated message ids per recipient (`fallback::destination`), reusing `messageUUIDForSend` in the batch insert.
 - `dequeuePass` releases (instead of parking) claims it skips: unregistered names and unreadable rows return to `ENQUEUED`.
+- `launchOnWithQueues` installs the listen-filtered executor into the instance rather than returning a filtered copy of an unfiltered install: the dequeue sweep and a later `launchExecutor` see the listen set, so a filtered launch stops polling every queue row in the database.
 - `runWorkflow` replays recorded `SUCCESS`/`ERROR` outcomes and loses foreign-owned claims instead of re-running or stealing them.
 - Infrastructure failures (`DbosDbError`) and all `AsyncException`s escape `runWorkflow` without recording an `ERROR` outcome.
 - `takeNotificationSession` tolerates a lost take race (`ON CONFLICT DO NOTHING`); the loser reads back the winner's record.

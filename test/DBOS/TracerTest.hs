@@ -44,6 +44,10 @@ tests =
         renderEvent (EngineRecovered 3) @?= ("re-enqueued workflows a previous run left PENDING workflows=3" :: Text),
       testCase "a skipped row names its workflow" $ do
         renderEvent (DequeuedRowSkipped "wf-9") @?= ("the dequeued row wf-9 names no workflow; skipped" :: Text),
+      testCase "a contended dequeue announces its backoff" $ do
+        renderEvent DequeueBackoff @?= ("a peer is mid-dequeue; backing off" :: Text),
+      testCase "a slow pass reports its sweep, claims and elapsed time" $ do
+        renderEvent (DequeuePassSlow 16050 1 98231) @?= ("a dequeue pass took longer than a second: queues 16050, claimed 1, elapsed_ms 98231" :: Text),
       testCase "a line names its event's constructor, nullary ones included" $ do
         eventName (StepRunning "double" 3) @?= ("StepRunning" :: Text)
         eventName DequeueBackoff @?= ("DequeueBackoff" :: Text),

@@ -161,8 +161,8 @@ cachedThreadId (ThreadIdCache table) self = do
 -- gives the cache its lifetime, the way fast-logger's own logger sets
 -- bundle their buffers.
 data LoggerBackend = LoggerBackend
-  { backendLogger :: TimedFastLogger,
-    backendThreadIds :: ThreadIdCache,
+  { backendLogger      :: TimedFastLogger,
+    backendThreadIds   :: ThreadIdCache,
     -- | The lowest severity the backend renders. An event below it is
     -- dropped before anything is formatted — the null path for a level
     -- nobody asked for — so @TRACE_LEVEL@ costs one 'eventSeverity'
@@ -197,18 +197,18 @@ minSeverityFromEnv = do
   raw <- lookupEnv "TRACE_LEVEL"
   pure $ case raw >>= parseSeverity of
     Just severity -> severity
-    Nothing -> SeverityDebug
+    Nothing       -> SeverityDebug
 
 -- | The level names @TRACE_LEVEL@ accepts, case- and space-insensitive:
 -- @debug@, @info@, @warning@ (or @warn@), @error@.
 parseSeverity :: String -> Maybe LogSeverity
 parseSeverity raw = case map toLower (filter (not . isSpace) raw) of
-  "debug" -> Just SeverityDebug
-  "info" -> Just SeverityInfo
+  "debug"   -> Just SeverityDebug
+  "info"    -> Just SeverityInfo
   "warning" -> Just SeverityWarning
-  "warn" -> Just SeverityWarning
-  "error" -> Just SeverityError
-  _ -> Nothing
+  "warn"    -> Just SeverityWarning
+  "error"   -> Just SeverityError
+  _         -> Nothing
 
 -- | The production tracer over any 'ToLogStr' event: the Rank-N shape —
 -- one value serves every event type, each line carrying FastLogger's

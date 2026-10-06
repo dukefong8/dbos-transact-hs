@@ -16,7 +16,8 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import DBOS.DualStack (liveCaseWith)
 import DBOS.Prelude
-import DBOS.SystemDB (AwaitedOutcome (..), Change (..), NewQueue (..), OnExistingQueue (..), QueueName (..), SystemDB (getQueue, upsertQueue), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), getWorkflow, internalQueueName, newQueue, secondsDuration)
+import DBOS.SystemDB (Applications (..), AwaitedOutcome (..), Change (..), NewQueue (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), SystemDB (deleteQueue, getQueue, listQueues, upsertQueue), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), getWorkflow, internalQueueName, newQueue, secondsDuration)
+import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact (CodecError, Config (..), DBOS, WorkflowCtx, Executor, DuplicationPolicy (..), EngineOnly, Enqueue (..), Environment (..), Error (..), Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), Serialization (..), SerializedWorkflowValue (..),
  StartOptions (..), WorkflowId (..),
@@ -41,6 +42,7 @@ import DBOS.Transact.QueueCases
     checkPriority,
     checkUpdateHonoured,
     checkWorkerConcurrency,
+    checkWorkerBudgetExhausted,
     checkCrud,
     checkDeadlineStamped,
     checkEqualLimits,
@@ -75,6 +77,7 @@ import DBOS.Transact.QueueCases
     scenarioPriority,
     scenarioUpdateHonoured,
     scenarioWorkerConcurrency,
+    scenarioWorkerBudgetExhausted,
     scenarioCrud,
     scenarioDeadlineStamped,
     scenarioEqualLimits,
@@ -154,7 +157,7 @@ leaf getBackend listenOf name scen judge = liveCaseWith (\run -> getBackend >>= 
 
 tests :: TestTree
 tests =
-  withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
+  withResource acquireSuiteBackend releaseSuiteBackend $ \getBackend ->
   testGroup
     "Workflow queues"
     [ leaf getBackend (const Nothing) "queue options default to no limits and poll once a second" scenarioQueueDefaults checkQueueDefaults,
@@ -254,7 +257,8 @@ tests =
       leaf getBackend (const Nothing) "an inherited deadline reaches a queued child" scenarioInheritedDeadline checkInheritedDeadline,
       leaf getBackend (const Nothing) "a queue carries a rate limit and priority ordering" scenarioRateLimit checkRateLimit,
       leaf getBackend (const Nothing) "per-partition limits partition a queue" scenarioPartitionLimits checkPartitionLimits,
-      leaf getBackend (const Nothing) "re-registering updates the stored limits" scenarioReregister checkReregister
+      leaf getBackend (const Nothing) "re-registering updates the stored limits" scenarioReregister checkReregister,
+      leaf getBackend (const Nothing) "a saturated worker budget runs one at a time" scenarioWorkerBudgetExhausted checkWorkerBudgetExhausted
     ]
 
 -- * Engine-only driver aliases
@@ -298,6 +302,56 @@ acquireSuiteBackend = do
   backend <- Postgres.acquirePostgresSystemDB config nullTracer
   Postgres.activatePostgresSystemDB backend
   pure backend
+
+-- | The queue-name prefixes this suite's cases register. No other live suite
+-- registers under them, so the release can delete by prefix without racing a
+-- running peer (tasty runs groups in parallel; names are unique per case).
+-- A scenario that registers under a new prefix must extend this list.
+suiteQueuePrefixes :: [Text]
+suiteQueuePrefixes =
+  [ "hs-l2-legacy-",
+    "hs-l2-queue-",
+    "hs-l2-queueconc-",
+    "hs-l2-checked-",
+    "hs-l2-incoherent-q-",
+    "hs-l2-equal-q-",
+    "hs-l2-limited-q-",
+    "hs-l2-sharded-",
+    "hs-l2-reregister-q-",
+    "hs-l2-deadline-q-",
+    "hs-l2-unpolled-q-",
+    "hs-l2-partition-q-",
+    "hs-l2-partitioned-q-",
+    "hs-l2-sentinel-q-",
+    "hs-l2-validation-q-",
+    "hs-l2-late-q-",
+    "hs-l2-ghost-q-",
+    "hs-l2-inherited-q-",
+    "hs-l2-delay-q-",
+    "hs-l2-dedup-q-",
+    "hs-l2-join-q-",
+    "hs-l2-priority-q-",
+    "hs-l2-update-q-",
+    "hs-l2-counted-q-",
+    "hs-l2-listen-",
+    "belongs-to-a-peer-"
+  ]
+
+-- | Delete this suite's fixture queues after the group finishes: the shared
+-- database keeps a queue row per run, and every unscoped sweep pays one claim
+-- query per row. Runs in the 'withResource' release, after every case, so it
+-- never races a running case. Best-effort: a refusal is ignored rather than
+-- failing the suite. Workflow rows are left alone; without their queue row
+-- no sweep will ever enumerate them.
+releaseSuiteBackend :: Postgres.PostgresSystemDB -> IO ()
+releaseSuiteBackend backend = do
+  listed <- SystemDB.listQueues backend Unset
+  case listed of
+    Left _ -> pure ()
+    Right records -> mapM_ (\name -> SystemDB.deleteQueue backend name >> pure ()) names
+      where
+        names = [name | record <- records, let name = record.queueRecordName, any (`Text.isPrefixOf` name) suiteQueuePrefixes]
+  Postgres.releasePostgresSystemDB backend
 
 -- | Register a body at the engine-only channel: the polymorphic
 -- registration cannot infer the JSON types from a local binding.

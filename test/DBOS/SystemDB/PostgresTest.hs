@@ -972,7 +972,7 @@ listTests getBackend =
           own @?= sort [claimed, unclaimed]
           other <- scoped named defaultWorkflowFilter {workflowFilterApplications = Named [unique <> "-elsewhere"]}
           other @?= [unclaimed]
-          anyRows <- sort <$> scoped named defaultWorkflowFilter {workflowFilterApplications = Any}
+          anyRows <- sort <$> scoped named defaultWorkflowFilter {workflowFilterApplications = AnyApplication}
           anyRows @?= sort [claimed, unclaimed],
       testCase "queues-only and parented flags narrow" $ do
         unique <- freshWorkflowId
@@ -2651,7 +2651,7 @@ scheduleTests getBackend =
             Left (AlreadyRegistered {kind = kind}) -> kind @?= "Schedule id"
             other -> fail ("expected an id collision, got: " <> show other)
           _ <- upsertSchedule env schedule Nothing
-          names <- scheduleNames env (defaultScheduleFilter {scheduleFilterNamePrefixes = [name], scheduleFilterApplications = Any})
+          names <- scheduleNames env (defaultScheduleFilter {scheduleFilterNamePrefixes = [name], scheduleFilterApplications = AnyApplication})
           names @?= [name]
           _ <- deleteSchedule env name Nothing
           pure (),
@@ -2747,7 +2747,7 @@ scheduleTests getBackend =
             reportWeekly = base <> "report-weekly"
             sweepHourly = base <> "sweep-hourly"
             wildcardOdd = base <> "100%-odd"
-            scoped = defaultScheduleFilter {scheduleFilterNamePrefixes = [base], scheduleFilterApplications = Any}
+            scoped = defaultScheduleFilter {scheduleFilterNamePrefixes = [base], scheduleFilterApplications = AnyApplication}
         withBackend getBackend $ \env -> do
           forM_
             [ (reportNightly, "generate_report"),
@@ -2797,7 +2797,7 @@ scheduleTests getBackend =
         withBackendAs getBackend (Just alpha) $ \env -> do
           own <- scheduleNames env scoped {scheduleFilterApplications = Unset}
           own @?= [alphaJob, nobodyJob]
-          anyApp <- scheduleNames env scoped {scheduleFilterApplications = Any}
+          anyApp <- scheduleNames env scoped {scheduleFilterApplications = AnyApplication}
           anyApp @?= [alphaJob, betaJob, nobodyJob]
           named <- scheduleNames env scoped {scheduleFilterApplications = Named [beta]}
           named @?= [betaJob, nobodyJob]

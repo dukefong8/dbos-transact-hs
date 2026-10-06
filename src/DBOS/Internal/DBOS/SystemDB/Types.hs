@@ -974,11 +974,13 @@ isScheduleUpdateEmpty update =
     && changeIsLeave update.scheduleUpdateQueueName
 
 -- | Which applications' rows a query covers. 'Unset' lets the query decide;
--- 'Any' is the operator's cross-application view; 'Named' names
--- applications plus the unclaimed rows. Mirrors Rust @Applications@.
+-- 'AnyApplication' is the operator's cross-application view; 'Named' names
+-- applications plus the unclaimed rows. Mirrors Rust @Applications@, whose
+-- @Any@ case carries the prefix here (constructor-prefix deviation,
+-- ADR-0024).
 data Applications
   = Unset
-  | Any
+  | AnyApplication
   | Named [Text]
   deriving stock (Eq, Show)
 

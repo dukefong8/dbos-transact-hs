@@ -891,7 +891,7 @@ Survey (2026-10-04; live/sim line counts):
 | Suite | Live | Sim | Critical for | State |
 | --- | ---: | ---: | --- | --- |
 | SleepTest | 93 | 88 | durability | framed (`SleepCases.hs`) |
-| DatasourceTest | 608 | 178 | transactions | framed (`DatasourceCases.hs`) |
+| DatasourceTest | 608 | 178 | transactions | framed (`DatasourceCases.hs`); sim half is mixed — the 2 `MemSystemDB` leaves stay in scope, the 8 `MockSystemDB` leaves are out (below) |
 | StepRetryTest | 352 | — | transactions | framed (`StepRetryCases.hs` + `StepRetryTestSim.hs`) |
 | CheckpointTest | 171 | — | durability/transactions | framed (`CheckpointCases.hs` + `CheckpointTestSim.hs`) |
 | WaitTest | 193 | 101 | concurrency (events) | framed (`WaitCases.hs`) |
@@ -899,9 +899,9 @@ Survey (2026-10-04; live/sim line counts):
 | SelectTest | 129 | — | concurrency | framed (`SelectCases.hs` + `SelectTestSim.hs`) |
 | DeadlinesTest | 319 | — | concurrency/timing | framed (`DeadlinesCases.hs` + `DeadlinesTestSim.hs`) |
 | QueueTest | 1640 | 149 | concurrency/durability | sim is a sketch |
-| WorkflowTest | 3350 | 827 | durability/concurrency | framed, scenarios not shared |
+| WorkflowTest | 3350 | 827 | durability/concurrency | framed (`WorkflowCases.hs`) |
 | ManagementTest | 1095 | 418 | durability/management | partial |
-| ContextTest | 546 | 215 | durability/context | partial |
+| ContextTest | 546 | 215 | durability/context | live only in scope — the sim half rides `MockSystemDB` stubs and is out (below) |
 | HandleTest | 312 | 131 | transactions (handles) | partial |
 | EventTest | 418 | — | durability (events) | no sim half |
 | StepTest | 333 | 344 | transactions | near-complete pair |
@@ -1090,12 +1090,64 @@ timeouts` → **3/3, 6/6, 10/10 green**. Per-scenario comparison:
         partitioned and counted-partitioned peaks, peer-queue invisibility)
         plus the legacy-input IO-only marker (ADR-0020). Watcher live 35/35
         + sim 37/37, flip guard failed all twelve checks on both halves.
-- [ ] **S7 WorkflowTest/Sim** — `WorkflowCases.hs`: share the 54 scenario
-      bodies; Tasks concurrency cases; recovery/replay/children.
-- [ ] **S8 Management/Context/Handle/Event** — `*Cases.hs` per domain.
+- [x] **S7 WorkflowTest/Sim** (green 2026-10-05: live 54/54 + sim 54/54 with
+      identical names in identical order; `cabal test all` 688/688, probes
+      10/10, migrate 114→114, Rust `--test children` 26/26 + `--test
+      recovery` 3/3 + `--test workflows` 13/13) — `WorkflowCases.hs` carries
+      the shared fixture (`WfFixture`/`mkWfFixture`), the 54 scenario bodies,
+      their checks, the `Tasks` bodies and the test-local JSON channels
+      (`Refused`/`GaveUp`); the live tree keeps `liveWfFixture`, the leaves,
+      `waitFinished` and the driver aliases; the sim keeps `simWaitDeparture`
+      and the typed traces; dead helper tails and unused imports pruned on
+      both sides (both modules build `-Wall`-clean bar the tree's standing
+      shadowing/type-defaults patterns). Engine fix the slice surfaced:
+      `launchOnWithQueues` installed the unfiltered executor and returned a
+      filtered *copy*, so `dequeueDBOSWorkflows` kept sweeping every queue
+      row in the shared database (15.8k rows ≈ 62 s per pass; the
+      join-held-key driver's two passes cost 123.20 s, and the case had
+      failed outright when its pass budget ran out). The seam now installs
+      the filtered executor and the scenario launches on `Just [queueName]`
+      (123.20 s → 4.39 s; live suite 5.0 s). psql mirror: the join case's
+      holder `SUCCESS`/`child` + parent `SUCCESS`/`joiner`, its step rows
+      `child` and `DBOS.getResult` both carrying the holder's id.
+- [ ] **S8 Management/Context/Handle/Event** — `*Cases.hs` per domain. Management
+      M1+M2 framed (`ManagementCases.hs`: cancel/resume/tree/delete/retrieve +
+      fork-beginning/placed/step/failure/bulk/partitioned; 15 framed leaves live,
+      15 + tracer sim) with two Mem fidelity fixes (`memFork` defaults forks to
+      `ENQUEUED` on the internal queue like `runFork`; derived fork points drop
+      the `+1` and `ForkLastFailure` mirrors the SQL `COALESCE(failed, last)`;
+      fork rows now carry the partition-key option) and suite-queue teardowns
+      (Queue/Client/Management suite backends delete their prefixed queue rows
+      on release; the Workflow join case deletes its queue; ClientTest's driven
+      cases set `configListenQueues`). Observability: `DequeuePassSlow`
+      (threshold-gated `QueueEvent`, `TracerTest` render case) — the 98 s
+      Management stall that motivated it (unscoped `dequeuePass` over 16 k
+      fixture queues; `mfLaunch` now scopes to the internal queue, EventCases
+      precedent; `dbos.queues` 16,077 → ~1.6 k).
+      M3 (in progress): attributes framed + Mem JSON-containment mirror for the
+      attributes filter; delay-release framed as the Time piece (driven
+      `transitionDelayedWorkflows`); Client +3 (plain enqueue, cancel-missing,
+      getEvent timeout). Skipped by directive: 8 remaining ManagementTest cases
+      (self/ancestor delete, in-workflow, fork-replay, resume-run operator,
+      client-call, refusal, empty batch).
+      Queue contention: `scenarioWorkerBudgetExhausted` (cap-one queue, peak
+      in-flight + settled statuses, flip-guarded) on both stacks; the 55P03
+      `DequeueBackoff` path is unforceable deterministically on either stack
+      (render-covered in `TracerTest`).
+      Internal-queue alignment: `dequeuePass` skips a stored
+      `_dbos_internal_queue` row and emits `InternalQueueLimitsIgnored` per
+      pass, mirroring the supervisor's `refreshQueueSet` (proven live).
+      Handle note: converted live cases ride `launchOn` over an explicitly
+      built connection (never the production `launchWithEnvironment`), so
+      supervisor/prepare/version-check coverage rests on the unconverted
+      suites — the same tradeoff the Workflow slice records.
 
 Per-slice acceptance: identical case names in both trees; the sim leaf
 drives the same engine entry points as its live half (deletion test);
+a framed row must sit on a queue the fixture's drive sweeps — a row parked
+elsewhere (e.g. a delay started on a runnerless queue while the launch only
+listens to internal) hangs `waitForWorkflow` with no log line between
+resume-done and dequeue-done;
 `dependentTestGroup ... AllFinish` wherever `printSimTrace` prints; an
 exactly-once check for every effectful step; Step 7 gates **plus the
 slice's Rust behavior gate below** (read-only,
@@ -1115,9 +1167,24 @@ where the record says no oracle exists.
 | S4 wait/message | `--test waits --test messages` | green 2026-10-04 |
 | S5 select/deadlines | `--test deadlines` | 5/5 green 2026-10-04 (select has no dedicated Rust suite) |
 | S6 queue | `--test queues` | 36/36 green 2026-10-04 (Steps 7–8 fan-out leg) |
-| S7 workflow | `--test workflows --test recovery --test children` | `recovery` 3/3 green 2026-10-04 (crash leg); rest with S7 |
-| S8 management/etc. | `--test management` (+ per-domain suites) | runs with S8 |
+| S7 workflow | `--test workflows --test recovery --test children` | 13/13 + 3/3 + 26/26 green 2026-10-05 |
+| S8 management/etc. | `--test management` (+ per-domain suites) | 31/31 + context 10/10, events 6/6, handles 4/4 green 2026-10-06; `cabal test all` 695/695, probes 10/10, migrate 114→114, psql mirror 7/7 |
 
-The mock-backed sim trees (`simLaunchWith`/`simConnectionWith`) keep the
-minimal launch until a slice owns their stubs; that seam is recorded on
-purpose.
+### Out of scope for Step 9 (decided 2026-10-06)
+
+Dual-stack means engine behavior through two real backends (Postgres +
+`MemSystemDB`). Leaves whose sim half rides `MockSystemDB` stubs — or no
+backend at all — assert stub wiring, not engine behavior, and are out of
+the migration scope. They keep running as-is; no slice converts them:
+
+- `ContextTestSim` (whole sim half: `simConnectionWith` mock connection).
+- `DatasourceTestSim` mock-backed leaves: commit-replay, error-replays,
+  body-failure-recorded, retry-then-success, conflict-adopts,
+  capture-refused, precheck-retry, runs-outside, delete-checkpoints (the 2
+  `MemSystemDB` leaves — ownership-moved, registry-lifecycle — stay in).
+- `SimTest.hs`: scaffolding tests for the mock itself.
+- `SystemDB.*` suites (`SystemDBError/IOSim/Notifier/Notify/Postgres/Retry/
+  Types`): backend unit tests, never in dual-stack scope.
+
+The mock-backed seam (`simLaunchWith`/`simConnectionWith` minimal launch)
+is therefore closed, not pending: nothing owns converting those stubs.

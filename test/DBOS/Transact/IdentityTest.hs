@@ -89,11 +89,3 @@ deployed =
 expectResolved result = case result of
   Right identity -> pure identity
   Left err -> fail ("expected a resolved identity, got: " <> show err)
-
-isRight :: Either a b -> Bool
-isRight (Right _) = True
-isRight _ = False
-
-isLeft :: Either a b -> Bool
-isLeft (Left _) = True
-isLeft _ = False

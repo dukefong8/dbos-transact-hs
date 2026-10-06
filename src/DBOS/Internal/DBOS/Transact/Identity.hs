@@ -85,7 +85,7 @@ readEnvironment = do
   pure
     Environment
       { environmentCloud = maybe False (\text -> Text.toLower (Text.pack text) == "true") cloudText,
-        environmentAppId = maybe "" id appId,
+        environmentAppId = fromMaybe "" appId,
         environmentAppName = appName,
         environmentAppVersion = appVersion,
         environmentExecutorId = executorId
@@ -109,7 +109,7 @@ resolve :: Config -> Environment -> Either (Error EngineOnly) Identity
 resolve config environment = do
   let (appName, appVersion, executorId)
         | environment.environmentCloud =
-            ( maybe "" id environment.environmentAppName,
+            ( fromMaybe "" environment.environmentAppName,
               environment.environmentAppVersion,
               environment.environmentExecutorId
             )
@@ -144,7 +144,7 @@ resolve config environment = do
     Identity
       { identityAppName = appName,
         identityAppVersion = appVersion',
-        identityExecutorId = maybe defaultExecutorId id executorId,
+        identityExecutorId = fromMaybe defaultExecutorId executorId,
         identityAppId = environment.environmentAppId
       }
   where

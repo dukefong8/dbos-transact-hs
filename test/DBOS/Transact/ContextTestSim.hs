@@ -2,23 +2,21 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 
--- | The shared 'ContextTest' scenarios over 'MockSystemDB': the same
--- cases as the live tree, with values asserted here — including the
--- 'IOSim' typed trace assertions, which stay in this module. Each case
--- prints its sim's 'Say' trace inline, so a plain @-- $> tasty@ run shows
--- traces with no extra plumbing.
+-- | The shared 'ContextTest' scenarios over 'MockSystemDB': the same cases
+-- as the live tree, judged by the same checks, with the sim-only typed
+-- trace assertions staying in this module. Nothing prints: 'simCase' runs
+-- each leaf through 'runSimCase' and judges the trace by type.
 module DBOS.Transact.ContextTestSim (tests) where
 
 import DBOS.Prelude
-import Control.Monad.IOSim (IOSim, selectTraceEventsDynamic)
-import Data.Text (Text)
-import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
+import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
+import DBOS.DualStack (simCase)
+import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB.IOSim (simConnectionWith)
 import DBOS.Transact
   ( Identity (..),
     SysdbEvent (..),
     WorkflowEvent (..),
-    firstStepStatus,
     runTracer,
   )
 import DBOS.Transact.Context
@@ -33,8 +31,31 @@ import DBOS.Transact.Connection
   )
 import DBOS.Transact.ContextTest
   ( Fixture (..),
+    checkAttemptScope,
+    checkAttemptTokens,
+    checkConcurrentIsolation,
+    checkCoopFlag,
+    checkDeadline,
+    checkDenseIds,
+    checkExecCounters,
+    checkFirstAttempt,
+    checkForkCounter,
+    checkNestedRunners,
+    checkNestedScope,
+    checkRaceCancelled,
+    checkRaceCompletes,
+    checkRerunIdentity,
+    checkRetryAttempt,
     checkScopeStatus,
+    checkSharedCounter,
+    checkStateInterop,
+    checkStepIds,
+    checkStepView,
     checkThrowEscape,
+    checkTokenFire,
+    checkTokenOutsideStep,
+    checkTravelsWith,
+    checkWorkflowId,
     scenarioAttemptScope,
     scenarioAttemptTokens,
     scenarioConcurrentIsolation,
@@ -61,8 +82,8 @@ import DBOS.Transact.ContextTest
     scenarioTravelsWith,
     scenarioWorkflowId,
   )
-import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.HUnit (assertBool, (@?=))
 
 simIdentity :: Identity
 simIdentity =
@@ -96,120 +117,50 @@ simFixture =
 
 tests :: TestTree
 tests =
-  -- Sequential: cases announce through one shared stderr, so parallel
-  -- 'printSimTrace' calls would interleave their lines mid-character.
-  -- 'AllFinish' keeps every case running on a failure, in order.
-  dependentTestGroup
+  testGroup
     "Context (IOSim)"
-    AllFinish
-    [ testCase "a context reads its workflow id" $ do
-        (res, tr) <- runSimCase (scenarioWorkflowId simFixture)
-        printSimTrace tr
-        res @?= "wf-1",
-      testCase "a workflow's step ids are zero based and allocated once" $ do
-        (res, tr) <- runSimCase (scenarioStepIds simFixture)
-        printSimTrace tr
-        res @?= (0, 1, 2),
-      testCase "step ids stay dense while markers spend their own sequence" $ do
-        (res, tr) <- runSimCase (scenarioDenseIds simFixture)
-        printSimTrace tr
-        res @?= (0, 1, 2),
-      testCase "withAttempt scopes a step and leaves the outer scope alone" $ do
-        (res, tr) <- runSimCase (scenarioAttemptScope simFixture)
-        printSimTrace tr
-        res @?= (Nothing, Just 4, Nothing),
-      testCase "a scope reports its status and id" $ do
-        (res, tr) <- runSimCase (scenarioScopeStatus simFixture)
-        printSimTrace tr
-        either fail pure (checkScopeStatus res),
-      testCase "a first attempt reports its step, attempt 1 of 1" $ do
-        (res, tr) <- runSimCase (scenarioFirstAttempt simFixture)
-        printSimTrace tr
-        res @?= (3, 1, 1),
-      testCase "a retry keeps the step and moves the attempt" $ do
-        (res, tr) <- runSimCase (scenarioRetryAttempt simFixture)
-        printSimTrace tr
-        res @?= (3, 2, 1),
-      testCase "a fresh token is quiet until fired" $ do
-        (res, tr) <- runSimCase (scenarioTokenFire simFixture)
-        printSimTrace tr
-        res @?= (False, True),
-      testCase "each attempt watches a token of its own" $ do
-        (res, tr) <- runSimCase (scenarioAttemptTokens simFixture)
-        printSimTrace tr
-        res @?= (True, False),
-      testCase "a deadline rides the workflow state" $ do
-        (res, tr) <- runSimCase (scenarioDeadline simFixture)
-        printSimTrace tr
-        res @?= Nothing,
-      testCase "two contexts over one workflow share its step counter" $ do
-        (res, tr) <- runSimCase (scenarioSharedCounter simFixture)
-        printSimTrace tr
-        res @?= (0, 1),
-      testCase "a re-run of one id is a different execution" $ do
-        (res, tr) <- runSimCase (scenarioRerunIdentity simFixture)
-        printSimTrace tr
-        res @?= (True, False),
-      testCase "the connection and identity travel with the context" $ do
-        (res, tr) <- runSimCase (scenarioTravelsWith simFixture)
-        printSimTrace tr
-        res @?= (simFixture.fixtureIdentity, Just ("sim-app" :: Text)),
-      testCase "nested runners isolate" $ do
-        (res, tr) <- runSimCase (scenarioNestedRunners simFixture)
-        printSimTrace tr
-        res @?= ("wf-1", "wf-1", False),
-      testCase "state interop runs beside the context" $ do
-        (res, tr) <- runSimCase (scenarioStateInterop simFixture)
-        printSimTrace tr
-        res @?= "done",
-      testCase "a throw from an engine call reaches the caller" $ do
-        (res, tr) <- runSimCase (scenarioThrowEscape simFixture)
-        printSimTrace tr
-        either fail pure (checkThrowEscape res),
-      testCase "a cooperative flag cancels a wait promptly" $ do
-        (_, tr) <- runSimCase (scenarioCoopFlag simFixture)
-        printSimTrace tr,
-      testCase "a fork handed the context shares its counter" $ do
-        (res, tr) <- runSimCase (scenarioForkCounter simFixture)
-        printSimTrace tr
-        res @?= (0, 1),
-      testCase "a nested scope reports the step that encloses it" $ do
-        (res, tr) <- runSimCase (scenarioNestedScope simFixture)
-        printSimTrace tr
-        res @?= (Nothing, Just 0, True),
-      testCase "a cancellation token outside a step never fires" $ do
-        (res, tr) <- runSimCase (scenarioTokenOutsideStep simFixture)
-        printSimTrace tr
-        res @?= False,
-      testCase "concurrent contexts are isolated from each other" $ do
-        (res, tr) <- runSimCase (scenarioConcurrentIsolation simFixture)
-        printSimTrace tr
-        res @?= ("a", "b"),
-      testCase "separate executions own independent step counters" $ do
-        (res, tr) <- runSimCase (scenarioExecCounters simFixture)
-        printSimTrace tr
-        res @?= ((0, 1), 0),
-      testCase "a step view reads its status with the workflow id" $ do
-        (res, tr) <- runSimCase (scenarioStepView simFixture)
-        printSimTrace tr
-        res @?= ("wf-9", Just (firstStepStatus 7)),
-      testCase "raceCancel returns the value when the token stays quiet" $ do
-        (res, tr) <- runSimCase (scenarioRaceCompletes simFixture)
-        printSimTrace tr
-        res @?= Just "done",
-      testCase "raceCancel reports cancellation when the token has fired" $ do
-        (res, tr) <- runSimCase (scenarioRaceCancelled simFixture)
-        printSimTrace tr
-        res @?= Nothing,
-      testCase "a context announces through its tracer" $ do
-        (_, tr) <- runSimCase demoTrace
-        printSimTrace tr
-        selectTraceEventsDynamic tr @?= [StepRunning "demo" 0]
-        selectTraceEventsDynamic tr @?= [SysdbRetryAttempt "demo-op" 1 0 "demo"]
+    [ simCase (pure simFixture) "a context reads its workflow id" scenarioWorkflowId checkWorkflowId traceContextSilent,
+      simCase (pure simFixture) "a workflow's step ids are zero based and allocated once" scenarioStepIds checkStepIds traceContextSilent,
+      simCase (pure simFixture) "step ids stay dense while markers spend their own sequence" scenarioDenseIds checkDenseIds traceContextSilent,
+      simCase (pure simFixture) "withAttempt scopes a step and leaves the outer scope alone" scenarioAttemptScope checkAttemptScope traceContextSilent,
+      simCase (pure simFixture) "a scope reports its status and id" scenarioScopeStatus checkScopeStatus traceContextSilent,
+      simCase (pure simFixture) "a first attempt reports its step, attempt 1 of 1" scenarioFirstAttempt checkFirstAttempt traceContextSilent,
+      simCase (pure simFixture) "a retry keeps the step and moves the attempt" scenarioRetryAttempt checkRetryAttempt traceContextSilent,
+      simCase (pure simFixture) "a fresh token is quiet until fired" scenarioTokenFire checkTokenFire traceContextSilent,
+      simCase (pure simFixture) "each attempt watches a token of its own" scenarioAttemptTokens checkAttemptTokens traceContextSilent,
+      simCase (pure simFixture) "a deadline rides the workflow state" scenarioDeadline checkDeadline traceContextSilent,
+      simCase (pure simFixture) "two contexts over one workflow share its step counter" scenarioSharedCounter checkSharedCounter traceContextSilent,
+      simCase (pure simFixture) "a re-run of one id is a different execution" scenarioRerunIdentity checkRerunIdentity traceContextSilent,
+      simCase (pure simFixture) "the connection and identity travel with the context" scenarioTravelsWith checkTravelsWith traceContextSilent,
+      simCase (pure simFixture) "nested runners isolate" scenarioNestedRunners checkNestedRunners traceContextSilent,
+      simCase (pure simFixture) "state interop runs beside the context" scenarioStateInterop checkStateInterop traceContextSilent,
+      simCase (pure simFixture) "a throw from an engine call reaches the caller" scenarioThrowEscape checkThrowEscape traceContextSilent,
+      simCase (pure simFixture) "a cooperative flag cancels a wait promptly" scenarioCoopFlag checkCoopFlag traceContextSilent,
+      simCase (pure simFixture) "a fork handed the context shares its counter" scenarioForkCounter checkForkCounter traceContextSilent,
+      simCase (pure simFixture) "a nested scope reports the step that encloses it" scenarioNestedScope checkNestedScope traceContextSilent,
+      simCase (pure simFixture) "a cancellation token outside a step never fires" scenarioTokenOutsideStep checkTokenOutsideStep traceContextSilent,
+      simCase (pure simFixture) "concurrent contexts are isolated from each other" scenarioConcurrentIsolation checkConcurrentIsolation traceContextSilent,
+      simCase (pure simFixture) "separate executions own independent step counters" scenarioExecCounters checkExecCounters traceContextSilent,
+      simCase (pure simFixture) "a step view reads its status with the workflow id" scenarioStepView checkStepView traceContextSilent,
+      simCase (pure simFixture) "raceCancel returns the value when the token stays quiet" scenarioRaceCompletes checkRaceCompletes traceContextSilent,
+      simCase (pure simFixture) "raceCancel reports cancellation when the token has fired" scenarioRaceCancelled checkRaceCancelled traceContextSilent,
+      simCase (pure simFixture) "a context announces through its tracer" (const demoTrace) checkCoopFlag traceAnnounce
     ]
-  where
-    demoTrace :: forall s. IOSim s ()
-    demoTrace = do
-      ctx <- withTracer simTracer <$> simFixture.fixtureMkCtx "wf-1"
-      runTracer ctx.wctxTracer (StepRunning "demo" 0)
-      runTracer ctx.wctxTracer (SysdbRetryAttempt "demo-op" 1 0 "demo")
+
+-- | Context scenarios touch no engine paths, so the trace carries no
+-- 'WorkflowEvent' at all.
+traceContextSilent :: SimTrace a -> IO ()
+traceContextSilent tr =
+  assertBool "context must emit no workflow events" (null (selectTraceEventsDynamic tr :: [WorkflowEvent]))
+
+-- | The sim-only structural announcement: the two hand-emitted events.
+traceAnnounce :: SimTrace a -> IO ()
+traceAnnounce tr = do
+  selectTraceEventsDynamic tr @?= [StepRunning "demo" 0]
+  selectTraceEventsDynamic tr @?= [SysdbRetryAttempt "demo-op" 1 0 "demo"]
+
+demoTrace :: forall s. IOSim s ()
+demoTrace = do
+  ctx <- withTracer simTracer <$> simFixture.fixtureMkCtx "wf-1"
+  runTracer ctx.wctxTracer (StepRunning "demo" 0)
+  runTracer ctx.wctxTracer (SysdbRetryAttempt "demo-op" 1 0 "demo")

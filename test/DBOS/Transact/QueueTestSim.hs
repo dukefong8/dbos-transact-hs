@@ -49,6 +49,7 @@ import DBOS.Transact.QueueCases
   ( QueueFixture (..),
     checkBadEnqueue,
     checkCountedPartitioned,
+    checkWorkerBudgetExhausted,
     checkDedup,
     checkDelayed,
     checkJoin,
@@ -83,6 +84,7 @@ import DBOS.Transact.QueueCases
     checkUpdateCoherent,
     scenarioBadEnqueue,
     scenarioCountedPartitioned,
+    scenarioWorkerBudgetExhausted,
     scenarioDedup,
     scenarioDelayed,
     scenarioJoin,
@@ -299,6 +301,7 @@ tests =
           simLeaf (const Nothing) "updating a queue changes what a running worker honours" scenarioUpdateHonoured checkUpdateHonoured,
           simLeaf (const Nothing) "a partitioned queue runs one workflow per key at a time" scenarioPartitioned checkPartitioned,
           simLeaf (const Nothing) "a counted partitioned queue runs its limit per key" scenarioCountedPartitioned checkCountedPartitioned,
+          simLeaf (const Nothing) "a saturated worker budget runs one at a time" scenarioWorkerBudgetExhausted checkWorkerBudgetExhausted,
           simLeaf (const Nothing) "another application's queue is not dequeued from" scenarioPeerQueue checkPeerQueue,
           -- IO only: the fixture rewrites the row through raw SQL into the
           -- pre-109 shape (input moved into the status column, payload-table

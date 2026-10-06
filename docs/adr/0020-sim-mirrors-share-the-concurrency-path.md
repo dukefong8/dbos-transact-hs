@@ -18,9 +18,9 @@ A `*Sim` mirror exists for one reason: to reproduce, deterministically, the conc
 
 ## The observation rule
 
-A per-stack capability may **observe**, never **stage**. The departure wait is the pattern to copy: IO observes the thread (`GHC.Conc.threadStatus` until `ThreadFinished`/`ThreadDied`, `test/DBOS/Transact/WorkflowTest.hs:2328`); IOSim needs nothing but a sim-time tick, because the scheduler advances time only when no thread is runnable, so a parent parked in a delay cannot resume before a self-terminating child has run to completion, departure commit included. Neither half stages an engine effect; both observe one.
+A per-stack capability may **observe**, never **stage**. The departure wait is the pattern to copy: IO observes the thread (`GHC.Conc.threadStatus` until `ThreadFinished`/`ThreadDied`, `test/DBOS/Transact/WorkflowTest.hs:579`); IOSim needs nothing but a sim-time tick (`test/DBOS/Transact/WorkflowTestSim.hs:621`), because the scheduler advances time only when no thread is runnable, so a parent parked in a delay cannot resume before a self-terminating child has run to completion, departure commit included. Neither half stages an engine effect; both observe one.
 
-The rule is not theoretical. The case that motivated it (the `Tasks` group's "a task finishing before registration is not swept as aborted", `WorkflowTest.hs:2383`) slept a fixed 1 ms before sweeping and failed under load with `Exception: user error (dead tasks swept as aborted: 1)`: the spawned task had not departed yet, so the sweep *correctly* counted it and the assertion misread a live task as a miscount. The engine was right; the harness had assumed timing.
+The rule is not theoretical. The case that motivated it (the `Tasks` group's "a task finishing before registration is not swept as aborted", `test/DBOS/Transact/WorkflowCases.hs:2782`) slept a fixed 1 ms before sweeping and failed under load with `Exception: user error (dead tasks swept as aborted: 1)`: the spawned task had not departed yet, so the sweep *correctly* counted it and the assertion misread a live task as a miscount. The engine was right; the harness had assumed timing.
 
 ## The mark rule
 
@@ -35,7 +35,7 @@ Deleting a case's sim half must remove **no engine function call** from the suit
 - `test/DBOS/Transact/WorkflowTestSim.hs:1251-1255`: "nothing runs it here, so the test stages what the queue runner would do and records its completion directly" — the runner's concurrency is untested in sim.
 - `test/DBOS/Transact/WorkflowTestSim.hs:1638-1651`: announcement shapes are hand-emitted through the say-carrier because "races and faults the sim does not stage" — the producing engine paths are untested in sim.
 - `MemSystemDB` delegates about forty methods — queues, schedules, streams, messages, versions — to `MockSystemDB`'s canned answers (`test/DBOS/SystemDB/IOSim.hs:574-613`), so those subsystems have no sim concurrency coverage at all. **Closed 2026-10-01 (step 4):** queues, recovery, delayed transitions, message/event wakeups, schedules, and versions are implemented over real Mem state with Postgres semantics; streams stay delegated because Postgres itself holds them `undefined` (P7.4). `SystemDB.IOSimTest` pins the new semantics in a `MemSystemDB (stateful)` group.
-- Where the path *is* shared it works, and is the model to copy: `ContextTest`'s `Fixture m` plus `scenario*` bodies (`test/DBOS/Transact/ContextTest.hs:156,165+`) and the `Tasks` group's in-process `runSimOrThrow` bodies (`test/DBOS/Transact/WorkflowTest.hs:2338-2404`).
+- Where the path *is* shared it works, and is the model to copy: `ContextTest`'s `Fixture m` plus `scenario*` bodies (`test/DBOS/Transact/ContextTest.hs:156,165+`) and the `Tasks` group's in-process `runSimOrThrow` bodies (`test/DBOS/Transact/WorkflowTestSim.hs:209`).
 
 ## Escape hatch, not adopted
 
@@ -49,7 +49,7 @@ Deleting a case's sim half must remove **no engine function call** from the suit
 
 IO-only cases (running list):
 
-- "a spawn refused after abort fills its channel instead of hanging" — real preemption, not cooperation (`test/DBOS/Transact/WorkflowTest.hs:2368`).
+- "a spawn refused after abort fills its channel instead of hanging" — real preemption, not cooperation (`test/DBOS/Transact/WorkflowTest.hs:615`).
 - "a recovery run replays completed steps after a body interruption" — crash-and-relaunch recovery sweep; `MemSystemDB` delegates `reenqueueForRecovery` to the canned mock.
 - "an unregistered workflow is skipped and the rest recover" — same recovery sweep.
 - "a replayed parent reads the recorded outcome rather than waiting again" — recorded-await replay across two launches; needs the recovery sweep.

@@ -33,7 +33,7 @@ simTracer :: SomeTracer (IOSim s)
 simTracer = SomeTracer (mkTracer emit)
   where
     emit :: (LogEvent e, Typeable e) => e -> IOSim s ()
-    emit event = traceM event >> say (unpack (renderLine event))
+    emit event = Control.Monad.IOSim.traceM event >> say (unpack (renderLine event))
 
 -- | Print a sim's 'Say' trace to the console's stderr: stderr bypasses
 -- the 'tasty' stdout capture, so announcement lines show on the watcher

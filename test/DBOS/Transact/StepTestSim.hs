@@ -16,27 +16,39 @@ import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import Data.Text (Text)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
-import DBOS.SystemDB.IOSim (simConnectionWith)
+import DBOS.SystemDB (StepRecord (..))
+import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, newMemDB, simConnectionWith)
+import DBOS.Transact.StepCases
+  ( StepFixture (..),
+    checkDurableSleep,
+    checkNestedEnclosing,
+    checkNestedPlain,
+    checkNestedStepView,
+    checkPendingScoped,
+    checkRecordReplay,
+    checkScopedView,
+    checkTokenQuiet,
+    scenarioDurableSleep,
+    scenarioNestedEnclosing,
+    scenarioNestedPlain,
+    scenarioNestedStepView,
+    scenarioPendingScoped,
+    scenarioRecordReplay,
+    scenarioScopedView,
+    scenarioTokenQuiet,
+  )
 import DBOS.Transact
   ( EngineOnly,
     Error (..),
     Identity (..),
-    StepStatus,
-    PendingStep (..),
     WorkflowCtx,
     WorkflowEvent (..),
     WorkflowId (..),
-    firstStepStatus,
-    nextWorkflowMarker,
-    pendingStep,
-    runNestedStep,
     runStep,
-    runStepWith,
-    stepCtxStatus,
-    stepOptionsDefault,
-    withStep,
     withWorkflow,
   )
+import DBOS.Transact.Connection (Connection)
 import DBOS.Transact.Checkpoint (pendingStepId)
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -55,6 +67,30 @@ simRun name action = do
   conn <- simConnectionWith simTracer
   withWorkflow conn simIdentity (WorkflowId name) Nothing action
 
+-- | One fixture per leaf over a fresh in-memory database: deterministic
+-- names, no row creation (Mem records steps without workflow rows),
+-- checkpoint reads through the memory backend, and the immediate
+-- quiet-token sense (deterministic where there is no race to catch).
+mkStepFixture :: forall s. IOSim s (StepFixture (IOSim s))
+mkStepFixture = do
+  mem <- newMemDB
+  pure StepFixture
+    { sfConnection = memConnectionOn mem simTracer,
+      sfFreshId = \base -> pure (WorkflowId ("sim-step-" <> base)),
+      sfIdentity = simIdentity,
+      sfInitRow = \_ -> pure (),
+      sfCheckStep = \wid step name -> do
+        placed <- SystemDB.checkStep mem wid step name
+        case placed of
+          Right (Just _) -> pure True
+          _ -> pure False,
+      sfListStepNames = \wid -> do
+        listed <- SystemDB.listSteps mem wid False Nothing Nothing Nothing
+        case listed of
+          Right rows -> pure (map (.stepRecordStepName) rows)
+          Left err -> error (show err)
+    }
+
 tests :: TestTree
 tests =
   -- Sequential: cases announce through one shared stderr, so parallel
@@ -68,82 +104,55 @@ tests =
         printSimTrace tr
         outcome @?= Right 1
         traceEvents tr @?= [StepRunning "traced" 0, StepOutputRecorded "traced" 0],
-      testCase "a step inside a step runs plainly" $ do
-        (outcome, tr) <- runSimCase plainRun
+      testCase "a recorded workflow step runs once and replays" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioRecordReplay)
         printSimTrace tr
-        outcome @?= Right 3
-        traceEvents tr @?= [StepPlain "inner"],
-      testCase "a scoped step runs through the workflow view" $ do
-        (outcome, tr) <- runSimCase scopedRun
+        either fail pure (checkRecordReplay outcome)
+        traceEvents tr @?= [StepRunning "test_step" 0, StepOutputRecorded "test_step" 0, StepReplaying "test_step" 0],
+      testCase "a step inside a step body runs plainly and takes no id" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioNestedPlain)
         printSimTrace tr
-        outcome @?= (Right 42, Just (firstStepStatus 0))
-        traceEvents tr @?= [StepRunning "scoped" 0, StepOutputRecorded "scoped" 0],
-      testCase "a nested step through the step view is plain" $ do
-        (outcome, tr) <- runSimCase scopedNested
-        printSimTrace tr
-        outcome @?= Right 8
+        either fail pure (checkNestedPlain outcome)
         traceEvents tr @?= [StepRunning "outer" 0, StepPlain "inner", StepOutputRecorded "outer" 0],
-      testCase "a pending scoped step claims its id at build" $ do
-        (outcome, tr) <- runSimCase scopedPending
+      testCase "a scoped step runs once and replays through the workflow view" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioScopedView)
         printSimTrace tr
-        outcome @?= (Right 42, Just 0)
-        -- The drive path announces the recorded output; the run-path
-        -- StepRunning announce belongs to runStep, not to drives.
-        traceEvents tr @?= [StepOutputRecorded "pending" 0]
+        either fail pure (checkScopedView outcome)
+        traceEvents tr @?= [StepRunning "scoped_step" 0, StepOutputRecorded "scoped_step" 0, StepReplaying "scoped_step" 0],
+      testCase "a nested step through the step view is plain and takes no id" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioNestedStepView)
+        printSimTrace tr
+        either fail pure (checkNestedStepView outcome)
+        traceEvents tr @?= [StepRunning "outer" 0, StepPlain "inner", StepOutputRecorded "outer" 0],
+      testCase "a pending scoped step claims its id at build and replays" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioPendingScoped)
+        printSimTrace tr
+        either fail pure (checkPendingScoped outcome)
+        traceEvents tr @?= [StepOutputRecorded "pending_step" 0, StepReplaying "pending_step" 0],
+      testCase "durable sleep reuses its recorded wake time" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioDurableSleep)
+        printSimTrace tr
+        either fail pure (checkDurableSleep outcome)
+        traceEvents tr @?= [],
+      testCase "a nested step reports the step that encloses it" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioNestedEnclosing)
+        printSimTrace tr
+        either fail pure (checkNestedEnclosing outcome)
+        traceEvents tr @?= [StepRunning "first" 0, StepOutputRecorded "first" 0, StepPlain "inner", StepRetrying "outer" 1 1 2 1 "the step outer failed: boom", StepPlain "inner", StepOutputRecorded "outer" 1],
+      testCase "a cancellation token outside a step never fires" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioTokenQuiet)
+        printSimTrace tr
+        either fail pure (checkTokenQuiet outcome)
+        traceEvents tr @?= [StepAttemptTimedOut "times-out" 0 20, StepErrorRecorded "times-out" 0]
     ]
 
 traceEvents :: SimTrace a -> [WorkflowEvent]
 traceEvents = selectTraceEventsDynamic
 
--- * Scoped-runner cases
-
--- | The workflow-scope runner over the sim backend: the body reads its
--- narrowed view's status, so the case proves the handoff as well as the
--- checkpoint.
-scopedRun :: IOSim s (Either (Error EngineOnly) Int, Maybe StepStatus)
-scopedRun = do
-  conn <- simConnectionWith simTracer
-  observed <- newTVarIO Nothing
-  result <-
-    withWorkflow conn simIdentity (WorkflowId "sim-step-scoped") Nothing $ \wctx ->
-      runStep wctx "scoped" $ \s -> do
-        atomically (writeTVar observed (stepCtxStatus s))
-        pure 42
-  seen <- readTVarIO observed
-  pure (result, seen)
-
--- | The scoped pending pair: the id is claimed when the pending is built
--- and the drive records under it.
-scopedPending :: IOSim s (Either (Error EngineOnly) Int, Maybe Int)
-scopedPending = do
-  conn <- simConnectionWith simTracer
-  withWorkflow conn simIdentity (WorkflowId "sim-step-pending-scoped") Nothing $ \wctx -> do
-    pending <-
-      pendingStep wctx "pending" $ \_ ->
-        pure (Right (42 :: Int))
-    outcome <- pending.pendingRun
-    pure (outcome, pendingStepId pending)
-
--- | The step-scope runner: the nested call is plain by construction.
-scopedNested :: forall s. IOSim s (Either (Error EngineOnly) Int)
-scopedNested = do
-  conn <- simConnectionWith simTracer
-  withWorkflow conn simIdentity (WorkflowId "sim-step-nested-scoped") Nothing $ \wctx ->
-    runStep wctx "outer" $ \s -> do
-      inner <- runNestedStep s "inner" (\_ -> pure (7 :: Int)) :: IOSim s (Either (Error EngineOnly) Int)
-      case inner of
-        Right n -> pure (n + 1)
-        Left err -> error (show err)
-
--- * The mirrored cases
-
+-- | The workflow-scope runner over the sim backend, kept for the
+-- tracer-demo leaf: it announces through the context tracer.
 tracedRun :: IOSim s (Either (Error EngineOnly) Int)
 tracedRun = do
-  simRun "sim-step" $ \wctx -> runStep wctx "traced" (const (pure (1 :: Int)))
-
-plainRun :: IOSim s (Either (Error EngineOnly) Int)
-plainRun = do
-  simRun "sim-step-plain" $ \wctx -> do
-    marker <- nextWorkflowMarker wctx
-    withStep wctx marker (firstStepStatus 0) $ \_stepped ->
-      runStepWith stepOptionsDefault wctx "inner" (const (pure (Right (3 :: Int))))
+  conn <- simConnectionWith simTracer
+  withWorkflow conn simIdentity (WorkflowId "sim-step") Nothing $ \wctx ->
+    runStep wctx "traced" (const (pure (1 :: Int)))

@@ -32,11 +32,13 @@ where
 import DBOS.Prelude
 import Control.Concurrent.Class.MonadSTM.Strict (STM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, retry, writeTVar)
 import Control.Monad.IOSim (IOSim)
+import Data.Aeson (Value (..), eitherDecodeStrict)
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.List (nub, sort, sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Text (Text)
+import Data.Text.Encoding (encodeUtf8)
 import Text.Read (readMaybe)
 import Data.Text qualified as Text
 import Data.Word (Word32)
@@ -62,6 +64,7 @@ import DBOS.SystemDB
     OnExistingQueue (..),
     Outcome (..),
     OutcomeWrite (..),
+    QueueName (..),
     QueueRecord (..),
     QueueUpdate (..),
     ScheduleFilter (..),
@@ -92,6 +95,7 @@ import DBOS.SystemDB
     invalidInput,
     getResultStepName,
     initialStatus,
+    internalQueueName,
     isQueueUpdateEmpty,
     isScheduleUpdateEmpty,
     newWorkflow,
@@ -574,19 +578,21 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     pure
       ( Right
           ( case filters.workflowFilterWorkflowIds of
-              [] -> [row | row <- Map.elems rows, queuedHere row]
-              ids -> [row | wid <- ids, Just row <- [Map.lookup wid rows], queuedHere row]
+              [] -> [row | row <- Map.elems rows, queuedHere row, attributesHere row]
+              ids -> [row | wid <- ids, Just row <- [Map.lookup wid rows], queuedHere row, attributesHere row]
           )
       )
     where
-      -- The only list guard the sim halves assert: a queue-name filter
+      -- The only list guards the sim halves assert: a queue-name filter
       -- admits a row only when the row names a listed queue, as the SQL
       -- @cardinality = 0 or queue_name = any@ guard does (a null queue
-      -- never matches a non-empty filter). Every other filter stays
-      -- unmirrored.
+      -- never matches a non-empty filter), and an attributes filter admits
+      -- a row only when the row's JSON contains the filter's, as @attributes
+      -- @> filter@ does. Every other filter stays unmirrored.
       queuedHere row = case filters.workflowFilterQueueNames of
         [] -> True
         names -> row.workflowRecordQueueName `elem` (Just <$> names)
+      attributesHere row = memAttributesContain row.workflowRecordAttributes filters.workflowFilterAttributes
   getWorkflowChildren db (WorkflowId wid) = do
     rows <- readTVarIO db.memRows
     pure (Right [row.workflowRecordId | row <- Map.elems rows, row.workflowRecordParentWorkflowId == Just (WorkflowId wid)])
@@ -633,23 +639,57 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   updateWorkflowAttributes db (WorkflowId wid) attributes _ =
     atomically (modifyTVar db.memRows (Map.adjust (\row -> row {workflowRecordAttributes = attributes}) wid))
       >> pure (Right ())
-  cancelWorkflows db ids _ _ = atomically $ do
+  cancelWorkflows db ids withChildren _ = atomically $ do
     rows <- readTVar db.memRows
-    let (moved, rows') = Map.mapAccumWithKey move [] rows
+    -- Transitive descendants, like the backend's per-id traverse through
+    -- 'descendantsSession': one level would leave a grandchild tree
+    -- half-cancelled.
+    let requested = [wid | WorkflowId wid <- ids]
+        targets
+          | withChildren = nub (requested <> concatMap (memChildTree rows) requested)
+          | otherwise = requested
+        (moved, rows') = Map.mapAccumWithKey move [] rows
         move acc wid row
-          | WorkflowId wid `elem` ids && row.workflowRecordStatus `elem` [Pending, Enqueued, Delayed] =
-              (WorkflowId wid : acc, row {workflowRecordStatus = Cancelled})
+          -- Mirrors the SQL guard: anything but a finished row moves.
+          | wid `elem` targets && row.workflowRecordStatus `notElem` [Success, Error, Cancelled] =
+              ( WorkflowId wid : acc,
+                row
+                  { workflowRecordStatus = Cancelled,
+                    workflowRecordQueueName = Nothing,
+                    workflowRecordDeduplicationId = Nothing,
+                    workflowRecordStartedAt = Nothing,
+                    workflowRecordCompletedAt = Nothing
+                  }
+              )
           | otherwise = (acc, row)
     writeTVar db.memRows rows'
     pure (Right moved)
-  resumeWorkflows db ids _ _ = do
-    rows <- readTVarIO db.memRows
-    -- No runner exists behind the sim to re-enqueue onto, so resume echoes
-    -- the ids (waits read whatever the rows recorded); only the unknown
-    -- id is refused, as live.
-    case [wid | WorkflowId wid <- ids, Map.notMember wid rows] of
-      _ : _ -> pure (Left (NonExistentWorkflow {workflowIds = [wid | WorkflowId wid <- ids]}))
-      [] -> pure (Right ids)
+  resumeWorkflows db ids queue _
+    | null ids = pure (Right [])
+    | otherwise = do
+        rows <- readTVarIO db.memRows
+        let missing = [wid | WorkflowId wid <- ids, Map.notMember wid rows]
+        case missing of
+          _ : _ -> pure (Left (NonExistentWorkflow {workflowIds = missing}))
+          [] -> atomically $ do
+            let QueueName internal = internalQueueName
+                (moved, rows') = Map.mapAccumWithKey move [] rows
+                move acc wid row
+                  | WorkflowId wid `elem` ids && row.workflowRecordStatus `notElem` [Success, Error] =
+                      ( WorkflowId wid : acc,
+                        row
+                          { workflowRecordStatus = Enqueued,
+                            workflowRecordQueueName = queue <|> Just internal,
+                            workflowRecordRecoveryAttempts = 0,
+                            workflowRecordDeadline = Nothing,
+                            workflowRecordDeduplicationId = Nothing,
+                            workflowRecordStartedAt = Nothing,
+                            workflowRecordCompletedAt = Nothing
+                          }
+                      )
+                  | otherwise = (acc, row)
+            writeTVar db.memRows rows'
+            pure (Right moved)
   deleteWorkflows db ids _ _ = atomically $ do
     rows <- readTVar db.memRows
     let gone = length (filter (`Map.member` rows) [wid | WorkflowId wid <- ids])
@@ -662,12 +702,16 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     memFork db [(source, Nothing, memStartStep point source steps) | WorkflowId source <- ids] options
     where
       memStartStep (ForkStep step) _ _ = step
-      memStartStep ForkLastFailure source steps = memCopyBelow (memMaxStep source steps) steps
-      memStartStep ForkLastStep source steps = memCopyBelow (memMaxStep source steps) steps
-      memStartStep (ForkStepNamed name) source steps = memCopyBelow (memNamedStep source name steps) steps
+      -- Mirrors the SQL 'COALESCE(MAX ... FILTER (WHERE error IS NOT NULL),
+      -- MAX ...)': the failed step, falling back to the last step.
+      memStartStep ForkLastFailure source steps =
+        case [sid | ((wid, sid), record) <- Map.toList steps, wid == source, record.stepRecordError /= Nothing] of
+          [] -> memMaxStep source steps
+          failed -> maximum failed
+      memStartStep ForkLastStep source steps = memMaxStep source steps
+      memStartStep (ForkStepNamed name) source steps = memNamedStep source name steps
       memMaxStep source steps = maximum (-1 : [sid | ((wid, sid), _) <- Map.toList steps, wid == source])
       memNamedStep source name steps = maximum (-1 : [sid | ((wid, sid), record) <- Map.toList steps, wid == source, record.stepRecordStepName == name])
-      memCopyBelow highest _ = highest + 1
   checkStep db (WorkflowId wid) stepId _name = Right . Map.lookup (wid, stepId) <$> readTVarIO db.memSteps
   recordStep db (WorkflowId wid) stepId name outcome serialization timing = atomically $ do
     steps <- readTVar db.memSteps
@@ -801,12 +845,19 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               Left err -> pure (Left err)
               Right () -> pure (Right wakeAt)
   setEvent db wid stepId key value serialization = do
-    now <- timestampNow
-    atomically $ do
-      events <- readTVar db.memEvents
-      writeTVar db.memEvents (Map.insert (widTextOf wid, key) (EncodedValue value serialization) events)
-      memInsertStep db wid stepId setEventStepName (Just value) serialization now
-      pure (Right ())
+    -- A replay adopts the recorded publish instead of republishing it,
+    -- mirroring PG's conflict adoption.
+    existing <- checkStep db wid stepId setEventStepName
+    case existing of
+      Left err -> pure (Left err)
+      Right (Just _) -> pure (Right ())
+      Right Nothing -> do
+        now <- timestampNow
+        atomically $ do
+          events <- readTVar db.memEvents
+          writeTVar db.memEvents (Map.insert (widTextOf wid, key) (EncodedValue value serialization) events)
+          memInsertStep db wid stepId setEventStepName (Just value) serialization now
+          pure (Right ())
   -- A recorded getEvent step is the answer (value or recorded absence);
   -- otherwise the reader blocks on the events TVar until the value lands
   -- or its duration passes.
@@ -818,13 +869,47 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     case replayed of
       Just record -> pure (Right (memEncodedFromStep record))
       Nothing -> do
-        waited <- memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memWaitEvent db widText key))
-        case caller of
-          Nothing -> pure (Right waited)
-          Just c -> do
-            now <- timestampNow
-            atomically (memInsertStep db c.getEventCallerWorkflowId c.getEventCallerStepId getEventStepName ((.encodedValue) <$> waited) (waited >>= (.encodedSerialization)) now)
-            pure (Right waited)
+        now <- timestampNow
+        case addTimeout now duration of
+          Nothing -> pure (Left (invalidInput "duration" "does not resolve to a representable wake time"))
+          Just wakeAt -> do
+            -- Mirror PG's deadline sleep checkpoint: the timeout owns its
+            -- step id, stamped now. A replayed deadline stands.
+            deadline <- case caller of
+              Nothing -> pure (Right wakeAt)
+              Just c -> do
+                existing <- checkStep db c.getEventCallerWorkflowId c.getEventCallerTimeoutStepId sleepStepName
+                case existing of
+                  Left err -> pure (Left err)
+                  Right (Just _) -> pure (Right wakeAt)
+                  Right Nothing -> do
+                    recorded <-
+                      recordStep
+                        db
+                        c.getEventCallerWorkflowId
+                        c.getEventCallerTimeoutStepId
+                        sleepStepName
+                        (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
+                        Nothing
+                        (Just (StepTiming now now))
+                    case recorded of
+                      Left err -> pure (Left err)
+                      Right () -> pure (Right wakeAt)
+            case deadline of
+              Left err -> pure (Left err)
+              Right _ -> do
+                -- Poll once before waiting: a present value must not lose
+                -- to the timeout (a zero timeout would otherwise always miss).
+                present <- atomically (Map.lookup (widText, key) <$> readTVar db.memEvents)
+                waited <- case present of
+                  Just value -> pure (Just value)
+                  Nothing -> memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memWaitEvent db widText key))
+                case caller of
+                  Nothing -> pure (Right waited)
+                  Just c -> do
+                    completedAt <- timestampNow
+                    atomically (memInsertStep db c.getEventCallerWorkflowId c.getEventCallerStepId getEventStepName ((.encodedValue) <$> waited) (waited >>= (.encodedSerialization)) completedAt)
+                    pure (Right waited)
   getAllNotifications db (WorkflowId widText) = do
     notifications <- readTVarIO db.memNotifications
     pure (Right (fromMaybe [] (Map.lookup widText notifications)))
@@ -859,11 +944,14 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       >> pure (Right ())
   upsertQueue db queue onExisting = atomically $ do
     queues <- readTVar db.memQueues
+    application <- readTVar db.memApplicationName
     let existing = Map.lookup queue.newQueueName queues
     case existing of
       Just _ | onExisting == LeaveExisting -> pure (Right False)
       _ -> do
-        writeTVar db.memQueues (Map.insert queue.newQueueName (memQueueRecord queue) queues)
+        -- The SQL upsert falls back to the backend's application when the
+        -- request names none, so a registered queue is never unclaimed.
+        writeTVar db.memQueues (Map.insert queue.newQueueName (memQueueRecord queue {newQueueApplicationName = queue.newQueueApplicationName <|> application}) queues)
         pure (Right (isNothing existing))
   -- The claim: worker/concurrency budgets from the queue's limits (rate
   -- limits are not modelled — Mem keeps no dequeue history), candidates
@@ -969,7 +1057,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
             Just name -> row.queueRecordApplicationName == Nothing || row.queueRecordApplicationName == Just name
           Named [] -> True
           Named names -> maybe True (`elem` names) row.queueRecordApplicationName
-          Any -> True
+          AnyApplication -> True
     pure (Right [row | row <- Map.elems queues, visible row])
   updateQueue db name update validate = do
     queues <- readTVarIO db.memQueues
@@ -1085,10 +1173,13 @@ memFork db forks options = atomically $ do
   pure (Right ids)
   where
     memForkOne options' owner' (source, chosen, startStep) (ids, rows, steps) =
-      let forkedText = fromMaybe (source <> "-fork") chosen
-          status = case options'.forkOptionsQueueName of
-            Just _ -> Enqueued
-            Nothing -> Pending
+      let QueueName internal = internalQueueName
+          forkedText = fromMaybe (source <> "-fork") chosen
+          -- A fork restarts on the internal queue unless told otherwise, and
+          -- is always enqueued: mirrors the SQL insert ('ENQUEUED', the
+          -- queue default in 'runFork'), so a driven dequeue claims it.
+          status = Enqueued
+          queueName = options'.forkOptionsQueueName <|> Just internal
           row = case Map.lookup source rows of
             Just origin ->
               origin
@@ -1096,7 +1187,8 @@ memFork db forks options = atomically $ do
                   workflowRecordStatus = status,
                   workflowRecordOutput = Nothing,
                   workflowRecordError = Nothing,
-                  workflowRecordQueueName = options'.forkOptionsQueueName,
+                  workflowRecordQueueName = queueName,
+                  workflowRecordQueuePartitionKey = options'.forkOptionsQueuePartitionKey,
                   workflowRecordForkedFrom = Just (WorkflowId source),
                   workflowRecordWasForkedFrom = True,
                   workflowRecordRecoveryAttempts = 0
@@ -1104,7 +1196,8 @@ memFork db forks options = atomically $ do
             Nothing ->
               (memFreshRow (newWorkflow forkedText) Nothing owner')
                 { workflowRecordStatus = status,
-                  workflowRecordQueueName = options'.forkOptionsQueueName,
+                  workflowRecordQueueName = queueName,
+                  workflowRecordQueuePartitionKey = options'.forkOptionsQueuePartitionKey,
                   workflowRecordForkedFrom = Just (WorkflowId source),
                   workflowRecordWasForkedFrom = True
                 }
@@ -1116,6 +1209,22 @@ memFork db forks options = atomically $ do
             ]
           steps' = foldr (uncurry Map.insert) steps copied
        in (WorkflowId forkedText : ids, Map.insert forkedText row rows, steps')
+
+-- | Whether the row's JSON attributes contain the filter's, as the SQL
+-- @attributes @> filter@ guard does: every filter key is present with a
+-- contained value, recursively; anything else compares by equality. A null
+-- filter matches every row (@$30 is null@); unparseable JSON matches nothing.
+memAttributesContain :: Maybe Text -> Maybe Text -> Bool
+memAttributesContain _ Nothing = True
+memAttributesContain Nothing (Just _) = False
+memAttributesContain (Just row) (Just wanted) =
+  case (eitherDecodeStrict (encodeUtf8 row), eitherDecodeStrict (encodeUtf8 wanted)) of
+    (Right rowValue, Right wantedValue) -> jsonContains rowValue wantedValue
+    _ -> False
+  where
+    jsonContains (Object rowFields) (Object wantedFields) =
+      all (\(key, value) -> maybe False (`jsonContains` value) (KeyMap.lookup key rowFields)) (KeyMap.toList wantedFields)
+    jsonContains rowValue wantedValue = rowValue == wantedValue
 
 -- * Helpers for the in-memory subsystems
 
@@ -1130,6 +1239,22 @@ memDescendants rows root = go [] [root]
             [ wid
               | (wid, row) <- Map.toList rows,
                 row.workflowRecordForkedFrom == Just (WorkflowId parent),
+                wid `notElem` seen
+            ]
+       in go (seen <> children) (rest <> children)
+
+-- | Every workflow parented under the root, transitively, excluding the
+-- root itself. Mirrors the SQL 'descendantsSession' walk over
+-- @parent_workflow_id@ — not the fork link 'memDescendants' follows.
+memChildTree :: Map Text WorkflowRecord -> Text -> [Text]
+memChildTree rows root = go [] [root]
+  where
+    go seen [] = seen
+    go seen (parent : rest) =
+      let children =
+            [ wid
+              | (wid, row) <- Map.toList rows,
+                row.workflowRecordParentWorkflowId == Just (WorkflowId parent),
                 wid `notElem` seen
             ]
        in go (seen <> children) (rest <> children)

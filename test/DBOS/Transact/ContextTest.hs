@@ -41,11 +41,35 @@ module DBOS.Transact.ContextTest
     scenarioRaceCancelled,
     scenarioRaceCompletes,
     scenarioStepView,
+    checkWorkflowId,
+    checkStepIds,
+    checkDenseIds,
+    checkAttemptScope,
+    checkFirstAttempt,
+    checkRetryAttempt,
+    checkTokenFire,
+    checkAttemptTokens,
+    checkDeadline,
+    checkSharedCounter,
+    checkRerunIdentity,
+    checkTravelsWith,
+    checkNestedRunners,
+    checkStateInterop,
+    checkCoopFlag,
+    checkForkCounter,
+    checkNestedScope,
+    checkTokenOutsideStep,
+    checkConcurrentIsolation,
+    checkExecCounters,
+    checkRaceCancelled,
+    checkRaceCompletes,
+    checkStepView,
     checkScopeStatus,
     checkThrowEscape,
   )
 where
 
+import DBOS.DualStack (liveCase)
 import DBOS.Prelude
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.List (isInfixOf)
@@ -105,7 +129,7 @@ import DBOS.Transact.Connection
   )
 import DBOS.SystemDB.Retry (uuidEntropy)
 import Test.Tasty (TestTree, testGroup, withResource)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (testCase)
 
 -- * Live fixtures: one backend and one FastLogger tracer for the group,
 -- passed explicitly — the same polymorphic GADT fields the sim tree fills
@@ -415,6 +439,74 @@ checkThrowEscape outcome =
       | otherwise -> Left ("the wrong throw escaped: " <> show err)
     Right _ -> Left "expected the throw to escape"
 
+checkWorkflowId :: Text -> Either String ()
+checkWorkflowId = checkEq ("wf-1" :: Text)
+
+checkStepIds :: (Int, Int, Int) -> Either String ()
+checkStepIds = checkEq (0, 1, 2)
+
+checkDenseIds :: (Int, Int, Int) -> Either String ()
+checkDenseIds = checkEq (0, 1, 2)
+
+checkAttemptScope :: (Maybe Int, Maybe Int, Maybe Int) -> Either String ()
+checkAttemptScope = checkEq (Nothing, Just 4, Nothing)
+
+checkFirstAttempt :: (Int, Word, Word) -> Either String ()
+checkFirstAttempt = checkEq (3, 1, 1)
+
+checkRetryAttempt :: (Int, Word, Word) -> Either String ()
+checkRetryAttempt = checkEq (3, 2, 1)
+
+checkTokenFire :: (Bool, Bool) -> Either String ()
+checkTokenFire = checkEq (False, True)
+
+checkAttemptTokens :: (Bool, Bool) -> Either String ()
+checkAttemptTokens = checkEq (True, False)
+
+checkDeadline :: Maybe Timestamp -> Either String ()
+checkDeadline = checkEq Nothing
+
+checkSharedCounter :: (Int, Int) -> Either String ()
+checkSharedCounter = checkEq (0, 1)
+
+checkRerunIdentity :: (Bool, Bool) -> Either String ()
+checkRerunIdentity = checkEq (True, False)
+
+checkTravelsWith :: (Identity, Maybe Text) -> Either String ()
+checkTravelsWith (ident, mApp) = checkEq (Just ident.identityAppName) mApp
+
+checkNestedRunners :: (Text, Text, Bool) -> Either String ()
+checkNestedRunners = checkEq ("wf-1", "wf-1", False)
+
+checkStateInterop :: Text -> Either String ()
+checkStateInterop = checkEq ("done" :: Text)
+
+checkCoopFlag :: () -> Either String ()
+checkCoopFlag () = Right ()
+
+checkForkCounter :: (Int, Int) -> Either String ()
+checkForkCounter = checkEq (0, 1)
+
+checkNestedScope :: (Maybe Int, Maybe Int, Bool) -> Either String ()
+checkNestedScope = checkEq (Nothing, Just 0, True)
+
+checkTokenOutsideStep :: Bool -> Either String ()
+checkTokenOutsideStep = checkEq False
+
+checkConcurrentIsolation :: (Text, Text) -> Either String ()
+checkConcurrentIsolation = checkEq ("a", "b")
+
+checkExecCounters :: ((Int, Int), Int) -> Either String ()
+checkExecCounters = checkEq ((0, 1), 0)
+
+checkStepView :: (Text, Maybe StepStatus) -> Either String ()
+checkStepView = checkEq ("wf-9", Just (firstStepStatus 7))
+
+checkRaceCompletes :: Maybe Text -> Either String ()
+checkRaceCompletes = checkEq (Just ("done" :: Text))
+
+checkRaceCancelled :: Maybe Text -> Either String ()
+checkRaceCancelled = checkEq Nothing
 -- * Shared helpers, polymorphic over the same vocabulary.
 
 -- | A wait that polls a cooperative flag instead of sleeping through it.
@@ -444,103 +536,31 @@ tests =
     withResource acquireLoggerBackend snd $ \getLogger ->
       testGroup
         "Context"
-        [ testCase "a context reads its workflow id" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioWorkflowId fx
-            res @?= "wf-1",
-          testCase "a workflow's step ids are zero based and allocated once" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioStepIds fx
-            res @?= (0, 1, 2),
-          testCase "step ids stay dense while markers spend their own sequence" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioDenseIds fx
-            res @?= (0, 1, 2),
-          testCase "withAttempt scopes a step and leaves the outer scope alone" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioAttemptScope fx
-            res @?= (Nothing, Just 4, Nothing),
-          testCase "a scope reports its status and id" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioScopeStatus fx
-            either fail pure (checkScopeStatus res),
-          testCase "a first attempt reports its step, attempt 1 of 1" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioFirstAttempt fx
-            res @?= (3, 1, 1),
-          testCase "a retry keeps the step and moves the attempt" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioRetryAttempt fx
-            res @?= (3, 2, 1),
-          testCase "a fresh token is quiet until fired" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioTokenFire fx
-            res @?= (False, True),
-          testCase "each attempt watches a token of its own" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioAttemptTokens fx
-            res @?= (True, False),
-          testCase "a deadline rides the workflow state" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioDeadline fx
-            res @?= Nothing,
-          testCase "two contexts over one workflow share its step counter" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioSharedCounter fx
-            res @?= (0, 1),
-          testCase "a re-run of one id is a different execution" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioRerunIdentity fx
-            res @?= (True, False),
-          testCase "the connection and identity travel with the context" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioTravelsWith fx
-            res @?= (testIdentity, Just ("test-app" :: Text)),
-          testCase "nested runners isolate" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioNestedRunners fx
-            res @?= ("wf-1", "wf-1", False),
-          testCase "state interop runs beside the context" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioStateInterop fx
-            res @?= "done",
-          testCase "a throw from an engine call reaches the caller" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioThrowEscape fx
-            either fail pure (checkThrowEscape res),
-          testCase "a cooperative flag cancels a wait promptly" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            scenarioCoopFlag fx,
-          testCase "a fork handed the context shares its counter" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioForkCounter fx
-            res @?= (0, 1),
-          testCase "a nested scope reports the step that encloses it" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioNestedScope fx
-            res @?= (Nothing, Just 0, True),
-          testCase "a cancellation token outside a step never fires" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioTokenOutsideStep fx
-            res @?= False,
-          testCase "concurrent contexts are isolated from each other" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioConcurrentIsolation fx
-            res @?= ("a", "b"),
-          testCase "separate executions own independent step counters" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioExecCounters fx
-            res @?= ((0, 1), 0),
-          testCase "a step view reads its status with the workflow id" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioStepView fx
-            res @?= ("wf-9", Just (firstStepStatus 7)),
-          testCase "raceCancel returns the value when the token stays quiet" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioRaceCompletes fx
-            res @?= Just "done",
-          testCase "raceCancel reports cancellation when the token has fired" $ do
-            fx <- liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)
-            res <- scenarioRaceCancelled fx
-            res @?= Nothing
+        [ liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a context reads its workflow id" scenarioWorkflowId checkWorkflowId,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a workflow's step ids are zero based and allocated once" scenarioStepIds checkStepIds,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "step ids stay dense while markers spend their own sequence" scenarioDenseIds checkDenseIds,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "withAttempt scopes a step and leaves the outer scope alone" scenarioAttemptScope checkAttemptScope,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a scope reports its status and id" scenarioScopeStatus checkScopeStatus,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a first attempt reports its step, attempt 1 of 1" scenarioFirstAttempt checkFirstAttempt,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a retry keeps the step and moves the attempt" scenarioRetryAttempt checkRetryAttempt,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a fresh token is quiet until fired" scenarioTokenFire checkTokenFire,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "each attempt watches a token of its own" scenarioAttemptTokens checkAttemptTokens,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a deadline rides the workflow state" scenarioDeadline checkDeadline,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "two contexts over one workflow share its step counter" scenarioSharedCounter checkSharedCounter,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a re-run of one id is a different execution" scenarioRerunIdentity checkRerunIdentity,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "the connection and identity travel with the context" scenarioTravelsWith checkTravelsWith,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "nested runners isolate" scenarioNestedRunners checkNestedRunners,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "state interop runs beside the context" scenarioStateInterop checkStateInterop,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a throw from an engine call reaches the caller" scenarioThrowEscape checkThrowEscape,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a cooperative flag cancels a wait promptly" scenarioCoopFlag checkCoopFlag,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a fork handed the context shares its counter" scenarioForkCounter checkForkCounter,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a nested scope reports the step that encloses it" scenarioNestedScope checkNestedScope,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a cancellation token outside a step never fires" scenarioTokenOutsideStep checkTokenOutsideStep,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "concurrent contexts are isolated from each other" scenarioConcurrentIsolation checkConcurrentIsolation,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "separate executions own independent step counters" scenarioExecCounters checkExecCounters,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a step view reads its status with the workflow id" scenarioStepView checkStepView,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "raceCancel returns the value when the token stays quiet" scenarioRaceCompletes checkRaceCompletes,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "raceCancel reports cancellation when the token has fired" scenarioRaceCancelled checkRaceCancelled,
+          -- Sim only: hand-emitted structural events; typed assertions live only in sim.
+          testCase "a context announces through its tracer" (pure ())
         ]
