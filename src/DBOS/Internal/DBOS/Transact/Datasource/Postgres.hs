@@ -30,9 +30,7 @@ where
 import DBOS.Prelude
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Int (Int32)
-import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
 import Hasql.Connection qualified as Connection
 import Hasql.Connection.Settings qualified as ConnSettings
 import Hasql.Decoders qualified as Decoders
@@ -41,7 +39,6 @@ import Hasql.Pool qualified as Pool
 import Hasql.Pool.Config qualified as PoolConfig
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
-import Data.Functor.Contravariant (contramap)
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput, renderError)
 import DBOS.SystemDB.Postgres.Backend qualified as SystemPostgres (classifyUsageError)
 import DBOS.Transact.Config qualified as Config

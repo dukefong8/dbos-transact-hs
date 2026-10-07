@@ -79,7 +79,7 @@ runStepScope (StepRetryFixture _ run _ _) = run
 
 -- | Mirrors Rust @tests/retries.rs@: a step that fails twice succeeds on
 -- the third attempt.
-scenarioRetryThird :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int, [StepRecord])
+scenarioRetryThird :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int, [StepRecord])
 scenarioRetryThird fx = do
   wid <- fx.srfFreshWorkflowId
   attempts <- newTVarIO (0 :: Int)
@@ -97,7 +97,7 @@ scenarioRetryThird fx = do
   pure (outcome, made, steps)
 
 -- | Exhausted retries carry every attempt's failure.
-scenarioRetryExhausted :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
+scenarioRetryExhausted :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
 scenarioRetryExhausted fx = do
   wid <- fx.srfFreshWorkflowId
   attempts <- newTVarIO (0 :: Int)
@@ -111,7 +111,7 @@ scenarioRetryExhausted fx = do
   pure (outcome, made)
 
 -- | The default does not retry and does not wrap.
-scenarioRetryDefault :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
+scenarioRetryDefault :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
 scenarioRetryDefault fx = do
   wid <- fx.srfFreshWorkflowId
   attempts <- newTVarIO (0 :: Int)
@@ -125,7 +125,7 @@ scenarioRetryDefault fx = do
 
 -- | A retried step replays from its single checkpoint: the second run
 -- reads the recording without running the body again.
-scenarioRetryReplay :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int, Either (Error EngineOnly) Int, Int)
+scenarioRetryReplay :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int, Either (Error EngineOnly) Int, Int)
 scenarioRetryReplay fx = do
   wid <- fx.srfFreshWorkflowId
   attempts <- newTVarIO (0 :: Int)
@@ -144,7 +144,7 @@ scenarioRetryReplay fx = do
   pure (first, midRuns, second, made)
 
 -- | A declined failure stops retrying immediately.
-scenarioRetryDeclined :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
+scenarioRetryDeclined :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
 scenarioRetryDeclined fx = do
   wid <- fx.srfFreshWorkflowId
   attempts <- newTVarIO (0 :: Int)
@@ -163,7 +163,7 @@ scenarioRetryDeclined fx = do
   pure (outcome, made)
 
 -- | Declining mid-policy keeps the earlier failures.
-scenarioRetryMidDecline :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
+scenarioRetryMidDecline :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
 scenarioRetryMidDecline fx = do
   wid <- fx.srfFreshWorkflowId
   attempts <- newTVarIO (0 :: Int)
@@ -187,7 +187,7 @@ scenarioRetryMidDecline fx = do
 
 -- | Mirrors the timeout cases of Rust @tests/timeouts.rs@: a step that
 -- hangs is stopped at its timeout.
-scenarioStepTimeout :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int)
+scenarioStepTimeout :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int)
 scenarioStepTimeout fx = do
   wid <- fx.srfFreshWorkflowId
   let options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 5)}
@@ -196,7 +196,7 @@ scenarioStepTimeout fx = do
   runStepScope fx wid $ \wctx -> runStepWith options wctx "slow" body
 
 -- | A step within its timeout is unaffected.
-scenarioStepWithinTimeout :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int)
+scenarioStepWithinTimeout :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int)
 scenarioStepWithinTimeout fx = do
   wid <- fx.srfFreshWorkflowId
   let options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 500)}
@@ -206,7 +206,7 @@ scenarioStepWithinTimeout fx = do
 
 -- | A timed-out body stops rather than continuing: after well past its
 -- hang, the body never ran to completion.
-scenarioTimeoutStopsBody :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Bool)
+scenarioTimeoutStopsBody :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Bool)
 scenarioTimeoutStopsBody fx = do
   wid <- fx.srfFreshWorkflowId
   ran <- newTVarIO False
@@ -220,7 +220,7 @@ scenarioTimeoutStopsBody fx = do
 
 -- | A timed-out attempt is retried with a fresh timeout: two hangs, then
 -- the immediate success.
-scenarioTimeoutFreshRetry :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
+scenarioTimeoutFreshRetry :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Int)
 scenarioTimeoutFreshRetry fx = do
   wid <- fx.srfFreshWorkflowId
   attempts <- newTVarIO (0 :: Int)
@@ -237,7 +237,7 @@ scenarioTimeoutFreshRetry fx = do
   pure (outcome, made)
 
 -- | Every attempt timing out reports each timeout.
-scenarioTimeoutAllTimeout :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int)
+scenarioTimeoutAllTimeout :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int)
 scenarioTimeoutAllTimeout fx = do
   wid <- fx.srfFreshWorkflowId
   let body :: forall exec. StepCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -247,7 +247,7 @@ scenarioTimeoutAllTimeout fx = do
 
 -- | A plain step is not preemptible: cancelling its workflow does not stop
 -- it, and it still returns its value once its gate opens.
-scenarioPlainNotPreemptible :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int)
+scenarioPlainNotPreemptible :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int)
 scenarioPlainNotPreemptible fx = do
   wid <- fx.srfFreshWorkflowId
   gate <- newEmptyMVar
@@ -260,7 +260,7 @@ scenarioPlainNotPreemptible fx = do
   wait worker
 
 -- | A completed step leaves its token alone.
-scenarioTokenQuiet :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Bool)
+scenarioTokenQuiet :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Bool)
 scenarioTokenQuiet fx = do
   wid <- fx.srfFreshWorkflowId
   seen <- newTVarIO True
@@ -276,7 +276,7 @@ scenarioTokenQuiet fx = do
 
 -- | The cancellation token fires before the body is dropped: the timed-out
 -- body observes the fired token.
-scenarioTokenFirst :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Bool)
+scenarioTokenFirst :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, Bool)
 scenarioTokenFirst fx = do
   wid <- fx.srfFreshWorkflowId
   gate <- newEmptyMVar
@@ -294,7 +294,7 @@ scenarioTokenFirst fx = do
 
 -- | A dropped step fires its cancellation token: killing the worker does
 -- not run the body, but the token fires first.
-scenarioTokenDrop :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m Bool
+scenarioTokenDrop :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadMVar m) => StepRetryFixture m -> m Bool
 scenarioTokenDrop fx = do
   wid <- fx.srfFreshWorkflowId
   gate <- newEmptyMVar
@@ -315,7 +315,7 @@ scenarioTokenDrop fx = do
 -- | A preemptible step stops and records no outcome: cancelling its
 -- workflow ends the run with 'WorkflowCancelled' and the step table stays
 -- empty, so a resume runs it again.
-scenarioPreemptible :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadFork m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, [StepRecord])
+scenarioPreemptible :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadMVar m) => StepRetryFixture m -> m (Either (Error EngineOnly) Int, [StepRecord])
 scenarioPreemptible fx = do
   wid <- fx.srfFreshWorkflowId
   gate <- newEmptyMVar

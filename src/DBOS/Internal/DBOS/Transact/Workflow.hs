@@ -53,27 +53,24 @@ import DBOS.Prelude
 import Control.Exception (AsyncException (..))
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Int (Int64)
-import Data.Aeson (FromJSON, ToJSON, Value)
+import Data.Aeson (FromJSON, Value)
 import Data.Map.Strict (Map)
-import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Word (Word32)
-import GHC.Stack (HasCallStack)
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (ApplicationVersion, AwaitedOutcome (..), Duration, ExecutorId, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), Submission (..), StepRecord (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowName (..), WorkflowStatus (..), addTimeout, newWorkflow, timestampNow, timestampToEpochMs)
-import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeAttributes, encodeWorkflowValue)
+import DBOS.SystemDB.Types (AwaitedOutcome (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), Submission (..), StepRecord (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowStatus (..), addTimeout, newWorkflow, timestampNow, timestampToEpochMs)
+import DBOS.Transact.Serialization (encodeAttributes)
 import DBOS.Transact.Config (serializerName)
-import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, nextExecutionIdentity, runSystemDB)
-import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), deadline, insideAStep, newWorkflowState, nextStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
+import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
+import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), deadline, insideAStep, nextStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Registry (ErasedWorkflow (..), Snapshot, WorkflowKey (..), WorkflowRef (refKey, refRegistry), lookupRegistryWorkflow, lookupSnapshotWorkflow, refName, registryInstanceId, renderWorkflowKey)
 import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Tracer (runTracer)
-import Data.Text (Text, pack)
+import Data.Text (pack)
 
 -- | Attempts before a workflow is parked as
 -- @MAX_RECOVERY_ATTEMPTS_EXCEEDED@. Mirrors workflow.rs.
@@ -201,7 +198,7 @@ adoptRecordedOutcome conn (WorkflowId workflowText) = do
 -- what is left, and children inherit the instant rather than a fresh budget.
 -- The spawner rides the context, so a child this body starts is detached
 -- into the same registry and hands its own children the same capability.
-executeRegisteredWorkflow :: (MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => TaskSpawner m -> Connection m -> Identity -> WorkflowId -> ErasedWorkflow m -> Maybe SerializedWorkflowValue -> Maybe Timestamp -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
+executeRegisteredWorkflow :: (MonadTimer m, MonadTime m, MThrow.MonadCatch m) => TaskSpawner m -> Connection m -> Identity -> WorkflowId -> ErasedWorkflow m -> Maybe SerializedWorkflowValue -> Maybe Timestamp -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
 executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowText) workflow input deadline = do
   attempted <- MThrow.try (runBody)
   case attempted of
@@ -294,7 +291,7 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
 -- @PENDING@ is left alone. A parked row (the recovery cap is exceeded) is a
 -- skip, not a fault. The release action runs when the spawned task ends, or
 -- immediately on every path that does not spawn.
-spawnRegisteredWorkflowWithRow :: (MonadFork m, MThrow.MonadMask m, MonadSTM m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> m () -> Submission -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe (ThreadId m)))
+spawnRegisteredWorkflowWithRow :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> m () -> Submission -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe (ThreadId m)))
 spawnRegisteredWorkflowWithRow tasks release submission conn identity snapshot key workflowId@(WorkflowId _) input new =
   case lookupSnapshotWorkflow key snapshot of
     Nothing -> release >> pure (Left (TransactError.ErrorWorkflowNotRegistered (renderWorkflowKey key)))
@@ -551,7 +548,7 @@ resolveEnqueueCollision conn shape _offeredId err =
 -- tasks at once — the workflow's life is the executor's, so dropping the
 -- handle must not stop the run — while a queued row is the supervisor's,
 -- as the oracle returns a polling handle for enqueues.
-startWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflowRef tasks conn identity snapshot ref options input =
   case traverse validateEnqueue options.startQueue of
     Left err -> pure (Left (TransactError.liftEngine err))

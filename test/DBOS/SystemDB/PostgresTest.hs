@@ -3,7 +3,6 @@
 module DBOS.SystemDB.PostgresTest (tests, streamTests) where
 
 import DBOS.Prelude
-import Data.Functor.Contravariant (contramap)
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
@@ -112,7 +111,6 @@ import DBOS.SystemDB.Postgres
   )
 import Data.Int (Int64)
 import Data.List (sort)
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.Transact (nullTracer)
 import Data.UUID qualified as UUID

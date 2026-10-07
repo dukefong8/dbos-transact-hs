@@ -10,11 +10,9 @@
 -- launch, and the SQL observations.
 module DBOS.Transact.WidgetTest (tests) where
 
-import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
@@ -26,18 +24,14 @@ import DBOS.Transact
     DBOS,
     Environment (..),
     Executor,
-    Identity (..),
-    StepCtx,
     Tx (..),
     WorkflowId (..),
     acquireAppDataSourceInFromEnv,
     configFromEnv,
-    firstStepStatus,
     handleStatus,
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
-    nextWorkflowMarker,
     nullTracer,
     registerDBOSDataSource,
     registerDBOSWorkflowRef,
@@ -45,10 +39,9 @@ import DBOS.Transact
     retrieveWorkflow,
     runAppSession,
     shutdown,
-    toDataSource,
-    withStep,
-    withWorkflow,
-  )
+    toDataSource)
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep, withWorkflow)
 import DBOS.Transact.WidgetCases
   ( CheckoutSteps (..),
     lostAckOnce,

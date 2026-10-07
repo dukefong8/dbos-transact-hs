@@ -16,7 +16,13 @@ import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
-import DBOS.Transact (EngineEvent (..), Identity (..), WorkflowEvent (..), configNew)
+import DBOS.Transact
+  (
+  configNew,
+  )
+import DBOS.Transact.Recovery (EngineEvent (..))
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Connection (SomeSystemDB (..))
 import DBOS.Transact.EventCases
   ( EventFixture (..),

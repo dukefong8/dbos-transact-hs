@@ -10,32 +10,25 @@
 -- MemSystemDB plus the sim carrier.
 module DBOS.Transact.WidgetSim (tests) where
 
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Monad.IOSim (IOSim, SimEventType (..), SimTrace, traceEvents)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (printSimTrace, simTracer)
 import DBOS.Prelude
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simConnectionWith, simInstance)
 import DBOS.Transact
-  ( DBOS,
-    DataSource (..),
-    Identity (..),
-    RecordedOutcome (..),
+  ( DataSource (..),
     StepCtx,
     Tx (..),
     WorkflowId (..),
-    firstStepStatus,
     handleStatus,
     newWorkflowKey,
-    nextWorkflowMarker,
     registerDBOSWorkflowRef,
-    retrieveWorkflow,
-    withStep,
-    withWorkflow,
-  )
+    retrieveWorkflow)
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Datasource (RecordedOutcome (..))
+import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep, withWorkflow)
 import DBOS.Transact.WidgetCases
   ( CheckoutSteps (..),
     lostAckOnce,
@@ -71,7 +64,7 @@ import DBOS.Transact.WidgetCases
     scenarioTableStatusCodes,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
-import Test.Tasty.HUnit (assertBool, testCase)
+import Test.Tasty.HUnit (assertBool)
 
 -- * The sim storefront
 

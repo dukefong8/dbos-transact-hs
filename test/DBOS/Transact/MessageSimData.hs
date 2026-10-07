@@ -6,7 +6,6 @@
 module DBOS.Transact.MessageSimData (mockMessageBody) where
 
 import DBOS.Prelude
-import Data.Text (Text)
 
 -- | The message body mock receives answer with.
 mockMessageBody :: Text

@@ -9,9 +9,7 @@ module DBOS.Transact.SerializationTest
 where
 
 import DBOS.Prelude
-import Data.Aeson (Value, object, (.=))
-import Data.Text (Text)
-import Data.Word (Word32)
+import Data.Aeson (Value)
 import DBOS.Transact
   ( CodecError (..),
     Serialization (..),

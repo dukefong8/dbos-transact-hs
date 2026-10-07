@@ -65,48 +65,47 @@ module DBOS.Transact.WidgetCases
   )
 where
 
-import Control.Monad.Except (ExceptT (..), runExceptT)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.Prelude
 import DBOS.SystemDB (BackendErrorKind (..))
 import DBOS.Transact
-  ( BackendError (..),
-    CodecError,
-    DBOS,
-    DataSource (..),
-    Duration,
-    EngineOnly,
-    Error,
-    Executor,
-    IsolationLevel (..),
-    StartOptions (..),
-    StepCtx,
-    Topic (..),
-    TransactionConfig (..),
-    Tx,
-    WorkflowCtx,
-    WorkflowId (..),
-    WorkflowRef,
-    WorkflowStatus (..),
-    decodeWorkflowValue,
-    encodeWorkflowValue,
-    getWorkflowEvent,
-    isTerminal,
-    millisDuration,
-    recv,
-    runTxStep,
-    secondsDuration,
-    sendWorkflowMessage,
-    setEvent,
-    shutdown,
-    sleepStep,
-    startChildWorkflow,
-    startDBOSWorkflowRef,
-    startOptionsDefault,
+  (
+  CodecError,
+  DBOS,
+  DataSource (..),
+  Duration,
+  EngineOnly,
+  Error,
+  Executor,
+  IsolationLevel (..),
+  StartOptions (..),
+  StepCtx,
+  Topic (..),
+  TransactionConfig (..),
+  Tx,
+  WorkflowCtx,
+  WorkflowId (..),
+  WorkflowRef,
+  WorkflowStatus (..),
+  decodeWorkflowValue,
+  encodeWorkflowValue,
+  getWorkflowEvent,
+  isTerminal,
+  millisDuration,
+  recv,
+  runTxStep,
+  secondsDuration,
+  sendWorkflowMessage,
+  setEvent,
+  shutdown,
+  sleepStep,
+  startChildWorkflow,
+  startDBOSWorkflowRef,
+  startOptionsDefault,
   )
+import DBOS.SystemDB.Error (BackendError (..))
 
 -- * Shared step-table vocabulary
 
@@ -424,7 +423,7 @@ readTableState wf = do
 
 -- | One table op in its own transaction — the same per-step commit shape the
 -- workflows spend — with failures surfaced as values.
-withTx :: WidgetCase m => WidgetFixture m -> (Tx m -> m a) -> m (Either BackendError a)
+withTx :: WidgetFixture m -> (Tx m -> m a) -> m (Either BackendError a)
 withTx wf act = do
   let DataSource {dsWithTransaction = runTx} = wf.wfDataSource
   runTx Nothing act

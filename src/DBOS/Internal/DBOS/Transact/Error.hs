@@ -30,7 +30,7 @@ where
 import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
-import Data.Text (Text, pack)
+import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Error qualified as SystemDBError
@@ -179,6 +179,13 @@ renderTransactError = \case
   StepBuiltElsewhere step built polled -> "step " <> step <> " was built " <> built <> " but polled " <> polled <> ": a step takes its id where it is built"
   StepTimeout step limit -> "the step " <> step <> " exceeded its " <> pack (show (durationAsMillis limit)) <> "ms timeout"
   MaxStepRetriesExceeded step attempts _ -> "the step " <> step <> " failed after " <> pack (show attempts) <> " attempts"
+
+-- | Haskell best practice for the oracle's @Display@: the 'Exception'
+-- mechanism carries the human rendering, so call sites use
+-- 'displayException' instead of the bespoke render function (which stays
+-- for the engine's existing uses).
+instance (Show e, Typeable e) => Exception (Error e) where
+  displayException = unpack . renderTransactError
 
 
 -- | The engine-only channel holds no value, so it never encodes and never

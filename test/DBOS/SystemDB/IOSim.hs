@@ -30,7 +30,6 @@ module DBOS.SystemDB.IOSim
 where
 
 import DBOS.Prelude
-import Control.Concurrent.Class.MonadSTM.Strict (STM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, retry, writeTVar)
 import Control.Monad.IOSim (IOSim)
 import Data.Aeson (Value (..), eitherDecodeStrict)
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -38,16 +37,11 @@ import Data.List (nub, sort, sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Text.Encoding (encodeUtf8)
-import Text.Read (readMaybe)
 import Data.Text qualified as Text
-import Data.Word (Word32)
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
-    Change (..),
     Debounce (..),
-    DebounceRequest (..),
     EncodedValue (..),
     Error (..),
     EventRecord (..),
@@ -69,14 +63,12 @@ import DBOS.SystemDB
     QueueUpdate (..),
     ScheduleFilter (..),
     ScheduleRecord (..),
-    ScheduleStatus (..),
     ScheduleUpdate (..),
     SendMessage (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
     StepTiming (..),
     StreamRead (..),
-    StreamRecord (..),
     SystemDB (..),
     Timestamp,
     Topic (..),
@@ -97,7 +89,6 @@ import DBOS.SystemDB
     initialStatus,
     internalQueueName,
     isQueueUpdateEmpty,
-    isScheduleUpdateEmpty,
     newWorkflow,
     nullTopicSentinel,
     recvStepName,
@@ -109,20 +100,17 @@ import DBOS.SystemDB
     timestampFromEpochMs,
     timestampNow,
     timestampToEpochMs,
-    zeroRowCounts,
-  )
+    zeroRowCounts)
 import DBOS.Transact
   ( DBOS,
     Executor,
-    Identity (..),
     Serializer (..),
     SomeTracer (..),
     configNew,
-    launchExecutor,
-    launchOn,
-    launchOnWithQueues,
     newDBOS,
   )
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Instance (launchExecutor, launchOn, launchOnWithQueues)
 import DBOS.Transact.Connection
   ( Connection,
     Owner (..),

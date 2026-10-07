@@ -27,8 +27,12 @@ import DBOS.SystemDB.Postgres
 import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Text (Text)
-import DBOS.Transact (LogEvent (..), SomeTracer (..), mkTracer, nullTracer)
+import DBOS.Transact
+  (
+  SomeTracer (..),
+  nullTracer,
+  )
+import DBOS.Tracer (LogEvent (..), mkTracer)
 import Hasql.Pool qualified as Pool
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (testCase, (@?=))

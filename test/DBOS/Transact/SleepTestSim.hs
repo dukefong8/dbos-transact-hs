@@ -15,10 +15,16 @@ import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import Data.Text qualified as Text
-import DBOS.SystemDB (Duration, NewWorkflow (..), Submission (..), WorkflowId (..), newWorkflow, sleepStepName)
+import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowId (..), newWorkflow, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
-import DBOS.Transact (SleepEvent (..), firstStepStatus, nextStepId, nextWorkflowMarker, sleepPlain, sleepStep, withStep, withWorkflow)
+import DBOS.Transact
+  (
+  sleepPlain,
+  sleepStep,
+  )
+import DBOS.Transact.Sleep (SleepEvent (..))
+import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep, withWorkflow)
 import DBOS.Transact.SleepCases
   ( SleepFixture (..),
     checkSleepCheckpoint,

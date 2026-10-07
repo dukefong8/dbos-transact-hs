@@ -93,7 +93,6 @@ module DBOS.Transact.QueueCases
 where
 
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.Prelude
 import DBOS.SystemDB (AwaitedOutcome (..), Change (..), Duration, NewQueue (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), RateLimit (..), Timestamp, WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter, internalQueueName, newQueue, secondsDuration)
@@ -120,7 +119,6 @@ import DBOS.Transact
     defaultQueueOptions,
     decodeWorkflowValue,
     deleteQueue,
-    dequeueDBOSWorkflows,
     encodeWorkflowValue,
     enqueueDBOSWorkflow,
     enqueueNew,
@@ -134,7 +132,6 @@ import DBOS.Transact
     registerDBOSWorkflow,
     registerDBOSWorkflowRef,
     registerQueue,
-    renderTransactError,
     retrieveWorkflow,
     runDBOSWorkflow,
     runDBOSWorkflowRef,
@@ -621,7 +618,7 @@ checkCrud (registered, enqueued, awaited, replayed, leftAlone, updated, listed, 
 -- | A dequeue stamps the deadline the enqueue left open: the budget the
 -- start carried is the timeout on the row, and the row carries an expiry
 -- only after a worker takes it.
-scenarioDeadlineStamped :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Either String Int, Maybe Duration, Maybe Timestamp)
+scenarioDeadlineStamped :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Either String Int, Maybe Duration, Maybe Timestamp)
 scenarioDeadlineStamped fx = do
   let key = newWorkflowKey "budgeted"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -771,7 +768,7 @@ checkBadEnqueue (started, listed) = do
 
 -- | A stored internal-queue row cannot redefine the internal queue: the
 -- engine ignores the stored limits and still runs the workflow.
-scenarioInternalRow :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Either String Int)
+scenarioInternalRow :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Either String Int)
 scenarioInternalRow fx = do
   let key = newWorkflowKey "internal"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -795,7 +792,7 @@ checkInternalRow result = unless (result == Right 9) $ Left ("expected the inter
 
 -- | A queue registered after the launch is still dequeued from: the
 -- supervisor picks up queues it did not start with.
-scenarioLateQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Either String Int)
+scenarioLateQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Either String Int)
 scenarioLateQueue fx = do
   let key = newWorkflowKey "late"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -816,7 +813,7 @@ checkLateQueue result = unless (result == Right 1) $ Left ("expected the late qu
 -- | A queue this process never registered is still dequeued from: the
 -- worker set comes from the table, never from what this instance
 -- registered. The row is written straight to the database.
-scenarioGhostQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Either String Int)
+scenarioGhostQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Either String Int)
 scenarioGhostQueue fx = do
   let key = newWorkflowKey "ghost"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -840,7 +837,7 @@ checkGhostQueue result = unless (result == Right 2) $ Left ("expected the ghost 
 -- parent's instant, and the child carries no timeout of its own. The child
 -- sits on a queue nothing polls: the assertion is about what the enqueue
 -- wrote, so the row has to stay as the enqueue left it.
-scenarioInheritedDeadline :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadCatch m) => QueueFixture m -> m (Maybe Timestamp, Maybe Timestamp, Maybe Duration)
+scenarioInheritedDeadline :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Maybe Timestamp, Maybe Timestamp, Maybe Duration)
 scenarioInheritedDeadline fx = do
   let childKey = newWorkflowKey "child"
       parentKey = newWorkflowKey "parent"
@@ -896,7 +893,7 @@ pollUntil remaining cond
 -- | A queue's worker concurrency runs that many at once in one process:
 -- three gated bodies, two running together, the peak never above the
 -- budget.
-scenarioWorkerConcurrency :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadSTM m, MonadDelay m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Bool, Int)
+scenarioWorkerConcurrency :: forall m. (MonadMVar m, MonadSTM m, MonadDelay m, MonadTime m) => QueueFixture m -> m (Bool, Int)
 scenarioWorkerConcurrency fx = do
   gate <- newTVarIO False
   active <- newTVarIO (0 :: Int)
@@ -949,7 +946,7 @@ checkWorkerConcurrency (reachedTwo, high) = do
 -- | Listen queues narrow what this process dequeues: the listened queue
 -- runs, the unlistened one stays ENQUEUED for a peer that does listen to
 -- it. The leaf staffs the supervisor with @Just [fastQueue]@.
-scenarioListenNarrow :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m, MonadCatch m) => QueueFixture m -> m (Either String Int, Maybe WorkflowStatus)
+scenarioListenNarrow :: forall m. (MonadMVar m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Either String Int, Maybe WorkflowStatus)
 scenarioListenNarrow fx = do
   let key = newWorkflowKey "either"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -988,7 +985,7 @@ checkListenNarrow (fast, slow) = do
 -- | An empty listen set dequeues from no registered queue — but the
 -- internal queue still runs, proving the loop is alive. The leaf staffs
 -- the supervisor with @Just []@.
-scenarioListenNone :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m, MonadCatch m) => QueueFixture m -> m (Either String Int, Maybe WorkflowStatus)
+scenarioListenNone :: forall m. (MonadMVar m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Either String Int, Maybe WorkflowStatus)
 scenarioListenNone fx = do
   let key = newWorkflowKey "nothing"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -1023,7 +1020,7 @@ checkListenNone (internal, ignored) = do
 
 -- | Listen queues never exclude the internal queue: under a filter naming
 -- only another queue, the internal workflow still runs.
-scenarioListenInternal :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m, MonadCatch m) => QueueFixture m -> m (Either String Int)
+scenarioListenInternal :: forall m. (MonadMVar m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Either String Int)
 scenarioListenInternal fx = do
   let key = newWorkflowKey "internal"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -1045,7 +1042,7 @@ checkListenInternal internal = unless (internal == Right 4) $ Left ("expected th
 
 -- | A delayed enqueue waits before it is dequeued: comfortably inside the
 -- delay and after several supervisor sweeps, no worker may have taken it.
-scenarioDelayed :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Maybe WorkflowStatus, Int, Either String Int)
+scenarioDelayed :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Maybe WorkflowStatus, Int, Either String Int)
 scenarioDelayed fx = do
   ran <- newTVarIO (0 :: Int)
   let key = newWorkflowKey "delayed"
@@ -1079,7 +1076,7 @@ checkDelayed (status, early, finished) = do
 
 -- | A deduplication id admits one waiting workflow: the second enqueue is
 -- refused naming the key, the first runs, and finishing releases the key.
-scenarioDedup :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Text, Either String Int, Bool)
+scenarioDedup :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Text, Either String Int, Bool)
 scenarioDedup fx = do
   let key = newWorkflowKey "deduped"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -1097,7 +1094,7 @@ scenarioDedup fx = do
   first <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just held}) Nothing >>= orCrash
   secondRun <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just held}) Nothing
   refusal <- case secondRun of
-    Left err -> pure (renderTransactError (err :: Error EngineOnly))
+    Left err -> pure (Text.pack (displayException (err :: Error EngineOnly)))
     Right _ -> pure "a second workflow took a held deduplication key"
   firstResult <- handleResult first
   -- Finishing released the key, so the same one is enqueueable again.
@@ -1114,7 +1111,7 @@ checkDedup (refusal, first, third) = do
 -- | ReturnExisting joins the workflow holding the key: the second handle
 -- resolves to the first workflow, writes no row of its own, and both
 -- handles read the one run.
-scenarioJoin :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Text, Text, Maybe WorkflowRecord, Either String Int, Either String Int, Text, Text)
+scenarioJoin :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Text, Text, Maybe WorkflowRecord, Either String Int, Either String Int, Text, Text)
 scenarioJoin fx = do
   let key = newWorkflowKey "deduped"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -1150,7 +1147,7 @@ checkJoin (joined, firstId, loser, first, second, third, thirdId) = do
 -- | Priority orders the backlog lower first: enqueued before the queue is
 -- registered — no worker exists for a queue with no row — the backlog
 -- runs lowest-priority-number first once registration starts the worker.
-scenarioPriority :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadSTM m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m [Text]
+scenarioPriority :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m [Text]
 scenarioPriority fx = do
   order <- newTVarIO []
   let key = newWorkflowKey "ordered"
@@ -1180,7 +1177,7 @@ checkPriority ran = unless (ran == ["none", "high", "mid", "low"]) $ Left ("expe
 
 -- | Updating a queue changes what a running worker honours: one at a time
 -- to begin with, three abreast after the update lands.
-scenarioUpdateHonoured :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadSTM m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Int, Int)
+scenarioUpdateHonoured :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Int, Int)
 scenarioUpdateHonoured fx = do
   active <- newTVarIO (0 :: Int)
   peak <- newTVarIO (0 :: Int)
@@ -1221,7 +1218,7 @@ checkUpdateHonoured (firstPeak, lastPeak) = do
 
 -- | A partitioned queue runs one workflow per key at a time while distinct
 -- keys overlap.
-scenarioPartitioned :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadSTM m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Int, Int)
+scenarioPartitioned :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Int, Int)
 scenarioPartitioned fx = do
   live <- newTVarIO Map.empty
   perKeyPeak <- newTVarIO (0 :: Int)
@@ -1267,7 +1264,7 @@ checkPartitioned (keyPeak, overlap) = do
   unless (overlap == 2) $ Left ("expected both keys overlapped, got: " <> show overlap)
 
 -- | A counted partitioned queue runs its limit per key.
-scenarioCountedPartitioned :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadSTM m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m Int
+scenarioCountedPartitioned :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m Int
 scenarioCountedPartitioned fx = do
   live <- newTVarIO Map.empty
   perKeyPeak <- newTVarIO (0 :: Int)
@@ -1307,7 +1304,7 @@ checkCountedPartitioned keyPeak = unless (keyPeak == 2) $ Left ("expected two pe
 
 -- | Another application's queue is not dequeued from: several reconciles'
 -- worth of waiting, the body never runs and the row stays ENQUEUED.
-scenarioPeerQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m) => QueueFixture m -> m (Int, Maybe WorkflowStatus)
+scenarioPeerQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m) => QueueFixture m -> m (Int, Maybe WorkflowStatus)
 scenarioPeerQueue fx = do
   ran <- newTVarIO (0 :: Int)
   let key = newWorkflowKey "scoped"
@@ -1340,7 +1337,7 @@ checkPeerQueue (early, status) = do
 -- while every row eventually succeeds. A gate holds the runs until the peak
 -- in-flight count pins the cap, and the settled statuses pin completion.
 -- Returns the peak in-flight count with the settled statuses.
-scenarioWorkerBudgetExhausted :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadThrow m, MonadCatch m) => QueueFixture m -> m (Int, [WorkflowStatus], [Maybe WorkflowStatus])
+scenarioWorkerBudgetExhausted :: forall m. (MonadMVar m, MonadTimer m) => QueueFixture m -> m (Int, [WorkflowStatus], [Maybe WorkflowStatus])
 scenarioWorkerBudgetExhausted fx = do
   gate <- newTVarIO False
   active <- newTVarIO (0 :: Int)

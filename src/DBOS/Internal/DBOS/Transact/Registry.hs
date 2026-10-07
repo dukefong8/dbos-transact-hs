@@ -36,9 +36,8 @@ import DBOS.Prelude
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.SystemDB.Types (Serialization (..), SerializedWorkflowValue, WorkflowId, WorkflowName (..))
+import DBOS.SystemDB.Types (SerializedWorkflowValue)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Context (WorkflowCtx)
 import DBOS.Transact.Error qualified as TransactError

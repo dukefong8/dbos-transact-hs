@@ -9,7 +9,6 @@ module DBOS.Transact.MessageTest (tests) where
 
 import DBOS.DualStack (liveCase)
 import DBOS.Prelude
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -17,7 +16,11 @@ import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), Outcome (..), Submission (..), WorkflowId (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (Identity (..), nullTracer)
+import DBOS.Transact
+  (
+  nullTracer,
+  )
+import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Connection (nextExecutionIdentity)
 import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState)
 import DBOS.Transact.ContextTest (connOver)

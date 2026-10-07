@@ -14,11 +14,10 @@ module DBOS.Transact.StepTestSim (tests) where
 
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
-import Data.Text (Text)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (StepRecord (..))
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, newMemDB, simConnectionWith)
+import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simConnectionWith)
 import DBOS.Transact.StepCases
   ( StepFixture (..),
     checkDurableSleep,
@@ -41,15 +40,13 @@ import DBOS.Transact.StepCases
 import DBOS.Transact
   ( EngineOnly,
     Error (..),
-    Identity (..),
     WorkflowCtx,
-    WorkflowEvent (..),
     WorkflowId (..),
     runStep,
-    withWorkflow,
   )
-import DBOS.Transact.Connection (Connection)
-import DBOS.Transact.Checkpoint (pendingStepId)
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Transact.Context (withWorkflow)
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 

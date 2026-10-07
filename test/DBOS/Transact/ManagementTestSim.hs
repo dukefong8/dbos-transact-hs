@@ -12,28 +12,13 @@ module DBOS.Transact.ManagementTestSim (tests) where
 
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Either (isLeft, isRight)
-import Data.Text (Text)
 import DBOS.DualStack (simCase)
 import DBOS.SystemDB
-  ( AwaitedOutcome (..),
-    MessageUUID (..),
-    MessageUUID (..),
-    Fork (..),
-    ForkOptions (..),
-    ForkPoint (..),
-    OnExistingQueue (..),
-    SerializedWorkflowValue (..),
+  ( SerializedWorkflowValue (..),
     WorkflowId (..),
-    WorkflowStatus (..),
-    defaultForkOptions,
-    forkNew,
-  )
-import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity, simInstance, simLaunchWith)
+    WorkflowStatus (..))
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.Prelude
-import DBOS.Transact.ManagementSimData (mockOutput, mockSerialization)
 import DBOS.Transact
   (
     EngineOnly,
@@ -41,34 +26,25 @@ import DBOS.Transact
     WorkflowCtx,
     DBOS,
     Executor,
-    EngineEvent (..),
     Error (..),
-    ManagementEvent (..),
-    QueueConflict (..),
-    WorkflowEvent (..),
-    WorkflowHandle (workflowId),
+    WorkflowHandle,
     WorkflowKey,
     WorkflowRef,
-    cancelWorkflows,
     decodeWorkflowValue,
-    defaultQueueOptions,
-    encodeWorkflowValue,
-    forkFrom,
-    forkWorkflows,
     handleResult,
     handleStatus,
-    newWorkflowKey,
     registerDBOSWorkflow,
     registerDBOSWorkflowRef,
-    registerQueue,
     retrieveWorkflow,
     runDBOSWorkflow,
     runStep,
     runTracer,
-    waitForWorkflow,
-    configNew,
-  )
+    configNew)
+import DBOS.Transact.Recovery (EngineEvent (..))
+import DBOS.Transact.Management (ManagementEvent (..))
+import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Connection (SomeSystemDB (..))
+import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
 import DBOS.Transact.ManagementCases
   ( MgmtFixture (..),
     checkCancelMissing,
@@ -108,7 +84,7 @@ import DBOS.Transact.ManagementCases
     scenarioUnlaunched,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
-import Test.Tasty.HUnit (assertBool, testCase, (@?=))
+import Test.Tasty.HUnit (testCase, (@?=))
 
 -- | The sim half of the shared management fixture: a fresh 'MemSystemDB'
 -- per case (so cases stay isolated) passed in as 'SomeSystemDB' with the

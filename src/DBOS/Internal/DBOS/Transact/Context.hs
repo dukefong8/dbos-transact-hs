@@ -84,10 +84,8 @@ module DBOS.Transact.Context
 where
 
 import DBOS.Prelude
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM, StrictTVar, atomically, modifyTVar, newTVarIO, readTVar, readTVarIO, writeTVar)
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Kind (Type)
-import Data.Text (Text)
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Timestamp, WorkflowId (..))
 import DBOS.Tracer (SomeTracer)
@@ -320,7 +318,7 @@ cancellationToken sctx = case sctx.stepCtxScope of
 -- 'raceCancel' honors workflow cancellation and attempt timeouts without a
 -- hand-polling loop, mirroring the skill's timeout-plus-abort-signal rule
 -- ('step-timeouts.md') in polled-token form.
-raceCancel :: (MonadSTM m, MonadAsync m) => StepCtx exec m -> m a -> m (Maybe a)
+raceCancel :: (MonadAsync m) => StepCtx exec m -> m a -> m (Maybe a)
 raceCancel sctx action = do
   token <- cancellationToken sctx
   outcome <- race action (atomically (readTVar token >>= check))
@@ -338,7 +336,7 @@ tokenCancelled = readTVarIO
 
 -- | Run a class method against this context's backend, passing the handle
 -- explicitly. The one place the connection's existential is unpacked.
-withSystemDB :: Monad m => WorkflowCtx exec m -> (forall db. SystemDB.SystemDB db m => db -> m a) -> m a
+withSystemDB ::  WorkflowCtx exec m -> (forall db. SystemDB.SystemDB db m => db -> m a) -> m a
 withSystemDB wctx action = runSystemDB wctx.wctxConn.connSysdb action
 
 -- * Scoped workflow contexts: one execution's view and one attempt's view.

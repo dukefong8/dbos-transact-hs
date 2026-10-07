@@ -43,11 +43,9 @@ module DBOS.Transact.Connection
   )
 where
 
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import Data.Word (Word32)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Postgres.Backend (Settings (..))
@@ -141,7 +139,7 @@ nextExecutionIdentity conn = do
   pure (ExecutionIdentity n)
 
 -- | Mint a workflow id for a caller that named none.
-generatedWorkflowId :: MonadSTM m => Connection m -> m Text
+generatedWorkflowId ::  Connection m -> m Text
 generatedWorkflowId conn = conn.connGenerateWorkflowId
 
 -- | Connects for an application. The executor's half of the connect: it

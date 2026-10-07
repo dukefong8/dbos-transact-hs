@@ -11,8 +11,6 @@ where
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, runSim, runSimTrace, selectTraceEventsDynamic)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
-import Data.Text (Text)
-import Data.Word (Word32)
 import DBOS.SystemDB
   ( BackendError (..),
     BackendErrorKind (..),
@@ -26,7 +24,10 @@ import DBOS.SystemDB
     shouldRetry,
     withRetry,
   )
-import DBOS.Transact (SysdbEvent (..), WorkflowId (..), nullTracer)
+import DBOS.Transact
+  (
+  nullTracer)
+import DBOS.SystemDB.Retry (SysdbEvent (..))
 import DBOS.IOSimTracer (simTracer)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))

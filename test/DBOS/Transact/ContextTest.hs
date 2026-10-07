@@ -73,39 +73,34 @@ import DBOS.DualStack (liveCase)
 import DBOS.Prelude
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.List (isInfixOf)
-import Data.Text (Text)
 import DBOS.SystemDB.Postgres (PostgresSystemDB)
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-  ( Identity (..),
-    LogEvent (..),
-    Serializer (..),
-    SomeTracer (..),
-    StepCtx,
-    StepStatus,
-    Timestamp (..),
-    WorkflowCtx,
-    WorkflowId (..),
-    acquireLoggerBackend,
-    firstStepStatus,
-    ioTracer,
-    nextWorkflowMarker,
-    nextStepId,
-    nullTracer,
-    secondsDuration,
-    stepCtxStatus,
-    withStep,
-    withWorkflow,
-    workflowId,
-  )
+  (
+  Serializer (..),
+  SomeTracer (..),
+  WorkflowCtx,
+  WorkflowId (..),
+  acquireLoggerBackend,
+  ioTracer,
+  nullTracer,
+  secondsDuration,
+  workflowId)
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.SystemDB.Types (Timestamp)
 import DBOS.Transact.Context
   ( StepCtx (stepCtxWorkflow),
+    StepStatus,
     WorkflowCtx (wctxConn, wctxIdentity),
+    firstStepStatus,
     newWorkflowCtx,
     newWorkflowState,
     nextAttempt,
+    nextStepId,
+    nextWorkflowMarker,
     insideAStep,
     stepCtxBoundary,
+    stepCtxStatus,
     deadline,
     raceCancel,
     cancelToken,
@@ -117,7 +112,9 @@ import DBOS.Transact.Context
     stepStatusCurrentAttempt,
     stepStatusMaxAttempts,
     stepStatusId,
-    cancellationToken
+    cancellationToken,
+    withStep,
+    withWorkflow
   )
 import DBOS.Transact.Connection
   ( Connection (..),
@@ -391,13 +388,13 @@ scenarioExecCounters fx = do
     nextStepId wctx
   pure (first, second)
 
-scenarioRaceCompletes :: (MonadSTM m, MonadAsync m, MonadCatch m) => Fixture m -> m (Maybe Text)
+scenarioRaceCompletes :: (MonadAsync m, MonadCatch m) => Fixture m -> m (Maybe Text)
 scenarioRaceCompletes fx = do
   ctx <- fx.fixtureMkCtx "wf-race"
   marker <- nextWorkflowMarker ctx
   withStep ctx marker (firstStepStatus 0) $ \sctx -> raceCancel sctx (pure "done")
 
-scenarioRaceCancelled :: (MonadSTM m, MonadAsync m, MonadMVar m, MonadCatch m) => Fixture m -> m (Maybe Text)
+scenarioRaceCancelled :: (MonadAsync m, MonadMVar m, MonadCatch m) => Fixture m -> m (Maybe Text)
 scenarioRaceCancelled fx = do
   ctx <- fx.fixtureMkCtx "wf-race-cancel"
   marker <- nextWorkflowMarker ctx

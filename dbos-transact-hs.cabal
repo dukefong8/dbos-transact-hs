@@ -13,7 +13,7 @@ common commons
     OverloadedLabels
     OverloadedRecordDot
     RecordWildCards
-  ghc-options: -Wall -threaded -Wno-ambiguous-fields
+  ghc-options: -Wall -threaded -Wno-ambiguous-fields -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints
   build-depends:
     aeson,
     base >=4.21 && <5,

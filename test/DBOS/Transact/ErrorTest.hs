@@ -14,13 +14,8 @@ import DBOS.Transact
     EngineOnly,
     Error (..),
     application,
-    controlOf,
-    decodeErrorText,
-    encodeErrorText,
-    liftEngine,
-    mapApplication,
-    renderTransactError,
   )
+import DBOS.Transact.Error (controlOf, decodeErrorText, encodeErrorText, liftEngine, mapApplication)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -47,7 +42,7 @@ tests =
       testCase "an engine error lifts into any channel" $ do
         let engine = ErrorNotLaunched {operation = "run a workflow"} :: Error EngineOnly
         liftEngine engine @?= (ErrorNotLaunched {operation = "run a workflow"} :: Error CardDeclined)
-        renderTransactError (liftEngine engine :: Error CardDeclined) @?= "cannot run a workflow before DBOS is launched",
+        displayException (liftEngine engine :: Error CardDeclined) @?= "cannot run a workflow before DBOS is launched",
       testCase "only control errors report themselves as control" $ do
         let cancelled = ErrorSystemDatabase (SystemDB.WorkflowCancelled {workflowId = "wf-1"}) :: Error CardDeclined
             interrupted = Interrupted {workflowId = "wf-1"} :: Error CardDeclined

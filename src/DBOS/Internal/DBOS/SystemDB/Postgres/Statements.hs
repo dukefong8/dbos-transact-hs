@@ -137,12 +137,9 @@ module DBOS.SystemDB.Postgres.Statements
   )
 where
 
-import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
 import Data.Set qualified as Set
-import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Word (Word32)
 import DBOS.Prelude
 import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..))
 import Hasql.Decoders qualified as Decoders

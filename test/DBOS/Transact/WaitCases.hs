@@ -36,9 +36,8 @@ module DBOS.Transact.WaitCases
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.SystemDB (Outcome (..), StepRecord (..), WorkflowId (..), selectStepName)
+import DBOS.SystemDB (StepRecord (..), WorkflowId (..))
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact
   ( EngineOnly,
@@ -70,7 +69,7 @@ widTextOf (WorkflowId text) = text
 
 -- | Ported from Rust @tests/waits.rs@: an empty first wait records its
 -- refusal and a replay reads it back rather than deciding again.
-scenarioRefusal :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (Either (Error EngineOnly) WorkflowId, Maybe StepRecord, Either (Error EngineOnly) WorkflowId)
+scenarioRefusal :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (Either (Error EngineOnly) WorkflowId, Maybe StepRecord, Either (Error EngineOnly) WorkflowId)
 scenarioRefusal fx = do
   wid <- fx.wfFreshWorkflowId "refusal"
   first <- wfRun fx wid $ \ctx -> selectWorkflow ctx []
@@ -82,7 +81,7 @@ scenarioRefusal fx = do
 
 -- | A recorded winner that left the set is refused: the winner must still
 -- be waited on.
-scenarioWinnerLeft :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) WorkflowId)
+scenarioWinnerLeft :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) WorkflowId)
 scenarioWinnerLeft fx = do
   wid <- fx.wfFreshWorkflowId "winner"
   fx.wfSettle wid
@@ -91,14 +90,14 @@ scenarioWinnerLeft fx = do
   pure (wid, first, second)
 
 -- | An all-wait completes over a settled workflow.
-scenarioJoinSettled :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (Either (Error EngineOnly) ())
+scenarioJoinSettled :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (Either (Error EngineOnly) ())
 scenarioJoinSettled fx = do
   wid <- fx.wfFreshWorkflowId "join"
   fx.wfSettle wid
   wfRun fx wid $ \ctx -> joinWorkflows ctx [wid]
 
 -- | Select reports the first workflow to settle, and checkpoints the win.
-scenarioSelectFirst :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (WorkflowId, WorkflowId, Either (Error EngineOnly) WorkflowId, Maybe StepRecord)
+scenarioSelectFirst :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (WorkflowId, WorkflowId, Either (Error EngineOnly) WorkflowId, Maybe StepRecord)
 scenarioSelectFirst fx = do
   first <- fx.wfFreshWorkflowId "first-a"
   second <- fx.wfFreshWorkflowId "first-b"
@@ -108,7 +107,7 @@ scenarioSelectFirst fx = do
   pure (first, second, won, checkpoint)
 
 -- | The symmetric direction: a settled first id wins over a pending set.
-scenarioSelectSettledFirst :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (WorkflowId, WorkflowId, Either (Error EngineOnly) WorkflowId, Maybe StepRecord)
+scenarioSelectSettledFirst :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (WorkflowId, WorkflowId, Either (Error EngineOnly) WorkflowId, Maybe StepRecord)
 scenarioSelectSettledFirst fx = do
   first <- fx.wfFreshWorkflowId "sfirst-a"
   second <- fx.wfFreshWorkflowId "sfirst-b"
@@ -118,7 +117,7 @@ scenarioSelectSettledFirst fx = do
   pure (first, second, won, checkpoint)
 
 -- | A replayed first-wait reads its recorded winner back.
-scenarioReplayWinner :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) WorkflowId)
+scenarioReplayWinner :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) WorkflowId)
 scenarioReplayWinner fx = do
   first <- fx.wfFreshWorkflowId "replay-a"
   second <- fx.wfFreshWorkflowId "replay-b"
@@ -128,7 +127,7 @@ scenarioReplayWinner fx = do
   pure (second, won, replayed)
 
 -- | A cancelled workflow counts as settled.
-scenarioCancelled :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId)
+scenarioCancelled :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId)
 scenarioCancelled fx = do
   wid <- fx.wfFreshWorkflowId "cancelled"
   other <- fx.wfFreshWorkflowId "cancelled-other"
@@ -137,7 +136,7 @@ scenarioCancelled fx = do
   pure (other, outcome)
 
 -- | Join returns when the last workflow settles.
-scenarioJoinLast :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (Either (Error EngineOnly) ())
+scenarioJoinLast :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (Either (Error EngineOnly) ())
 scenarioJoinLast fx = do
   wid <- fx.wfFreshWorkflowId "joinlast"
   other <- fx.wfFreshWorkflowId "joinlast-other"
@@ -146,7 +145,7 @@ scenarioJoinLast fx = do
   wfRun fx wid $ \ctx -> joinWorkflows ctx [wid, other]
 
 -- | An empty all-wait is satisfied and takes no step.
-scenarioEmptyAll :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (Either (Error EngineOnly) (), Maybe StepRecord)
+scenarioEmptyAll :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (Either (Error EngineOnly) (), Maybe StepRecord)
 scenarioEmptyAll fx = do
   wid <- fx.wfFreshWorkflowId "empty"
   outcome <- wfRun fx wid $ \ctx -> joinWorkflows ctx []
@@ -154,7 +153,7 @@ scenarioEmptyAll fx = do
   pure (outcome, checkpoint)
 
 -- | A repeated id is accepted by both waits.
-scenarioRepeated :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) ())
+scenarioRepeated :: forall m. (MonadSTM m, MonadTime m, MonadDelay m) => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) ())
 scenarioRepeated fx = do
   wid <- fx.wfFreshWorkflowId "repeated"
   fx.wfSettle wid

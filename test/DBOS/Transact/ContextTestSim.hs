@@ -14,11 +14,12 @@ import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB.IOSim (simConnectionWith)
 import DBOS.Transact
-  ( Identity (..),
-    SysdbEvent (..),
-    WorkflowEvent (..),
-    runTracer,
+  (
+  runTracer,
   )
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.SystemDB.Retry (SysdbEvent (..))
+import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Context
   ( WorkflowCtx (wctxTracer),
     newWorkflowCtx,

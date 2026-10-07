@@ -14,7 +14,6 @@ import DBOS.DualStack (liveCase)
 import DBOS.Prelude
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
@@ -24,7 +23,6 @@ import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
     application,
-    decodeErrorText,
     EngineOnly, CodecError,
     Config (..),
     Environment (..),
@@ -37,7 +35,6 @@ import DBOS.Transact
     DBOS,
     WorkflowCtx,
     Executor,
-    Identity (..),
     SomeTracer (..),
     WorkflowStatus (..),
     acquireLoggerBackend,
@@ -65,6 +62,8 @@ import DBOS.Transact
     startOptionsDefault,
     waitForWorkflow,
   )
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Error (decodeErrorText)
 import DBOS.Transact.Workflow (abortAll, newTasks, tasksSpawner)
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
 import DBOS.Transact.Context (spawnLocal)

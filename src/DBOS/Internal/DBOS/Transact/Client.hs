@@ -47,14 +47,11 @@ module DBOS.Transact.Client
 where
 
 import DBOS.Prelude
-import Data.Aeson (FromJSON, ToJSON)
 import Data.Aeson (Value)
 import Data.Map.Strict (Map)
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import Data.Word (Word, Word64)
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
@@ -83,8 +80,7 @@ import DBOS.SystemDB.Types
   )
 import DBOS.Transact.Serialization (encodeAttributes)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
-import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), closeConnection, generatedWorkflowId, newConnection, runSystemDB, uuidWorkflowId)
+import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), closeConnection, generatedWorkflowId, newConnection, runSystemDB)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
@@ -214,7 +210,7 @@ connectClient config =
 
 -- | Closes the connection: the notifier stops before the pool closes, so
 -- nothing queued is lost to a closed pool.
-closeClient :: Monad m => Client m -> m ()
+closeClient ::  Client m -> m ()
 closeClient client = closeConnection client.conn
 
 -- | What an enqueue may say about how, beside the workflow and its input.

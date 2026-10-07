@@ -6,37 +6,21 @@ module DBOS.Transact.StepTest (tests) where
 
 import DBOS.Prelude
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Text (Text)
-import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (NewWorkflow (..), Submission (..), SystemDB (..), millisDuration, newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), Submission (..), SystemDB (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
     EngineOnly,
     Error (..),
-    PendingStep (..),
-    StepOptions (..),
-    StepStatus,
     StepCtx,
     WorkflowCtx,
     WorkflowId (..),
-    Identity (..),
-    acquireLoggerBackend,
-    firstStepStatus,
-    ioTracer,
-    nullTracer,
-    pendingStep,
-    runNestedStep,
-    runStepWith,
-    stepCtxStatus,
-    sleepStep,
-    stepOptionsDefault,
-    withWorkflow,
-  )
+    nullTracer)
+import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.StepCases
   ( StepFixture (..),
     checkDurableSleep,
@@ -57,19 +41,9 @@ import DBOS.Transact.StepCases
     scenarioTokenQuiet,
   )
 import DBOS.Transact qualified as Transact
-import DBOS.Transact.Checkpoint (pendingStepId)
-import DBOS.Transact.Context
-  ( cancellationToken,
-    stepCtxBoundary,
-    stepId,
-    stepStatus,
-    stepStatusCurrentAttempt,
-    stepStatusId,
-    stepStatusMaxAttempts
-  )
-import DBOS.Transact.ContextTest (connOver, ctxOver)
+import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+import Test.Tasty.HUnit (testCase)
 
 -- | The application identity the scoped runner installs: the app
 -- identity, not the execution identity the state mints internally.

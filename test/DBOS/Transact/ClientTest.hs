@@ -7,11 +7,10 @@ module DBOS.Transact.ClientTest (tests) where
 import DBOS.Prelude
 import Data.Aeson (Value (..))
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (Applications (..), Fork (..), ForkOptions (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
+import DBOS.SystemDB (Applications (..), QueueRecord (..), VersionInfo (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
@@ -38,7 +37,6 @@ import DBOS.Transact
     clientDeleteWorkflows,
     clientForkWorkflows,
     clientGetEvent,
-    clientLatestApplicationVersion,
     clientListApplicationVersions,
     clientListWorkflows,
     clientPromoteVersion,
@@ -52,7 +50,6 @@ import DBOS.Transact
     connectClient,
     decodeWorkflowValue,
     defaultQueueOptions,
-    dequeueDBOSWorkflows,
     encodeWorkflowValue,
     enqueueClientWorkflowWith,
     enqueueClientWorkflow,
@@ -72,16 +69,15 @@ import DBOS.Transact
     runStep,
     setEvent,
     shutdown,
-    storedPriority,
     validateClientConfig,
-    validateEnqueue,
     WorkflowKey,
     workflowStatusClient,
     WorkflowHandle (workflowId),
     recv,
     runStep,
-    setEvent,
-  )
+    setEvent)
+import DBOS.Transact.Instance (dequeueDBOSWorkflows)
+import DBOS.Transact.Workflow (storedPriority, validateEnqueue)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 

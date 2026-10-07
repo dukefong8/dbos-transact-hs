@@ -26,7 +26,6 @@ import DBOS.SystemDB
   )
 
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 

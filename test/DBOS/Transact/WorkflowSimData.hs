@@ -17,7 +17,6 @@ module DBOS.Transact.WorkflowSimData
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import DBOS.SystemDB
   ( NewWorkflow (..),
     StepRecord (..),

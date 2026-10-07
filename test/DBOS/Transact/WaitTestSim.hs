@@ -9,6 +9,8 @@
 -- recorded winner.
 module DBOS.Transact.WaitTestSim (tests) where
 
+import DBOS.Transact.Wait (WaitEvent (..))
+import DBOS.Transact.Context (withWorkflow)
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
@@ -16,7 +18,6 @@ import DBOS.Prelude
 import DBOS.SystemDB (NewWorkflow (..), Outcome (..), Submission (..), WorkflowId (..), newWorkflow, selectStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
-import DBOS.Transact (WaitEvent (..), withWorkflow)
 import DBOS.Transact.WaitCases
   ( WaitFixture (..),
     checkCancelled,

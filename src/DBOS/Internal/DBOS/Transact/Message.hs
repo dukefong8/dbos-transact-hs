@@ -20,7 +20,6 @@ module DBOS.Transact.Message
 where
 
 import DBOS.Prelude
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
@@ -113,12 +112,12 @@ sendWith wctx destination value options = do
 -- step's checkpoint standing for the send. Payloads are encoded before the
 -- step id is taken, so a message that cannot be encoded is a send that never
 -- happened. Mirrors Rust @send_bulk@.
-sendBulk :: (ToJSON value, MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Message value] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendBulk :: (ToJSON value, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Message value] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendBulk wctx messages = sendBulkWith wctx messages sendBulkOptionsDefault
 
 -- | 'sendBulk' with the options rather than the defaults: the fork
 -- fan-out. Mirrors Rust @send_bulk_with@.
-sendBulkWith :: (ToJSON value, MonadSTM m, MonadDelay m, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Message value] -> SendBulkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendBulkWith :: (ToJSON value, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Message value] -> SendBulkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendBulkWith wctx messages options = do
   let encoded = map encodeMessage messages
       serialization = case encoded of

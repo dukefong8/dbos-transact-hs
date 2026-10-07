@@ -6,7 +6,6 @@
 module DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery) where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (QueueName (..), WorkflowId, internalQueueName)

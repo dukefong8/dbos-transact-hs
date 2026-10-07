@@ -114,15 +114,12 @@ import DBOS.Prelude
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Word (Word32)
 import DBOS.SystemDB (AwaitedOutcome (..), NewWorkflow (..), StepRecord (..), Submission (..), WorkflowId (..), WorkflowRecord (..), Timestamp (..), addTimeout, getWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
   (
     application,
-    decodeErrorText,
     EngineOnly, CodecError,
     Config (..),
     Error (..),
@@ -132,7 +129,6 @@ import DBOS.Transact
     SelectArm (..),
     SerializedWorkflowValue (..),
     StartOptions (..),
-    Provenance (..),
     WorkflowHandle (..),
     Timeout (..),
     DBOS,
@@ -140,35 +136,27 @@ import DBOS.Transact
     stepCtxCancellationToken,
     Executor,
     Enqueue (..),
-    Identity (..),
     DuplicationPolicy (..),
     QueueConflict (..),
     SomeTracer (..),
     WorkflowStatus (..),
     awaitChild,
     defaultQueueOptions,
-    firstStepStatus,
     decodeWorkflowValue,
     encodeWorkflowValue,
     enqueueNew,
     handleResult,
     handleStatus,
-    launchOn,
-    launchOnWithQueues,
-    dequeueDBOSWorkflows,
     deleteQueue,
     newDBOS,
     newWorkflowKey,
     registerDBOSWorkflowRef,
     registerDBOSWorkflow,
     registerQueue,
-    resolveTimeoutDeadline,
     retrieveWorkflow,
     runDBOSWorkflow,
     runDBOSWorkflowRef,
-    nextWorkflowMarker,
     runOptionsDefault,
-    runOptionsToStartOptions,
     pendingAwait,
     pendingStep,
     runStep,
@@ -182,13 +170,19 @@ import DBOS.Transact
     startDBOSWorkflowRef,
     startOptionsDefault,
     stepOptionsDefault,
-    withStep,
-    withWorkflow,
-    timeoutBudget,
     waitForWorkflow,
   )
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Handle (Provenance (..))
+import DBOS.Transact.Error (decodeErrorText)
+import DBOS.Transact.Instance (dequeueDBOSWorkflows, launchOn, launchOnWithQueues)
+import DBOS.Transact.Workflow (resolveTimeoutDeadline, runOptionsToStartOptions, timeoutBudget)
 import DBOS.Transact.Context
-  ( withSystemDB,
+  ( firstStepStatus,
+    nextWorkflowMarker,
+    withStep,
+    withSystemDB,
+    withWorkflow,
     tokenCancelled,
     workflowId
   )
@@ -200,7 +194,6 @@ import DBOS.Transact.Connection
     newConnection,
     runSystemDB
   )
-import Debug.Trace (trace)
 import Test.Tasty.HUnit ((@?=))
 
 -- | Timeout, option, and child-id composition without a database: pure
@@ -1058,7 +1051,7 @@ scenarioPlainStepAtStart fx = do
 -- dequeue results, the settled child, and the replayed parent's run.
 scenarioDerivedChildAdopted ::
   forall m.
-  (MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   WfFixture m ->
   m (Text, [WorkflowId], Either (Error EngineOnly) [WorkflowId], Either (Error EngineOnly) AwaitedOutcome, Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioDerivedChildAdopted fx = do
@@ -1102,7 +1095,7 @@ scenarioDerivedChildAdopted fx = do
 -- child, the replayed parent's run, and both rows.
 scenarioAssignedChildAdopted ::
   forall m.
-  (MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   WfFixture m ->
   m (Text, [WorkflowId], Either (Error EngineOnly) [WorkflowId], Either (Error EngineOnly) AwaitedOutcome, Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioAssignedChildAdopted fx = do
@@ -1393,7 +1386,7 @@ scenarioChildInsideStepRefused fx = do
 -- child's awaited outcome, and the parent's steps.
 scenarioCascadeDeadline ::
   forall m.
-  (MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   WfFixture m ->
   m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Either (Error EngineOnly) AwaitedOutcome, [StepRecord])
 scenarioCascadeDeadline fx = do
@@ -1646,7 +1639,7 @@ scenarioCancelledChildAwaited fx = do
 -- result and the recorded step names.
 scenarioScopedBody ::
   forall m.
-  (MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   WfFixture m ->
   m (Either (Error EngineOnly) Int, [(Int, Text)])
 scenarioScopedBody fx = do
@@ -1691,7 +1684,7 @@ checkScopedBody (outcome, steps)
 -- leaves no row. Returns the winner's value and the recorded steps.
 scenarioScopedSelect ::
   forall m.
-  (MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m) =>
+  (MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadTime m) =>
   WfFixture m ->
   m (Either (Error EngineOnly) Int, [(Int, Text)])
 scenarioScopedSelect fx = do
@@ -1732,7 +1725,7 @@ checkScopedSelect (outcome, steps)
 -- whether the loser's watcher observed the fire.
 scenarioLosingTokenFired ::
   forall m.
-  (MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m) =>
+  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   WfFixture m ->
   m (Int, Bool)
 scenarioLosingTokenFired fx = do
@@ -1780,7 +1773,7 @@ scenarioLosingTokenFired fx = do
 -- the row's status, and the parent id.
 scenarioControlSelect ::
   forall m.
-  (MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m) =>
+  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   WfFixture m ->
   m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord], Maybe WorkflowStatus, Text)
 scenarioControlSelect fx = do
@@ -1814,7 +1807,7 @@ scenarioControlSelect fx = do
 -- parent's steps, and the derived child id.
 scenarioSelectStepRaces ::
   forall m.
-  (MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m) =>
+  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   WfFixture m ->
   m (Int, [StepRecord], Text)
 scenarioSelectStepRaces fx = do
@@ -2060,7 +2053,7 @@ scenarioStaleAwaitRefused fx = do
 -- both name the holder while no derived id ever exists. The queue is
 -- driven explicitly — no supervisor runs on either stack — with the parent
 -- run forked, the join observed, then passes until the parent settles.
-scenarioJoinHeldKey :: forall m. (MonadMVar m, MonadSTM m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m, MonadCatch m) => WfFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Text, Maybe WorkflowRecord, [StepRecord], [WorkflowId])
+scenarioJoinHeldKey :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m) => WfFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Text, Maybe WorkflowRecord, [StepRecord], [WorkflowId])
 scenarioJoinHeldKey fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     holderWid <- fx.wfFreshId "join-holder"

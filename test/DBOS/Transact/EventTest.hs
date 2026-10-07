@@ -8,7 +8,6 @@ module DBOS.Transact.EventTest (tests) where
 
 import DBOS.DualStack (liveCase)
 import DBOS.Prelude
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
@@ -17,13 +16,13 @@ import DBOS.SystemDB.Postgres (PostgresSystemDB)
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   ( Config (..),
-    Identity (..),
     SomeTracer (..),
     acquireLoggerBackend,
     configFromEnv,
     ioTracer,
     nullTracer,
   )
+import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
 import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.Transact.EventCases

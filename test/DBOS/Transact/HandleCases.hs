@@ -30,8 +30,6 @@ module DBOS.Transact.HandleCases
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
-import Data.Word (Word32, Word64)
 import DBOS.SystemDB (NewWorkflow (..), SerializedWorkflowValue (..), Submission (..), WorkflowId (..), WorkflowStatus (..), getResultStepName, initWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
@@ -41,7 +39,6 @@ import DBOS.Transact
     EngineOnly,
     Error (..),
     Executor,
-    Identity (..),
     Serializer (..),
     SomeTracer (..),
     WorkflowCtx,
@@ -53,7 +50,6 @@ import DBOS.Transact
     encodeWorkflowValue,
     handleResult,
     handleStatus,
-    launchOn,
     newDBOS,
     newWorkflowKey,
     registerDBOSWorkflow,
@@ -62,16 +58,16 @@ import DBOS.Transact
     runStep,
     secondsDuration,
     shutdown,
-    withWorkflow,
   )
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Instance (launchOn)
+import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.Connection
   ( Connection,
     Owner (..),
     SomeSystemDB (..),
     newConnection,
-    nextExecutionIdentity,
-    runSystemDB,
-  )
+    runSystemDB)
 
 -- | How a tree instantiation builds its world: a fresh unlaunched instance,
 -- the stack-specific launch, fresh workflow ids, a connection and identity
@@ -171,7 +167,7 @@ statusWf = handleStatus
 -- requested id, the handle's id, and the status it reports.
 scenarioRetrieveStatus ::
   forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   HandleFixture m ->
   m (Text, Text, Maybe WorkflowStatus)
 scenarioRetrieveStatus fx = do
@@ -197,7 +193,7 @@ scenarioRetrieveStatus fx = do
 -- | A handle result adopts the recorded output. Returns the decoded value.
 scenarioResultAdopts ::
   forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   HandleFixture m ->
   m Int
 scenarioResultAdopts fx = do
@@ -226,7 +222,7 @@ scenarioResultAdopts fx = do
 -- failure's step and message fields.
 scenarioFailError ::
   forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   HandleFixture m ->
   m (Text, Text)
 scenarioFailError fx = do
@@ -257,7 +253,7 @@ scenarioFailError fx = do
 -- count and the status the fresh handle reads.
 scenarioDeletedAbsent ::
   forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   HandleFixture m ->
   m (Word64, Maybe WorkflowStatus)
 scenarioDeletedAbsent fx = do
@@ -293,7 +289,7 @@ scenarioDeletedAbsent fx = do
 -- completed result. Returns the decoded value.
 scenarioDropHandle ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m) =>
+  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   HandleFixture m ->
   m Int
 scenarioDropHandle fx = do
@@ -325,7 +321,7 @@ scenarioDropHandle fx = do
 -- decoded value and the parent's recorded step names.
 scenarioScopedAwait ::
   forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   HandleFixture m ->
   m (Int, [Text])
 scenarioScopedAwait fx = do

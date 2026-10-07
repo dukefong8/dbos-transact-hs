@@ -44,8 +44,6 @@ module DBOS.Transact.EventCases
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
-import Data.Word (Word32)
 import DBOS.SystemDB (NewWorkflow (..), QueueName (..), SerializedWorkflowValue (..), Submission (..), WorkflowId (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
@@ -55,27 +53,18 @@ import DBOS.Transact
     EngineOnly,
     Error (..),
     Executor,
-    Identity (..),
-    PendingStep (..),
     RunOptions (..),
     Serializer (..),
     SomeTracer (..),
     WorkflowCtx,
     WorkflowRef,
     decodeWorkflowValue,
-    dequeueDBOSWorkflows,
     encodeWorkflowValue,
     getEvent,
     getWorkflowEvent,
-    launchExecutor,
-    launchOn,
-    launchOnWithQueues,
     millisDuration,
     newDBOS,
     newWorkflowKey,
-    nextStepId,
-    nextWorkflowMarker,
-    firstStepStatus,
     pendingGetEvent,
     pendingSetEvent,
     pendingSleep,
@@ -88,9 +77,11 @@ import DBOS.Transact
     setEvent,
     shutdown,
     stepOptionsDefault,
-    withStep,
-    withWorkflow,
   )
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Checkpoint (PendingStep (..))
+import DBOS.Transact.Instance (dequeueDBOSWorkflows, launchExecutor, launchOn, launchOnWithQueues)
+import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep, withWorkflow)
 import DBOS.Transact.Checkpoint (pendingStepId)
 import DBOS.Transact.Connection
   ( Connection,
@@ -127,7 +118,7 @@ data EventFixture m = EventFixture
 -- FastLogger; sim passes 'MemSystemDB' + the sim carrier.
 mkEventFixture ::
   forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   Config ->
   Config ->
   Identity ->
@@ -200,7 +191,7 @@ runRef = runDBOSWorkflowRef
 -- | A wait that polls for a published event instead of sleeping through it.
 -- Under IOSim the timeout is virtual, so a hung wait fails fast; live it
 -- throws after fifty polls, which tasty reports as a failure.
-waitForEvent :: (MonadMVar m, MonadSTM m, MonadDelay m, MonadTime m, MonadThrow m) => DBOS m -> WorkflowId -> Text -> m ()
+waitForEvent :: (MonadMVar m, MonadDelay m, MonadTime m, MonadThrow m) => DBOS m -> WorkflowId -> Text -> m ()
 waitForEvent dbos wid key = go (50 :: Int)
   where
     go 0 = throwIO (userError "the workflow never published an event")
@@ -214,7 +205,7 @@ waitForEvent dbos wid key = go (50 :: Int)
 -- the offer is already taken), then parks until released.
 progressBody ::
   forall exec m.
-  (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m) =>
+  (MonadMVar m, MonadSTM m) =>
   StrictMVar m Text ->
   StrictMVar m () ->
   () ->
@@ -259,7 +250,7 @@ inStepReaderBody other () wctx = do
 -- build order. The ids stay in build order regardless.
 outOfOrderBody ::
   forall exec m.
-  (MonadMVar m, MonadSTM m, MonadAsync m, MonadTime m, MonadDelay m, MonadCatch m) =>
+  (MonadMVar m, MonadAsync m, MonadTime m, MonadDelay m, MonadCatch m) =>
   DBOS m ->
   () ->
   WorkflowCtx exec m ->
@@ -316,7 +307,7 @@ scenarioPublishReplay fx = do
 -- plus whether the slot after the step stayed empty.
 scenarioCheckpointedRead ::
   forall m.
-  (MonadSTM m, MonadAsync m, MonadCatch m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadAsync m, MonadCatch m, MonadTime m, MonadDelay m) =>
   EventFixture m ->
   m ((Maybe Int, [(Int, Text)]), (Maybe Int, [(Int, Text)], Bool))
 scenarioCheckpointedRead fx = do
@@ -356,7 +347,7 @@ scenarioCheckpointedRead fx = do
 -- and the step counter before and after.
 scenarioRefusedSet ::
   forall m.
-  (MonadSTM m, MonadCatch m, MonadThrow m) =>
+  (MonadSTM m, MonadCatch m) =>
   EventFixture m ->
   m (Text, Int, Int)
 scenarioRefusedSet fx = do
@@ -381,7 +372,7 @@ scenarioRefusedSet fx = do
 -- Returns the read and the step counter before and after.
 scenarioCapturedRead ::
   forall m.
-  (MonadSTM m, MonadCatch m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadSTM m, MonadCatch m, MonadTime m, MonadDelay m) =>
   EventFixture m ->
   m (Maybe Int, Int, Int)
 scenarioCapturedRead fx = do
@@ -447,7 +438,7 @@ scenarioReplayNoRepublish fx = do
 -- recovered result and the kept event value.
 scenarioRecoveryKeepsFirst ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   EventFixture m ->
   m (Int, Text)
 scenarioRecoveryKeepsFirst fx = do
@@ -496,7 +487,7 @@ scenarioRecoveryKeepsFirst fx = do
 -- and what the plain read found.
 scenarioWrongInstance ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   EventFixture m ->
   m (Bool, Maybe Int)
 scenarioWrongInstance fx = do
@@ -531,7 +522,7 @@ scenarioWrongInstance fx = do
 -- with. Returns the recorded steps.
 scenarioOutOfOrderIds ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, MonadThrow m) =>
+  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   EventFixture m ->
   m [(Int, Text)]
 scenarioOutOfOrderIds fx = do

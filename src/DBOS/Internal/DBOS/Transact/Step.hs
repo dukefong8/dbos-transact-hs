@@ -24,7 +24,7 @@ where
 
 import DBOS.Prelude
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Text (Text, pack)
+import Data.Text (pack)
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
@@ -35,9 +35,8 @@ import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encode
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..))
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), StepStatus, WorkflowCtx (wctxConn, wctxTracer), cancellationToken, cancelToken, firstStepStatus, insideAStep, nextWorkflowMarker, nextStepId, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancellationToken, cancelToken, firstStepStatus, insideAStep, nextWorkflowMarker, nextStepId, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
-import GHC.Stack (HasCallStack)
 
 data StepError
   = StepRecordedError SerializedWorkflowValue
@@ -166,7 +165,7 @@ instance ToLogStr WorkflowEvent where
 -- Run and replay announcements go through the context's tracer, so the
 -- same call sites log to FastLogger in production and to the io-sim trace
 -- in simulations with no logger argument at all.
-runStep :: (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m, HasCallStack) => WorkflowCtx exec m -> Text -> (StepCtx exec m -> m value) -> m (Either (TransactError.Error e) value)
+runStep :: (FromJSON value, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> Text -> (StepCtx exec m -> m value) -> m (Either (TransactError.Error e) value)
 runStep wctx name body = do
   stepped <- insideAStep wctx
   if stepped
@@ -229,7 +228,7 @@ runNestedStep sctx name body = do
   Right <$> body sctx
 
 -- | The recorded outcome of a step, replayed without entering the body.
-replayStep :: (FromJSON value, FromJSON e) => Text -> Int -> StepRecord -> Either (TransactError.Error e) value
+replayStep :: (FromJSON value) => Text -> Int -> StepRecord -> Either (TransactError.Error e) value
 replayStep name stepId record =
   case record.stepRecordChildWorkflowId of
     Just (WorkflowId childText) -> Left (TransactError.StepFailed name ("unexpected child workflow checkpoint: " <> childText))
@@ -323,7 +322,7 @@ stepBackoff options failures =
 -- Leaf rule, as in 'runStep': inside a step body the call runs
 -- plainly once, uncheckpointed.
 runStepWith ::
-  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
+  (FromJSON value, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepOptions e ->
   WorkflowCtx exec m ->
   Text ->
@@ -339,7 +338,7 @@ runStepWith options wctx name body =
 -- unconsumed still spent its id, which is what keeps a replay's numbering
 -- stable.
 pendingStepWith ::
-  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
+  (FromJSON value, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepOptions e ->
   WorkflowCtx exec m ->
   Text ->
@@ -356,7 +355,7 @@ pendingStepWith options wctx name body = do
 
 -- | 'pendingStepWith' with the default options: a plain step.
 pendingStep ::
-  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
+  (FromJSON value, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   WorkflowCtx exec m ->
   Text ->
   (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
@@ -367,7 +366,7 @@ pendingStep = pendingStepWith stepOptionsDefault
 -- or run and record it. Building and driving are separate so a race can
 -- build every branch — claiming every id — before any branch runs.
 driveStepWith ::
-  (FromJSON value, ToJSON value, FromJSON e, ToJSON e, Show e, MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
+  (FromJSON value, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepOptions e ->
   WorkflowCtx exec m ->
   Text ->

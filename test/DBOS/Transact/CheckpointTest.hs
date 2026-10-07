@@ -13,8 +13,7 @@ import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact (Serializer (..), nullTracer, secondsDuration)
 import DBOS.Transact.Checkpoint (takenPlacement)
 import DBOS.Transact.Connection
-  ( Connection (..),
-    Owner (..),
+  ( Owner (..),
     SomeSystemDB (..),
     newConnection,
     uuidWorkflowId

@@ -36,36 +36,33 @@ module DBOS.Transact.StepCases
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.Transact
   ( EngineOnly,
     Error (..),
-    Identity (..),
-    PendingStep (..),
     StepCtx,
     StepOptions (..),
-    StepStatus,
-    WorkflowCtx,
-    firstStepStatus,
     millisDuration,
     pendingStep,
     runNestedStep,
     runStep,
     runStepWith,
     sleepStep,
+    stepOptionsDefault)
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Checkpoint (PendingStep (..))
+import DBOS.Transact.Checkpoint (pendingStepId)
+import DBOS.Transact.Connection (Connection)
+import DBOS.Transact.Context
+  ( StepStatus,
+    firstStepStatus,
     stepCtxStatus,
-    stepOptionsDefault,
+    stepId,
+    stepStatus,
     stepStatusCurrentAttempt,
     stepStatusId,
     stepStatusMaxAttempts,
     withWorkflow,
-  )
-import DBOS.Transact.Checkpoint (pendingStepId)
-import DBOS.Transact.Connection (Connection)
-import DBOS.Transact.Context
-  ( stepId,
-    stepStatus,
   )
 
 -- | How a tree instantiates its world: a fresh connection per run over a
@@ -90,7 +87,7 @@ orThrow = either (throwIO . userError . show) pure
 -- the body's run count, and the observed step id.
 scenarioRecordReplay ::
   forall m.
-  (MonadSTM m, MonadTime m, MonadCatch m, MonadThrow m) =>
+  (MonadSTM m, MonadTime m, MonadCatch m) =>
   StepFixture m ->
   m (Int, Int, Int, Maybe Int)
 scenarioRecordReplay fx = do
@@ -125,7 +122,7 @@ countingBody calls observed sctx = do
 -- outer result with whether each level checkpointed.
 scenarioNestedPlain ::
   forall m.
-  (MonadSTM m, MonadTime m, MonadCatch m, MonadThrow m) =>
+  (MonadSTM m, MonadTime m, MonadCatch m) =>
   StepFixture m ->
   m (Int, Bool, Bool)
 scenarioNestedPlain fx = do
@@ -158,7 +155,7 @@ nestingBody s = do
 -- and the run count.
 scenarioScopedView ::
   forall m.
-  (MonadSTM m, MonadTime m, MonadCatch m, MonadThrow m) =>
+  (MonadSTM m, MonadTime m, MonadCatch m) =>
   StepFixture m ->
   m (Int, Maybe StepStatus, Int, Int)
 scenarioScopedView fx = do
@@ -194,7 +191,7 @@ scopedBody calls observed s = do
 -- assert different seams around it (checkpoints live, traces sim).
 scenarioNestedStepView ::
   forall m.
-  (MonadSTM m, MonadTime m, MonadCatch m, MonadThrow m) =>
+  (MonadSTM m, MonadTime m, MonadCatch m) =>
   StepFixture m ->
   m (Int, Bool, Bool)
 scenarioNestedStepView = scenarioNestedPlain
@@ -205,7 +202,7 @@ scenarioNestedStepView = scenarioNestedPlain
 -- and the run count.
 scenarioPendingScoped ::
   forall m.
-  (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m, MonadThrow m) =>
+  (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepFixture m ->
   m (Int, Maybe Int, Int, Int)
 scenarioPendingScoped fx = do
@@ -259,7 +256,7 @@ scenarioDurableSleep fx = do
 -- attempt count, the nested observations, and the recorded step names.
 scenarioNestedEnclosing ::
   forall m.
-  (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m, MonadThrow m) =>
+  (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepFixture m ->
   m ((), (), Int, [(Maybe StepStatus, Maybe StepStatus, Maybe Int)], [Text])
 scenarioNestedEnclosing fx = do
@@ -319,7 +316,7 @@ innerObserve seen outer innerSctx = do
 -- Returns whether the abandonment timed out.
 scenarioTokenQuiet ::
   forall m.
-  (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m, MonadThrow m) =>
+  (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
   StepFixture m ->
   m Bool
 scenarioTokenQuiet fx = do

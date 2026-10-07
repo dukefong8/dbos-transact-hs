@@ -28,7 +28,6 @@ where
 import DBOS.Prelude
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Int (Int64)
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import DBOS.SystemDB.Class qualified as SystemDB
@@ -156,7 +155,7 @@ pendingAwait wctx handle = do
 -- settled outcome under the claimed id. The placement decides, so a race
 -- can build every branch before any of them waits.
 driveAwait ::
-  (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
+  (MonadDelay m, MonadTime m, MonadMVar m, MThrow.MonadThrow m, FromJSON e, ToJSON e) =>
   WorkflowCtx exec m ->
   WorkflowHandle m e ->
   StepPlacement exec m ->

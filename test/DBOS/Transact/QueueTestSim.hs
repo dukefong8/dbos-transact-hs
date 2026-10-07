@@ -23,7 +23,6 @@ module DBOS.Transact.QueueTestSim (tests) where
 
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimEventType (..), SimTrace, selectTraceEvents)
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)

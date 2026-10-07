@@ -60,9 +60,7 @@ module DBOS.Transact.ManagementCases
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Word (Word32)
 import DBOS.SystemDB (Fork (..), ForkOptions (..), ForkPoint (..), QueueName (..), SerializedWorkflowValue (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, internalQueueName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
@@ -73,7 +71,6 @@ import DBOS.Transact
     EngineOnly,
     Error (..),
     Executor,
-    Identity (..),
     Serializer (..),
     SomeTracer (..),
     StartOptions (..),
@@ -83,7 +80,6 @@ import DBOS.Transact
     WorkflowRef,
     cancelWorkflows,
     decodeWorkflowValue,
-    dequeueDBOSWorkflows,
     deleteWorkflows,
     encodeWorkflowValue,
     enqueueDBOSWorkflow,
@@ -92,7 +88,6 @@ import DBOS.Transact
     forkWorkflows,
     handleResult,
     handleStatus,
-    launchOnWithQueues,
     newDBOS,
     newWorkflowKey,
     registerDBOSWorkflow,
@@ -111,6 +106,8 @@ import DBOS.Transact
     startOptionsDefault,
     waitForWorkflow,
   )
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Instance (dequeueDBOSWorkflows, launchOnWithQueues)
 import DBOS.Transact.Connection
   ( Connection,
     Owner (..),
@@ -252,7 +249,7 @@ treeParentBody childRef started () wctx = do
 -- unlaunched call was refused.
 scenarioUnlaunched ::
   forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadThrow m) =>
+  (MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m) =>
   MgmtFixture m ->
   m Bool
 scenarioUnlaunched fx = do
@@ -265,7 +262,7 @@ scenarioUnlaunched fx = do
 -- | Cancelling a workflow that does not exist is not an error.
 scenarioCancelMissing ::
   forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m) =>
   MgmtFixture m ->
   m [WorkflowId]
 scenarioCancelMissing fx = do
@@ -280,7 +277,7 @@ scenarioCancelMissing fx = do
 -- missing ids the refusal names.
 scenarioResumeMissing ::
   forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m) =>
   MgmtFixture m ->
   m [Text]
 scenarioResumeMissing fx = do
@@ -297,7 +294,7 @@ scenarioResumeMissing fx = do
 -- count, the resumed ids, the decoded result, and the final run count.
 scenarioCancelResumeRun ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Text, [Text], Maybe WorkflowStatus, Int, [Text], Int, Int)
 scenarioCancelResumeRun fx = do
@@ -359,7 +356,7 @@ scenarioCancelResumeRun fx = do
 -- Returns the decoded result.
 scenarioResumeOntoQueue ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m Int
 scenarioResumeOntoQueue fx = do
@@ -406,7 +403,7 @@ scenarioResumeOntoQueue fx = do
 -- ids the tree cancel named, and the child's terminal status.
 scenarioCancelTree ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m, MonadCatch m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Text, [Text], Maybe WorkflowStatus)
 scenarioCancelTree fx = do
@@ -453,7 +450,7 @@ scenarioCancelTree fx = do
 -- status a fresh handle reads.
 scenarioDelete ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m, MonadCatch m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Word64, Maybe WorkflowStatus)
 scenarioDelete fx = do
@@ -489,7 +486,7 @@ scenarioDelete fx = do
 -- the decoded result.
 scenarioRetrieve ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Maybe WorkflowStatus, Int)
 scenarioRetrieve fx = do
@@ -639,7 +636,7 @@ zeroBody () _ = pure (Right 0)
 -- and the source's attempt count.
 scenarioForkFromBeginning ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Text, Int, Int)
 scenarioForkFromBeginning fx = do
@@ -681,7 +678,7 @@ scenarioForkFromBeginning fx = do
 -- carries, and the fork's decoded result.
 scenarioForkTakesIdAndQueue ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Text, Maybe Text, Int)
 scenarioForkTakesIdAndQueue fx = do
@@ -724,7 +721,7 @@ scenarioForkTakesIdAndQueue fx = do
 -- the steps at or above the fork point. Returns the fork's step names.
 scenarioForkFromStep ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m, MonadCatch m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m [Text]
 scenarioForkFromStep fx = do
@@ -768,7 +765,7 @@ scenarioForkFromStep fx = do
 -- fork's id, and the fork's decoded result.
 scenarioForkFromFailure ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m, MonadCatch m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Text, Text, Int)
 scenarioForkFromFailure fx = do
@@ -837,7 +834,7 @@ checkForkTakesIdAndQueue (forkedText, queue, decoded) = do
 -- the two source texts with the cancelled and resumed ids.
 scenarioBulkCancelResume ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m) =>
   MgmtFixture m ->
   m (Text, Text, [Text], [Text])
 scenarioBulkCancelResume fx = do
@@ -876,7 +873,7 @@ scenarioBulkCancelResume fx = do
 -- results, in order.
 scenarioBulkFork ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Text, Text, [Text], [Int])
 scenarioBulkFork fx = do
@@ -922,7 +919,7 @@ scenarioBulkFork fx = do
 -- partition key on the fork's row.
 scenarioForkPartitioned ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Maybe Text)
 scenarioForkPartitioned fx = do
@@ -976,7 +973,7 @@ checkForkPartitioned = checkEq (Just "pk-7")
 -- cleared row's attributes.
 scenarioAttributes ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Text, [Text], [Text], Maybe Text)
 scenarioAttributes fx = do
@@ -1038,7 +1035,7 @@ checkDelayRelease = checkEq (Just Delayed, 0)
 -- it. Returns the waiting status and the decoded result.
 scenarioDelayRelease ::
   forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadSTM m, MonadTimer m, MonadTime m, MonadDelay m, MonadThrow m) =>
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
   MgmtFixture m ->
   m (Maybe WorkflowStatus, Int)
 scenarioDelayRelease fx = do

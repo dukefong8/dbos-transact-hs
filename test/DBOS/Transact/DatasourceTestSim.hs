@@ -15,12 +15,13 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, newMemDB, simConnectionWith, simInstance)
 import DBOS.Transact
-  ( TransactionEvent (..),
-    WorkflowCtx,
-    WorkflowId (..),
-    Identity (..),
-    withWorkflow,
+  (
+  WorkflowCtx,
+  WorkflowId (..),
   )
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Datasource (TransactionEvent (..))
+import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.DatasourceCases
   ( DsFixture (..),
     RegistryFixture (..),
@@ -52,7 +53,6 @@ import DBOS.Transact.DatasourceCases
     scenarioRetryThenSuccess,
     scenarioRunsOutside,
   )
-import Data.Text (Text)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 

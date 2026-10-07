@@ -26,7 +26,6 @@ module DBOS.Transact.Checkpoint
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), insideAStep, nextStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
 import DBOS.Transact.Connection (Connection (..), Owner (..))
 import DBOS.Transact.Error (Error (..))

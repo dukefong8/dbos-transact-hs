@@ -13,7 +13,7 @@ import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
 import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
-import DBOS.Transact.Context (WorkflowCtx (wctxTracer), nextStepId, stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.Transact.Context (WorkflowCtx (wctxTracer), stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Error qualified as TransactError
 

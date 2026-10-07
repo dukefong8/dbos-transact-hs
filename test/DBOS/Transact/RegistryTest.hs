@@ -8,26 +8,25 @@ import DBOS.Transact
   (
     EngineOnly, CodecError,
     WorkflowCtx,
-    Identity (..),
     WorkflowId (..),
     Error,
-    Failure (..),
     SerializedWorkflowValue (..),
     decodeWorkflowValue,
     encodeWorkflowValue,
     newWorkflowKey,
     nullTracer,
-    registerTypedWorkflow,
-    registerWorkflowRef,
-    renderTransactError,
-    withWorkflow,
   )
+import DBOS.Transact.Error (Failure (..))
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.Registry
   ( ErasedWorkflow (..),
     instanceWorkflowKey,
     lookupSnapshotWorkflow,
     newRegistry,
     registerErasedWorkflow,
+    registerTypedWorkflow,
+    registerWorkflowRef,
     renderWorkflowKey,
     WorkflowRef (refKey),
     refName,
@@ -37,8 +36,7 @@ import DBOS.Transact.Registry
     workflowKeyFromRow,
   )
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.ContextTest (connOver, ctxOver)
-import Data.Text (Text)
+import DBOS.Transact.ContextTest (connOver)
 import Data.Text qualified as Text
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -80,7 +78,7 @@ tests =
           Left err -> fail (show err)
         second <- registerErasedWorkflow registry key body
         case second of
-          Left err -> renderTransactError err @?= "a workflow is already registered as same"
+          Left err -> displayException err @?= "a workflow is already registered as same"
           Right () -> fail "expected duplicate registration to be refused",
       testCase "a snapshot closes the registry and releasing it reopens" $ do
         registry <- newRegistry
@@ -92,7 +90,7 @@ tests =
         snapshotSize snapshot @?= 1
         refused <- registerErasedWorkflow registry (newWorkflowKey "after") body
         case refused of
-          Left err -> renderTransactError err @?= "cannot register_workflow after DBOS is launched"
+          Left err -> displayException err @?= "cannot register_workflow after DBOS is launched"
           Right () -> fail "expected registration after snapshot to be refused"
         assertBool "the snapshot holds the registered workflow" (maybe False (const True) (lookupSnapshotWorkflow key snapshot))
         thawRegistry registry
@@ -168,7 +166,7 @@ tests =
           Right _ -> pure ()
         second <- registerWorkflowRef registry key body
         case second of
-          Left err -> renderTransactError err @?= "a workflow is already registered as same"
+          Left err -> displayException err @?= "a workflow is already registered as same"
           Right _ -> fail "expected duplicate registration to be refused",
       testCase "a zero argument workflow is called with no input at all" $ do
         registry <- newRegistry

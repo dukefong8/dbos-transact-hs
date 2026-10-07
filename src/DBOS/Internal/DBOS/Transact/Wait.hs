@@ -20,7 +20,6 @@ where
 
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import Data.Text (Text)
 import Data.Text qualified as Text
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Error qualified as SystemDBError

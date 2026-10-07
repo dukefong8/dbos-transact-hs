@@ -24,8 +24,6 @@ module DBOS.Transact.Management
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
-import Data.Word (Word64)
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionsValidate, forkValidate, forkStepName, listWorkflowsStepName, resumeStepName)
@@ -93,7 +91,7 @@ cancelWorkflows conn workflowIds cancelChildren = do
 -- | Cancels workflows as a step of the calling workflow: the call takes a
 -- step id, runs once, and replays its recorded ids. Same leaf rule as
 -- every in-workflow call — inside a step body it runs plainly.
-cancelWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+cancelWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflowsInWorkflow wctx workflowIds cancelChildren =
   runStepWith
     stepOptionsDefault
@@ -117,7 +115,7 @@ resumeWorkflows conn workflowIds queueName = do
 
 -- | Resumes workflows as a step of the calling workflow. Same leaf rule
 -- as every in-workflow call.
-resumeWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+resumeWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflowsInWorkflow wctx workflowIds queueName =
   runStepWith
     stepOptionsDefault
@@ -152,7 +150,7 @@ deleteWorkflowsWithCaller conn workflowIds deleteChildren caller = do
 -- like every system-database failure — so a replay refuses again rather
 -- than replaying a delete. Inside a step body the call runs plainly with
 -- no caller, by the leaf rule.
-deleteWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
+deleteWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflowsInWorkflow wctx workflowIds deleteChildren =
   runStepWith
     stepOptionsDefault
@@ -184,7 +182,7 @@ forkWorkflows conn forks options = do
 -- under a second id. Arguments are refused before the step id is taken,
 -- so a refused call spends nothing. Same leaf rule as every in-workflow
 -- call.
-forkWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+forkWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkWorkflowsInWorkflow wctx forks options =
   case (forkOptionsValidate options, traverse forkValidate forks) of
     (Left err, _) -> pure (Left (TransactError.ErrorSystemDatabase err))
@@ -218,7 +216,7 @@ announceFork conn forked = case forked of
 -- | Forks from a point as a step of the calling workflow. Arguments are
 -- refused before the step id is taken. Same leaf rule as every
 -- in-workflow call.
-forkFromInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+forkFromInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFromInWorkflow wctx workflowIds point options =
   case forkOptionsValidate options of
     Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
@@ -258,7 +256,7 @@ listWorkflows conn filters = do
 -- | Lists workflows as a step of the calling workflow, under the
 -- cross-SDK name, so a step listing reads the same whichever SDK wrote
 -- it. Same leaf rule as every in-workflow call.
-listWorkflowsInWorkflow :: (MonadSTM m, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
+listWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 listWorkflowsInWorkflow wctx filters =
   runStepWith
     stepOptionsDefault

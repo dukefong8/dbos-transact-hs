@@ -48,37 +48,34 @@ import DBOS.Prelude
 import DBOS.Transact.Context (withSystemDB)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB (BackendErrorKind (..), NewWorkflow (..), Submission (..), SystemDB (..), newWorkflow)
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact
-  ( BackendError (..),
-    DBOS,
-    DataSource (..),
-    EngineOnly,
-    Error (..),
-    IsolationLevel (..),
-    RecordedOutcome (..),
-    SerializedWorkflowValue (..),
-    TransactionConfig (..),
-    Tx (..),
-    WorkflowCtx,
-    WorkflowId (..),
-    application,
-    beginSql,
-    clearDBOSCheckpoints,
-    encodeErrorText,
-    encodeWorkflowValue,
-    registerDBOSDataSource,
-    renderTransactError,
-    runTxOutside,
-    runTxStep,
-    transactionConfigDefault,
-    firstStepStatus,
-    nextWorkflowMarker,
-    withStep,
+  (
+  DBOS,
+  DataSource (..),
+  EngineOnly,
+  Error (..),
+  IsolationLevel (..),
+  SerializedWorkflowValue (..),
+  TransactionConfig (..),
+  Tx (..),
+  WorkflowCtx,
+  WorkflowId (..),
+  application,
+  encodeWorkflowValue,
+  registerDBOSDataSource,
+  runTxOutside,
+  runTxStep,
+  transactionConfigDefault,
   )
+import DBOS.SystemDB.Error (BackendError (..))
+import DBOS.Transact.Datasource (RecordedOutcome (..))
+import DBOS.Transact.Datasource.Postgres (beginSql)
+import DBOS.Transact.Instance (clearDBOSCheckpoints)
+import DBOS.Transact.Error (encodeErrorText)
+import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep)
 
 -- | How a tree instantiation builds its world: contexts over any backend
 -- plus a fresh fake datasource per case (each case owns its rows).
@@ -400,8 +397,8 @@ checkDeleteCheckpoints (first, second, third, fourth, runs) = do
 checkOwnershipMoved :: Either (Error EngineOnly) Text -> Either String ()
 checkOwnershipMoved result = case result of
   Left err
-    | "other-executor" `Text.isInfixOf` renderTransactError err -> Right ()
-    | otherwise -> Left ("expected the owning executor to be named, got: " <> show (renderTransactError err))
+    | "other-executor" `Text.isInfixOf` Text.pack (displayException err) -> Right ()
+    | otherwise -> Left ("expected the owning executor to be named, got: " <> displayException err)
   Right _ -> Left "expected the ownership conflict to stop the execution"
 
 -- | Registration succeeds once, the duplicate names the datasource, and
@@ -411,8 +408,8 @@ checkRegistryLifecycle (first, duplicate, rowsBefore, rowsAfter) = do
   unless (first == Right ()) $ Left ("expected registration to succeed, got: " <> show first)
   case duplicate of
     Left err
-      | "datasource" `Text.isInfixOf` renderTransactError err -> pure ()
-      | otherwise -> Left ("expected the refusal to name the datasource, got: " <> show (renderTransactError err))
+      | "datasource" `Text.isInfixOf` Text.pack (displayException err) -> pure ()
+      | otherwise -> Left ("expected the refusal to name the datasource, got: " <> displayException err)
     Right () -> Left "expected the duplicate registration to be refused"
   unless (rowsBefore == 1) $ Left ("expected one checkpoint row, got: " <> show rowsBefore)
   unless (rowsAfter == 0) $ Left ("expected clearing to empty the rows, got: " <> show rowsAfter)

@@ -49,12 +49,9 @@ module DBOS.Transact.Instance
   )
 where
 
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Int (Int64)
-import Data.Text (Text)
-import Data.Word (Word64)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
@@ -229,7 +226,7 @@ runDBOSWorkflow executor key workflowId input = do
 
 -- | Starts the referenced workflow via the launched executor: what
 -- @WorkflowRef::start_with@ becomes when the call site holds a reference.
-startDBOSWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Executor m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startDBOSWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Executor m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startDBOSWorkflowRef executor ref options input =
   startWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
 
@@ -245,7 +242,7 @@ runDBOSWorkflowRef executor ref options input = do
       pure outcome
     Nothing -> pure outcome
 
-enqueueDBOSWorkflow :: (MonadMVar m, Monad m) => DBOS m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
+enqueueDBOSWorkflow :: (MonadMVar m) => DBOS m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
 enqueueDBOSWorkflow dbos key workflowId input queueName = do
   running <- requireExecutor dbos "enqueue a workflow"
   case running of
@@ -262,7 +259,7 @@ enqueueDBOSWorkflow dbos key workflowId input queueName = do
             input
             queueName
 
-dequeueDBOSWorkflows :: (MonadMVar m, MonadSTM m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+dequeueDBOSWorkflows :: (MonadMVar m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeueDBOSWorkflows dbos = do
   running <- requireExecutor dbos "dequeue workflows"
   case running of
@@ -285,14 +282,14 @@ retrieveWorkflow dbos (WorkflowId workflowText) = do
     Left err       -> Left err
     Right executor -> Right (pollingHandle executor.conn workflowText False)
 
-cancelWorkflows :: (MonadMVar m, Monad m) => DBOS m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+cancelWorkflows :: (MonadMVar m) => DBOS m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflows dbos workflowIds includeChildren = do
   running <- requireExecutor dbos "cancel workflows"
   case running of
     Left err       -> pure (Left err)
     Right executor -> Management.cancelWorkflows executor.conn workflowIds includeChildren
 
-resumeWorkflows :: (MonadMVar m, Monad m) => DBOS m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+resumeWorkflows :: (MonadMVar m) => DBOS m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflows dbos workflowIds queueName = do
   running <- requireExecutor dbos "resume workflows"
   case running of
@@ -302,7 +299,7 @@ resumeWorkflows dbos workflowIds queueName = do
 -- | Moves a delayed workflow's release: brought forward to now, the
 -- supervisor releases it on its next pass. The launched-instance guard
 -- first, as every method on this surface expects.
-setWorkflowDelay :: (MonadMVar m, Monad m) => DBOS m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+setWorkflowDelay :: (MonadMVar m) => DBOS m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 setWorkflowDelay dbos workflowId delay = do
   running <- requireExecutor dbos "set a workflow delay"
   case running of
@@ -319,21 +316,21 @@ setWorkflowDelay dbos workflowId delay = do
           runTracer executor.conn.connTracer (WorkflowDelayMoveAsked workflowText)
           pure (Right ())
 
-deleteWorkflows :: (MonadMVar m, Monad m) => DBOS m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
+deleteWorkflows :: (MonadMVar m) => DBOS m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflows dbos workflowIds includeChildren = do
   running <- requireExecutor dbos "delete workflows"
   case running of
     Left err       -> pure (Left err)
     Right executor -> Management.deleteWorkflows executor.conn workflowIds includeChildren
 
-forkWorkflows :: (MonadMVar m, Monad m) => DBOS m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+forkWorkflows :: (MonadMVar m) => DBOS m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkWorkflows dbos forks options = do
   running <- requireExecutor dbos "fork workflows"
   case running of
     Left err       -> pure (Left err)
     Right executor -> Management.forkWorkflows executor.conn forks options
 
-forkFrom :: (MonadMVar m, Monad m) => DBOS m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+forkFrom :: (MonadMVar m) => DBOS m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFrom dbos workflowIds point options = do
   running <- requireExecutor dbos "fork from workflows"
   case running of
@@ -343,7 +340,7 @@ forkFrom dbos workflowIds point options = do
 -- | Replaces the attributes attached to a workflow, or clears them when
 -- given 'Nothing'. The launched-instance guard first, as every method on
 -- this surface expects; the write itself lives in 'Management'.
-updateWorkflowAttributes :: (MonadMVar m, Monad m) => DBOS m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+updateWorkflowAttributes :: (MonadMVar m) => DBOS m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 updateWorkflowAttributes dbos workflowId attributes = do
   running <- requireExecutor dbos "update workflow attributes"
   case running of
@@ -352,7 +349,7 @@ updateWorkflowAttributes dbos workflowId attributes = do
 
 -- | Reads the workflows matching a filter. The launched-instance guard
 -- first; the read itself lives in 'Management'.
-listWorkflows :: (MonadMVar m, Monad m) => DBOS m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
+listWorkflows :: (MonadMVar m) => DBOS m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 listWorkflows dbos filters = do
   running <- requireExecutor dbos "list workflows"
   case running of
@@ -362,7 +359,7 @@ listWorkflows dbos filters = do
 -- | Read another workflow's event from outside a workflow, waiting up to
 -- the duration (zero is a poll). Nothing is checkpointed: there is no caller
 -- to record against, which is what makes this the outside-caller surface.
-getWorkflowEvent :: (MonadMVar m, MonadSTM m, MonadDelay m, MonadTime m) => DBOS m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe SerializedWorkflowValue))
+getWorkflowEvent :: (MonadMVar m, MonadDelay m, MonadTime m) => DBOS m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe SerializedWorkflowValue))
 getWorkflowEvent dbos workflowId key wait = do
   running <- requireExecutor dbos "read an event"
   case running of
@@ -376,7 +373,7 @@ getWorkflowEvent dbos workflowId key wait = do
           Right (Just (SerializedWorkflowValue encoded.encodedValue (Serialization <$> encoded.encodedSerialization)))
 
 -- | Send one message to a workflow from outside, the caller unrecorded.
-sendWorkflowMessage :: (MonadMVar m, Monad m) => DBOS m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendWorkflowMessage :: (MonadMVar m) => DBOS m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWorkflowMessage dbos destination topic idempotencyKey value = do
   running <- requireExecutor dbos "send a message"
   case running of
@@ -393,7 +390,7 @@ sendWorkflowMessage dbos destination topic idempotencyKey value = do
       pure (either (Left . TransactError.ErrorSystemDatabase) Right written)
 
 -- | Send a batch from outside in one transaction: all or none.
-sendWorkflowMessages :: (MonadMVar m, Monad m) => DBOS m -> [SendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendWorkflowMessages :: (MonadMVar m) => DBOS m -> [SendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWorkflowMessages dbos messages = do
   running <- requireExecutor dbos "send messages"
   case running of
@@ -407,7 +404,7 @@ sendWorkflowMessages dbos messages = do
 -- by name" list the clients render. Descending on purpose — the oracle's
 -- filter defaults to oldest-first, which is useless under a limit on a
 -- used database (the newest run falls outside the window).
-listWorkflowIdsByName :: (MonadMVar m, Monad m) => DBOS m -> Text -> Int64 -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+listWorkflowIdsByName :: (MonadMVar m) => DBOS m -> Text -> Int64 -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 listWorkflowIdsByName dbos name limit = do
   running <- requireExecutor dbos "list workflows"
   case running of
@@ -432,7 +429,7 @@ listWorkflowIdsByName dbos name limit = do
         Right records -> Right [record.workflowRecordId | record <- records]
 
 -- | Statuses for the ids that still have a row; a missing row is dropped.
-fetchWorkflowStatuses :: (MonadMVar m, Monad m) => DBOS m -> [WorkflowId] -> m [(WorkflowId, WorkflowStatus)]
+fetchWorkflowStatuses :: (MonadMVar m) => DBOS m -> [WorkflowId] -> m [(WorkflowId, WorkflowStatus)]
 fetchWorkflowStatuses dbos workflowIds = do
   running <- requireExecutor dbos "fetch workflow statuses"
   case running of
@@ -499,7 +496,7 @@ launchOnWithQueues dbos conn identity listen = do
 -- already bound the registry and installed the executor; the repeats below
 -- keep this tail self-contained for the IO builder path, which does
 -- neither — both operations are idempotent.)
-launchExecutor :: (MonadSTM m, MonadMVar m, MonadFork m, MThrow.MonadMask m, MonadDelay m, MonadTimer m, MonadTime m) => DBOS m -> Executor m -> m (Either (TransactError.Error TransactError.EngineOnly) (Executor m))
+launchExecutor :: (MonadMVar m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => DBOS m -> Executor m -> m (Either (TransactError.Error TransactError.EngineOnly) (Executor m))
 launchExecutor dbos executor = do
   prepared <- prepare executor.conn executor.identity
   case prepared of

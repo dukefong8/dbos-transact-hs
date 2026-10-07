@@ -11,21 +11,16 @@ module DBOS.SystemDB.IOSimTest (tests) where
 
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, runSimOrThrow)
-import Data.Text (Text)
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
     Change (..),
     Debounce (..),
-    Error (..),
     DebounceRequest (..),
     EncodedValue (..),
     EventRecord (..),
-    Fork (..),
-    ForkOptions (..),
     ForkPoint (..),
     NewQueue (..),
-    NewSchedule (..),
     NewWorkflow (..),
     NotificationRecord (..),
     OnExistingQueue (..),
@@ -67,9 +62,8 @@ import DBOS.SystemDB
     newWorkflow,
     secondsDuration,
     timestampFromEpochMs,
-    zeroRowCounts,
-  )
-import DBOS.SystemDB.IOSim (MockSystemDB (..), MemSystemDB, newMemDB)
+    zeroRowCounts)
+import DBOS.SystemDB.IOSim (MockSystemDB (..), newMemDB)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 

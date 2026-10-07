@@ -26,7 +26,6 @@ module DBOS.Transact.Queue
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types
@@ -250,7 +249,7 @@ validateQueueOptions queueName options =
     (<|>) (Just value) _ = Just value
     (<|>) Nothing other = other
 
-registerQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> QueueOptions -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
+registerQueue :: (MonadMVar m) => DBOS m -> Text -> QueueOptions -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
 registerQueue dbos queueName options conflict
   | Just refusal <- reserved queueName = pure (Left refusal)
   | otherwise = case validateQueueOptions queueName options of
@@ -270,7 +269,7 @@ registerQueue dbos queueName options conflict
                 Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
                 Right _ -> queueRecord executor queueName
 
-queue :: (MonadMVar m, Monad m) => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe Queue))
+queue :: (MonadMVar m) => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe Queue))
 queue dbos queueName = do
   required <- requireExecutor dbos "read a queue"
   case required of
@@ -279,7 +278,7 @@ queue dbos queueName = do
       result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getQueue db queueName)
       pure (fmap (fmap queueFromRecord) (either (Left . TransactError.ErrorSystemDatabase) Right result))
 
-listQueues :: (MonadMVar m, Monad m) => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [Queue])
+listQueues :: (MonadMVar m) => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [Queue])
 listQueues dbos = do
   required <- requireExecutor dbos "list queues"
   case required of
@@ -288,7 +287,7 @@ listQueues dbos = do
       result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.listQueues db (Named [executor.identity.identityAppName]))
       pure (fmap (map queueFromRecord) (either (Left . TransactError.ErrorSystemDatabase) Right result))
 
-updateQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> QueueChange -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
+updateQueue :: (MonadMVar m) => DBOS m -> Text -> QueueChange -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
 updateQueue dbos queueName change = case reserved queueName of
   Just refusal -> pure (Left refusal)
   Nothing -> do
@@ -330,7 +329,7 @@ updateQueue dbos queueName change = case reserved queueName of
                     updated <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.updateQueue db queueName update (\_ _ -> Right ()))
                     pure (queueFromRecord <$> either (Left . TransactError.ErrorSystemDatabase) Right updated)
 
-deleteQueue :: (MonadMVar m, Monad m) => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+deleteQueue :: (MonadMVar m) => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 deleteQueue dbos queueName = case reserved queueName of
   Just refusal -> pure (Left refusal)
   Nothing -> do
@@ -355,7 +354,7 @@ reserved queueName =
             )
       | otherwise -> Nothing
 
-queueRecord :: (MonadMVar m, Monad m) => Executor m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
+queueRecord :: (Monad m) => Executor m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
 queueRecord executor queueName = do
   result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getQueue db queueName)
   pure $ case result of
@@ -363,7 +362,7 @@ queueRecord executor queueName = do
     Right Nothing -> Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` was not returned after registration"))
     Right (Just record) -> Right (queueFromRecord record)
 
-resolveConflict :: (MonadMVar m, Monad m) => Executor m -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) OnExistingQueue)
+resolveConflict :: (Monad m) => Executor m -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) OnExistingQueue)
 resolveConflict _ AlwaysUpdate = pure (Right UpdateExisting)
 resolveConflict _ NeverUpdate = pure (Right LeaveExisting)
 resolveConflict executor UpdateIfLatestVersion = do

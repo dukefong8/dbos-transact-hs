@@ -18,13 +18,10 @@ import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB)
 import DBOS.Transact
   ( Error (..),
-    EngineOnly,
-    Identity (..),
-    WorkflowEvent (..),
-    renderTransactError,
-    WorkflowCtx,
-    withWorkflow,
-  )
+    EngineOnly)
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.StepRetryCases
   ( StepRetryFixture (..),
     checkPlainNotPreemptible,
@@ -121,7 +118,7 @@ tests =
     ]
 
 -- * Typed-event assertions (sim-only): the exact 'WorkflowEvent' record
--- each case must emit. Retry details are computed with 'renderTransactError'
+-- each case must emit. Retry details are computed with 'displayException'
 -- over the same error values, so the asserts pin the sequence, not the
 -- rendering.
 
@@ -131,15 +128,15 @@ traceEvents = selectTraceEventsDynamic
 traceRetryThird :: SimTrace a -> IO ()
 traceRetryThird tr =
   traceEvents tr
-    @?= [ StepRetrying "flaky" 0 1 3 1 (renderTransactError (StepFailed "flaky" "boom" :: (Error EngineOnly))),
-          StepRetrying "flaky" 0 2 3 2 (renderTransactError (StepFailed "flaky" "boom" :: (Error EngineOnly))),
+    @?= [ StepRetrying "flaky" 0 1 3 1 (Text.pack (displayException (StepFailed "flaky" "boom" :: (Error EngineOnly)))),
+          StepRetrying "flaky" 0 2 3 2 (Text.pack (displayException (StepFailed "flaky" "boom" :: (Error EngineOnly)))),
           StepOutputRecorded "flaky" 0
         ]
 
 traceRetryExhausted :: SimTrace a -> IO ()
 traceRetryExhausted tr =
   traceEvents tr
-    @?= [ StepRetrying "doomed" 0 1 2 1 (renderTransactError (StepFailed "doomed" "boom" :: (Error EngineOnly))),
+    @?= [ StepRetrying "doomed" 0 1 2 1 (Text.pack (displayException (StepFailed "doomed" "boom" :: (Error EngineOnly)))),
           StepErrorRecorded "doomed" 0
         ]
 
@@ -150,7 +147,7 @@ traceRetryDefault tr =
 traceRetryReplay :: SimTrace a -> IO ()
 traceRetryReplay tr =
   traceEvents tr
-    @?= [ StepRetrying "flaky" 0 1 3 1 (renderTransactError (StepFailed "flaky" "boom" :: (Error EngineOnly))),
+    @?= [ StepRetrying "flaky" 0 1 3 1 (Text.pack (displayException (StepFailed "flaky" "boom" :: (Error EngineOnly)))),
           StepOutputRecorded "flaky" 0,
           StepReplaying "flaky" 0
         ]
@@ -158,15 +155,15 @@ traceRetryReplay tr =
 traceRetryDeclined :: SimTrace a -> IO ()
 traceRetryDeclined tr =
   traceEvents tr
-    @?= [ StepDeclined "declined" 0 1 (renderTransactError (StepFailed "declined" "boom" :: (Error EngineOnly))),
+    @?= [ StepDeclined "declined" 0 1 (Text.pack (displayException (StepFailed "declined" "boom" :: (Error EngineOnly)))),
           StepErrorRecorded "declined" 0
         ]
 
 traceRetryMidDecline :: SimTrace a -> IO ()
 traceRetryMidDecline tr =
   traceEvents tr
-    @?= [ StepRetrying "pick" 0 1 3 1 (renderTransactError (StepFailed "pick" "first" :: (Error EngineOnly))),
-          StepDeclined "pick" 0 2 (renderTransactError (StepFailed "pick" "second" :: (Error EngineOnly))),
+    @?= [ StepRetrying "pick" 0 1 3 1 (Text.pack (displayException (StepFailed "pick" "first" :: (Error EngineOnly)))),
+          StepDeclined "pick" 0 2 (Text.pack (displayException (StepFailed "pick" "second" :: (Error EngineOnly)))),
           StepErrorRecorded "pick" 0
         ]
 
@@ -183,9 +180,9 @@ traceTimeoutFreshRetry :: SimTrace a -> IO ()
 traceTimeoutFreshRetry tr =
   traceEvents tr
     @?= [ StepAttemptTimedOut "flaky" 0 20,
-          StepRetrying "flaky" 0 1 3 1 (renderTransactError (StepTimeout "flaky" (millisDuration 20) :: (Error EngineOnly))),
+          StepRetrying "flaky" 0 1 3 1 (Text.pack (displayException (StepTimeout "flaky" (millisDuration 20) :: (Error EngineOnly)))),
           StepAttemptTimedOut "flaky" 0 20,
-          StepRetrying "flaky" 0 2 3 2 (renderTransactError (StepTimeout "flaky" (millisDuration 20) :: (Error EngineOnly))),
+          StepRetrying "flaky" 0 2 3 2 (Text.pack (displayException (StepTimeout "flaky" (millisDuration 20) :: (Error EngineOnly)))),
           StepOutputRecorded "flaky" 0
         ]
 
@@ -193,7 +190,7 @@ traceTimeoutAllTimeout :: SimTrace a -> IO ()
 traceTimeoutAllTimeout tr =
   traceEvents tr
     @?= [ StepAttemptTimedOut "slow" 0 10,
-          StepRetrying "slow" 0 1 2 1 (renderTransactError (StepTimeout "slow" (millisDuration 10) :: (Error EngineOnly))),
+          StepRetrying "slow" 0 1 2 1 (Text.pack (displayException (StepTimeout "slow" (millisDuration 10) :: (Error EngineOnly)))),
           StepAttemptTimedOut "slow" 0 10,
           StepErrorRecorded "slow" 0
         ]
@@ -227,6 +224,6 @@ tracePreemptible :: SimTrace a -> IO ()
 tracePreemptible tr =
   traceEvents tr
     @?= [ StepAttemptTimedOut "preemptible" 0 50,
-          StepRetrying "preemptible" 0 1 3 1 (renderTransactError (StepTimeout "preemptible" (millisDuration 50) :: (Error EngineOnly))),
+          StepRetrying "preemptible" 0 1 3 1 (Text.pack (displayException (StepTimeout "preemptible" (millisDuration 50) :: (Error EngineOnly)))),
           StepPreempted "preemptible" 0
         ]

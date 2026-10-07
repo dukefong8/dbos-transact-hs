@@ -44,7 +44,7 @@ where
 import DBOS.Prelude
 import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Text (Text, pack)
+import Data.Text (pack)
 import Data.Text qualified as Text
 import Hasql.Statement qualified as Statement
 import DBOS.SystemDB.Class qualified as SystemDB

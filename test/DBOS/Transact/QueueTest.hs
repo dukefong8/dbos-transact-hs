@@ -5,9 +5,7 @@
 -- older SDKs.
 module DBOS.Transact.QueueTest (tests) where
 
-import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Map.Strict qualified as Map
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Hasql.Decoders qualified as Decoders
@@ -16,17 +14,16 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import DBOS.DualStack (liveCaseWith)
 import DBOS.Prelude
-import DBOS.SystemDB (Applications (..), AwaitedOutcome (..), Change (..), NewQueue (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), SystemDB (deleteQueue, getQueue, listQueues, upsertQueue), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), getWorkflow, internalQueueName, newQueue, secondsDuration)
+import DBOS.SystemDB (Applications (..), AwaitedOutcome (..), QueueRecord (..), SystemDB (getQueue, upsertQueue), WorkflowInitResult (..), WorkflowStatus (..), getWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (CodecError, Config (..), DBOS, WorkflowCtx, Executor, DuplicationPolicy (..), EngineOnly, Enqueue (..), Environment (..), Error (..), Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), Serialization (..), SerializedWorkflowValue (..),
- StartOptions (..), WorkflowId (..),
+import DBOS.Transact (CodecError, Config (..), DBOS, WorkflowCtx, Executor, EngineOnly, Environment (..), Error (..), QueueConflict (..), Serialization (..), SerializedWorkflowValue (..),
+ WorkflowId (..),
  WorkflowKey,
  WorkflowRef,
- WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueOptions, encodeWorkflowValue, enqueueDBOSWorkflow, enqueueNew, handleResult, handleStatus,
+ WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueOptions, encodeWorkflowValue, enqueueDBOSWorkflow, handleResult, handleStatus,
  launchWithEnvironment,
- newDBOS, newWorkflowKey, nullTracer, registerDBOSWorkflowRef, registerDBOSWorkflow, registerQueue, renderTransactError, retrieveWorkflow, shutdown, startDBOSWorkflowRef, startOptionsDefault, updateQueue, waitForWorkflow)
-import DBOS.Transact.Queue (defaultQueueChange)
+ newDBOS, newWorkflowKey, nullTracer, registerDBOSWorkflowRef, registerDBOSWorkflow, registerQueue, retrieveWorkflow, shutdown, waitForWorkflow)
 import DBOS.Transact.QueueCases
   ( QueueFixture (..),
     checkBadEnqueue,
@@ -101,7 +98,7 @@ import DBOS.Transact.QueueCases
     scenarioUpdateCoherent,
   )
 import Test.Tasty (TestTree, testGroup, withResource)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
+import Test.Tasty.HUnit (assertEqual, testCase, (@?=))
 
 -- | Launch over the isolated environment and hand back the executor:
 -- the one-call form of @launchWithEnvironment@ plus unwrap.

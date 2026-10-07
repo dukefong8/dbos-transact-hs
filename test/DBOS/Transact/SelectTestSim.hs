@@ -8,6 +8,7 @@
 -- proving the select path never touches the tracer.
 module DBOS.Transact.SelectTestSim (tests) where
 
+import DBOS.Transact.Step (WorkflowEvent (..))
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
@@ -15,7 +16,6 @@ import DBOS.Prelude
 import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowId (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
-import DBOS.Transact (WorkflowEvent (..))
 import DBOS.Transact.Connection (nextExecutionIdentity)
 import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState)
 import DBOS.Transact.SelectCases

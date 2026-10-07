@@ -10,10 +10,23 @@ import Control.Tracer qualified as CT
 import Data.ByteString.Char8 qualified as ByteString
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf)
-import Data.Text (Text, pack)
+import Data.Text (pack)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.Transact (EngineEvent (..), LoggerBackend, LogEvent (..), LogSeverity (..), QueueEvent (..), SomeTracer (..), SysdbEvent (..), Tracer, WorkflowEvent (..), contramap, fastLoggerTracer, mkTracer, newLoggerBackend, nullTracer, parseSeverity, renderEvent, runTracer)
+import DBOS.Transact
+  (
+  LoggerBackend,
+  SomeTracer (..),
+  Tracer,
+  fastLoggerTracer,
+  nullTracer,
+  runTracer,
+  )
+import DBOS.Tracer (LogEvent (..), LogSeverity (..), mkTracer, newLoggerBackend, parseSeverity)
+import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Transact.Recovery (EngineEvent (..))
+import DBOS.Transact.Dequeue (QueueEvent (..))
+import DBOS.SystemDB.Retry (SysdbEvent (..))
 import System.Log.FastLogger (FormattedTime, LogStr, LogType' (..), ToLogStr, fromLogStr, newTimeCache, newTimedFastLogger, toLogStr)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))

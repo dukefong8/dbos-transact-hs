@@ -16,20 +16,15 @@ where
 import DBOS.DualStack (liveCase)
 import DBOS.Prelude
 import Data.Int (Int64)
-import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.SystemDB (NewWorkflow (..), Submission (..), newWorkflow)
 import DBOS.SystemDB qualified as SysDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   ( AppDataSource,
-    BackendError (..),
     DataSource (..),
     EngineOnly,
     Error (..),
-    Identity (..),
     IsolationLevel (..),
-    RecordedOutcome (..),
     Serializer (..),
     TransactionConfig (..),
     Tx (..),
@@ -37,7 +32,6 @@ import DBOS.Transact
     WorkflowId (..),
     acquireAppDataSource,
     acquireAppDataSourceIn,
-    beginSql,
     configNew,
     encodeWorkflowValue,
     newDBOS,
@@ -48,8 +42,11 @@ import DBOS.Transact
     secondsDuration,
     toDataSource,
     verifyAppDataSource,
-    withWorkflow,
   )
+import DBOS.SystemDB.Error (BackendError)
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Datasource (RecordedOutcome (..))
+import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.Connection
   ( newConnection,
     uuidWorkflowId,

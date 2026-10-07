@@ -22,18 +22,17 @@ module DBOS.Transact.SelectCases
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.SystemDB (StepRecord (..), WorkflowId (..), selectStepStepName)
+import DBOS.SystemDB (StepRecord (..), selectStepStepName)
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact
-  ( Branches,
-    EngineOnly,
-    Error (..),
-    PendingStep (..),
-    Racing (..),
-    WorkflowCtx,
+  (
+  EngineOnly,
+  Error (..),
+  WorkflowCtx,
   )
+import DBOS.Transact.Select (Branches, Racing (..))
+import DBOS.Transact.Checkpoint (PendingStep (..))
 import DBOS.Transact.Select (checkSelect, controlError, newBranches, pushBranch, recordSelect)
 
 -- | What a stack must provide: run one check/record pass over a fresh
@@ -61,7 +60,7 @@ branches2 =
 -- | A fresh select claims its id and records a winner: the row carries
 -- step 0 under the select name with the winner as output, and a second
 -- pass replays the winner.
-scenarioFreshWinner :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => SelectFixture m -> m (Bool, Int, Int, Text, Maybe Text, Int)
+scenarioFreshWinner :: forall m. (MonadSTM m, MonadTime m) => SelectFixture m -> m (Bool, Int, Int, Text, Maybe Text, Int)
 scenarioFreshWinner fx = do
   isFresh <- scfWith fx $ \ctx -> do
     checked <- checkSelect ctx branches2
@@ -85,7 +84,7 @@ scenarioFreshWinner fx = do
 
 -- | A winner outside the branches that exist now is refused, naming this
 -- run's shape and the stale winner.
-scenarioStaleWinner :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => SelectFixture m -> m (Bool, Maybe (Int, Text, Text))
+scenarioStaleWinner :: forall m. (MonadSTM m, MonadTime m) => SelectFixture m -> m (Bool, Maybe (Int, Text, Text))
 scenarioStaleWinner fx = do
   isFresh <- scfWith fx $ \ctx -> do
     checked <- checkSelect ctx branches2

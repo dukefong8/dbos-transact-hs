@@ -23,7 +23,6 @@ module DBOS.Transact.ManagementSimData
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import DBOS.SystemDB
   ( QueueRecord (..),
     ScheduleRecord (..),

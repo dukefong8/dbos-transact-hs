@@ -13,9 +13,7 @@ module DBOS.Transact.Event
 where
 
 import DBOS.Prelude
-import Control.Concurrent.Class.MonadSTM.Strict (MonadSTM)
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))

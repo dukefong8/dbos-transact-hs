@@ -16,7 +16,6 @@ module DBOS.Transact.ContextSimData
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import DBOS.SystemDB
   ( EventRecord (..),
     NotificationRecord (..),

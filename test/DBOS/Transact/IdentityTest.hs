@@ -10,16 +10,15 @@ import DBOS.Prelude
 import DBOS.Transact
   ( Config (..),
     Environment (..),
-    Identity (..),
     configNew,
   )
 import DBOS.Transact.Identity
-  ( appVersionEnv,
+  ( Identity (..),
+    appVersionEnv,
     cloudAppNameEnv,
     resolve,
     validateAppName,
   )
-import Data.Text (Text)
 import Data.Text qualified as Text
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))

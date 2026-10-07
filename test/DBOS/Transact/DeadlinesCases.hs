@@ -74,7 +74,7 @@ waitForDeadline fx wid = go (50 :: Int)
 
 -- | A workflow within its deadline is unaffected: the run records its
 -- result and the row reads SUCCESS.
-scenarioWithinDeadline :: forall m. (MonadSTM m, MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadTime m, MonadTimer m, MonadCatch m, MonadMask m) => DeadlinesFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
+scenarioWithinDeadline :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMask m) => DeadlinesFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
 scenarioWithinDeadline fx = do
   (dbos, wid) <- fx.dfSetup
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -88,7 +88,7 @@ scenarioWithinDeadline fx = do
 
 -- | A workflow past its deadline is cancelled: the run reports the
 -- cancellation naming the workflow and the row reads CANCELLED.
-scenarioPastDeadline :: forall m. (MonadSTM m, MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadTime m, MonadTimer m, MonadCatch m, MonadMask m) => DeadlinesFixture m -> m (WorkflowId, Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
+scenarioPastDeadline :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMask m) => DeadlinesFixture m -> m (WorkflowId, Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
 scenarioPastDeadline fx = do
   (dbos, wid) <- fx.dfSetup
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -105,7 +105,7 @@ scenarioPastDeadline fx = do
 -- | A recovered workflow keeps the deadline it already had: the deadline
 -- stamped before the crash is the deadline after the relaunch, and the
 -- resumed run records its result.
-scenarioKeptDeadline :: forall m. (MonadSTM m, MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadTime m, MonadTimer m, MonadCatch m, MonadMask m) => DeadlinesFixture m -> m (Timestamp, Timestamp, Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+scenarioKeptDeadline :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadTime m, MonadTimer m, MonadMask m) => DeadlinesFixture m -> m (Timestamp, Timestamp, Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioKeptDeadline fx = do
   (dbos, wid) <- fx.dfSetup
   gate <- newEmptyMVar
@@ -126,7 +126,7 @@ scenarioKeptDeadline fx = do
 
 -- | Shutdown does not durably cancel a workflow that has a deadline: the
 -- row stays pending.
-scenarioShutdownPending :: forall m. (MonadSTM m, MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadTime m, MonadTimer m, MonadCatch m, MonadMask m) => DeadlinesFixture m -> m (Maybe WorkflowStatus)
+scenarioShutdownPending :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadTime m, MonadTimer m, MonadMask m) => DeadlinesFixture m -> m (Maybe WorkflowStatus)
 scenarioShutdownPending fx = do
   (dbos, wid) <- fx.dfSetup
   gate <- newEmptyMVar
@@ -143,7 +143,7 @@ scenarioShutdownPending fx = do
 -- | A deadline that loses to a recorded outcome reports that outcome: the
 -- completed run wins, and a 1ms budget against the recording still reads
 -- the result.
-scenarioBeatenDeadline :: forall m. (MonadSTM m, MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadTime m, MonadTimer m, MonadCatch m, MonadMask m) => DeadlinesFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
+scenarioBeatenDeadline :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMask m) => DeadlinesFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
 scenarioBeatenDeadline fx = do
   (dbos, wid) <- fx.dfSetup
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
