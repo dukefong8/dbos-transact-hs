@@ -42,14 +42,14 @@ import DBOS.Transact
     WorkflowId (..),
     decodeWorkflowValue,
     WorkflowRef,
-    enqueueDBOSWorkflow,
+    enqueueWorkflow,
     encodeWorkflowValue,
     fetchWorkflowStatuses,
     getWorkflowEvent,
     listWorkflowIdsByName,
     newWorkflowKey,
     queue,
-    startDBOSWorkflowRef,
+    startWorkflowRef,
     startOptionsDefault,
     sendWorkflowMessage,
     sendWorkflowMessages,
@@ -130,7 +130,7 @@ enqueueWorkflows app =
   liftIO $
     replicateM_ enqueueBatchSize $ do
       workflowId <- freshId "queued"
-      _ <- enqueueDBOSWorkflow app.staDbos (newWorkflowKey enqueuedWorkflowName) workflowId Nothing demoQueueName
+      _ <- enqueueWorkflow app.staDbos (newWorkflowKey enqueuedWorkflowName) workflowId Nothing demoQueueName
       pure ()
 
 applyConcurrency :: StarterApp -> Int -> RouteHandler ()
@@ -259,7 +259,7 @@ fetchQueueWorkerConcurrency dbos name = do
 -- running rather than failing.
 startBackground :: StarterApp -> WorkflowRef IO EngineOnly -> WorkflowId -> IO WorkflowId
 startBackground app ref (WorkflowId widText) = do
-  _ <- startDBOSWorkflowRef app.staExec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}) Nothing
+  _ <- startWorkflowRef app.staExec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}) Nothing
   pure (WorkflowId widText)
 
 freshId :: Text -> IO WorkflowId

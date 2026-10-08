@@ -48,7 +48,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Notify (Registry, keyFor, wake)
 import DBOS.SystemDB.Retry (SysdbEvent (..))
 import DBOS.SystemDB.Types (Duration, durationAsMillis, millisDuration)
-import DBOS.Tracer (SomeTracer, runTracer)
+import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Pool qualified as Pool

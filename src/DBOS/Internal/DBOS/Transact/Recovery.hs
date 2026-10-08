@@ -9,7 +9,7 @@ import DBOS.Prelude
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (QueueName (..), WorkflowId, internalQueueName)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
+import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Error qualified as TransactError
 

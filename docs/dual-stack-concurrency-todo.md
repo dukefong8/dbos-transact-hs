@@ -191,7 +191,7 @@ Converted 2026-10-01 (slices 17-19, child leaf refusals and detachment):
 - "a child that fails differently is started through lift" —
   `scenarioLiftChildError`/`checkLiftChildError` (the child's own error
   channel crosses the boundary as itself; the parent reports its own
-  `GaveUp`). The scenario registers through `registerDBOSWorkflowRef`
+  `GaveUp`). The scenario registers through `registerWorkflowRef`
   (the IO-only `registerRefOf` alias is gone). Sim trace:
   `WorkflowFailed` child, `WorkflowCompleted` parent.
 - "a child started and never awaited is still recorded" —
@@ -673,7 +673,7 @@ IOSim's scheduler — judged by one shared check.
 `reenqueueForRecovery` produced. Rules, in order:
 
 1. Sim `wfRelaunch` = `memLaunchOn` then drive the engine's dequeue entry
-   (`dequeueDBOSWorkflows`, `Instance.hs:281`) until it reports no more work.
+   (`dequeueWorkflows`, `Instance.hs:281`) until it reports no more work.
    Driving an engine function is permitted (ADR-0020's observation rule);
    document the one-call-vs-loop difference beside the helper. If both crash
    checks pass with the sim half running the same replay path as live, done.
@@ -714,7 +714,7 @@ IOSim's scheduler — judged by one shared check.
   commit per expected step name and byte-identical effects across the crash.
 - **Recovery spike: succeeded** (option 1). Sim `wfRelaunch` re-enqueues via
   `reenqueueForRecovery`, launches with `memLaunchOn`, then drives
-  `dequeueDBOSWorkflows` until it reports no work — the supervisor's pass,
+  `dequeueWorkflows` until it reports no work — the supervisor's pass,
   driven synchronously because `launchOn` installs no supervisor. Both crash
   scenarios run unchanged under IOSim; no IO-only markers remain and ADR-0020's
   list is unchanged.
@@ -1081,7 +1081,7 @@ timeouts` → **3/3, 6/6, 10/10 green**. Per-scenario comparison:
         fixture grows `qfReadWorkflowRow`; mem `listWorkflows` now honours
         the queue-name filter (null never matches non-empty, mirroring the
         SQL guard); engine-channel pinning helper `orCrash` for the free
-        `startDBOSWorkflowRef` error variable. Watcher live 35/35 + sim
+        `startWorkflowRef` error variable. Watcher live 35/35 + sim
         24/24, flip guard failed all ten checks on both halves.
       - Slice 3 green 2026-10-05 (timing/scoping tier): 12 more
         scenarios/checks (worker concurrency peaks, three listen filters via
@@ -1102,7 +1102,7 @@ timeouts` → **3/3, 6/6, 10/10 green**. Per-scenario comparison:
       both sides (both modules build `-Wall`-clean bar the tree's standing
       shadowing/type-defaults patterns). Engine fix the slice surfaced:
       `launchOnWithQueues` installed the unfiltered executor and returned a
-      filtered *copy*, so `dequeueDBOSWorkflows` kept sweeping every queue
+      filtered *copy*, so `dequeueWorkflows` kept sweeping every queue
       row in the shared database (15.8k rows ≈ 62 s per pass; the
       join-held-key driver's two passes cost 123.20 s, and the case had
       failed outright when its pass budget ran out). The seam now installs
@@ -1110,7 +1110,7 @@ timeouts` → **3/3, 6/6, 10/10 green**. Per-scenario comparison:
       (123.20 s → 4.39 s; live suite 5.0 s). psql mirror: the join case's
       holder `SUCCESS`/`child` + parent `SUCCESS`/`joiner`, its step rows
       `child` and `DBOS.getResult` both carrying the holder's id.
-- [ ] **S8 Management/Context/Handle/Event** — `*Cases.hs` per domain. Management
+- [x] **S8 Management/Context/Handle/Event** — `*Cases.hs` per domain. Management
       M1+M2 framed (`ManagementCases.hs`: cancel/resume/tree/delete/retrieve +
       fork-beginning/placed/step/failure/bulk/partitioned; 15 framed leaves live,
       15 + tracer sim) with two Mem fidelity fixes (`memFork` defaults forks to
@@ -1120,11 +1120,11 @@ timeouts` → **3/3, 6/6, 10/10 green**. Per-scenario comparison:
       (Queue/Client/Management suite backends delete their prefixed queue rows
       on release; the Workflow join case deletes its queue; ClientTest's driven
       cases set `configListenQueues`). Observability: `DequeuePassSlow`
-      (threshold-gated `QueueEvent`, `TracerTest` render case) — the 98 s
+      (threshold-gated `QueueEvent`, `LoggerTest` render case) — the 98 s
       Management stall that motivated it (unscoped `dequeuePass` over 16 k
       fixture queues; `mfLaunch` now scopes to the internal queue, EventCases
       precedent; `dbos.queues` 16,077 → ~1.6 k).
-      M3 (in progress): attributes framed + Mem JSON-containment mirror for the
+      M3 (done 2026-10-07 — attributes and delay-release framed and green in both trees): attributes framed + Mem JSON-containment mirror for the
       attributes filter; delay-release framed as the Time piece (driven
       `transitionDelayedWorkflows`); Client +3 (plain enqueue, cancel-missing,
       getEvent timeout). Skipped by directive: 8 remaining ManagementTest cases
@@ -1133,7 +1133,7 @@ timeouts` → **3/3, 6/6, 10/10 green**. Per-scenario comparison:
       Queue contention: `scenarioWorkerBudgetExhausted` (cap-one queue, peak
       in-flight + settled statuses, flip-guarded) on both stacks; the 55P03
       `DequeueBackoff` path is unforceable deterministically on either stack
-      (render-covered in `TracerTest`).
+      (render-covered in `LoggerTest`).
       Internal-queue alignment: `dequeuePass` skips a stored
       `_dbos_internal_queue` row and emits `InternalQueueLimitsIgnored` per
       pass, mirroring the supervisor's `refreshQueueSet` (proven live).
@@ -1141,6 +1141,7 @@ timeouts` → **3/3, 6/6, 10/10 green**. Per-scenario comparison:
       built connection (never the production `launchWithEnvironment`), so
       supervisor/prepare/version-check coverage rests on the unconverted
       suites — the same tradeoff the Workflow slice records.
+      Closed 2026-10-07: M3 attributes + delay-release green in both Management trees; the remaining ManagementTest cases stay skipped by directive.
 
 Per-slice acceptance: identical case names in both trees; the sim leaf
 drives the same engine entry points as its live half (deletion test);

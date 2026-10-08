@@ -7,7 +7,7 @@ tags: queue, delay
 
 ## Queue Delay
 
-Set `delay` on the `Enqueue` value to hold a queued workflow until the delay elapses. The workflow idles in the queue; `dequeueDBOSWorkflows` skips it until due.
+Set `delay` on the `Enqueue` value to hold a queued workflow until the delay elapses. The workflow idles in the queue; `dequeueWorkflows` skips it until due.
 
 ```haskell
 let q = (enqueueNew "email") { delay = Just (secondsDuration 60) }

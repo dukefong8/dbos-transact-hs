@@ -32,14 +32,14 @@ import DBOS.Transact
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
-    nullTracer,
-    registerDBOSDataSource,
-    registerDBOSWorkflowRef,
+    registerDataSource,
+    registerWorkflowRef,
     releaseAppDataSource,
     retrieveWorkflow,
     runAppSession,
     shutdown,
     toDataSource)
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep, withWorkflow)
 import DBOS.Transact.WidgetCases
@@ -264,15 +264,15 @@ withWidgetFixture body = do
   createWidgetSchema app tables
   dbos <- newDBOS config
   let ds = toDataSource app
-  _ <- registerDBOSDataSource dbos ds >>= either (fail . show) pure
+  _ <- registerDataSource dbos ds >>= either (fail . show) pure
   checkoutTid <- newTVarIO Nothing
   dispatchTid <- newTVarIO Nothing
-  dispatchRef <- registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (\tx -> captureDispatchThread dispatchTid (pgDispatchSteps tables tx))) >>= either (fail . show) pure
-  checkoutRef <- registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds (\tx -> captureCheckoutThread checkoutTid (pgCheckoutSteps tables tx)) dispatchRef) >>= either (fail . show) pure
-  failingRef <- registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutCannedFailWorkflow") (checkoutBody ds (\tx -> failingPgCheckoutSteps tables tx) dispatchRef) >>= either (fail . show) pure
+  dispatchRef <- registerWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (\tx -> captureDispatchThread dispatchTid (pgDispatchSteps tables tx))) >>= either (fail . show) pure
+  checkoutRef <- registerWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds (\tx -> captureCheckoutThread checkoutTid (pgCheckoutSteps tables tx)) dispatchRef) >>= either (fail . show) pure
+  failingRef <- registerWorkflowRef dbos (newWorkflowKey "CheckoutCannedFailWorkflow") (checkoutBody ds (\tx -> failingPgCheckoutSteps tables tx) dispatchRef) >>= either (fail . show) pure
   acked <- newTVarIO 0
   let lostDs = lostAckOnce acked ds
-  lostRef <- registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutLostAckWorkflow") (checkoutBody lostDs (\tx -> pgCheckoutSteps tables tx) dispatchRef) >>= either (fail . show) pure
+  lostRef <- registerWorkflowRef dbos (newWorkflowKey "CheckoutLostAckWorkflow") (checkoutBody lostDs (\tx -> pgCheckoutSteps tables tx) dispatchRef) >>= either (fail . show) pure
   postgresConfig <- Postgres.configFromEnv
   backend <- Postgres.acquirePostgresSystemDB postgresConfig nullTracer
   Postgres.activatePostgresSystemDB backend

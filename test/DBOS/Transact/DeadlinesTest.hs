@@ -26,9 +26,9 @@ import DBOS.Transact
     configFromEnv,
     launchWithEnvironment,
     newDBOS,
-    nullTracer,
     shutdown,
   )
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.DeadlinesCases
   ( DeadlinesFixture (..),
     checkBeatenDeadline,

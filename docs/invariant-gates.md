@@ -87,3 +87,8 @@ a hole, not a cleanup.
 - Runtime halves: the existing live+sim trees; no-trace assertions are
   strengthened wherever a negative currently asserts only the refusal
   shape.
+- Regression corpus (ADR-0029): `negative/neg_*.hs` must fail with the
+  expected error class, `negative/w_*.hs` must build clean; `make neg`
+  runs both halves and blocks `/review` on red.
+  strengthened wherever a negative currently asserts only the refusal
+  shape.

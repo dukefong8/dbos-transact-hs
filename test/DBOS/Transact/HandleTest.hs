@@ -16,12 +16,9 @@ import DBOS.SystemDB.Postgres (PostgresSystemDB)
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   ( Config (..),
-    SomeTracer (..),
-    acquireLoggerBackend,
     configFromEnv,
-    ioTracer,
-    nullTracer,
   )
+import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
 import DBOS.SystemDB.Retry (uuidEntropy)

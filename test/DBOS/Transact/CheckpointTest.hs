@@ -10,7 +10,8 @@ module DBOS.Transact.CheckpointTest (tests) where
 import DBOS.DualStack (liveCase)
 import DBOS.Prelude
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (Serializer (..), nullTracer, secondsDuration)
+import DBOS.Transact (Serializer (..), secondsDuration)
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Checkpoint (takenPlacement)
 import DBOS.Transact.Connection
   ( Owner (..),

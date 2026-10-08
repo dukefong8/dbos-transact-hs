@@ -9,21 +9,22 @@
 module DBOS.Transact.ContextTestSim (tests) where
 
 import DBOS.Prelude
-import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
+import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic, selectTraceEventsSay)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB.IOSim (simConnectionWith)
-import DBOS.Transact
-  (
-  runTracer,
-  )
 import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Logger (runTracer)
+import DBOS.Transact (logDebug, logError, logInfo, logWarn)
 import DBOS.SystemDB.Retry (SysdbEvent (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Context
   ( WorkflowCtx (wctxTracer),
+    firstStepStatus,
     newWorkflowCtx,
     newWorkflowState,
+    nextWorkflowMarker,
+    withStep,
     withTracer
   )
 import DBOS.Transact.Connection (Connection)
@@ -32,6 +33,8 @@ import DBOS.Transact.Connection
   )
 import DBOS.Transact.ContextTest
   ( Fixture (..),
+    appLogEvents,
+    appLogLines,
     checkAttemptScope,
     checkAttemptTokens,
     checkConcurrentIsolation,
@@ -145,6 +148,7 @@ tests =
       simCase (pure simFixture) "a step view reads its status with the workflow id" scenarioStepView checkStepView traceContextSilent,
       simCase (pure simFixture) "raceCancel returns the value when the token stays quiet" scenarioRaceCompletes checkRaceCompletes traceContextSilent,
       simCase (pure simFixture) "raceCancel reports cancellation when the token has fired" scenarioRaceCancelled checkRaceCancelled traceContextSilent,
+      simCase (pure simFixture) "a body logs through its context" scenarioAppLog checkTraceOnly traceAppLog,
       simCase (pure simFixture) "a context announces through its tracer" (const demoTrace) checkCoopFlag traceAnnounce
     ]
 
@@ -165,3 +169,31 @@ demoTrace = do
   ctx <- withTracer simTracer <$> simFixture.fixtureMkCtx "wf-1"
   runTracer ctx.wctxTracer (StepRunning "demo" 0)
   runTracer ctx.wctxTracer (SysdbRetryAttempt "demo-op" 1 0 "demo")
+
+-- | The four app-facing helpers called exactly as the live half calls
+-- them: four through the workflow view, two through the step view. The
+-- judgment is the trace, not a returned value.
+scenarioAppLog :: forall s. Fixture (IOSim s) -> IOSim s ()
+scenarioAppLog fixture = do
+  ctx <- fixture.fixtureMkCtx "wf-log"
+  logInfo ctx "order 7 dispatched"
+  logDebug ctx "payload 42 bytes"
+  logWarn ctx "dispatch queue backed up"
+  logError ctx "courier unavailable"
+  marker <- nextWorkflowMarker ctx
+  withStep ctx marker (firstStepStatus 1) $ \stepped -> do
+    logInfo stepped "picked from the shelf"
+    logWarn stepped "shelf scan retried"
+
+-- | The scenario's value carries no judgment for this case:
+-- 'traceAppLog' does.
+checkTraceOnly :: () -> Either String ()
+checkTraceOnly () = Right ()
+
+-- | The six helper calls as typed events, and the lines the sim tracer
+-- said for them — the same render the live half asserts through
+-- FastLogger.
+traceAppLog :: SimTrace a -> IO ()
+traceAppLog tr = do
+  selectTraceEventsDynamic tr @?= appLogEvents
+  selectTraceEventsSay tr @?= appLogLines

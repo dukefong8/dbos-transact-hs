@@ -105,7 +105,7 @@ import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
 import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdempotencyKey (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, workflowStatusText)
 import DBOS.SystemDB.Types qualified as Types
-import DBOS.Tracer (SomeTracer, runTracer)
+import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
 import Hasql.Decoders qualified as Decoders
 import Hasql.Errors qualified as Errors
@@ -1593,46 +1593,6 @@ debounceHeld raw =
         debounceHolderConfigName = raw.debounceHolderConfigName,
         debounceHolderApplicationName = raw.debounceHolderApplicationName
       }
-
--- | The step output encoding for a bounce, in the shape serde writes: an
--- externally tagged enum, so a replay in any SDK reads what this one wrote.
-instance Aeson.ToJSON DebounceHolder where
-  toJSON holder =
-    Aeson.object
-      [ "workflow_id" Aeson..= holder.debounceHolderWorkflowId,
-        "is_debounced" Aeson..= holder.debounceHolderIsDebounced,
-        "workflow_name" Aeson..= holder.debounceHolderWorkflowName,
-        "class_name" Aeson..= holder.debounceHolderClassName,
-        "config_name" Aeson..= holder.debounceHolderConfigName,
-        "application_name" Aeson..= holder.debounceHolderApplicationName
-      ]
-
-instance Aeson.FromJSON DebounceHolder where
-  parseJSON = Aeson.withObject "DebounceHolder" $ \o ->
-    DebounceHolder
-      <$> o Aeson..: "workflow_id"
-      <*> o Aeson..: "is_debounced"
-      <*> o Aeson..: "workflow_name"
-      <*> o Aeson..: "class_name"
-      <*> o Aeson..: "config_name"
-      <*> o Aeson..: "application_name"
-
-instance Aeson.ToJSON Debounce where
-  toJSON (Debounced wid) =
-    Aeson.object ["Bounced" Aeson..= Aeson.object ["workflow_id" Aeson..= wid]]
-  toJSON (DebounceHeld holder) = Aeson.object ["Held" Aeson..= holder]
-  toJSON DebounceUnheld = Aeson.String "Unheld"
-
-instance Aeson.FromJSON Debounce where
-  parseJSON (Aeson.String "Unheld") = pure DebounceUnheld
-  parseJSON (Aeson.Object o) =
-    (Debounced <$> (o Aeson..: "Bounced" >>= bouncedId))
-      <|> (DebounceHeld <$> o Aeson..: "Held")
-  parseJSON _ = fail "Debounce must be Unheld, Bounced, or Held"
-
-bouncedId :: Aeson.Value -> Parser Text
-bouncedId (Aeson.Object inner) = inner Aeson..: "workflow_id"
-bouncedId _                    = fail "Bounced must hold an object"
 
 -- | The stored output of a debounce step as the value it records. A missing
 -- output, or one this build cannot read, is malformed — a step that ran has

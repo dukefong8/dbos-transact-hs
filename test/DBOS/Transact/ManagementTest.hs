@@ -46,15 +46,14 @@ import DBOS.Transact
     Environment (..),
     Error (..),
     QueueConflict (..),
-    SomeTracer (..),
     StartOptions (..),
     WorkflowHandle (workflowId),
     WorkflowKey,
     WorkflowRef,
-    acquireLoggerBackend,
     cancelWorkflowsInWorkflow,
     clientCancelWorkflows,
     clientConfigFromEnv,
+    clientListWorkflowSteps,
     closeClient,
     configFromEnv,
     connectClient,
@@ -62,26 +61,24 @@ import DBOS.Transact
     defaultQueueOptions,
     deleteWorkflowsInWorkflow,
     encodeWorkflowValue,
-    enqueueDBOSWorkflow,
+    enqueueWorkflow,
     forkWorkflowsInWorkflow,
     handleResult,
     handleStatus,
-    ioTracer,
     launchWithEnvironment,
     listWorkflowsInWorkflow,
     newDBOS,
     newWorkflowKey,
-    registerDBOSWorkflow,
-    registerDBOSWorkflowRef,
+    registerWorkflow,
+    registerWorkflowRef,
     registerQueue,
     resumeWorkflows,
     resumeWorkflowsInWorkflow,
     retrieveWorkflow,
-    nullTracer,
-    runDBOSWorkflow,
+    runWorkflow,
     runStep,
     shutdown,
-    startDBOSWorkflowRef,
+    startWorkflowRef,
     startOptionsDefault,
     waitForWorkflow,
     cancelWorkflowsInWorkflow,
@@ -89,6 +86,7 @@ import DBOS.Transact
     forkWorkflowsInWorkflow,
     resumeWorkflowsInWorkflow,
     startChildWorkflow)
+import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
@@ -114,6 +112,9 @@ import DBOS.Transact.ManagementCases
     checkResumeMissing,
     checkResumeOntoQueue,
     checkRetrieve,
+    checkListSteps,
+    checkListStepsInWorkflow,
+    checkSingular,
     checkUnlaunched,
     mkMgmtFixture,
     mkMgmtFixture,
@@ -134,6 +135,9 @@ import DBOS.Transact.ManagementCases
     scenarioResumeMissing,
     scenarioResumeOntoQueue,
     scenarioRetrieve,
+    scenarioListSteps,
+    scenarioListStepsInWorkflow,
+    scenarioSingular,
     scenarioUnlaunched,
   )
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -163,6 +167,9 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "cancelling a tree reaches the children" scenarioCancelTree checkCancelTree,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "deleting a workflow removes its row" scenarioDelete checkDelete,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow can be retrieved by id" scenarioRetrieve checkRetrieve,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow's steps list in execution order" scenarioListSteps checkListSteps,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an in-workflow step listing is itself a step" scenarioListStepsInWorkflow checkListStepsInWorkflow,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "the singular wrappers move one workflow each" scenarioSingular checkSingular,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from the beginning runs the workflow again under a new id" scenarioForkFromBeginning checkForkFromBeginning,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a fork takes the id it is given" scenarioForkTakesIdAndQueue checkForkTakesIdAndQueue,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from a chosen step replays the steps below it" scenarioForkFromStep checkForkFromStep,
@@ -174,13 +181,13 @@ tests =
               wid = WorkflowId ("hs-l2-mgmt-resume-q-" <> suffix)
               echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
               echoWorkflow message _ = pure (Right message)
-          registered <- registerDBOSWorkflow dbos key echoWorkflow
+          registered <- registerWorkflow dbos key echoWorkflow
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchOrFail dbos
           enqueued <-
-            enqueueDBOSWorkflow
+            enqueueWorkflow
               dbos
               key
               wid
@@ -205,7 +212,7 @@ tests =
               body ownId wctx = do
                 deleted <- deleteWorkflowsInWorkflow wctx [WorkflowId ownId] False
                 pure (void deleted)
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -244,7 +251,7 @@ tests =
                 case started of
                   Left err -> pure (Left err)
                   Right _ -> void <$> takeMVar observed
-          registered <- registerDBOSWorkflow dbos parentKey parentBody
+          registered <- registerWorkflow dbos parentKey parentBody
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -284,17 +291,17 @@ tests =
                         wctx
                         (defaultWorkflowFilter {workflowFilterWorkflowIds = [target]})
                     pure (Right (length listed))
-          registeredTarget <- registerDBOSWorkflow dbos targetKey targetBody
+          registeredTarget <- registerWorkflow dbos targetKey targetBody
           case registeredTarget of
             Left err -> fail (show err)
             Right () -> pure ()
-          registeredOperator <- registerDBOSWorkflow dbos operatorKey operatorBody
+          registeredOperator <- registerWorkflow dbos operatorKey operatorBody
           case registeredOperator of
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchOrFail dbos
           enqueued <-
-            enqueueDBOSWorkflow
+            enqueueWorkflow
               dbos
               targetKey
               (WorkflowId targetText)
@@ -348,11 +355,11 @@ tests =
                       then liftIO (ioError (userError "forked then crashed"))
                       else pure (Right fid)
                   Right other -> fail ("expected exactly one fork, got: " <> show other)
-          sourceRegistered <- registerDBOSWorkflow dbos sourceKey sourceBody
+          sourceRegistered <- registerWorkflow dbos sourceKey sourceBody
           case sourceRegistered of
             Left err -> fail (show err)
             Right () -> pure ()
-          operatorRegistered <- registerDBOSWorkflow dbos operatorKey operatorBody
+          operatorRegistered <- registerWorkflow dbos operatorKey operatorBody
           case operatorRegistered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -402,11 +409,11 @@ tests =
                     case resumed of
                       Left err -> pure (Left err)
                       Right _ -> pure (Right ())
-          registeredTarget <- registerDBOSWorkflow dbos targetKey targetBody
+          registeredTarget <- registerWorkflow dbos targetKey targetBody
           case registeredTarget of
             Left err -> fail (show err)
             Right () -> pure ()
-          registeredOperator <- registerDBOSWorkflow dbos operatorKey operatorBody
+          registeredOperator <- registerWorkflow dbos operatorKey operatorBody
           case registeredOperator of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -416,7 +423,7 @@ tests =
             Left err -> fail (show err)
             Right _ -> pure ()
           enqueued <-
-            enqueueDBOSWorkflow
+            enqueueWorkflow
               dbos
               targetKey
               (WorkflowId targetText)
@@ -469,7 +476,7 @@ tests =
                           case probe of
                             Left err -> pure (Left err)
                             Right () -> pure (Right ())
-                registered <- registerDBOSWorkflow dbos operatorKey body
+                registered <- registerWorkflow dbos operatorKey body
                 case registered of
                   Left err -> fail (show err)
                   Right () -> pure ()
@@ -484,6 +491,37 @@ tests =
                   Right [StepRecord {stepRecordStepId = sid, stepRecordStepName = name}] ->
                     (sid, name) @?= (0, "probe")
                   other -> fail ("expected only the probe at step zero, got: " <> show other),
+      testCase "a client lists a workflow's steps without recording one" $
+        withInstance "mgmt-client-steps" $ \dbos suffix -> do
+          let key = newWorkflowKey "client-listed"
+              wid = WorkflowId ("hs-l2-mgmt-client-steps-" <> suffix)
+              body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
+              body () wctx = do
+                one <- runStep wctx "one" (const (pure ()))
+                case one of
+                  Left err -> pure (Left err)
+                  Right () -> do
+                    two <- runStep wctx "two" (const (pure ()))
+                    pure (void two)
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchOrFail dbos
+          ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+          case ran of
+            Right _ -> pure ()
+            other -> fail ("expected the workflow to run, got: " <> show other)
+          clientConfig <- clientConfigFromEnv
+          bracket (connectClient clientConfig) (either (const (pure ())) closeClient) $ \connected ->
+            case connected of
+              Left err -> fail (show err)
+              Right client -> do
+                listed <- clientListWorkflowSteps client wid
+                case listed of
+                  Left err -> fail (show err)
+                  Right records ->
+                    [record.stepRecordStepName | record <- records] @?= ["one", "two"],
       testCase "a refused management call spends no step id" $ do
         backend <- getBackend
         fresh <- freshSuffix
@@ -546,10 +584,10 @@ tests =
 -- carries only the aliases it uses, and a sibling test module repeats
 -- the ones it needs.
 runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWf = runDBOSWorkflow
+runWf = runWorkflow
 
 startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
-startWfRef = startDBOSWorkflowRef
+startWfRef = startWorkflowRef
 
 retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
 retrieveWf = retrieveWorkflow
@@ -672,7 +710,7 @@ isolatedEnvironment =
 
 registerRefOrFail :: (FromJSON argument, ToJSON result) => DBOS IO -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) result)) -> IO (WorkflowRef IO EngineOnly)
 registerRefOrFail dbos key body = do
-  registered <- registerDBOSWorkflowRef dbos key body
+  registered <- registerWorkflowRef dbos key body
   either (fail . show) pure registered
 
 retrieveOrFail :: DBOS IO -> WorkflowId -> IO (WorkflowHandle IO EngineOnly)

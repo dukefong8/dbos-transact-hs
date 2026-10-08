@@ -43,6 +43,7 @@ module DBOS.Transact.Client
     clientLatestApplicationVersion,
     clientPromoteVersion,
     clientListWorkflows,
+    clientListWorkflowSteps,
   )
 where
 
@@ -67,6 +68,7 @@ import DBOS.SystemDB.Types
     SendMessage (..),
     Serialization (..),
     SerializedWorkflowValue (..),
+    StepRecord,
     Submission (..),
     Topic (..),
     VersionInfo (..),
@@ -84,7 +86,7 @@ import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..),
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
-import DBOS.Tracer (nullTracer)
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Workflow (Enqueue (..), enqueueNew, maxRecoveryAttempts, resolveEnqueueCollision, storedPriority, validateEnqueue)
 import System.Environment (lookupEnv)
 
@@ -397,4 +399,13 @@ clientPromoteVersion client version = do
 clientListWorkflows :: Monad m => Client m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 clientListWorkflows client filters = do
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.listWorkflows db filters Nothing)
+  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+
+-- | Reads one workflow's steps, outputs and errors included. Nothing is
+-- checkpointed: a client has no step counter of its own to agree with a
+-- workflow's, and an id with no row lists nothing rather than failing.
+-- Mirrors Rust @Client::list_workflow_steps@.
+clientListWorkflowSteps :: Monad m => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+clientListWorkflowSteps client workflowId = do
+  result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.listSteps db workflowId True Nothing Nothing Nothing)
   pure (either (Left . TransactError.ErrorSystemDatabase) Right result)

@@ -60,12 +60,11 @@ import DBOS.Transact
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
-    registerDBOSWorkflow,
+    registerWorkflow,
     registerQueue,
     retrieveClientWorkflow,
-    nullTracer,
     recv,
-    runDBOSWorkflow,
+    runWorkflow,
     runStep,
     setEvent,
     shutdown,
@@ -76,7 +75,8 @@ import DBOS.Transact
     recv,
     runStep,
     setEvent)
-import DBOS.Transact.Instance (dequeueDBOSWorkflows)
+import DBOS.Transact.Logger (nullTracer)
+import DBOS.Transact.Instance (dequeueWorkflows)
 import DBOS.Transact.Workflow (storedPriority, validateEnqueue)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
@@ -114,7 +114,7 @@ tests =
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -134,7 +134,7 @@ tests =
             case enqueued of
               Left err -> fail (show err)
               Right handle -> do
-                _ <- dequeueDBOSWorkflows dbos
+                _ <- dequeueWorkflows dbos
                 result <- resultWf handle
                 case result of
                   Right (Just stored) -> do
@@ -174,7 +174,7 @@ tests =
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -191,7 +191,7 @@ tests =
             case (first, second) of
               (Right holder, Right joiner) -> do
                 joiner.workflowId @?= holder.workflowId
-                _ <- dequeueDBOSWorkflows dbos
+                _ <- dequeueWorkflows dbos
                 result <- resultWf joiner
                 case result of
                   Right (Just stored) -> do
@@ -213,7 +213,7 @@ tests =
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -350,7 +350,7 @@ tests =
         -- queue only, not every fixture queue on the shared database.
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [queueName]}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -372,7 +372,7 @@ tests =
             let enqueuedId = handle.workflowId
             sent <- clientSendMessage client (WorkflowId enqueuedId) (Just (Topic "ping")) Nothing (encodeWorkflowValue ("hello" :: Text))
             sent @?= Right ()
-            _ <- dequeueDBOSWorkflows dbos
+            _ <- dequeueWorkflows dbos
             result <- resultWf handle
             case result of
               Right (Just stored) -> do
@@ -408,7 +408,7 @@ tests =
         -- queue only, not every fixture queue on the shared database.
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [queueName]}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -433,7 +433,7 @@ tests =
                   SendMessage enqueuedId (encodeWorkflowValue ("two" :: Text)) (Just (Topic "ping")) Nothing
                 ]
             sent @?= Right ()
-            _ <- dequeueDBOSWorkflows dbos
+            _ <- dequeueWorkflows dbos
             result <- resultWf batch
             case result of
               Right (Just stored) -> do
@@ -455,7 +455,7 @@ tests =
                 Left err -> pure (Left err)
                 Right () -> runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -484,7 +484,7 @@ tests =
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -514,7 +514,7 @@ tests =
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -541,7 +541,7 @@ tests =
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -611,7 +611,7 @@ tests =
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -638,7 +638,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -673,7 +673,7 @@ tests =
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -691,7 +691,7 @@ tests =
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
 runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWf = runDBOSWorkflow
+runWf = runWorkflow
 
 resultWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 resultWf = handleResult

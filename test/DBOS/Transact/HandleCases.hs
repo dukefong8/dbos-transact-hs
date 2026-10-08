@@ -40,7 +40,6 @@ import DBOS.Transact
     Error (..),
     Executor,
     Serializer (..),
-    SomeTracer (..),
     WorkflowCtx,
     WorkflowHandle (..),
     WorkflowKey,
@@ -52,13 +51,14 @@ import DBOS.Transact
     handleStatus,
     newDBOS,
     newWorkflowKey,
-    registerDBOSWorkflow,
+    registerWorkflow,
     retrieveWorkflow,
-    runDBOSWorkflow,
+    runWorkflow,
     runStep,
     secondsDuration,
     shutdown,
   )
+import DBOS.Transact.Logger (SomeTracer (..))
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Instance (launchOn)
 import DBOS.Transact.Context (withWorkflow)
@@ -143,7 +143,7 @@ registerDouble dbos = do
   let key = newWorkflowKey "double"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body value wctx = runStep wctx "double" (const (pure (value * 2)))
-  registered <- registerDBOSWorkflow dbos key body
+  registered <- registerWorkflow dbos key body
   case registered of
     Left err -> throwIO (userError (show err))
     Right () -> pure ()
@@ -152,7 +152,7 @@ registerDouble dbos = do
 -- error channel pins to 'EngineOnly' once instead of at each call site.
 -- Local copies are deliberate: this module carries only the aliases it uses.
 runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWf = runDBOSWorkflow
+runWf = runWorkflow
 
 retrieveWf :: forall m. (MonadMVar m) => DBOS m -> WorkflowId -> m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))
 retrieveWf = retrieveWorkflow
@@ -230,7 +230,7 @@ scenarioFailError fx = do
     let key = newWorkflowKey "fails"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body _ _ = pure (Left (StepFailed "body" "boom"))
-    registered <- registerDBOSWorkflow dbos key body
+    registered <- registerWorkflow dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
@@ -261,7 +261,7 @@ scenarioDeletedAbsent fx = do
     let key = newWorkflowKey "delete-me"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body value _ = pure (Right (value + 1))
-    registered <- registerDBOSWorkflow dbos key body
+    registered <- registerWorkflow dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()

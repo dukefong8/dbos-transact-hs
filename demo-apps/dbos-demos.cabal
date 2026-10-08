@@ -24,6 +24,9 @@ executable demo-apps
     .,
     dbos-hs-starter,
     dbos-hs-widget-store,
+    dbos-hs-outbox,
+    dbos-hs-queue-worker,
+    dbos-hs-queue-patterns,
     demo-common
   main-is: Main.hs
   other-modules:
@@ -45,6 +48,25 @@ executable demo-apps
     WidgetStore.Store
     WidgetStore.View
     WidgetStore.Workflows
+    Outbox.App
+    Outbox.Handler
+    Outbox.Route
+    Outbox.Run
+    Outbox.Store
+    Outbox.View
+    Outbox.Workflows
+    QueueWorker.App
+    QueueWorker.Handler
+    QueueWorker.Route
+    QueueWorker.Run
+    QueueWorker.View
+    QueueWorker.Workflows
+    QueuePatterns.App
+    QueuePatterns.Handler
+    QueuePatterns.Route
+    QueuePatterns.Run
+    QueuePatterns.View
+    QueuePatterns.Workflows
   build-depends:
     aeson,
     base >=4.21 && <5,

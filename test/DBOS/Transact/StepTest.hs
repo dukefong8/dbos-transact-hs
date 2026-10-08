@@ -18,8 +18,9 @@ import DBOS.Transact
     Error (..),
     StepCtx,
     WorkflowCtx,
-    WorkflowId (..),
-    nullTracer)
+    WorkflowId (..)
+  )
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.StepCases
   ( StepFixture (..),

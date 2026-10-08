@@ -29,7 +29,7 @@ import Data.UUID.V4 qualified as UUID.V4
 import Data.Word (Word32)
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), renderError)
 import DBOS.SystemDB.Types (Duration (..), durationAsMillis, secondsDuration)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
+import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
 import System.Log.FastLogger (ToLogStr (..))
 
 -- | System-database events: retry attempts, backend warnings, notifier

@@ -43,8 +43,8 @@ import DBOS.Transact
     WorkflowCtx,
     decodeWorkflowValue,
     newWorkflowKey,
-    registerDBOSWorkflowRef,
-    runDBOSWorkflowRef,
+    registerWorkflowRef,
+    runWorkflowRef,
     runOptionsDefault,
     shutdown,
   )
@@ -79,9 +79,9 @@ scenarioWithinDeadline fx = do
   (dbos, wid) <- fx.dfSetup
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right 7)
-  ref <- registerDBOSWorkflowRef dbos (newWorkflowKey "quick") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newWorkflowKey "quick") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
-  ran <- runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing
+  ran <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing
   status <- fx.dfReadStatus wid
   shutdown dbos
   pure (ran, status)
@@ -95,9 +95,9 @@ scenarioPastDeadline fx = do
       body () _ = do
         threadDelay 30000000
         pure (Right 1)
-  ref <- registerDBOSWorkflowRef dbos (newWorkflowKey "runs-forever") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newWorkflowKey "runs-forever") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
-  ran <- runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (millisDuration 100)}) Nothing
+  ran <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (millisDuration 100)}) Nothing
   status <- fx.dfReadStatus wid
   shutdown dbos
   pure (wid, ran, status)
@@ -111,16 +111,16 @@ scenarioKeptDeadline fx = do
   gate <- newEmptyMVar
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = takeMVar gate >> pure (Right 7)
-  ref <- registerDBOSWorkflowRef dbos (newWorkflowKey "gated") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newWorkflowKey "gated") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
-  worker <- async (runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing)
+  worker <- async (runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing)
   first <- waitForDeadline fx wid
   shutdown dbos
   cancel worker
   exec2 <- fx.dfLaunch dbos
   second <- waitForDeadline fx wid
   putMVar gate ()
-  ran <- runDBOSWorkflowRef exec2 ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing
+  ran <- runWorkflowRef exec2 ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing
   shutdown dbos
   pure (first, second, ran)
 
@@ -132,9 +132,9 @@ scenarioShutdownPending fx = do
   gate <- newEmptyMVar
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = takeMVar gate >> pure (Right 7)
-  ref <- registerDBOSWorkflowRef dbos (newWorkflowKey "gated") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newWorkflowKey "gated") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
-  worker <- async (runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing)
+  worker <- async (runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing)
   _ <- waitForDeadline fx wid
   shutdown dbos
   cancel worker
@@ -148,10 +148,10 @@ scenarioBeatenDeadline fx = do
   (dbos, wid) <- fx.dfSetup
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right 7)
-  ref <- registerDBOSWorkflowRef dbos (newWorkflowKey "quick") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newWorkflowKey "quick") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
-  first <- runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing
-  second <- runDBOSWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (millisDuration 1)}) Nothing
+  first <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing
+  second <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (millisDuration 1)}) Nothing
   status <- fx.dfReadStatus wid
   shutdown dbos
   pure (first, second, status)

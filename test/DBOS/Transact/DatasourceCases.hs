@@ -65,7 +65,7 @@ import DBOS.Transact
   WorkflowId (..),
   application,
   encodeWorkflowValue,
-  registerDBOSDataSource,
+  registerDataSource,
   runTxOutside,
   runTxStep,
   transactionConfigDefault,
@@ -73,7 +73,7 @@ import DBOS.Transact
 import DBOS.SystemDB.Error (BackendError (..))
 import DBOS.Transact.Datasource (RecordedOutcome (..))
 import DBOS.Transact.Datasource.Postgres (beginSql)
-import DBOS.Transact.Instance (clearDBOSCheckpoints)
+import DBOS.Transact.Instance (clearCheckpoints)
 import DBOS.Transact.Error (encodeErrorText)
 import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep)
 
@@ -308,11 +308,11 @@ scenarioOwnershipMoved fx wfId = do
 scenarioRegistryLifecycle :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadMVar m) => DBOS m -> DsFixture m -> Text -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Int, Int)
 scenarioRegistryLifecycle dbos fx wid = do
   fake <- fx.dsFixtureMkDs
-  first <- registerDBOSDataSource dbos fake.fakeSource
-  duplicate <- registerDBOSDataSource dbos fake.fakeSource
+  first <- registerDataSource dbos fake.fakeSource
+  duplicate <- registerDataSource dbos fake.fakeSource
   _ <- runFixture fx wid (\wctx -> (runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("v" :: Text))) :: m (Either (Error Text) Text)))
   rowsBefore <- readTVarIO fake.fakeRows
-  clearDBOSCheckpoints dbos (WorkflowId wid)
+  clearCheckpoints dbos (WorkflowId wid)
   rowsAfter <- readTVarIO fake.fakeRows
   pure (first, duplicate, Map.size rowsBefore, Map.size rowsAfter)
 

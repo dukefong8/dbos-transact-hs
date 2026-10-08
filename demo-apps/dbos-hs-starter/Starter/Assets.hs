@@ -67,7 +67,7 @@ codePanelQueues =
         <> panelGap
         <> $( fragment
                "dbos-hs-starter/Starter/Handler.hs"
-               ["enqueueDBOSWorkflow app.staDbos"]
+               ["enqueueWorkflow app.staDbos"]
                []
            )
     )

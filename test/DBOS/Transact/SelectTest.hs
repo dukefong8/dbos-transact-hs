@@ -17,8 +17,8 @@ import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowId (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (nullTracer)
 import DBOS.Transact.ContextTest (ctxOver)
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.SelectCases
   ( SelectFixture (..),
     checkControlError,

@@ -30,6 +30,9 @@ module DBOS.Transact.ManagementCases
     scenarioCancelTree,
     scenarioDelete,
     scenarioRetrieve,
+    scenarioListSteps,
+    scenarioListStepsInWorkflow,
+    scenarioSingular,
     scenarioForkFromBeginning,
     scenarioForkTakesIdAndQueue,
     scenarioForkFromStep,
@@ -47,6 +50,9 @@ module DBOS.Transact.ManagementCases
     checkCancelTree,
     checkDelete,
     checkRetrieve,
+    checkListSteps,
+    checkListStepsInWorkflow,
+    checkSingular,
     checkForkFromBeginning,
     checkForkTakesIdAndQueue,
     checkForkFromStep,
@@ -72,42 +78,50 @@ import DBOS.Transact
     Error (..),
     Executor,
     Serializer (..),
-    SomeTracer (..),
     StartOptions (..),
+    StepRecord (..),
     WorkflowCtx,
     WorkflowHandle (..),
     WorkflowKey,
     WorkflowRef,
+    cancelWorkflow,
     cancelWorkflows,
     decodeWorkflowValue,
+    deleteWorkflow,
     deleteWorkflows,
     encodeWorkflowValue,
-    enqueueDBOSWorkflow,
+    enqueueWorkflow,
     enqueueNew,
+    forkWorkflow,
     forkFrom,
     forkWorkflows,
+    getWorkflowStatus,
     handleResult,
     handleStatus,
     newDBOS,
     newWorkflowKey,
-    registerDBOSWorkflow,
-    registerDBOSWorkflowRef,
+    registerWorkflow,
+    registerWorkflowRef,
+    resumeWorkflow,
     resumeWorkflows,
     retrieveWorkflow,
-    runDBOSWorkflow,
+    runWorkflow,
     runStep,
     setWorkflowDelay,
     updateWorkflowAttributes,
+    listWorkflowStepsInWorkflow,
+    listWorkflowSteps,
     listWorkflows,
     secondsDuration,
     shutdown,
     startChildWorkflow,
-    startDBOSWorkflowRef,
+    startWorkflowRef,
     startOptionsDefault,
     waitForWorkflow,
   )
+import DBOS.Transact.Logger (SomeTracer (..))
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Instance (dequeueDBOSWorkflows, launchOnWithQueues)
+import DBOS.Transact.Instance (dequeueWorkflows, launchOnWithQueues)
 import DBOS.Transact.Connection
   ( Connection,
     Owner (..),
@@ -191,10 +205,10 @@ mkMgmtFixture config identity connApp genId genEntropy sysdb tracer freshBase = 
 -- error channel pins to 'EngineOnly' once instead of at each call site.
 -- Local copies are deliberate: this module carries only the aliases it uses.
 runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWf = runDBOSWorkflow
+runWf = runWorkflow
 
 startWfRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Executor m -> WorkflowRef m EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))
-startWfRef = startDBOSWorkflowRef
+startWfRef = startWorkflowRef
 
 retrieveWf :: forall m. (MonadMVar m) => DBOS m -> WorkflowId -> m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))
 retrieveWf = retrieveWorkflow
@@ -204,6 +218,9 @@ resultWf = handleResult
 
 statusWf :: forall m. (MonadMVar m) => WorkflowHandle m EngineOnly -> m (Either (Error EngineOnly) (Maybe WorkflowStatus))
 statusWf = handleStatus
+
+listStepsWf :: forall m. (MonadMVar m) => DBOS m -> WorkflowId -> m (Either (Error EngineOnly) [StepRecord])
+listStepsWf = listWorkflowSteps
 
 -- | The cancellable body: counts its entries, then answers input plus five.
 cancellableBody ::
@@ -255,9 +272,10 @@ scenarioUnlaunched ::
 scenarioUnlaunched fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     refused <- cancelWorkflows dbos [WorkflowId "never-launched"] False
-    case refused of
-      Left ErrorNotLaunched {} -> pure True
-      other -> throwIO (userError ("expected a not-launched refusal, got: " <> show other))
+    listed <- listWorkflowSteps dbos (WorkflowId "never-launched")
+    case (refused, listed) of
+      (Left ErrorNotLaunched {}, Left ErrorNotLaunched {}) -> pure True
+      other -> throwIO (userError ("expected not-launched refusals, got: " <> show other))
 
 -- | Cancelling a workflow that does not exist is not an error.
 scenarioCancelMissing ::
@@ -304,7 +322,7 @@ scenarioCancelResumeRun fx = do
     let key = newWorkflowKey "cancellable"
         workflowText = "hs-l2-mgmt-cancel-resume-" <> suffix
         wid = WorkflowId workflowText
-    refE <- registerDBOSWorkflowRef dbos key (cancellableBody ran)
+    refE <- registerWorkflowRef dbos key (cancellableBody ran)
     ref <- case refE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
@@ -337,7 +355,7 @@ scenarioCancelResumeRun fx = do
       Right ids -> pure [t | WorkflowId t <- ids]
     -- Drive the dequeue entry synchronously: the resumed row runs now
     -- instead of waiting for a supervisor tick that bare launches never fork.
-    drove <- dequeueDBOSWorkflows dbos
+    drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -366,7 +384,7 @@ scenarioResumeOntoQueue fx = do
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body input _ = pure (Right input)
         wid = WorkflowId ("hs-l2-mgmt-resume-queue-" <> suffix)
-    refE <- registerDBOSWorkflowRef dbos key body
+    refE <- registerWorkflowRef dbos key body
     ref <- case refE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
@@ -387,7 +405,7 @@ scenarioResumeOntoQueue fx = do
       Right _ -> pure ()
     -- Drive the dequeue entry synchronously: the resumed row runs now
     -- instead of waiting for a supervisor tick that bare launches never fork.
-    drove <- dequeueDBOSWorkflows dbos
+    drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -415,11 +433,11 @@ scenarioCancelTree fx = do
         parentKey = newWorkflowKey "tree-parent"
         parentText = "hs-l2-mgmt-tree-parent-" <> suffix
         parentId = WorkflowId parentText
-    childRefE <- registerDBOSWorkflowRef dbos childKey (treeChildBody childStarted gate)
+    childRefE <- registerWorkflowRef dbos childKey (treeChildBody childStarted gate)
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
-    parentReg <- registerDBOSWorkflow dbos parentKey (treeParentBody childRef childStarted)
+    parentReg <- registerWorkflow dbos parentKey (treeParentBody childRef childStarted)
     case parentReg of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
@@ -460,7 +478,7 @@ scenarioDelete fx = do
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body input wctx = runStep wctx "work" (const (pure input))
         wid = WorkflowId ("hs-l2-mgmt-delete-" <> suffix)
-    registered <- registerDBOSWorkflow dbos key body
+    registered <- registerWorkflow dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
@@ -496,7 +514,7 @@ scenarioRetrieve fx = do
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body input _ = pure (Right (input * 3))
         wid = WorkflowId ("hs-l2-mgmt-retrieve-" <> suffix)
-    registered <- registerDBOSWorkflow dbos key body
+    registered <- registerWorkflow dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
@@ -521,6 +539,150 @@ scenarioRetrieve fx = do
               Left err -> throwIO (userError (show err))
           other -> throwIO (userError ("expected the retrieved result, got: " <> show other))
         pure (mStatus, decoded)
+
+-- | A workflow's steps list in execution order with their zero-based ids,
+-- and an id with no workflow behind it lists nothing: mirrors the Rust
+-- @listing_a_workflows_steps_reports_them_in_execution_order@ case.
+scenarioListSteps ::
+  forall m.
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
+  MgmtFixture m ->
+  m ([Text], [Int], [Text])
+scenarioListSteps fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "three-steps"
+        body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
+        body () wctx = do
+          one <- runStep wctx "one" (const (pure ()))
+          case one of
+            Left err -> pure (Left err)
+            Right () -> do
+              two <- runStep wctx "two" (const (pure ()))
+              case two of
+                Left err -> pure (Left err)
+                Right () -> do
+                  three <- runStep wctx "three" (const (pure ()))
+                  pure (void three)
+        wid = WorkflowId ("hs-l2-mgmt-liststeps-" <> suffix)
+    registered <- registerWorkflow dbos key body
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    listed <- listStepsWf dbos wid
+    (names, ids) <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records ->
+        pure
+          ( [record.stepRecordStepName | record <- records],
+            [record.stepRecordStepId | record <- records]
+          )
+    missing <- listStepsWf dbos (WorkflowId "never-existed")
+    missingNames <- case missing of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepName | record <- records]
+    pure (names, ids, missingNames)
+
+-- | The in-workflow listing is itself a step: it reads the steps recorded
+-- before it and the engine records the snapshot after it, under the
+-- cross-SDK step name.
+scenarioListStepsInWorkflow ::
+  forall m.
+  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
+  MgmtFixture m ->
+  m ([Text], [Text])
+scenarioListStepsInWorkflow fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "self-lister"
+        wid = WorkflowId ("hs-l2-mgmt-liststeps-in-" <> suffix)
+        body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) [Text])
+        body () wctx = do
+          first <- runStep wctx "first" (const (pure ()))
+          case first of
+            Left err -> pure (Left err)
+            Right () -> do
+              listed <- listWorkflowStepsInWorkflow wctx wid
+              pure (fmap (map (.stepRecordStepName)) listed)
+    registered <- registerWorkflow dbos key body
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    inside <- case ran of
+      Left err -> throwIO (userError (show err))
+      Right Nothing -> throwIO (userError "expected the workflow result")
+      Right (Just output) ->
+        case decodeWorkflowValue "result" (Just output) :: Either CodecError [Text] of
+          Left err -> throwIO (userError (show err))
+          Right names -> pure names
+    outside <- listStepsWf dbos wid
+    outsideNames <- case outside of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepName | record <- records]
+    pure (inside, outsideNames)
+
+-- | The singular wrappers move one workflow each, per the Rust @DBOS@
+-- singular surface: cancel (children skipped), resume (handle back),
+-- delete, fork-from-the-top (handle back), and the singular status read.
+scenarioSingular ::
+  forall m.
+  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
+  MgmtFixture m ->
+  m (Maybe WorkflowStatus, Maybe WorkflowStatus, Maybe WorkflowStatus, Bool, Maybe WorkflowStatus)
+scenarioSingular fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "singular"
+        body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        body input _ = pure (Right input)
+        wid n = WorkflowId ("hs-l2-mgmt-singular-" <> Text.pack (show n) <> "-" <> suffix)
+    refE <- registerWorkflowRef dbos key body
+    ref <- case refE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    exec <- fx.mfLaunch dbos
+    started1 <-
+      startWfRef
+        exec
+        ref
+        (startOptionsDefault {startWorkflowId = Just (wid 1), startQueue = Just (enqueueNew "no-runner-here")})
+        (Just (encodeWorkflowValue (1 :: Int)))
+    ran2 <- runWf exec key (wid 2) (Just (encodeWorkflowValue (2 :: Int)))
+    ran3 <- runWf exec key (wid 3) (Just (encodeWorkflowValue (3 :: Int)))
+    case (started1, ran2, ran3) of
+      (Right _, Right _, Right _) -> pure ()
+      other -> throwIO (userError ("expected one queued start and two runs, got: " <> show other))
+    cancelled <- cancelWorkflow dbos (wid 1)
+    case cancelled of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    afterCancel <- getWorkflowStatus dbos (wid 1)
+    resumed <- resumeWorkflow dbos (wid 1) Nothing
+    case resumed of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    afterResume <- getWorkflowStatus dbos (wid 1)
+    deleted <- deleteWorkflow dbos (wid 2)
+    case deleted of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    afterDelete <- getWorkflowStatus dbos (wid 2)
+    forked <- forkWorkflow dbos (wid 3) Nothing defaultForkOptions
+    (forkedDifferent, forkedStatus) <- case forked of
+      Left err -> throwIO (userError (show err))
+      Right handle -> do
+        let forkedText = handle.workflowId
+            sourceText = case wid 3 of WorkflowId text -> text
+        status <- getWorkflowStatus dbos (WorkflowId forkedText)
+        pure (forkedText /= sourceText, status)
+    pure (afterCancel, afterResume, afterDelete, forkedDifferent, forkedStatus)
 
 -- | The unlaunched call is refused.
 checkUnlaunched :: Bool -> Either String ()
@@ -563,6 +725,27 @@ checkDelete = checkEq (1, Nothing)
 -- | The retrieved row reports success and its recorded output.
 checkRetrieve :: (Maybe WorkflowStatus, Int) -> Either String ()
 checkRetrieve = checkEq (Just Success, 6)
+
+-- | Steps name and number in execution order; an unknown id lists empty.
+checkListSteps :: ([Text], [Int], [Text]) -> Either String ()
+checkListSteps (names, ids, missing) = do
+  checkEq ["one", "two", "three"] names
+  checkEq [0, 1, 2] ids
+  checkEq [] missing
+
+-- | The listing sees the steps before it, and is itself recorded after.
+checkListStepsInWorkflow :: ([Text], [Text]) -> Either String ()
+checkListStepsInWorkflow = checkEq (["first"], ["first", "DBOS.listWorkflowSteps"])
+
+-- | Cancel leaves it cancelled, resume re-enqueues it, delete removes the
+-- row, and the fork is a new enqueued workflow.
+checkSingular :: (Maybe WorkflowStatus, Maybe WorkflowStatus, Maybe WorkflowStatus, Bool, Maybe WorkflowStatus) -> Either String ()
+checkSingular (afterCancel, afterResume, afterDelete, forkedDifferent, forkedStatus) = do
+  checkEq (Just Cancelled) afterCancel
+  checkEq (Just Enqueued) afterResume
+  checkEq Nothing afterDelete
+  checkEq True forkedDifferent
+  checkEq (Just Enqueued) forkedStatus
 
 -- | The forkable body: its first attempt fails, later attempts answer 8. The
 -- counter is shared so both stacks can observe exactly-once retry semantics.
@@ -646,7 +829,7 @@ scenarioForkFromBeginning fx = do
     let key = newWorkflowKey "forkable"
         sourceText = "hs-l2-mgmt-fork-src-" <> suffix
         sourceId = WorkflowId sourceText
-    refE <- registerDBOSWorkflowRef dbos key (forkableBody attempts)
+    refE <- registerWorkflowRef dbos key (forkableBody attempts)
     case refE of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -660,7 +843,7 @@ scenarioForkFromBeginning fx = do
       Left err -> throwIO (userError (show err))
       Right [WorkflowId text] -> pure text
       other -> throwIO (userError ("expected exactly one fork, got: " <> show other))
-    drove <- dequeueDBOSWorkflows dbos
+    drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -688,7 +871,7 @@ scenarioForkTakesIdAndQueue fx = do
         sourceText = "hs-l2-mgmt-fork-placed-src-" <> suffix
         forkedText = "hs-l2-mgmt-fork-placed-" <> suffix
         sourceId = WorkflowId sourceText
-    refE <- registerDBOSWorkflowRef dbos key plusOneBody
+    refE <- registerWorkflowRef dbos key plusOneBody
     case refE of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -703,7 +886,7 @@ scenarioForkTakesIdAndQueue fx = do
       Left err -> throwIO (userError (show err))
       Right [WorkflowId text] | text == forkedText -> pure ()
       other -> throwIO (userError ("expected the chosen fork id, got: " <> show other))
-    drove <- dequeueDBOSWorkflows dbos
+    drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -731,7 +914,7 @@ scenarioForkFromStep fx = do
     let key = newWorkflowKey "staged"
         sourceText = "hs-l2-mgmt-fork-step-src-" <> suffix
         sourceId = WorkflowId sourceText
-    refE <- registerDBOSWorkflowRef dbos key (stagedBody ran)
+    refE <- registerWorkflowRef dbos key (stagedBody ran)
     case refE of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -747,7 +930,7 @@ scenarioForkFromStep fx = do
       Left err -> throwIO (userError (show err))
       Right [WorkflowId text] -> pure text
       other -> throwIO (userError ("expected exactly one fork, got: " <> show other))
-    drove <- dequeueDBOSWorkflows dbos
+    drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -786,7 +969,7 @@ scenarioForkFromFailure fx = do
               if attempt < 1
                 then pure (Left (StepFailed "two" "boom"))
                 else runStep wctx "two" (const (pure 99))
-    refE <- registerDBOSWorkflowRef dbos key flakyBody
+    refE <- registerWorkflowRef dbos key flakyBody
     case refE of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -800,7 +983,7 @@ scenarioForkFromFailure fx = do
       Left err -> throwIO (userError (show err))
       Right [WorkflowId text] -> pure text
       other -> throwIO (userError ("expected exactly one fork, got: " <> show other))
-    drove <- dequeueDBOSWorkflows dbos
+    drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -845,13 +1028,13 @@ scenarioBulkCancelResume fx = do
         secondText = "hs-l2-mgmt-bulk-2-" <> suffix
         first = WorkflowId firstText
         second = WorkflowId secondText
-    regE <- registerDBOSWorkflow dbos key echoTextBody
+    regE <- registerWorkflow dbos key echoTextBody
     case regE of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
     _ <- fx.mfLaunch dbos
     let enqueueOne wid = do
-          enqueued <- enqueueDBOSWorkflow dbos key wid (Just (encodeWorkflowValue ("hello" :: Text))) ("bulk-" <> suffix)
+          enqueued <- enqueueWorkflow dbos key wid (Just (encodeWorkflowValue ("hello" :: Text))) ("bulk-" <> suffix)
           case enqueued of
             Left err -> throwIO (userError (show err))
             Right _ -> pure ()
@@ -884,7 +1067,7 @@ scenarioBulkFork fx = do
         secondText = "hs-l2-mgmt-bulk-fork-2-" <> suffix
         first = WorkflowId firstText
         second = WorkflowId secondText
-    regE <- registerDBOSWorkflow dbos key doublingBody
+    regE <- registerWorkflow dbos key doublingBody
     case regE of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -900,7 +1083,7 @@ scenarioBulkFork fx = do
     forkedTexts <- case forked of
       Left err -> throwIO (userError (show err))
       Right ids -> pure [t | WorkflowId t <- ids]
-    drove <- dequeueDBOSWorkflows dbos
+    drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -927,7 +1110,7 @@ scenarioForkPartitioned fx = do
     suffix <- fx.mfFreshBase
     let key = newWorkflowKey "queued"
         sourceId = WorkflowId ("hs-l2-mgmt-fork-key-src-" <> suffix)
-    regE <- registerDBOSWorkflow dbos key echoTextBody
+    regE <- registerWorkflow dbos key echoTextBody
     case regE of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -986,7 +1169,7 @@ scenarioAttributes fx = do
         full = "{\"tenant\":\"" <> tenant <> "\",\"tier\":\"gold\"}"
         tenantOnly = "{\"tenant\":\"" <> tenant <> "\"}"
         tierOnly = "{\"tier\":\"gold\"}"
-    regE <- registerDBOSWorkflow dbos key zeroBody
+    regE <- registerWorkflow dbos key zeroBody
     case regE of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -1044,7 +1227,7 @@ scenarioDelayRelease fx = do
     let key = newWorkflowKey "delayable"
         wid = WorkflowId ("hs-l2-mgmt-delayed-" <> suffix)
         QueueName internal = internalQueueName
-    refE <- registerDBOSWorkflowRef dbos key zeroBody
+    refE <- registerWorkflowRef dbos key zeroBody
     ref <- case refE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
@@ -1063,7 +1246,7 @@ scenarioDelayRelease fx = do
     case released of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
-    drove <- dequeueDBOSWorkflows dbos
+    drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()

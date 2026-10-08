@@ -2,6 +2,8 @@
 
 > STOPPED 2026-10-06 after Phase-1 Context/Checkpoint edits: all code
 > reverted to `348fe64`, ADR-0026 kept. Resume here if revived.
+> Closed 2026-10-07 (`docs/start-enqueue-escape-todo.md` R1): accept-and-record; do not resume.
+> reverted to `348fe64`, ADR-0026 kept. Resume here if revived.
 
 Supersedes the opt-in rollout: the seams themselves change, so every
 consumer migrates. Goal: user workflow/step bodies carry only

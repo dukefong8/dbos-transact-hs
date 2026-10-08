@@ -12,7 +12,7 @@ module DBOS.Transact.Instance
   ( DBOS (..),
     Executor (..),
     newDBOS,
-    registerDBOSWorkflow,
+    registerWorkflow,
     isLaunched,
     dbosExecutorId,
     dbosAppVersion,
@@ -24,27 +24,33 @@ module DBOS.Transact.Instance
     launchExecutor,
     shutdown,
     requireExecutor,
-    registerDBOSWorkflowRef,
-    registerDBOSDataSource,
-    clearDBOSCheckpoints,
-    runDBOSWorkflow,
-    startDBOSWorkflowRef,
-    runDBOSWorkflowRef,
-    enqueueDBOSWorkflow,
+    registerWorkflowRef,
+    registerDataSource,
+    clearCheckpoints,
+    runWorkflow,
+    startWorkflowRef,
+    runWorkflowRef,
+    enqueueWorkflow,
     retrieveWorkflow,
     getWorkflowEvent,
     sendWorkflowMessage,
     sendWorkflowMessages,
     listWorkflowIdsByName,
     fetchWorkflowStatuses,
+    getWorkflowStatus,
+    cancelWorkflow,
     cancelWorkflows,
+    resumeWorkflow,
     resumeWorkflows,
     setWorkflowDelay,
+    deleteWorkflow,
     deleteWorkflows,
+    forkWorkflow,
     forkWorkflows,
     forkFrom,
-    dequeueDBOSWorkflows,
+    dequeueWorkflows,
     updateWorkflowAttributes,
+    listWorkflowSteps,
     listWorkflows,
   )
 where
@@ -55,7 +61,7 @@ import Data.Int (Int64)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic, WorkflowDelay (..), WorkflowFilter (..), VersionInfo (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, forkNew, Topic, WorkflowDelay (..), WorkflowFilter (..), VersionInfo (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
 import DBOS.Transact.Config (Config (..))
 import DBOS.Transact.Config qualified as Config
 import DBOS.Transact.Connection (Connection (..), closeConnection, forApplication, runSystemDB)
@@ -64,13 +70,16 @@ import DBOS.Transact.Dequeue (dequeuePass, superviseForever)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Identity (Environment, Identity (..), readEnvironment, resolve)
-import DBOS.Tracer (SomeTracer, acquireLoggerBackend, ioTracer, runTracer)
+import DBOS.Transact.Logger (SomeTracer, acquireLoggerBackend, ioTracer, runTracer)
 import DBOS.Transact.Management qualified as Management
 import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
-import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, registerDataSource, thawDataSourceRegistry)
-import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflow, registerWorkflowRef, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
-import DBOS.Transact.Workflow (RunOptions (..), StartOptions, Tasks, abortAll, enqueueWorkflow, newTasks, runRegisteredWorkflow, runWorkflowRef, spawnTracked, startWorkflowRef)
+import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, thawDataSourceRegistry)
+import DBOS.Transact.Datasource qualified as Datasource (registerDataSource)
+import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflow, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
+import DBOS.Transact.Registry qualified as Registry (registerWorkflowRef)
+import DBOS.Transact.Workflow (RunOptions (..), StartOptions, Tasks, abortAll, newTasks, runRegisteredWorkflow, spawnTracked)
+import DBOS.Transact.Workflow qualified as Workflow (enqueueWorkflow, runWorkflowRef, startWorkflowRef)
 
 -- | An instance is the application's stable configuration and registry;
 -- its executor slot is empty until launch and may be filled again after a
@@ -122,12 +131,12 @@ newDBOS config' = do
 -- downgrade explicitly at call sites not yet converted; converted and
 -- unconverted bodies share the registry, so conversion proceeds one body
 -- at a time.
-registerDBOSWorkflow :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-registerDBOSWorkflow dbos key body = registerTypedWorkflow dbos.dbos_registry key body
+registerWorkflow :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+registerWorkflow dbos key body = registerTypedWorkflow dbos.dbos_registry key body
 
--- | 'registerDBOSWorkflowRef' for a reference-typed workflow body.
-registerDBOSWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
-registerDBOSWorkflowRef dbos key body = registerWorkflowRef dbos.dbos_registry key body
+-- | 'registerWorkflowRef' for a reference-typed workflow body.
+registerWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
+registerWorkflowRef dbos key body = Registry.registerWorkflowRef dbos.dbos_registry key body
 
 isLaunched :: MonadMVar m => DBOS m -> m Bool
 isLaunched dbos = maybe False (const True) <$> readMVar dbos.dbos_executor
@@ -210,8 +219,8 @@ shutdown dbos =
         thawRegistry dbos.dbos_registry
         thawDataSourceRegistry dbos.dbos_datasources
 
-runDBOSWorkflow :: forall m e. (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runDBOSWorkflow executor key workflowId input = do
+runWorkflow :: forall m e. (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runWorkflow executor key workflowId input = do
   outcome <-
     runRegisteredWorkflow
       executor.tasks
@@ -226,24 +235,24 @@ runDBOSWorkflow executor key workflowId input = do
 
 -- | Starts the referenced workflow via the launched executor: what
 -- @WorkflowRef::start_with@ becomes when the call site holds a reference.
-startDBOSWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Executor m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
-startDBOSWorkflowRef executor ref options input =
-  startWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
+startWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Executor m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startWorkflowRef executor ref options input =
+  Workflow.startWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
 
 -- | Runs the referenced workflow via the launched executor and waits: a
 -- start followed by an await under the same id.
-runDBOSWorkflowRef :: forall m e. (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Executor m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runDBOSWorkflowRef executor ref options input = do
+runWorkflowRef :: forall m e. (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Executor m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runWorkflowRef executor ref options input = do
   outcome <-
-    runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
+    Workflow.runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
   case options.runWorkflowId of
     Just workflowId' -> do
       _ <- MThrow.try (clearDatasourceCheckpoints executor.datasources workflowId') :: m (Either SomeException ())
       pure outcome
     Nothing -> pure outcome
 
-enqueueDBOSWorkflow :: (MonadMVar m) => DBOS m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
-enqueueDBOSWorkflow dbos key workflowId input queueName = do
+enqueueWorkflow :: (MonadMVar m) => DBOS m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
+enqueueWorkflow dbos key workflowId input queueName = do
   running <- requireExecutor dbos "enqueue a workflow"
   case running of
     Left err -> pure (Left err)
@@ -251,7 +260,7 @@ enqueueDBOSWorkflow dbos key workflowId input queueName = do
       case lookupSnapshotWorkflow key executor.workflows of
         Nothing -> pure (Left (TransactError.ErrorWorkflowNotRegistered (renderWorkflowKey key)))
         Just _ ->
-          enqueueWorkflow
+          Workflow.enqueueWorkflow
             executor.conn
             executor.identity
             key
@@ -259,8 +268,8 @@ enqueueDBOSWorkflow dbos key workflowId input queueName = do
             input
             queueName
 
-dequeueDBOSWorkflows :: (MonadMVar m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
-dequeueDBOSWorkflows dbos = do
+dequeueWorkflows :: (MonadMVar m, MonadFork m, MThrow.MonadMask m, MonadTimer m, MonadTime m) => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+dequeueWorkflows dbos = do
   running <- requireExecutor dbos "dequeue workflows"
   case running of
     Left err -> pure (Left err)
@@ -355,6 +364,55 @@ listWorkflows dbos filters = do
   case running of
     Left err       -> pure (Left err)
     Right executor -> Management.listWorkflows executor.conn filters
+
+-- | Reads one workflow's steps in execution order, outputs and errors
+-- included; an id with no row lists nothing rather than failing.
+listWorkflowSteps :: (MonadMVar m) => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+listWorkflowSteps dbos workflowId = do
+  running <- requireExecutor dbos "list a workflow's steps"
+  case running of
+    Left err       -> pure (Left err)
+    Right executor -> Management.listWorkflowSteps executor.conn workflowId
+
+-- | Cancels one workflow, children skipped: the singular of
+-- 'cancelWorkflows'. Mirrors Rust @DBOS::cancel@.
+cancelWorkflow :: (MonadMVar m) => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+cancelWorkflow dbos workflowId = void <$> cancelWorkflows dbos [workflowId] False
+
+-- | Resumes one workflow, optionally onto a queue, and hands back its
+-- handle. Mirrors Rust @DBOS::resume@ / @resume_with@.
+resumeWorkflow :: (MonadMVar m) => DBOS m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+resumeWorkflow dbos workflowId queue = do
+  resumed <- resumeWorkflows dbos [workflowId] queue
+  case resumed of
+    Left err -> pure (Left err)
+    Right _  -> retrieveWorkflow dbos workflowId
+
+-- | Deletes one workflow, children skipped: the singular of
+-- 'deleteWorkflows'. Mirrors Rust @DBOS::delete@.
+deleteWorkflow :: (MonadMVar m) => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+deleteWorkflow dbos workflowId = void <$> deleteWorkflows dbos [workflowId] False
+
+-- | Forks one workflow and hands back the new workflow's handle.
+-- @Nothing@ forks from the top (Rust @ForkFrom::Beginning@); @Just point@
+-- from a chosen step (Rust @ForkFrom::Step@/@LastFailure@). Mirrors Rust
+-- @DBOS::fork@ / @fork_with@.
+forkWorkflow :: (MonadMVar m) => DBOS m -> WorkflowId -> Maybe ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+forkWorkflow dbos workflowId from options = do
+  forked <- case from of
+    Nothing -> do
+      let WorkflowId workflowText = workflowId
+      forkWorkflows dbos [forkNew workflowText] options
+    Just point -> forkFrom dbos [workflowId] point options
+  case forked of
+    Left err         -> pure (Left err)
+    Right []         -> pure (Left (TransactError.ErrorSystemDatabase (SystemDBError.InvalidInput {field = "fork", detail = "the fork produced no workflow"})))
+    Right (newId : _) -> retrieveWorkflow dbos newId
+
+-- | One workflow's status, or 'Nothing' when no row matches: the singular
+-- of 'fetchWorkflowStatuses'.
+getWorkflowStatus :: (MonadMVar m) => DBOS m -> WorkflowId -> m (Maybe WorkflowStatus)
+getWorkflowStatus dbos workflowId = lookup workflowId <$> fetchWorkflowStatuses dbos [workflowId]
 
 -- | Read another workflow's event from outside a workflow, waiting up to
 -- the duration (zero is a poll). Nothing is checkpointed: there is no caller
@@ -453,13 +511,13 @@ requireExecutor dbos operation = do
 -- | Register a datasource on the instance unless launch has frozen the
 -- registry or the name is taken: the created-before-launch rule. A failed
 -- launch or shutdown thaws it again.
-registerDBOSDataSource :: MonadMVar m => DBOS m -> DataSource m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-registerDBOSDataSource dbos source = registerDataSource dbos.dbos_datasources source
+registerDataSource :: MonadMVar m => DBOS m -> DataSource m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+registerDataSource dbos source = Datasource.registerDataSource dbos.dbos_datasources source
 
 -- | Clear a finished workflow's checkpoints from every registered
 -- datasource, best effort and silent.
-clearDBOSCheckpoints :: (MonadMVar m, MThrow.MonadCatch m) => DBOS m -> WorkflowId -> m ()
-clearDBOSCheckpoints dbos wid = clearDatasourceCheckpoints dbos.dbos_datasources wid
+clearCheckpoints :: (MonadMVar m, MThrow.MonadCatch m) => DBOS m -> WorkflowId -> m ()
+clearCheckpoints dbos wid = clearDatasourceCheckpoints dbos.dbos_datasources wid
 
 -- | Installs an executor over a caller-built connection: the seam tests
 -- launch arbitrary backends through. The snapshot is taken from the

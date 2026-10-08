@@ -81,7 +81,7 @@ Two port-only notes:
 - **The start's channel is a type variable, not a marker.** Rust's
   `PendingStart<R, E, C = E>` defaults the reported channel to the child's and
   `.lift::<C2>()` re-declares it. The port's `startChildWorkflow` /
-  `startWorkflowRef` / `startDBOSWorkflowRef` instead report in an
+  `startWorkflowRef` instead report in an
   unconstrained `c` (the start can only fail in engine terms, so `c` is
   phantom): the common case infers `c = e`, and the lift case — a parent whose
   channel differs from its child's — typechecks by inference. Same semantics,

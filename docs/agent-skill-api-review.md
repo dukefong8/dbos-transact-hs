@@ -35,29 +35,37 @@ workflow body only.
 |---|---|---|
 | `startChildWorkflow` | refused (`InsideStep`) — slice 2 | refused — slice 2 |
 | `setEvent` | refused (`InsideStep`) | refused (via `takenPlacement` depth check — slice 1) |
-| `recv` | refused (`InsideStep`) | **HOLE — proceeded** (scope-field check only). Fix: slice 4 |
-| `send` / `sendWith` | plain (no id) | **HOLE — allocated an id** (scope-field check only). Fix: slice 4 |
+| `recv` | refused (`InsideStep`) | refused (`InsideStep "recv"`, pinned `scenarioCapturedRecv`) — slice 4 |
+| `send` / `sendWith` | plain (no id) | plain, no id (caller dropped via `insideAStep`, pinned `scenarioCapturedSend`) — slice 4 |
 | `sendBulk` | plain (step-wrap degrades) | plain (transitively via `placeCall` — slice 1). No change |
-| `getEvent` (eager) | plain (no ids) | **HOLE — allocated 2 ids** (scope-field check only). Fix: slice 5 |
+| `getEvent` (eager) | plain (no ids) | plain, no ids (caller dropped via `insideAStep`, pinned `scenarioCapturedRead`) — slice 5 |
 | `getEvent` (pending) | plain | plain (via `takenPlacement` — slice 1). No change |
 | `awaitChild` | plain (unrecorded settle) | plain. No change (read-only wait, no ids) |
 | `sleep` | plain | plain (via `placeCall` — slice 1). No change |
 | `selectStep` | fresh/non-recorded | same (via `placeCall` — slice 1) + `<2` arms `ErrorConfig`. No change |
-| `runTxStep` | refused (`InsideStep`) | **HOLE — proceeded** (`inStep` check only). Fix: slice 5 |
+| `runTxStep` | refused (`InsideStep`) | refused (`InsideStep "transaction"`, pinned `scenarioCaptureRefused`) — slice 5 |
 | `runStep` (nested) | plain (leaf rule) | plain (via `placeCall` — slice 1). Matches TS "step-from-step nests" |
-| `enqueueWorkflow` / `enqueueDBOSWorkflow` / `startWorkflowRef` via `currentConnection` or captured `DBOS`/`Client` | n/a (no `Ctx`) — **HOLE: reachable from a step body with no guard** | same. Fix: engine rewire (below), not a point fix |
+| `enqueueWorkflow` / `startWorkflowRef` on captured `DBOS`/`Executor`/`Client` | n/a (no `Ctx`) — the ctx form is a type error here; the instance forms stay callable on captured values: outside-only by discipline (**open, accepted** — below) | ctx form refused (`InsideStep`, pinned); instance forms unguarded (same accepted limitation) |
 
-The shared fix for the point holes is one predicate,
-`insideAStep :: MonadSTM m => Ctx m -> m Bool` (scope field *or* depth),
-used by every guard — named for symmetry with `insideAWorkflow`. The
-`Connection`-taking enqueue paths cannot see depth (it lives in
-`WorkflowState`, reachable only via `Ctx`), so their fix belongs to the
-engine rewire: enqueue/start signatures take `WorkflowCtx exec m` (refuse
-when depth > 0, covering captured parents) and **no overload takes
-`StepCtx`** — calling enqueue from a step body then becomes a compile
-error, and through a captured parent a runtime refusal. Recorded here as
-a rewire requirement; `currentConnection` stays public (management and
-read paths need it).
+The ctx-routed half is closed: the only start/enqueue entry a body reaches
+without a captured value is `startChildWorkflow :: WorkflowCtx exec m -> …`
+— including the in-workflow enqueue via `startQueue` (`Workflow.hs:655-745`),
+which records the parent step under the child's bare name plus
+`child_workflow_id` and replays (`scenarioEnqueuedChildReplays`, 2026-10-07).
+From a step body the ctx form is a type error; through a captured parent it
+is an `InsideStep` refusal — both pinned (`scenarioChildInsideStepRefused`,
+`scenarioCaptureChildRefused`, live+sim). What remains is the
+captured-instance escape: `enqueueWorkflow :: DBOS m` / `startWorkflowRef ::
+Executor m` stay for handlers, clients, and tests, and a step body can close
+over those values. Depth lives in `WorkflowState`, reachable only through a
+ctx, so no instance-surface signature can see it — the recorded rewire
+("signatures take `WorkflowCtx`") is already satisfied where it can be and
+impossible where it cannot. Verdict: **open, accepted limitation** (the
+explicitness price); the only true closure is ambient execution state
+(ADR-0026 revival) or nothing. Decision 2026-10-07 (R1): accept and record;
+ADR-0026 closed, not revived. (`currentConnection`, named in the 2026-10-03
+(ADR-0026 revival) or nothing. (`currentConnection`, named in the 2026-10-03
+draft, no longer exists in `src`.)
 
 ## 3. Determinism / globals (CRITICAL)
 
@@ -149,10 +157,9 @@ Implemented (slices 4–6): `insideAStep` + depth guards on `send` /
 `recv` (slice 4), `getEvent` / `runTxStep` (slice 5), each with
 live+sim RED tests; `raceCancel` + `runAppSession` docs (slice 6).
 Deferred: a typed start wrapper (taking the input value with `ToJSON`
-instead of `Maybe SerializedWorkflowValue`) belongs with the engine
-rewire, where start signatures change anyway — wrapping the `Ctx`
-form now would churn again when it takes `WorkflowCtx`. The
+instead of `Maybe SerializedWorkflowValue`); the ctx form already takes
+`WorkflowCtx`, so no rewire churn blocks it — still deferred as a papercut.
 manual-encode footgun fails fast today (matchable `Codec` errors), so
-this is a papercut, not a hole. Rewire requirement: enqueue/start take `WorkflowCtx`,
+this is a papercut, not a hole. Rewire retired 2026-10-07: the ctx form already takes `WorkflowCtx` and the in-workflow enqueue ships via `startQueue` (§2); the remaining instance-surface escape is an accepted limitation pending an ADR-0026 decision (`start-enqueue-escape-todo.md` R1). Accepted limitations: §3 determinism/globals,
 no `StepCtx` overload (§2). Accepted limitations: §3 determinism/globals,
 §5 raw-pool doc-level, §6 dedup-construction.

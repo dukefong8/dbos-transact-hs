@@ -35,7 +35,6 @@ import DBOS.Transact
     configNew,
     encodeWorkflowValue,
     newDBOS,
-    nullTracer,
     releaseAppDataSource,
     runAppSession,
     runTxStep,
@@ -43,6 +42,7 @@ import DBOS.Transact
     toDataSource,
     verifyAppDataSource,
   )
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.SystemDB.Error (BackendError)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Datasource (RecordedOutcome (..))

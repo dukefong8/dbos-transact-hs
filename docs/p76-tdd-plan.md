@@ -370,8 +370,8 @@ StarterTest mirror, and removal of the v1 pool/Store path have not landed.
   `RunOptions`/`StartOptions` (+ defaults, `runOptionsToStartOptions`),
   `childWorkflowId` (`{parent}-{step}` derivation, chosen wins),
   `resolveEnqueueCollision` (shared client/reference dedup settlement),
-  `startWorkflowRef` / `runWorkflowRef` (+ `startDBOSWorkflowRef` /
-  `runDBOSWorkflowRef` instance drivers), `startChildWorkflow` (ambient
+  `startWorkflowRef` / `runWorkflowRef` (+ `Instance`'s
+  `startWorkflowRef` / `runWorkflowRef` drivers), `startChildWorkflow` (ambient
   parentage, replay adopts the recorded child, joined dedup writes only
   the mapping, `InsideStep` inside a step). `runRegisteredWorkflowWithRow`
   is the shared execute-or-adopt core. Deviations: `run*`/`start*` option
@@ -499,7 +499,7 @@ StarterTest mirror, and removal of the v1 pool/Store path have not landed.
   tracked task holding its slot, so worker concurrency is enforced locally
   without a database round trip. `dequeuePass` keeps its one-shot shape
   (fresh tally, one poll per queue, returns claimed ids) for the
-  `dequeueDBOSWorkflows` driver.
+  `dequeueWorkflows` driver.
 - `Workflow` gains `maxRecoveryAttempts = 100` (workflow.rs) threaded into
   every run-path init, and `spawnRegisteredWorkflowWithRow`, which checks
   the row's own `PENDING` status before spawning and treats a parked row

@@ -1,6 +1,6 @@
 # ADR-0026: Canonical ambient context (`ImplicitParams`) on user-facing seams
 
-Date: 2026-10-06. Status: accepted. Supersedes the opt-in rule of
+Date: 2026-10-06. Status: closed 2026-10-07 — the ambient migration is not pursued; the captured-instance escape it could have closed stays an accepted limitation (`docs/agent-skill-api-review.md` §2, `docs/start-enqueue-escape-todo.md` R1). Supersedes the opt-in rule of
 ADR-0025 (explicit default stays for non-user-facing plumbing).
 
 ## Context

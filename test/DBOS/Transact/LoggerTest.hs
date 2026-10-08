@@ -1,7 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module DBOS.TracerTest
+module DBOS.Transact.LoggerTest
   ( tests,
+    callbackBackend,
+    renderedLines,
   )
 where
 
@@ -13,16 +15,7 @@ import Data.List (isInfixOf)
 import Data.Text (pack)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.Transact
-  (
-  LoggerBackend,
-  SomeTracer (..),
-  Tracer,
-  fastLoggerTracer,
-  nullTracer,
-  runTracer,
-  )
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), mkTracer, newLoggerBackend, parseSeverity)
+import DBOS.Transact.Logger (AppLog (..), LogEvent (..), LogSeverity (..), LoggerBackend, SomeTracer (..), fastLoggerTracer, mkTracer, newLoggerBackend, nullTracer, parseSeverity, runTracer, Tracer)
 import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Recovery (EngineEvent (..))
 import DBOS.Transact.Dequeue (QueueEvent (..))
@@ -47,7 +40,7 @@ renderedLines collected = map (ByteString.unpack . fromLogStr) . reverse <$> rea
 tests :: TestTree
 tests =
   testGroup
-    "DBOS Tracer"
+    "DBOS Logger"
     [ testCase "step events render the legacy lines" $ do
         renderEvent (StepRunning "double" 3) @?= ("running step double (3)" :: Text),
       testCase "engine version staleness carries both versions" $ do
@@ -66,6 +59,12 @@ tests =
         eventName DequeueBackoff @?= ("DequeueBackoff" :: Text),
       testCase "a line is severity, constructor, prose" $ do
         renderLine (StepRunning "double" 3) @?= ("[Debug] StepRunning: running step double (3)" :: Text),
+      testCase "an application log line is severity, constructor, prose" $ do
+        renderLine (AppLog SeverityInfo "order 7 dispatched") @?= "[Info] AppLog: order 7 dispatched"
+        renderLine (AppLog SeverityDebug "payload 42 bytes") @?= "[Debug] AppLog: payload 42 bytes"
+        renderLine (AppLog SeverityWarning "dispatch queue backed up") @?= "[Warning] AppLog: dispatch queue backed up"
+        renderLine (AppLog SeverityError "courier unavailable") @?= "[Error] AppLog: courier unavailable"
+        eventName (AppLog SeverityInfo "order 7 dispatched") @?= "AppLog",
       testCase "events carry their severity and name into LogStr" $ do
         ByteString.unpack (fromLogStr (toLogStr (StepRunning "double" 3))) @?= "[Debug] StepRunning: running step double (3)",
       testCase "a sim run carries the structured event and its line" $ do
@@ -73,6 +72,11 @@ tests =
             said = selectTraceEventsSay (runSimTrace (runTracer simTracer (StepRunning "double" 3)))
         traced @?= [StepRunning "double" 3]
         said @?= ["[Debug] StepRunning: running step double (3)"],
+      testCase "a sim run carries the application log event and its line" $ do
+        let traced = selectTraceEventsDynamic (runSimTrace (runTracer simTracer (AppLog SeverityInfo "order 7 dispatched")))
+            said = selectTraceEventsSay (runSimTrace (runTracer simTracer (AppLog SeverityInfo "order 7 dispatched")))
+        traced @?= [AppLog SeverityInfo "order 7 dispatched"]
+        said @?= ["[Info] AppLog: order 7 dispatched"],
       testCase "contramap zooms a general tracer to a domain event" $ do
         collected <- newIORef []
         let textTracer = mkTracer (\line -> modifyIORef' collected (line :)) :: Tracer IO Text

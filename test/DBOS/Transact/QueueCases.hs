@@ -120,7 +120,7 @@ import DBOS.Transact
     decodeWorkflowValue,
     deleteQueue,
     encodeWorkflowValue,
-    enqueueDBOSWorkflow,
+    enqueueWorkflow,
     enqueueNew,
     handleResult,
     handleStatus,
@@ -129,15 +129,15 @@ import DBOS.Transact
     listWorkflows,
     newWorkflowKey,
     queue,
-    registerDBOSWorkflow,
-    registerDBOSWorkflowRef,
+    registerWorkflow,
+    registerWorkflowRef,
     registerQueue,
     retrieveWorkflow,
-    runDBOSWorkflow,
-    runDBOSWorkflowRef,
+    runWorkflow,
+    runWorkflowRef,
     runOptionsDefault,
     startChildWorkflow,
-    startDBOSWorkflowRef,
+    startWorkflowRef,
     startOptionsDefault,
     updateQueue,
     waitForWorkflow,
@@ -518,7 +518,7 @@ checkLegacyUpdateRefused (written, stored, refused) = do
 
 -- * Execution and row reads (slice 2)
 
--- | Abort on an engine-channel failure, naming it. 'startDBOSWorkflowRef'
+-- | Abort on an engine-channel failure, naming it. 'startWorkflowRef'
 -- leaves its error channel free, so the call sites pin it here once
 -- instead of annotating every start.
 orCrash :: forall m a. Applicative m => Either (Error EngineOnly) a -> m a
@@ -549,7 +549,7 @@ scenarioCrud fx = do
   let key = newWorkflowKey "queued"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body input _ = pure (Right input)
-  _ <- registerDBOSWorkflow fx.qfDBOS key body >>= either (error . show) pure
+  _ <- registerWorkflow fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-queue-" <> Text.take 12 fx.qfSuffix
       options =
@@ -566,13 +566,13 @@ scenarioCrud fx = do
       workflowId = WorkflowId ("hs-l2-enqueue-" <> fx.qfSuffix)
       input = encodeWorkflowValue (7 :: Int)
   registered <- registerQueue fx.qfDBOS queueName options AlwaysUpdate
-  enqueued <- enqueueDBOSWorkflow fx.qfDBOS key workflowId (Just input) queueName >>= either (error . show) pure
+  enqueued <- enqueueWorkflow fx.qfDBOS key workflowId (Just input) queueName >>= either (error . show) pure
   waited <- waitForWorkflow fx.qfDBOS workflowId >>= either (error . show) pure
   let awaited = case waited of
         AwaitedSucceeded (Just output) serialization ->
           decodedInt (Right (Just (SerializedWorkflowValue output (Serialization <$> serialization))) :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
         other -> Left ("expected the queued run to succeed, got: " <> show other)
-  rerun <- runDBOSWorkflow exec key workflowId (Just input)
+  rerun <- runWorkflow exec key workflowId (Just input)
   let replayed = decodedInt rerun
   leftAlone <- registerQueue fx.qfDBOS queueName defaultQueueOptions NeverUpdate
   let change =
@@ -623,7 +623,7 @@ scenarioDeadlineStamped fx = do
   let key = newWorkflowKey "budgeted"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-deadline-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "budget-starts-on-dequeue-" <> fx.qfSuffix
@@ -634,7 +634,7 @@ scenarioDeadlineStamped fx = do
             startQueue = Just (enqueueNew queueName),
             startTimeout = Explicit (secondsDuration 300)
           }
-  started <- startDBOSWorkflowRef exec ref options Nothing >>= orCrash
+  started <- startWorkflowRef exec ref options Nothing >>= orCrash
   ran <- handleResult started
   let result = decodedInt ran
   found <- fx.qfReadWorkflowRow (WorkflowId workflowText) >>= maybe (error "expected the queued row") pure
@@ -654,7 +654,7 @@ scenarioNoDeadlineYet fx = do
   let key = newWorkflowKey "queued"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-unpolled-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "queued-with-a-budget-" <> fx.qfSuffix
@@ -666,7 +666,7 @@ scenarioNoDeadlineYet fx = do
           }
   -- No register_queue anywhere: the row must stay as the enqueue left
   -- it, so the read follows the start at once.
-  _ <- startDBOSWorkflowRef exec ref options Nothing >>= orCrash
+  _ <- startWorkflowRef exec ref options Nothing >>= orCrash
   found <- fx.qfReadWorkflowRow (WorkflowId workflowText) >>= maybe (error "expected the queued row") pure
   fx.qfShutdown
   pure (found.workflowRecordTimeout, found.workflowRecordDeadline)
@@ -683,7 +683,7 @@ scenarioPartitionRow fx = do
   let key = newWorkflowKey "partitioned"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-partition-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "sharded-" <> fx.qfSuffix
@@ -693,7 +693,7 @@ scenarioPartitionRow fx = do
           { startWorkflowId = Just (WorkflowId workflowText),
             startQueue = Just ((enqueueNew queueName) {partitionKey = Just "tenant-7", priority = Just 4})
           }
-  _ <- startDBOSWorkflowRef exec ref options Nothing >>= orCrash
+  _ <- startWorkflowRef exec ref options Nothing >>= orCrash
   found <- fx.qfReadWorkflowRow (WorkflowId workflowText)
   fx.qfShutdown
   pure found
@@ -714,7 +714,7 @@ scenarioSentinel fx = do
   let key = newWorkflowKey "plain"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-sentinel-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "no-priority-" <> fx.qfSuffix
@@ -724,7 +724,7 @@ scenarioSentinel fx = do
           { startWorkflowId = Just (WorkflowId workflowText),
             startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 30)})
           }
-  _ <- startDBOSWorkflowRef exec ref options Nothing >>= orCrash
+  _ <- startWorkflowRef exec ref options Nothing >>= orCrash
   found <- fx.qfReadWorkflowRow (WorkflowId workflowText)
   fx.qfShutdown
   pure found
@@ -744,13 +744,13 @@ scenarioBadEnqueue fx = do
   let key = newWorkflowKey "checked"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-validation-q-" <> Text.take 12 fx.qfSuffix
   _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
   -- Past what the priority column holds: i32 max plus one.
   let bad = (enqueueNew queueName) {priority = Just 2147483648}
-  started <- fmap (fmap (.workflowId)) (startDBOSWorkflowRef exec ref (startOptionsDefault {startQueue = Just bad}) Nothing)
+  started <- fmap (fmap (.workflowId)) (startWorkflowRef exec ref (startOptionsDefault {startQueue = Just bad}) Nothing)
   listed <- listWorkflows fx.qfDBOS (defaultWorkflowFilter {workflowFilterQueueNames = [queueName]}) >>= either (error . show) pure
   fx.qfShutdown
   pure (started, listed)
@@ -774,7 +774,7 @@ scenarioInternalRow fx = do
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (9 :: Int))
       QueueName internalName = internalQueueName
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   -- Ownerless on purpose: the internal row is a global singleton, so no
   -- single run can own it; leaving the owner null keeps the upsert
   -- repeatable while the stored 300s interval still proves the engine
@@ -782,7 +782,7 @@ scenarioInternalRow fx = do
   _ <- fx.qfUpsertQueue ((newQueue internalName) {newQueuePollingInterval = secondsDuration 300, newQueueWorkerConcurrency = Just 1, newQueueApplicationName = Nothing}) UpdateExisting >>= either (error . show) pure
   exec <- fx.qfLaunch
   let workflowText = "on-the-internal-queue-" <> fx.qfSuffix
-  started <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew internalName)}) Nothing >>= orCrash
+  started <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew internalName)}) Nothing >>= orCrash
   ran <- handleResult started
   fx.qfShutdown
   pure (decodedInt ran)
@@ -797,12 +797,12 @@ scenarioLateQueue fx = do
   let key = newWorkflowKey "late"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-late-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "late-run-" <> fx.qfSuffix
   _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
-  started <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
+  started <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
   ran <- handleResult started
   fx.qfShutdown
   pure (decodedInt ran)
@@ -818,14 +818,14 @@ scenarioGhostQueue fx = do
   let key = newWorkflowKey "ghost"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (2 :: Int))
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   -- The row is written straight to the database: no register_queue
   -- anywhere on this process.
   _ <- fx.qfUpsertQueue ((newQueue ("hs-l2-ghost-q-" <> Text.take 12 fx.qfSuffix)) {newQueueApplicationName = Just fx.qfAppName}) UpdateExisting >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-ghost-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "ghost-run-" <> fx.qfSuffix
-  started <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
+  started <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
   ran <- handleResult started
   fx.qfShutdown
   pure (decodedInt ran)
@@ -846,7 +846,7 @@ scenarioInheritedDeadline fx = do
       childText = "hs-l2-inherited-child-" <> fx.qfSuffix
       childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       childBody () _ = pure (Right (0 :: Int))
-  childRef <- registerDBOSWorkflowRef fx.qfDBOS childKey childBody >>= either (error . show) pure
+  childRef <- registerWorkflowRef fx.qfDBOS childKey childBody >>= either (error . show) pure
   let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
       parentBody () wctx = do
         startedChild <-
@@ -858,10 +858,10 @@ scenarioInheritedDeadline fx = do
         case startedChild of
           Left err -> pure (Left err)
           Right child -> pure (Right child.workflowId)
-  parentRef <- registerDBOSWorkflowRef fx.qfDBOS parentKey parentBody >>= either (error . show) pure
+  parentRef <- registerWorkflowRef fx.qfDBOS parentKey parentBody >>= either (error . show) pure
   exec <- fx.qfLaunch
   _ <-
-    runDBOSWorkflowRef
+    runWorkflowRef
       exec
       parentRef
       (runOptionsDefault {runWorkflowId = Just (WorkflowId parentText), runTimeout = Explicit (secondsDuration 300)})
@@ -912,7 +912,7 @@ scenarioWorkerConcurrency fx = do
           if open then pure () else retry
         atomically (modifyTVar active (subtract 1))
         pure (Right input)
-  _ <- registerDBOSWorkflow fx.qfDBOS key body >>= either (error . show) pure
+  _ <- registerWorkflow fx.qfDBOS key body >>= either (error . show) pure
   _ <- fx.qfLaunch
   let queueName = "hs-l2-queueconc-" <> Text.take 12 fx.qfSuffix
       workflowIds = [WorkflowId ("hs-l2-queueconc-" <> fx.qfSuffix <> "-" <> Text.pack (show n)) | n <- [1 :: Int, 2, 3]]
@@ -920,7 +920,7 @@ scenarioWorkerConcurrency fx = do
   _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {workerConcurrency = Just 2}) AlwaysUpdate >>= either (error . show) pure
   mapM_
     ( \workflowId -> do
-        _ <- enqueueDBOSWorkflow fx.qfDBOS key workflowId (Just input) queueName >>= either (error . show) pure
+        _ <- enqueueWorkflow fx.qfDBOS key workflowId (Just input) queueName >>= either (error . show) pure
         pure ()
     )
     workflowIds
@@ -955,7 +955,7 @@ scenarioListenNarrow fx = do
       slowQueue = "hs-l2-listen-slow-" <> Text.take 12 fx.qfSuffix
       fastText = "hs-l2-listen-fast-wf-" <> fx.qfSuffix
       slowText = "hs-l2-listen-slow-wf-" <> fx.qfSuffix
-  _ <- registerDBOSWorkflow fx.qfDBOS key body >>= either (error . show) pure
+  _ <- registerWorkflow fx.qfDBOS key body >>= either (error . show) pure
   _ <- fx.qfLaunch
   mapM_
     ( \queueName -> do
@@ -964,7 +964,7 @@ scenarioListenNarrow fx = do
     )
     [fastQueue, slowQueue]
   let enqueueOne wid input queueName = do
-        _ <- enqueueDBOSWorkflow fx.qfDBOS key wid (Just (encodeWorkflowValue (input :: Int))) queueName >>= either (error . show) pure
+        _ <- enqueueWorkflow fx.qfDBOS key wid (Just (encodeWorkflowValue (input :: Int))) queueName >>= either (error . show) pure
         pure ()
   enqueueOne (WorkflowId fastText) 1 fastQueue
   enqueueOne (WorkflowId slowText) 2 slowQueue
@@ -994,11 +994,11 @@ scenarioListenNone fx = do
       ignoredText = "hs-l2-listen-ignored-wf-" <> fx.qfSuffix
       internalText = "hs-l2-listen-internal-wf-" <> fx.qfSuffix
       QueueName internalName = internalQueueName
-  _ <- registerDBOSWorkflow fx.qfDBOS key body >>= either (error . show) pure
+  _ <- registerWorkflow fx.qfDBOS key body >>= either (error . show) pure
   _ <- fx.qfLaunch
   _ <- registerQueue fx.qfDBOS ignoredQueue defaultQueueOptions AlwaysUpdate >>= either (error . show) pure
   let enqueueOne wid input queueName = do
-        _ <- enqueueDBOSWorkflow fx.qfDBOS key wid (Just (encodeWorkflowValue (input :: Int))) queueName >>= either (error . show) pure
+        _ <- enqueueWorkflow fx.qfDBOS key wid (Just (encodeWorkflowValue (input :: Int))) queueName >>= either (error . show) pure
         pure ()
   enqueueOne (WorkflowId ignoredText) 1 ignoredQueue
   enqueueOne (WorkflowId internalText) 2 internalName
@@ -1027,9 +1027,9 @@ scenarioListenInternal fx = do
       body input _ = pure (Right input)
       internalText = "hs-l2-listen-int-wf-" <> fx.qfSuffix
       QueueName internalName = internalQueueName
-  _ <- registerDBOSWorkflow fx.qfDBOS key body >>= either (error . show) pure
+  _ <- registerWorkflow fx.qfDBOS key body >>= either (error . show) pure
   _ <- fx.qfLaunch
-  _ <- enqueueDBOSWorkflow fx.qfDBOS key (WorkflowId internalText) (Just (encodeWorkflowValue (4 :: Int))) internalName >>= either (error . show) pure
+  _ <- enqueueWorkflow fx.qfDBOS key (WorkflowId internalText) (Just (encodeWorkflowValue (4 :: Int))) internalName >>= either (error . show) pure
   internaled <- timeout 15000000 (waitForWorkflow fx.qfDBOS (WorkflowId internalText)) >>= maybe (error "expected the internal workflow to run") pure >>= either (error . show) pure
   fx.qfShutdown
   pure $ case internaled of
@@ -1050,7 +1050,7 @@ scenarioDelayed fx = do
       body () _ = do
         atomically (modifyTVar ran (+ 1))
         pure (Right 7)
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-delay-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "held-back-" <> fx.qfSuffix
@@ -1060,7 +1060,7 @@ scenarioDelayed fx = do
           { startWorkflowId = Just (WorkflowId workflowText),
             startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 3)})
           }
-  started <- startDBOSWorkflowRef exec ref options Nothing >>= orCrash
+  started <- startWorkflowRef exec ref options Nothing >>= orCrash
   status <- handleStatus started >>= orCrash
   threadDelay 1500000
   early <- readTVarIO ran
@@ -1085,20 +1085,20 @@ scenarioDedup fx = do
       firstText = "dedup-first-" <> fx.qfSuffix
       secondText = "dedup-second-" <> fx.qfSuffix
       thirdText = "dedup-third-" <> fx.qfSuffix
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
   -- Delayed, so the first workflow is still holding the key when the
   -- second arrives.
   let held = (enqueueNew queueName) {deduplicationId = Just "order-42", delay = Just (secondsDuration 3)}
-  first <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just held}) Nothing >>= orCrash
-  secondRun <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just held}) Nothing
+  first <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just held}) Nothing >>= orCrash
+  secondRun <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just held}) Nothing
   refusal <- case secondRun of
     Left err -> pure (Text.pack (displayException (err :: Error EngineOnly)))
     Right _ -> pure "a second workflow took a held deduplication key"
   firstResult <- handleResult first
   -- Finishing released the key, so the same one is enqueueable again.
-  third <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42"})}) Nothing
+  third <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42"})}) Nothing
   fx.qfShutdown
   pure (refusal, decodedInt firstResult, either (const False) (const True) third)
 
@@ -1120,20 +1120,20 @@ scenarioJoin fx = do
       firstText = "join-first-" <> fx.qfSuffix
       secondText = "join-second-" <> fx.qfSuffix
       thirdText = "join-third-" <> fx.qfSuffix
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
   -- Delayed, so the holder is still waiting when the second caller
   -- arrives.
   let joining = (enqueueNew queueName) {deduplicationId = Just "order-42", delay = Just (secondsDuration 3), duplicationPolicy = ReturnExisting}
-  first <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just joining}) Nothing >>= orCrash
-  second <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just joining}) Nothing >>= orCrash
+  first <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just joining}) Nothing >>= orCrash
+  second <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just joining}) Nothing >>= orCrash
   loser <- fx.qfReadWorkflowRow (WorkflowId secondText)
   firstResult <- handleResult first
   secondResult <- handleResult second
   -- The holder has finished, so the key is free and the same policy
   -- claims it rather than joining.
-  third <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42", duplicationPolicy = ReturnExisting})}) Nothing >>= orCrash
+  third <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42", duplicationPolicy = ReturnExisting})}) Nothing >>= orCrash
   fx.qfShutdown
   pure (second.workflowId, firstText, loser, decodedInt firstResult, decodedInt secondResult, third.workflowId, thirdText)
 
@@ -1157,13 +1157,13 @@ scenarioPriority fx = do
         pure (Right name)
       queueName = "hs-l2-priority-q-" <> Text.take 12 fx.qfSuffix
       submitted = [("low", Just 9), ("high", Just 1), ("none", Nothing), ("mid", Just 5)]
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   -- Enqueued before the queue is registered, which is what holds the
   -- backlog back: no worker exists for a queue with no row.
   handles <- flip mapM submitted $ \(name, priority) -> do
     let workflowText = name <> "-" <> fx.qfSuffix
-    startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {priority = priority})}) (Just (encodeWorkflowValue name)) >>= orCrash
+    startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {priority = priority})}) (Just (encodeWorkflowValue name)) >>= orCrash
   -- The backlog is complete, so registering the queue is what starts its
   -- worker.
   _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {workerConcurrency = Just 1}) UpdateIfLatestVersion >>= either (error . show) pure
@@ -1195,12 +1195,12 @@ scenarioUpdateHonoured fx = do
         atomically (modifyTVar active (subtract 1))
         pure (Right 1)
       queueName = "hs-l2-update-q-" <> Text.take 12 fx.qfSuffix
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {workerConcurrency = Just 1}) UpdateIfLatestVersion >>= either (error . show) pure
   handles <- flip mapM [0 .. 5 :: Int] $ \n -> do
     let workflowText = "fanned-" <> Text.pack (show n) <> "-" <> fx.qfSuffix
-    startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
+    startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
   -- One at a time to begin with.
   threadDelay 1200000
   firstPeak <- readTVarIO peak
@@ -1244,13 +1244,13 @@ scenarioPartitioned fx = do
             Nothing -> pure ()
         pure (Right partition)
       queueName = "hs-l2-partitioned-q-" <> Text.take 12 fx.qfSuffix
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {partitionConcurrency = Just 1}) UpdateIfLatestVersion >>= either (error . show) pure
   handles <- flip mapM ["tenant-a", "tenant-b"] $ \partition ->
     flip mapM [0 .. 1 :: Int] $ \n -> do
       let workflowText = partition <> "-" <> Text.pack (show n) <> "-" <> fx.qfSuffix
-      startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})}) (Just (encodeWorkflowValue partition)) >>= orCrash
+      startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})}) (Just (encodeWorkflowValue partition)) >>= orCrash
   results <- mapM (mapM handleResult) handles
   mapM_ (mapM_ (either (error . show) pure . decodedText)) results
   keyPeak <- readTVarIO perKeyPeak
@@ -1286,13 +1286,13 @@ scenarioCountedPartitioned fx = do
             Nothing -> pure ()
         pure (Right partition)
       queueName = "hs-l2-counted-q-" <> Text.take 12 fx.qfSuffix
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   exec <- fx.qfLaunch
   _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {partitionConcurrency = Just 2}) UpdateIfLatestVersion >>= either (error . show) pure
   handles <- flip mapM ["tenant-a", "tenant-b"] $ \partition ->
     flip mapM [0 .. 2 :: Int] $ \n -> do
       let workflowText = partition <> "-" <> Text.pack (show n) <> "-" <> fx.qfSuffix
-      startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})}) (Just (encodeWorkflowValue partition)) >>= orCrash
+      startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})}) (Just (encodeWorkflowValue partition)) >>= orCrash
   results <- mapM (mapM handleResult) handles
   mapM_ (mapM_ (either (error . show) pure)) results
   keyPeak <- readTVarIO perKeyPeak
@@ -1315,10 +1315,10 @@ scenarioPeerQueue fx = do
       queueName = "belongs-to-a-peer-" <> Text.take 12 fx.qfSuffix
       peerName = "some-other-application-" <> Text.take 12 fx.qfSuffix
       workflowText = "enqueued-onto-a-peers-queue-" <> fx.qfSuffix
-  ref <- registerDBOSWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   _ <- fx.qfUpsertQueue ((newQueue queueName) {newQueueApplicationName = Just peerName}) UpdateExisting >>= either (error . show) pure
   exec <- fx.qfLaunch
-  _ <- startDBOSWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
+  _ <- startWorkflowRef exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
   -- Several reconciles' worth: if this queue were going to enter the set,
   -- it would have.
   threadDelay 3000000
@@ -1358,12 +1358,12 @@ scenarioWorkerBudgetExhausted fx = do
         pure (Right input)
       queueName = "hs-l2-budget-q-" <> Text.take 12 fx.qfSuffix
       texts = ["hs-l2-budget-1-" <> fx.qfSuffix, "hs-l2-budget-2-" <> fx.qfSuffix, "hs-l2-budget-3-" <> fx.qfSuffix]
-  _ <- registerDBOSWorkflow fx.qfDBOS key body >>= either (error . show) pure
+  _ <- registerWorkflow fx.qfDBOS key body >>= either (error . show) pure
   _ <- fx.qfLaunch
   _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {workerConcurrency = Just 1}) AlwaysUpdate >>= either (error . show) pure
   mapM_
     ( \text -> do
-        _ <- enqueueDBOSWorkflow fx.qfDBOS key (WorkflowId text) (Just (encodeWorkflowValue (1 :: Int))) queueName >>= either (error . show) pure
+        _ <- enqueueWorkflow fx.qfDBOS key (WorkflowId text) (Just (encodeWorkflowValue (1 :: Int))) queueName >>= either (error . show) pure
         pure ()
     )
     texts

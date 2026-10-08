@@ -31,8 +31,10 @@ where
 
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim)
-import Data.Aeson (Value (..), eitherDecodeStrict)
+import Data.Aeson (Value (..), eitherDecodeStrict, encode)
 import Data.Aeson.KeyMap qualified as KeyMap
+import Data.ByteString.Lazy qualified as LBS
+import Data.Text.Encoding (decodeUtf8)
 import Data.List (nub, sort, sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -42,6 +44,8 @@ import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
     Debounce (..),
+    DebounceHolder (..),
+    DebounceRequest (..),
     EncodedValue (..),
     Error (..),
     EventRecord (..),
@@ -81,6 +85,8 @@ import DBOS.SystemDB
     WorkflowStatus (..),
     addTimeout,
     changeSet,
+    debounceStepName,
+    debounceValidate,
     dequeueSweepCap,
     durationAsMillis,
     getEventStepName,
@@ -105,10 +111,10 @@ import DBOS.Transact
   ( DBOS,
     Executor,
     Serializer (..),
-    SomeTracer (..),
     configNew,
     newDBOS,
   )
+import DBOS.Transact.Logger (SomeTracer (..))
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Instance (launchExecutor, launchOn, launchOnWithQueues)
 import DBOS.Transact.Connection
@@ -1059,7 +1065,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               let updated = memApplyQueueUpdate update record
               atomically (modifyTVar db.memQueues (Map.insert name updated))
               pure (Right updated)
-  debounceDelayedWorkflow _ = debounceDelayedWorkflow MockSystemDB
+  debounceDelayedWorkflow db request caller = memDebounce db request caller
   deleteQueue db name = atomically (modifyTVar db.memQueues (Map.delete name)) >> pure (Right ())
   createSchedule db new _caller = do
     now <- timestampNow
@@ -1301,6 +1307,131 @@ memWaitEvent db widText key = do
 -- class-polymorphic 'timeout' cannot settle elsewhere.
 memTimeout :: forall s a. Int -> IOSim s a -> IOSim s (Maybe a)
 memTimeout micros action = timeout @(IOSim s) micros action
+
+-- | Bounce a debounce onto its deduplication key, recording the caller's
+-- step when one calls. Mirrors the Postgres lane exactly: validate first;
+-- a recorded caller step is the answer and the work never re-runs;
+-- otherwise the bounce runs (extend the matching DELAYED debounced row, or
+-- report its holder, or report the key free) and the caller step records
+-- the JSON outcome beside it, all in one STM transaction.
+memDebounce :: MemSystemDB s -> DebounceRequest -> Maybe (WorkflowId, Int) -> IOSim s (Either Error Debounce)
+memDebounce db request caller = case debounceValidate request of
+  Left err -> pure (Left err)
+  Right () -> do
+    now <- timestampNow
+    application <- readTVarIO db.memApplicationName
+    let scope = request.debounceRequestApplicationName <|> application
+    atomically $ do
+      rows <- readTVar db.memRows
+      steps <- readTVar db.memSteps
+      case caller of
+        Just (callerWid, callerStep)
+          | Just stored <- Map.lookup (widTextOf callerWid, callerStep) steps ->
+              pure (memReplayDebounce callerWid callerStep stored)
+        _ -> do
+          let (bounced, rows') = memBounce scope request rows
+          writeTVar db.memRows rows'
+          case caller of
+            Nothing -> pure (Right bounced)
+            Just (callerWid, callerStep) -> do
+              writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) (memDebounceStep callerWid callerStep now bounced) steps)
+              pure (Right bounced)
+
+-- | The bounce itself, as pure row surgery: extend the one DELAYED
+-- debounced row holding the key (capped at its deadline, inputs replaced),
+-- or describe whoever holds the key, or report it free. First in key
+-- order, as the SQL update's single returning row is.
+memBounce :: Maybe Text -> DebounceRequest -> Map Text WorkflowRecord -> (Debounce, Map Text WorkflowRecord)
+memBounce scope request rows = case Map.lookupMin (Map.filter isBouncable rows) of
+  Just (wid, row) ->
+    let capped = case row.workflowRecordDebounceDeadline of
+          Just deadline | deadline < request.debounceRequestDelayUntil -> deadline
+          _ -> request.debounceRequestDelayUntil
+        row' =
+          row
+            { workflowRecordDelayUntil = Just capped,
+              workflowRecordSerialization = request.debounceRequestSerialization,
+              workflowRecordApplicationName = row.workflowRecordApplicationName <|> scope,
+              workflowRecordInput = request.debounceRequestInputs
+            }
+     in (Debounced wid, Map.insert wid row' rows)
+  Nothing -> case Map.lookupMin (Map.filter isHolder rows) of
+    Nothing -> (DebounceUnheld, rows)
+    Just (_, row) -> (DebounceHeld (memDebounceHolder row), rows)
+  where
+    queue = request.debounceRequestQueueName
+    key = request.debounceRequestDeduplicationId
+    isHolder row = row.workflowRecordQueueName == Just queue && row.workflowRecordDeduplicationId == Just key
+    -- The update's guard, conjunct for conjunct: name and class and config
+    -- agree (@is not distinct from@ treats two absences as agreement), the
+    -- row still waits, it debounces, and the scope admits it.
+    isBouncable row =
+      isHolder row
+        && row.workflowRecordName == Just request.debounceRequestWorkflowName
+        && row.workflowRecordClassName == request.debounceRequestClassName
+        && row.workflowRecordConfigName == request.debounceRequestConfigName
+        && row.workflowRecordStatus == Delayed
+        && row.workflowRecordIsDebounced
+        && (scope == Nothing || row.workflowRecordApplicationName == scope || row.workflowRecordApplicationName == Nothing)
+
+-- | The holder as the domain describes it: what holds the key, not merely
+-- that something does, so the caller can tell a collision from a
+-- coincidence. Mirrors the backend's @debounceHeld@.
+memDebounceHolder :: WorkflowRecord -> DebounceHolder
+memDebounceHolder row =
+  let WorkflowId wid = row.workflowRecordId
+   in DebounceHolder
+        { debounceHolderWorkflowId = wid,
+          debounceHolderIsDebounced = row.workflowRecordIsDebounced,
+          debounceHolderWorkflowName = row.workflowRecordName,
+          debounceHolderClassName = row.workflowRecordClassName,
+          debounceHolderConfigName = row.workflowRecordConfigName,
+          debounceHolderApplicationName = row.workflowRecordApplicationName
+        }
+
+-- | The caller step a bounce records: the JSON outcome under the debounce
+-- step name, started and finished now. Mirrors the backend's record beside
+-- its bounce.
+memDebounceStep :: WorkflowId -> Int -> Timestamp -> Debounce -> StepRecord
+memDebounceStep callerWid callerStep now bounced =
+  StepRecord
+    { stepRecordWorkflowId = callerWid,
+      stepRecordStepId = callerStep,
+      stepRecordStepName = debounceStepName,
+      stepRecordOutput = Just (decodeUtf8 (LBS.toStrict (encode bounced))),
+      stepRecordError = Nothing,
+      stepRecordChildWorkflowId = Nothing,
+      stepRecordSerialization = Nothing,
+      stepRecordStartedAt = Just now,
+      stepRecordCompletedAt = Just now
+    }
+
+-- | A recorded bounce step as the answer it holds. A missing output, or one
+-- this build cannot read, is malformed — a step that ran has an answer.
+-- Mirrors the backend's @replayedDebounce@.
+memReplayDebounce :: WorkflowId -> Int -> StepRecord -> Either Error Debounce
+memReplayDebounce (WorkflowId widText) stepId stored = case stored.stepRecordOutput of
+  Nothing ->
+    Left
+      ( Malformed
+          ( "workflow " <> widText <> " step " <> Text.pack (show stepId)
+              <> " ("
+              <> debounceStepName
+              <> ") has no recorded output"
+          )
+      )
+  Just output -> case eitherDecodeStrict (encodeUtf8 output) of
+    Left err ->
+      Left
+        ( Malformed
+            ( "workflow " <> widText <> " step " <> Text.pack (show stepId)
+                <> " ("
+                <> debounceStepName
+                <> ") has an output this build cannot read: "
+                <> Text.pack err
+            )
+        )
+    Right value -> Right value
 
 -- | Deliver messages to their topics and destinations, appending a
 -- notification per delivery so 'getAllNotifications' sees them, and record

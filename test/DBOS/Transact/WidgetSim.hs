@@ -24,7 +24,7 @@ import DBOS.Transact
     WorkflowId (..),
     handleStatus,
     newWorkflowKey,
-    registerDBOSWorkflowRef,
+    registerWorkflowRef,
     retrieveWorkflow)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Datasource (RecordedOutcome (..))
@@ -193,12 +193,12 @@ simWidgetFixture = do
   let ds = mkWidgetDs store
   checkoutTid <- newTVarIO Nothing
   dispatchTid <- newTVarIO Nothing
-  dispatchRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (\_tx -> captureDispatchThread dispatchTid (stmDispatchSteps store)))
-  checkoutRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds (\_tx -> captureCheckoutThread checkoutTid (stmCheckoutSteps store)) dispatchRef)
-  failingRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutCannedFailWorkflow") (checkoutBody ds (\_tx -> failingCheckoutSteps calls store) dispatchRef)
+  dispatchRef <- either (error . show) id <$> registerWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (\_tx -> captureDispatchThread dispatchTid (stmDispatchSteps store)))
+  checkoutRef <- either (error . show) id <$> registerWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds (\_tx -> captureCheckoutThread checkoutTid (stmCheckoutSteps store)) dispatchRef)
+  failingRef <- either (error . show) id <$> registerWorkflowRef dbos (newWorkflowKey "CheckoutCannedFailWorkflow") (checkoutBody ds (\_tx -> failingCheckoutSteps calls store) dispatchRef)
   acked <- newTVarIO 0
   let lostDs = lostAckOnce acked ds
-  lostRef <- either (error . show) id <$> registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutLostAckWorkflow") (checkoutBody lostDs (\_tx -> stmCheckoutSteps store) dispatchRef)
+  lostRef <- either (error . show) id <$> registerWorkflowRef dbos (newWorkflowKey "CheckoutLostAckWorkflow") (checkoutBody lostDs (\_tx -> stmCheckoutSteps store) dispatchRef)
   pure
     WidgetFixture
       { wfDataSource = ds,

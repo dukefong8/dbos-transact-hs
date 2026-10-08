@@ -39,7 +39,7 @@ Import only from `DBOS.Transact` in app code; anything else is engine-internal (
 
 Reference files are named `{prefix}-{topic}.md` (e.g. `step-retries.md`).
 
-Only the implemented subset is present. TS-only topics (`lifecycle-express`, `pattern-classes`, `comm-streaming`, `advanced-patching`, `advanced-upgrading`) are intentionally absent. Where the Rust oracle differs from TS (datasource naming, queue defaults, fork/rewind availability), the Haskell reference states the Haskell behavior and names the difference.
+Only the implemented subset is present. TS-only topics (`lifecycle-express`, `pattern-classes`, `pattern-scheduled`, `comm-streaming`, `advanced-patching`, `advanced-upgrading`) are intentionally absent. Where the Rust oracle differs from TS (datasource naming, queue defaults, fork/rewind availability), the Haskell reference states the Haskell behavior and names the difference.
 
 ## Available References
 
@@ -75,6 +75,7 @@ Only the implemented subset is present. TS-only topics (`lifecycle-express`, `pa
 - `references/comm-messages.md`
 
 **Pattern** (`pattern-`):
+- `references/pattern-debouncing.md`
 - `references/pattern-idempotency.md`
 - `references/pattern-sleep.md`
 

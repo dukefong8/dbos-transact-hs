@@ -60,12 +60,14 @@ library dbos-transact-internals
     DBOS.Transact.Context
     DBOS.Transact.Datasource
     DBOS.Transact.Datasource.Postgres
+    DBOS.Transact.Debouncer
     DBOS.Transact.Dequeue
     DBOS.Transact.Error
     DBOS.Transact.Event
     DBOS.Transact.Handle
     DBOS.Transact.Identity
     DBOS.Transact.Instance
+    DBOS.Transact.Logger
     DBOS.Transact.Management
     DBOS.Transact.Message
     DBOS.Transact.Queue
@@ -77,7 +79,6 @@ library dbos-transact-internals
     DBOS.Transact.Step
     DBOS.Transact.Wait
     DBOS.Transact.Workflow
-    DBOS.Tracer
     DBOS.SystemDB.Class
     DBOS.SystemDB.Error
     DBOS.SystemDB.Notify
@@ -106,7 +107,7 @@ test-suite test
     -- PARKED while the Postgres backend is rewritten: ghciwatch and
     -- `cabal build test` cover the DBOS.SystemDB slice only.
     DBOS.Transact.SerializationTest
-    DBOS.TracerTest
+    DBOS.Transact.LoggerTest
     DBOS.DualStack
     DBOS.IOSimTracer
     DBOS.SystemDB.TypesTest
@@ -134,6 +135,9 @@ test-suite test
     DBOS.Transact.DeadlinesCases
     DBOS.Transact.DeadlinesTest
     DBOS.Transact.DeadlinesTestSim
+    DBOS.Transact.DebouncerCases
+    DBOS.Transact.DebouncerTest
+    DBOS.Transact.DebouncerTestSim
     DBOS.Transact.HandleCases
     DBOS.Transact.HandleTest
     DBOS.Transact.HandleTestSim
@@ -156,6 +160,9 @@ test-suite test
     DBOS.Transact.MessageTest
     DBOS.Transact.MessageTestSim
     DBOS.Transact.MessageSimData
+    DBOS.Transact.OutboxCases
+    DBOS.Transact.OutboxTest
+    DBOS.Transact.OutboxTestSim
     DBOS.Transact.WaitCases
     DBOS.Transact.WaitTest
     DBOS.Transact.WaitTestSim

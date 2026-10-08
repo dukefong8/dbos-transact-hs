@@ -14,8 +14,8 @@ import DBOS.Transact
     decodeWorkflowValue,
     encodeWorkflowValue,
     newWorkflowKey,
-    nullTracer,
   )
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Error (Failure (..))
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Context (withWorkflow)

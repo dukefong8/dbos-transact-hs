@@ -10,7 +10,7 @@ tags: workflow, timeout
 `Timeout` on `RunOptions` / `StartOptions` bounds a workflow run. `timeoutBudget` extracts the duration; `resolveTimeoutDeadline` computes the wall-clock deadline from enqueue delay plus budget.
 
 ```haskell
-startDBOSWorkflowRef exec ref (startOptionsDefault { startTimeout = timeoutSeconds 60 }) input
+startWorkflowRef exec ref (startOptionsDefault { startTimeout = timeoutSeconds 60 }) input
 ```
 
 A timed-out workflow stops scheduling new steps; a running step finishes (steps have their own `StepOptions.timeout`). Use `sleepStep` + `getEvent` timeouts for business deadlines inside the body.

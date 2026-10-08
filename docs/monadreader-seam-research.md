@@ -23,7 +23,7 @@ Threading is explicit end to end, by recorded decision:
   `runTxStep ds config wctx body` (`Datasource.hs:192`),
   `startChildWorkflow wctx ref options input` (`Workflow.hs:636`),
   `runRegisteredWorkflow tasks conn identity snapshot …` (`Workflow.hs:86`),
-  `runDBOSWorkflow executor …` / `cancelWorkflows dbos …` (`Instance.hs:216,288`).
+  `runWorkflow executor …` / `cancelWorkflows dbos …` (`Instance.hs:216,288`).
 - The backend seam is explicit-handle too: every `SystemDB` method takes `db`
   first; "there is no `ReaderT` carrier" (`src/DBOS/Internal/DBOS/SystemDB/Class.hs:43-57`).
 - The tracer is explicit the same way: `SomeTracer m` rides `Connection`

@@ -35,33 +35,30 @@ import DBOS.Transact
     DBOS,
     WorkflowCtx,
     Executor,
-    SomeTracer (..),
     WorkflowStatus (..),
-    acquireLoggerBackend,
     awaitChild,
     configFromEnv,
     decodeWorkflowValue,
     encodeWorkflowValue,
-    ioTracer,
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
-    registerDBOSWorkflowRef,
-    registerDBOSWorkflow,
+    registerWorkflowRef,
+    registerWorkflow,
     WorkflowKey,
     WorkflowRef,
-    runDBOSWorkflow,
-    runDBOSWorkflowRef,
+    runWorkflow,
+    runWorkflowRef,
     runOptionsDefault,
-    nullTracer,
     runStep,
     selectWorkflow,
     startChildWorkflow,
     shutdown,
-    startDBOSWorkflowRef,
+    startWorkflowRef,
     startOptionsDefault,
     waitForWorkflow,
   )
+import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Error (decodeErrorText)
 import DBOS.Transact.Workflow (abortAll, newTasks, tasksSpawner)
@@ -116,6 +113,7 @@ import DBOS.Transact.WorkflowCases
     scenarioBudgetCancels,
     scenarioWrongInstance,
     scenarioJoinHeldKey,
+    scenarioEnqueuedChildReplays,
     checkRegisteredResult,
     checkJoinTakesId,
     checkFreshJoinPolls,
@@ -157,6 +155,7 @@ import DBOS.Transact.WorkflowCases
     checkBudgetCancels,
     checkWrongInstance,
     checkJoinHeldKey,
+    checkEnqueuedChildReplays,
     taskAbortAllWaits,
     taskFinishedNotRegistered,
     taskRefusedAfterSweep,
@@ -201,7 +200,7 @@ tests =
                     then ioError (userError "interrupted after checkpoint")
                     else pure (Right result)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
@@ -252,11 +251,11 @@ tests =
             gated :: StrictMVar IO () -> forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
             gated entered () _ = putMVar entered () >> takeMVar gate >> pure (Right ())
         bracket (newDBOS firstConfig) shutdown $ \first -> do
-          ghostRegistered <- registerDBOSWorkflowRef first ghostKey (gated enteredGhost)
+          ghostRegistered <- registerWorkflowRef first ghostKey (gated enteredGhost)
           ghostRef <- case ghostRegistered of
             Left err -> fail (show err)
             Right ref -> pure ref
-          keeperRegistered <- registerDBOSWorkflowRef first keeperKey (gated enteredKeeper)
+          keeperRegistered <- registerWorkflowRef first keeperKey (gated enteredKeeper)
           keeperRef <- case keeperRegistered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -275,7 +274,7 @@ tests =
         -- A new instance on the same database, with ghost's code removed.
         let secondConfig = config0 {configAppVersion = Just appVersion, configExecutorId = Just secondExec}
         bracket (newDBOS secondConfig) shutdown $ \second -> do
-          keeperRegistered <- registerDBOSWorkflowRef second keeperKey (\() _ -> pure (Right ()) :: IO (Either (Error EngineOnly) ()))
+          keeperRegistered <- registerWorkflowRef second keeperKey (\() _ -> pure (Right ()) :: IO (Either (Error EngineOnly) ()))
           case keeperRegistered of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -319,7 +318,7 @@ tests =
             childBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             childBody () _ = pure (Right 5)
         bracket (newDBOS config) shutdown $ \first -> do
-          childRegistered <- registerDBOSWorkflowRef first childKey childBody
+          childRegistered <- registerWorkflowRef first childKey childBody
           childRef <- case childRegistered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -340,7 +339,7 @@ tests =
                           Right value -> Right value
                           Left err -> Left (StepFailed "parent" (Text.pack (show err)))
                       Right Nothing -> pure (Left (StepFailed "parent" "no child output"))
-          parentRegistered <- registerDBOSWorkflowRef first parentKey parentBody
+          parentRegistered <- registerWorkflowRef first parentKey parentBody
           parentRef <- case parentRegistered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -368,7 +367,7 @@ tests =
         -- Second process: recovery replays the parent, which must not go
         -- looking for the child.
         bracket (newDBOS config) shutdown $ \second -> do
-          childRegistered <- registerDBOSWorkflowRef second childKey childBody
+          childRegistered <- registerWorkflowRef second childKey childBody
           childRef2 <- case childRegistered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -386,7 +385,7 @@ tests =
                           Right value -> Right value
                           Left err -> Left (StepFailed "parent" (Text.pack (show err)))
                       Right Nothing -> Left (StepFailed "parent" "no child output")
-          parentRegistered <- registerDBOSWorkflowRef second parentKey parentBody
+          parentRegistered <- registerWorkflowRef second parentKey parentBody
           case parentRegistered of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -423,12 +422,12 @@ tests =
                 pure $ case charged of
                   Left refused -> Left (application (Gateway (Text.pack (show refused))))
                   Right () -> Right ()
-          payRegistered <- registerDBOSWorkflow dbos payKey payBody
+          payRegistered <- registerWorkflow dbos payKey payBody
           case payRegistered of
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchExec dbos isolatedEnvironment
-          ran <- runDBOSWorkflow exec payKey (WorkflowId payText) (Just (encodeWorkflowValue ()))
+          ran <- runWorkflow exec payKey (WorkflowId payText) (Just (encodeWorkflowValue ()))
           case ran of
             Left (Application (Gateway {reason})) -> reason @?= "the gateway refused the card"
             other -> fail ("expected the boundary conversion, got: " <> show other)
@@ -460,7 +459,7 @@ tests =
             childBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             childBody n _ = putMVar (entered !! n) () >> takeMVar (gates !! n) >> pure (Right n)
         bracket (newDBOS config) shutdown $ \dbos -> do
-          childRegistered <- registerDBOSWorkflowRef dbos childKey childBody
+          childRegistered <- registerWorkflowRef dbos childKey childBody
           childRef <- case childRegistered of
             Left err -> fail (show err)
             Right ref -> pure ref
@@ -512,6 +511,7 @@ tests =
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a start position holding a plain step is refused" scenarioPlainStepAtStart checkPlainStepAtStart,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child joining a held key is recorded as the workflow it joined" scenarioJoinHeldKey checkJoinHeldKey,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "an in-workflow enqueue is a recorded child start that replays" scenarioEnqueuedChildReplays checkEnqueuedChildReplays,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a panicking workflow leaves its row pending" scenarioPanic checkPanic,
@@ -644,13 +644,13 @@ launchExec dbos env = do
 -- carries only the aliases it uses, and a sibling test module repeats
 -- the ones it needs.
 runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWf = runDBOSWorkflow
+runWf = runWorkflow
 
 runWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWfRef = runDBOSWorkflowRef
+runWfRef = runWorkflowRef
 
 startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
-startWfRef = startDBOSWorkflowRef
+startWfRef = startWorkflowRef
 
 awaitWf :: WorkflowCtx exec IO -> WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 awaitWf = awaitChild

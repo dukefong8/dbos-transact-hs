@@ -19,6 +19,8 @@ module DBOS.Transact.Management
     forkFromInWorkflow,
     updateWorkflowAttributes,
     listWorkflows,
+    listWorkflowSteps,
+    listWorkflowStepsInWorkflow,
     listWorkflowsInWorkflow,
   )
 where
@@ -26,12 +28,12 @@ where
 import DBOS.Prelude
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionsValidate, forkValidate, forkStepName, listWorkflowsStepName, resumeStepName)
+import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, StepRecord, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionsValidate, forkValidate, forkStepName, listStepsStepName, listWorkflowsStepName, resumeStepName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, stepStatusId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
+import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 
 -- | Operator-action events: the management surface's announcements.
 -- Rendered lines keep the Rust @tracing!@ message bodies with their
@@ -252,6 +254,28 @@ listWorkflows :: Monad m => Connection m -> WorkflowFilter -> m (Either (Transac
 listWorkflows conn filters = do
   result <- runSystemDB conn.connSysdb (\db -> SystemDB.listWorkflows db filters Nothing)
   pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+
+-- | Reads one workflow's steps in execution order, outputs and errors
+-- included; an id with no row lists nothing rather than failing. Mirrors
+-- Rust @DBOS::list_workflow_steps@; the in-workflow form wraps this read
+-- as a step.
+listWorkflowSteps :: Monad m => Connection m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+listWorkflowSteps conn workflowId = do
+  result <- runSystemDB conn.connSysdb (\db -> SystemDB.listSteps db workflowId True Nothing Nothing Nothing)
+  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+
+-- | Lists a workflow's steps as a step of the calling workflow, under
+-- the cross-SDK name, so a replayed listing reads the snapshot the first
+-- execution saw. Same leaf rule as every in-workflow call.
+listWorkflowStepsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+listWorkflowStepsInWorkflow wctx workflowId =
+  runStepWith
+    stepOptionsDefault
+    wctx
+    listStepsStepName
+    (\_ -> listWorkflowSteps conn workflowId)
+  where
+    conn = wctx.wctxConn
 
 -- | Lists workflows as a step of the calling workflow, under the
 -- cross-SDK name, so a step listing reads the same whichever SDK wrote

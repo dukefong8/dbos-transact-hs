@@ -31,7 +31,7 @@ app <- acquireAppDataSourceInFromEnv "my_schema" config.configDatabaseUrl 5
 runAppSession app createSchemaSession >>= either die pure
 verifyAppDataSource app >>= either die pure
 let ds = toDataSource app
-registerDBOSDataSource dbos ds >>= either die pure
+registerDataSource dbos ds >>= either die pure
 ```
 
 Rules: name the step the way the oracle names it (`txName = Just "create_order"`); pick `Serializable` when the guard depends on it (transient serialization failures retry with backoff). `runTxStep` requires a registered `DataSource`, refuses inside a step body, and replays recorded outcomes without running the body. Outside workflows use `runTxOutside ds txConfig body`.

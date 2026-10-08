@@ -26,8 +26,8 @@ import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
 import DBOS.Transact
   (
   configNew,
-  runTracer,
   )
+import DBOS.Transact.Logger (runTracer)
 import DBOS.Transact.Recovery (EngineEvent (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Connection (SomeSystemDB (..))
@@ -56,6 +56,7 @@ import DBOS.Transact.WorkflowCases
     checkFanout,
     checkFreshJoinPolls,
     checkJoinHeldKey,
+    checkEnqueuedChildReplays,
     checkJoinTakesId,
     checkLiftChildError,
     checkLosingTokenFired,
@@ -101,6 +102,7 @@ import DBOS.Transact.WorkflowCases
     scenarioFanout,
     scenarioFreshJoinPolls,
     scenarioJoinHeldKey,
+    scenarioEnqueuedChildReplays,
     scenarioJoinTakesId,
     scenarioLiftChildError,
     scenarioLosingTokenFired,
@@ -179,6 +181,7 @@ tests =
       simCase simWfFixture "a start position holding a plain step is refused" scenarioPlainStepAtStart checkPlainStepAtStart tracePlainStepAtStart,
       simCase simWfFixture "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance traceWrongInstance,
       simCase simWfFixture "a child joining a held key is recorded as the workflow it joined" scenarioJoinHeldKey checkJoinHeldKey traceJoinHeldKey,
+      simCase simWfFixture "an in-workflow enqueue is a recorded child start that replays" scenarioEnqueuedChildReplays checkEnqueuedChildReplays traceEnqueuedChildReplays,
       simCase simWfFixture "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
       simCase simWfFixture "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
       simCase simWfFixture "a panicking workflow leaves its row pending" scenarioPanic checkPanic tracePanic,
@@ -367,6 +370,17 @@ traceJoinHeldKey tr = do
           WorkflowDedupJoined "sim-join-holder" "order-42-sim-join-holder",
           WorkflowCompleted "sim-join-holder",
           WorkflowCompleted "sim-join-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The parent enqueues its child and completes; the replay joins the existing
+-- run instead of enqueuing another.
+traceEnqueuedChildReplays :: forall a. SimTrace a -> IO ()
+traceEnqueuedChildReplays tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowEnqueued "sim-enqueued-child-parent-0" "enqueued-child-q-sim-enqueued-child-q",
+          WorkflowCompleted "sim-enqueued-child-parent",
+          WorkflowAlreadyOwned "sim-enqueued-child-parent"
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 

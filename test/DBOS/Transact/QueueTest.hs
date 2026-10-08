@@ -21,9 +21,10 @@ import DBOS.Transact (CodecError, Config (..), DBOS, WorkflowCtx, Executor, Engi
  WorkflowId (..),
  WorkflowKey,
  WorkflowRef,
- WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueOptions, encodeWorkflowValue, enqueueDBOSWorkflow, handleResult, handleStatus,
+ WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueOptions, encodeWorkflowValue, enqueueWorkflow, handleResult, handleStatus,
  launchWithEnvironment,
- newDBOS, newWorkflowKey, nullTracer, registerDBOSWorkflowRef, registerDBOSWorkflow, registerQueue, retrieveWorkflow, shutdown, waitForWorkflow)
+ newDBOS, newWorkflowKey, registerWorkflowRef, registerWorkflow, registerQueue, retrieveWorkflow, shutdown, waitForWorkflow)
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.QueueCases
   ( QueueFixture (..),
     checkBadEnqueue,
@@ -179,12 +180,12 @@ tests =
           let key = newWorkflowKey "doubles"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right (input * 2))
-          registered <- registerDBOSWorkflow dbos key body
+          registered <- registerWorkflow dbos key body
           case registered of
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchQueueExec dbos isolatedEnvironment
-          enqueued <- enqueueDBOSWorkflow dbos key workflowId (Just (encodeWorkflowValue (21 :: Int))) queueName
+          enqueued <- enqueueWorkflow dbos key workflowId (Just (encodeWorkflowValue (21 :: Int))) queueName
           case enqueued of
             Left err -> fail (show err)
             Right result -> result.initResultStatus @?= Enqueued
@@ -353,12 +354,12 @@ releaseSuiteBackend backend = do
 -- | Register a body at the engine-only channel: the polymorphic
 -- registration cannot infer the JSON types from a local binding.
 registerRefOf :: DBOS IO -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
-registerRefOf = registerDBOSWorkflowRef
+registerRefOf = registerWorkflowRef
 
 -- | Register a @Text -> Text@ body at the engine-only channel.
 registerTextRefOf :: DBOS IO -> WorkflowKey -> (forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
-registerTextRefOf = registerDBOSWorkflowRef
+registerTextRefOf = registerWorkflowRef
 
 -- | Register a @() -> Text@ body at the engine-only channel.
 registerUnitTextRefOf :: DBOS IO -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
-registerUnitTextRefOf = registerDBOSWorkflowRef
+registerUnitTextRefOf = registerWorkflowRef

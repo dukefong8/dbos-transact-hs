@@ -55,7 +55,6 @@ import DBOS.Transact
     Executor,
     RunOptions (..),
     Serializer (..),
-    SomeTracer (..),
     WorkflowCtx,
     WorkflowRef,
     decodeWorkflowValue,
@@ -69,8 +68,8 @@ import DBOS.Transact
     pendingSetEvent,
     pendingSleep,
     pendingStep,
-    registerDBOSWorkflowRef,
-    runDBOSWorkflowRef,
+    registerWorkflowRef,
+    runWorkflowRef,
     runOptionsDefault,
     runStep,
     runStepWith,
@@ -78,9 +77,10 @@ import DBOS.Transact
     shutdown,
     stepOptionsDefault,
   )
+import DBOS.Transact.Logger (SomeTracer (..))
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Checkpoint (PendingStep (..))
-import DBOS.Transact.Instance (dequeueDBOSWorkflows, launchExecutor, launchOn, launchOnWithQueues)
+import DBOS.Transact.Instance (dequeueWorkflows, launchExecutor, launchOn, launchOnWithQueues)
 import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep, withWorkflow)
 import DBOS.Transact.Checkpoint (pendingStepId)
 import DBOS.Transact.Connection
@@ -186,7 +186,7 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
 -- | Engine-only driver alias: the recovery and order cases read through
 -- this, so the error channel pins to 'EngineOnly' once.
 runRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Executor m -> WorkflowRef m EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runRef = runDBOSWorkflowRef
+runRef = runWorkflowRef
 
 -- | A wait that polls for a published event instead of sleeping through it.
 -- Under IOSim the timeout is virtual, so a hung wait fails fast; live it
@@ -446,7 +446,7 @@ scenarioRecoveryKeepsFirst fx = do
     offer <- newEmptyMVar
     release <- newEmptyMVar
     putMVar offer ("first" :: Text)
-    refE <- registerDBOSWorkflowRef dbos (newWorkflowKey "progress") (progressBody offer release)
+    refE <- registerWorkflowRef dbos (newWorkflowKey "progress") (progressBody offer release)
     ref <- case refE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
@@ -462,7 +462,7 @@ scenarioRecoveryKeepsFirst fx = do
     -- tick: one pass claims the recovered row and spawns its rerun, and the
     -- join below waits for that rerun rather than for a poll interval.
     -- (One pass, not a loop: the recovery holds exactly one row.)
-    drove <- dequeueDBOSWorkflows dbos
+    drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -493,11 +493,11 @@ scenarioWrongInstance ::
 scenarioWrongInstance fx = do
   bracket fx.efNewOtherDBOS shutdown $ \other ->
     bracket fx.efNewDBOS shutdown $ \owner -> do
-      readerE <- registerDBOSWorkflowRef owner (newWorkflowKey "reads_through_other") (readerBody other)
+      readerE <- registerWorkflowRef owner (newWorkflowKey "reads_through_other") (readerBody other)
       readerRef <- case readerE of
         Left err -> throwIO (userError (show err))
         Right ref -> pure ref
-      inStepE <- registerDBOSWorkflowRef owner (newWorkflowKey "reads_in_step") (inStepReaderBody other)
+      inStepE <- registerWorkflowRef owner (newWorkflowKey "reads_in_step") (inStepReaderBody other)
       inStepRef <- case inStepE of
         Left err -> throwIO (userError (show err))
         Right ref -> pure ref
@@ -527,7 +527,7 @@ scenarioOutOfOrderIds ::
   m [(Int, Text)]
 scenarioOutOfOrderIds fx = do
   bracket fx.efNewDBOS shutdown $ \dbos -> do
-    refE <- registerDBOSWorkflowRef dbos (newWorkflowKey "joins") (outOfOrderBody dbos)
+    refE <- registerWorkflowRef dbos (newWorkflowKey "joins") (outOfOrderBody dbos)
     ref <- case refE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r

@@ -5,7 +5,7 @@ SHELL := bash
 GHC  ?= 9.12
 PACKAGE ?= dbos-transact-hs
 
-.PHONY: build dev env hie pg test db-migrate widget-db
+.PHONY: build dev env hie pg test neg db-migrate widget-db
 
 dev:
 	ghciwatch --no-interrupt-reloads \
@@ -26,6 +26,23 @@ build:
 
 test:
 	cabal test all
+
+
+# Regression gate for the ctx invariants (ADR-0029): every negative must
+# FAIL with the expected error class (a misuse that compiles is a hole),
+# every witness twin must BUILD clean (a broken negative fails for the
+# wrong reason). negative/ sits outside the cabal stanzas and the
+# ghciwatch globs, so the corpus never enters a build or a reload.
+neg: build
+	for f in negative/neg_*.hs; do \
+		echo "== $$f (must fail)"; \
+		cabal exec -- ghc -fno-code $$f 2>&1 | grep -q "Couldn't match\|does not export" || { echo "GATE RED: $$f built or wrong error class"; exit 1; }; \
+	done; \
+	for f in negative/w_*.hs; do \
+		echo "== $$f (must build)"; \
+		cabal exec -- ghc -fno-code $$f > /dev/null || { echo "GATE RED: witness $$f failed"; exit 1; }; \
+	done; \
+	echo "negative gate green"
 
 
 db-migrate:

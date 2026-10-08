@@ -15,8 +15,8 @@ import DBOS.Transact
     launch,
     newDBOS,
     newWorkflowKey,
-    registerDBOSDataSource,
-    registerDBOSWorkflowRef,
+    registerDataSource,
+    registerWorkflowRef,
     releaseAppDataSource,
     runAppSession,
     shutdown,
@@ -63,15 +63,15 @@ start = do
   either (die . Text.pack . show) pure verified
   dbos <- newDBOS config
   let ds = toDataSource app
-  _ <- registerDBOSDataSource dbos ds >>= either (die . Text.pack . show) pure
+  _ <- registerDataSource dbos ds >>= either (die . Text.pack . show) pure
   -- Registered before launch, because recovery starts inside it: a workflow
   -- the registry does not know by name is one the recovering executor
   -- cannot resume.
   dispatchRef <-
-    registerDBOSWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchWorkflow ds pgDispatchSteps)
+    registerWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchWorkflow ds pgDispatchSteps)
       >>= either (die . Text.pack . show) pure
   checkoutRef <-
-    registerDBOSWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (\() -> checkoutWorkflow ds pgCheckoutSteps dispatchRef)
+    registerWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (\() -> checkoutWorkflow ds pgCheckoutSteps dispatchRef)
       >>= either (die . Text.pack . show) pure
   exec <- launch dbos >>= either (die . Text.pack . show) pure
   let widget = WidgetApp {waDbos = dbos, waExec = exec, waApp = app, waCheckout = checkoutRef}

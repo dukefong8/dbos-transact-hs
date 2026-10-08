@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
 
 -- | Internal workflow runner (Rule 4: plain Haskell, no Bluefin imports).
 -- Runs a registered body and records its outcome: @SUCCESS@ with the output,
@@ -52,25 +52,25 @@ import DBOS.Prelude
 -- throws, or waits through base; all effects stay on io-classes.
 import Control.Exception (AsyncException (..))
 import Control.Monad.Class.MonadThrow qualified as MThrow
-import Data.Int (Int64)
 import Data.Aeson (FromJSON, Value)
+import Data.Int (Int64)
 import Data.Map.Strict (Map)
+import Data.Text (pack)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), Submission (..), StepRecord (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowStatus (..), addTimeout, newWorkflow, timestampNow, timestampToEpochMs)
-import DBOS.Transact.Serialization (encodeAttributes)
+import DBOS.SystemDB.Types (AwaitedOutcome (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Submission (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowStatus (..), addTimeout, newWorkflow, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), deadline, insideAStep, nextStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Logger (runTracer)
 import DBOS.Transact.Registry (ErasedWorkflow (..), Snapshot, WorkflowKey (..), WorkflowRef (refKey, refRegistry), lookupRegistryWorkflow, lookupSnapshotWorkflow, refName, registryInstanceId, renderWorkflowKey)
+import DBOS.Transact.Serialization (encodeAttributes)
 import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Tracer (runTracer)
-import Data.Text (pack)
 
 -- | Attempts before a workflow is parked as
 -- @MAX_RECOVERY_ATTEMPTS_EXCEEDED@. Mirrors workflow.rs.
@@ -150,13 +150,13 @@ tasksSpawner tasks = spawner
           Right value -> LocalTaskValue value
           Left err -> case MThrow.fromException err :: Maybe AsyncException of
             Just ThreadKilled -> LocalTaskCancelled
-            _ -> LocalTaskPanic err
+            _                 -> LocalTaskPanic err
       -- A refused arrival never forked, so the parent fills the
       -- cancellation itself: no child exists to do it, and the waiter must
       -- still learn the outcome rather than hang on an empty box.
       case spawned of
         Nothing -> putMVar channel LocalTaskCancelled
-        Just _ -> pure ()
+        Just _  -> pure ()
       pure channel
 
 -- | Park-and-adopt: wait for whoever owns the row and report its recorded
@@ -243,7 +243,7 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
                   TransactError.FailureRecorded payload -> recordOutcome (OutcomeError payload) (Left failure)
                   -- Unreachable by construction: only control failures are
                   -- `Control`, and those were handled above.
-                  TransactError.FailureControl err -> recordOutcome (OutcomeError (TransactError.encodeErrorText (TransactError.liftEngine err :: (TransactError.Error TransactError.EngineOnly)))) (Left failure)
+                  TransactError.FailureControl err      -> recordOutcome (OutcomeError (TransactError.encodeErrorText (TransactError.liftEngine err :: (TransactError.Error TransactError.EngineOnly)))) (Left failure)
             Right output -> recordOutcome (OutcomeOutput ((.serializedText) <$> output)) (Right output)
     -- Records one outcome and reports what the write decided: recording a
     -- second outcome behind a finished row is a supersede, not a write, and
@@ -265,10 +265,10 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
           runTracer conn.connTracer (WorkflowSuperseded workflowText)
           adoptRecordedFailure conn workflowId
     isControlFailure failure = case failure of
-      TransactError.FailureControl _ -> True
+      TransactError.FailureControl _  -> True
       TransactError.FailureRecorded _ -> False
     failureControl failure = case failure of
-      TransactError.FailureControl err -> err
+      TransactError.FailureControl err      -> err
       TransactError.FailureRecorded payload -> TransactError.ErrorWorkflowFailed {workflowId = workflowText, message = payload}
     -- A durable cancellation, unless the row already reached an outcome while
     -- the race ran — then the recorded outcome is what the run reports, as
@@ -314,7 +314,7 @@ spawnRegisteredWorkflowWithRow tasks release submission conn identity snapshot k
                 -- Refused by a closed registry: no task exists to run the
                 -- release, so it runs here — the "every path that does not
                 -- spawn releases immediately" half of the contract above.
-                Nothing -> release >> pure (Right Nothing)
+                Nothing  -> release >> pure (Right Nothing)
                 Just tid -> pure (Right (Just tid))
 
 -- | Create an enqueued workflow row without running its body. A queue worker
@@ -329,7 +329,7 @@ workflowNewWorkflow :: Connection m -> Identity -> WorkflowKey -> WorkflowId -> 
 workflowNewWorkflow conn identity key (WorkflowId workflowText) input queueName =
   let serialization = case input >>= (.serializedSerialization) of
         Just (Serialization name) -> name
-        Nothing -> serializerName conn.connSerializer
+        Nothing                   -> serializerName conn.connSerializer
       (workflowName, className, configName) = case key of
         WorkflowKey name class' config' -> (name, class', config')
    in (newWorkflow workflowText)
@@ -346,16 +346,24 @@ workflowNewWorkflow conn identity key (WorkflowId workflowText) input queueName 
         }
 
 -- | What an enqueue asks of its queue: deduplication, priority, partition,
--- delay. Mirrors Rust @Enqueue@ in @workflow.rs@, which the client's
+-- delay, and — only for the debouncer's fresh creation — the debounce
+-- creation flags. Mirrors Rust @Enqueue@ in @workflow.rs@, which the client's
 -- @EnqueueOptions@ and the runtime's start options both build on so the two
--- surfaces never spell the same four things differently.
+-- surfaces never spell the same four things differently; the two debounce
+-- fields mirror TypeScript's @EnqueueOptions@ (@isDebounced@,
+-- @debounceDeadlineEpochMS@), which only the debounce names — the oracle's
+-- own comment says no other caller does — so a plain enqueue stays
+-- non-debounced with no deadline.
 data Enqueue = Enqueue
-  { name :: Text,
-    deduplicationId :: Maybe Text,
-    priority :: Maybe Word32,
-    partitionKey :: Maybe Text,
-    delay :: Maybe Duration,
-    duplicationPolicy :: DuplicationPolicy
+  { name              :: Text,
+    deduplicationId   :: Maybe Text,
+    priority          :: Maybe Word32,
+    partitionKey      :: Maybe Text,
+    delay             :: Maybe Duration,
+    duplicationPolicy :: DuplicationPolicy,
+    isDebounced       :: Bool,
+    debounceTimeout   :: Maybe Duration,
+    applicationName   :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -376,7 +384,10 @@ enqueueNew queueName =
       priority = Nothing,
       partitionKey = Nothing,
       delay = Nothing,
-      duplicationPolicy = Reject
+      duplicationPolicy = Reject,
+      isDebounced = False,
+      debounceTimeout = Nothing,
+      applicationName = Nothing
     }
 
 -- | Rejects an enqueue no queue could honour. Only what the shape could not
@@ -435,8 +446,8 @@ timeoutBudget :: Timeout -> Maybe Duration
 timeoutBudget timeout =
   case timeout of
     Explicit budget -> Just budget
-    Inherit -> Nothing
-    None -> Nothing
+    Inherit         -> Nothing
+    None            -> Nothing
 
 -- | The deadline to record on the row: what a direct start stamps now, and
 -- what a queued start leaves null for the claim to fill in. An explicit
@@ -447,7 +458,7 @@ resolveTimeoutDeadline :: Timeout -> Maybe Enqueue -> Maybe Timestamp -> Timesta
 resolveTimeoutDeadline timeout queue parentDeadline now =
   case timeout of
     Explicit budget -> case queue of
-      Just _ -> Nothing
+      Just _  -> Nothing
       Nothing -> addTimeout now budget
     None -> Nothing
     Inherit -> parentDeadline
@@ -457,7 +468,7 @@ resolveTimeoutDeadline timeout queue parentDeadline now =
 -- 'StartOptions'.
 data RunOptions = RunOptions
   { runWorkflowId :: Maybe WorkflowId,
-    runTimeout :: Timeout,
+    runTimeout    :: Timeout,
     runAttributes :: Maybe (Map Text Value)
   }
   deriving stock (Eq, Show)
@@ -469,8 +480,8 @@ data RunOptions = RunOptions
 -- twice.
 data StartOptions = StartOptions
   { startWorkflowId :: Maybe WorkflowId,
-    startTimeout :: Timeout,
-    startQueue :: Maybe Enqueue,
+    startTimeout    :: Timeout,
+    startQueue      :: Maybe Enqueue,
     startAttributes :: Maybe (Map Text Value)
   }
   deriving stock (Eq, Show)
@@ -515,9 +526,9 @@ runOptionsToStartOptions options =
 childWorkflowId :: Maybe WorkflowId -> Maybe (Text, Int) -> Text -> Text
 childWorkflowId chosen parent generated =
   case (chosen, parent) of
-    (Just (WorkflowId offered), _) -> offered
+    (Just (WorkflowId offered), _)     -> offered
     (Nothing, Just (parentId, stepId)) -> parentId <> "-" <> pack (show stepId)
-    (Nothing, Nothing) -> generated
+    (Nothing, Nothing)                 -> generated
 
 -- | Settles a deduplication collision the way the caller asked: a held key
 -- under 'ReturnExisting' hands back a handle to whoever holds it, and
@@ -540,6 +551,27 @@ resolveEnqueueCollision conn shape _offeredId err =
       _ -> pure (Left (TransactError.ErrorSystemDatabase err))
     _ -> pure (Left (TransactError.ErrorSystemDatabase err))
 
+-- | The debounce creation fields a start carries onto its row: the delay
+-- capped at the timeout's deadline (as the oracle's executor caps its delay
+-- at the debounce deadline), the debounced mark, the stamped deadline, and
+-- the acting application. A plain enqueue contributes nothing beyond its
+-- delay: no mark, no deadline, the identity's application.
+debounceCreation :: Maybe Enqueue -> Timestamp -> (Maybe Duration, Bool, Maybe Timestamp, Maybe Text)
+debounceCreation queue now = case queue of
+  Just shape | shape.isDebounced ->
+    ( cappedDelay shape.delay shape.debounceTimeout,
+      True,
+      shape.debounceTimeout >>= addTimeout now,
+      shape.applicationName
+    )
+  _ -> (queue >>= (.delay), False, Nothing, Nothing)
+  where
+    -- The earlier of the period's wake and the timeout's deadline, as
+    -- durations from the same now the deadline stamps above.
+    cappedDelay delay timeout = case (delay, timeout) of
+      (Just period, Just limit) -> Just (min period limit)
+      (delayed, _)              -> delayed
+
 -- | Starts the referenced workflow durably and returns a handle to it,
 -- without waiting. Called outside a workflow this starts a root; the
 -- 'startChildWorkflow' form is what a body reaches for. If the id is
@@ -559,12 +591,16 @@ startWorkflowRef tasks conn identity snapshot ref options input =
           workflowText = maybe generated (\(WorkflowId offered) -> offered) options.startWorkflowId
           deadline' = resolveTimeoutDeadline options.startTimeout options.startQueue Nothing now
           base = workflowNewWorkflow conn identity key (WorkflowId workflowText) input ((.name) <$> options.startQueue)
+          (debouncedDelay, debounced, debouncedDeadline, debounceApp) = debounceCreation options.startQueue now
           new =
             base
               { newWorkflowDeduplicationId = options.startQueue >>= (.deduplicationId),
                 newWorkflowPriority = maybe 0 storedPriority options.startQueue,
                 newWorkflowQueuePartitionKey = options.startQueue >>= (.partitionKey),
-                newWorkflowDelay = options.startQueue >>= (.delay),
+                newWorkflowDelay = debouncedDelay,
+                newWorkflowIsDebounced = debounced,
+                newWorkflowDebounceDeadline = debouncedDeadline,
+                newWorkflowApplicationName = debounceApp <|> Just identity.identityAppName,
                 newWorkflowTimeout = timeoutBudget options.startTimeout,
                 newWorkflowDeadline = deadline',
                 newWorkflowAttributes = encodeAttributes options.startAttributes
@@ -593,7 +629,7 @@ startWorkflowRef tasks conn identity snapshot ref options input =
                 pure (Right (localHandle conn workflowText channel))
         Left err -> case options.startQueue of
           Just shape -> fmap (either (Left . TransactError.liftEngine) Right) (resolveEnqueueCollision conn shape workflowText err)
-          Nothing -> pure (Left (TransactError.ErrorSystemDatabase err))
+          Nothing    -> pure (Left (TransactError.ErrorSystemDatabase err))
 
 -- | Runs the referenced workflow durably and waits for its result: one
 -- init records the row with everything the options name, then the shared
@@ -694,12 +730,16 @@ startChildWorkflow wctx ref options input = do
         Right Nothing -> do
           let childDeadline = resolveTimeoutDeadline options.startTimeout options.startQueue (deadline wctx) now
               base = workflowNewWorkflow conn identity key (WorkflowId childText) input ((.name) <$> options.startQueue)
+              (debouncedDelay, debounced, debouncedDeadline, debounceApp) = debounceCreation options.startQueue now
               new =
                 base
                   { newWorkflowDeduplicationId = options.startQueue >>= (.deduplicationId),
                     newWorkflowPriority = maybe 0 storedPriority options.startQueue,
                     newWorkflowQueuePartitionKey = options.startQueue >>= (.partitionKey),
-                    newWorkflowDelay = options.startQueue >>= (.delay),
+                    newWorkflowDelay = debouncedDelay,
+                    newWorkflowIsDebounced = debounced,
+                    newWorkflowDebounceDeadline = debouncedDeadline,
+                    newWorkflowApplicationName = debounceApp <|> Just identity.identityAppName,
                     newWorkflowTimeout = timeoutBudget options.startTimeout,
                     newWorkflowDeadline = childDeadline,
                     newWorkflowAttributes = encodeAttributes options.startAttributes
@@ -714,6 +754,11 @@ startChildWorkflow wctx ref options input = do
           initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh (Just caller))
           case initialized of
             Right result -> do
+              -- The oracle announces the enqueue at debug whether the start
+              -- came from outside or from a workflow body.
+              case options.startQueue of
+                Just shape -> runTracer conn.connTracer (WorkflowEnqueued childText shape.name)
+                Nothing    -> pure ()
               spawned <- case (wctx.wctxSpawner, options.startQueue) of
                 -- A fresh start is not a dequeue, so it holds no queue's
                 -- slot; an owned-elsewhere row is already running somewhere.
@@ -739,7 +784,7 @@ startChildWorkflow wctx ref options input = do
                     mapped <- runSystemDB conn.connSysdb (\db -> SystemDB.recordChildWorkflow db (WorkflowId parentText) (WorkflowId holder.workflowId) parentStepId name (Just now))
                     pure $ case mapped of
                       Left recordErr -> Left (TransactError.ErrorSystemDatabase recordErr)
-                      Right _ -> Right holder
+                      Right _        -> Right holder
                   Left joinErr -> pure (Left (TransactError.liftEngine joinErr))
               Nothing -> pure (Left (TransactError.ErrorSystemDatabase err))
 
@@ -755,17 +800,17 @@ data Tasks m = Tasks  { tasksState :: StrictTVar m (TaskState m),
     -- flag-snapshot, so no arrival can land between the count and the
     -- registry the kill list is read from. Held only across non-blocking
     -- steps (one STM commit, a fork, a kill), never across a wait.
-    tasksLock :: StrictMVar m ()
+    tasksLock                      :: StrictMVar m ()
   }
 
 data TaskState m = TaskState
-  { running :: [ThreadId m],
+  { running  :: [ThreadId m],
     -- | How many spawned tasks exist and have not departed.
-    live :: Int,
+    live     :: Int,
     -- | Set by 'abortAll'. An arrival past this point is refused outright
     -- (no fork, no count) rather than added to a list nothing will read
     -- again.
-    closed :: Bool,
+    closed   :: Bool,
     -- | Tasks that departed before the parent registered them: a fast body
     -- on a parallel scheduler can run to completion between the fork and
     -- the registration. The imminent registration consumes the entry

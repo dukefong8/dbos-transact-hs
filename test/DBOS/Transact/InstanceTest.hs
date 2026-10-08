@@ -30,17 +30,17 @@ import DBOS.Transact
     cancelWorkflows,
     configFromEnv,
     encodeWorkflowValue,
-    enqueueDBOSWorkflow,
+    enqueueWorkflow,
     isLaunched,
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
-    nullTracer,
-    registerDBOSWorkflow,
-    runDBOSWorkflow,
+    registerWorkflow,
+    runWorkflow,
     shutdown,
     waitForWorkflow,
   )
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Instance (dbosAppVersion, dbosExecutorId)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
@@ -138,7 +138,7 @@ tests =
         case started of
           Left _ -> pure ()
           Right _ -> fail "expected a short application name to be refused"
-        reopened <- registerDBOSWorkflow dbos (newWorkflowKey "late") echoWorkflow
+        reopened <- registerWorkflow dbos (newWorkflowKey "late") echoWorkflow
         case reopened of
           Left err -> fail (displayException err)
           Right () -> pure (),
@@ -203,7 +203,7 @@ tests =
             echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         dbos <- newDBOS configured
-        registered <- registerDBOSWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
+        registered <- registerWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
         case registered of
           Left err -> fail (displayException err)
           Right () -> pure ()
@@ -252,7 +252,7 @@ tests =
         dbos <- newDBOS configured
         let echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
-        beforeLaunch <- registerDBOSWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
+        beforeLaunch <- registerWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
         case beforeLaunch of
           Left err -> fail (displayException err)
           Right () -> pure ()
@@ -266,7 +266,7 @@ tests =
         case missing of
           Left err -> assertBool "reports the missing workflow" ("no such workflow" `Text.isInfixOf` Text.pack (displayException err))
           Right _ -> fail "expected waiting for a missing workflow to fail"
-        afterLaunch <- registerDBOSWorkflow dbos (newWorkflowKey "late") echoWorkflow
+        afterLaunch <- registerWorkflow dbos (newWorkflowKey "late") echoWorkflow
         case afterLaunch of
           Left err -> assertBool "names the lifecycle boundary" ("after DBOS is launched" `Text.isInfixOf` Text.pack (displayException err))
           Right () -> fail "expected registration after launch to be refused"
@@ -285,7 +285,7 @@ tests =
             echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         bracket (newDBOS configured) shutdown $ \dbos -> do
-          registered <- registerDBOSWorkflow dbos (newWorkflowKey "queued") echoWorkflow
+          registered <- registerWorkflow dbos (newWorkflowKey "queued") echoWorkflow
           case registered of
             Left err -> fail (displayException err)
             Right () -> pure ()
@@ -294,7 +294,7 @@ tests =
             Left err -> fail (displayException err)
             Right _ -> pure ()
           enqueued <-
-            enqueueDBOSWorkflow
+            enqueueWorkflow
               dbos
               (newWorkflowKey "queued")
               workflowId
@@ -372,7 +372,7 @@ tests =
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
 runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWf = runDBOSWorkflow
+runWf = runWorkflow
 
 -- | One backend for the whole group: pools are per-backend, so sharing
 -- bounds connections no matter how many tests run or are interrupted.

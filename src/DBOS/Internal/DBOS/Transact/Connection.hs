@@ -52,7 +52,7 @@ import DBOS.SystemDB.Postgres.Backend (Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.SystemDB.Types (Duration)
-import DBOS.Tracer (SomeTracer)
+import DBOS.Transact.Logger (SomeTracer)
 import DBOS.Transact.Config (Config (..), Serializer, outcomePollInterval)
 import DBOS.Transact.Identity (Identity (..))
 

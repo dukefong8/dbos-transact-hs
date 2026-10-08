@@ -18,11 +18,7 @@ import Control.Monad.IOSim (IOSim, SimTrace, runSim, runSimTrace, selectTraceEve
 import Control.Tracer (mkTracer)
 import Data.Text (unpack)
 import DBOS.Prelude
-import DBOS.Transact
-  (
-  SomeTracer (..),
-  )
-import DBOS.Tracer (LogEvent (..))
+import DBOS.Transact.Logger (LogEvent (..), SomeTracer (..))
 import System.IO (hPutStrLn, stderr)
 
 -- | The simulation carrier does both halves of a sim run: it traces the

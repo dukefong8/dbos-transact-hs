@@ -41,7 +41,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text, pack)
 import Data.Word (Word64)
 import DBOS.SystemDB (Topic (..), millisDuration)
-import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowCtx, WorkflowRef, newWorkflowKey, recv, registerDBOSWorkflow, registerDBOSWorkflowRef, runStep, setEvent, sleepStep)
+import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowCtx, WorkflowRef, newWorkflowKey, recv, registerWorkflow, registerWorkflowRef, runStep, setEvent, sleepStep)
 import Prelude
 
 -- * Durations and keys
@@ -136,10 +136,10 @@ stepSleep wctx name milliseconds =
 
 registerStarterWorkflows :: DBOS IO -> IO (Either (Error EngineOnly) StarterRefs)
 registerStarterWorkflows dbos = do
-  example <- registerDBOSWorkflowRef dbos (newWorkflowKey "ExampleWorkflow") (\() -> exampleWorkflow)
-  order <- registerDBOSWorkflowRef dbos (newWorkflowKey "OrderWorkflow") (\() -> orderWorkflow)
-  approval <- registerDBOSWorkflowRef dbos (newWorkflowKey approvalWorkflowName) (\() -> approvalWorkflow)
-  enqueued <- registerDBOSWorkflow dbos (newWorkflowKey enqueuedWorkflowName) (\() -> enqueuedWorkflow)
+  example <- registerWorkflowRef dbos (newWorkflowKey "ExampleWorkflow") (\() -> exampleWorkflow)
+  order <- registerWorkflowRef dbos (newWorkflowKey "OrderWorkflow") (\() -> orderWorkflow)
+  approval <- registerWorkflowRef dbos (newWorkflowKey approvalWorkflowName) (\() -> approvalWorkflow)
+  enqueued <- registerWorkflow dbos (newWorkflowKey enqueuedWorkflowName) (\() -> enqueuedWorkflow)
   pure (StarterRefs <$> example <*> order <*> approval <* enqueued)
 
 -- | The refs the handlers start through. Starting by ref persists the

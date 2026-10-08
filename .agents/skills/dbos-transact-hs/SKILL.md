@@ -49,13 +49,13 @@ Reference these guidelines when:
 A DBOS application MUST build a `Config`, create `DBOS`, register workflows before `launch`, and `shutdown` on exit:
 
 ```haskell
-import DBOS.Transact (configFromEnv, launch, newDBOS, newWorkflowKey, registerDBOSWorkflowRef, shutdown)
+import DBOS.Transact (configFromEnv, launch, newDBOS, newWorkflowKey, registerWorkflowRef, shutdown)
 
 main :: IO ()
 main = do
   config <- configFromEnv "my-app"          -- DBOS_* environment variables
   dbos   <- newDBOS config
-  _ref   <- registerDBOSWorkflowRef dbos (newWorkflowKey "MyWorkflow") myBody
+  _ref   <- registerWorkflowRef dbos (newWorkflowKey "MyWorkflow") myBody
   exec   <- launch dbos
   -- run workflows via exec ...
   shutdown dbos
@@ -68,7 +68,7 @@ app <- acquireAppDataSourceInFromEnv "my_schema" config.configDatabaseUrl 5
 runAppSession app createSchemaSession >>= either die pure
 verifyAppDataSource app >>= either die pure
 let ds = toDataSource app
-registerDBOSDataSource dbos ds >>= either die pure   -- BEFORE launch: recovery starts inside it
+registerDataSource dbos ds >>= either die pure   -- BEFORE launch: recovery starts inside it
 ```
 
 When creating a new application, set `configAppVersion` to `Just "0.1.0"`. Recovery only resumes its own version. `configExecutorId` isolates processes; `configListenQueues = Just []` makes a process dequeue nothing (see `references/queue-listening.md` and `references/lifecycle-config.md`).
@@ -105,7 +105,7 @@ Define one record of step functions per workflow, keyed by `StepCtx`, plus build
 ### Key Constraints
 
 - Do NOT call, start, or enqueue workflows from within steps
-- Do NOT use uncontrolled concurrency to start workflows — use `startDBOSWorkflowRef` or queues
+- Do NOT use uncontrolled concurrency to start workflows — use `startWorkflowRef` or queues
 - Workflows MUST be deterministic — non-deterministic operations go in steps
 - Do NOT mutate globals from workflows or steps
 - Register workflows and datasources BEFORE `launch` — registering after is refused

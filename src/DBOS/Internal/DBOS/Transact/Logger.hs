@@ -1,30 +1,57 @@
-{-# LANGUAGE DefaultSignatures #-}
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
+{-# LANGUAGE DefaultSignatures      #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE GADTs                  #-}
+{-# LANGUAGE MultiParamTypeClasses  #-}
+{-# LANGUAGE OverloadedRecordDot    #-}
+{-# LANGUAGE OverloadedStrings      #-}
+{-# LANGUAGE RankNTypes             #-}
 
--- | Domain-event tracing over 'Control.Tracer.Tracer', with one backend
--- per runtime: production logs through FastLogger (the Rank-N shape — one
--- tracer value serves every 'ToLogStr' event type), simulations trace the
--- structured event through io-sim's @traceM@ and assert with
+-- | Logging and tracing: the four app-facing helpers ('logDebug' …
+-- 'logError') and the machinery that carries every engine and application
+-- line to its backend.
+--
+-- A workflow or step body calls a helper with the context it already holds.
+-- The line rides the context's own tracer, so it lands wherever engine lines
+-- land: FastLogger on stderr in production (cached timestamp, emitting
+-- thread, the @TRACE_LEVEL@ floor), the io-sim trace in simulations. Every
+-- rendered line keeps the one shape: severity tag, data-constructor name,
+-- prose — @[Info] AppLog: sending notification for order 7@. Logging is not
+-- durable: a retried step logs again, the way a replayed Rust body's
+-- @tracing@ call does.
+--
+-- Under the helpers: domain-event tracing over 'Control.Tracer.Tracer', with
+-- one backend per runtime: production logs through FastLogger (the Rank-N
+-- shape — one tracer value serves every 'ToLogStr' event type), simulations
+-- trace the structured event through io-sim's @traceM@ and assert with
 -- @selectTraceEventsDynamic@. Records hold one 'SomeTracer' — a GADT over
 -- the Rank-N shape both backends share — so leaf functions stay agnostic
 -- of the backend and of each other's event types: a general tracer zooms
 -- to a domain event with 'contramap', exactly as @contra-tracer@
--- documents.
---
--- One rendered line names its event: @[Debug] StepRunning: running step
--- double (3)@ — severity tag, data-constructor name, prose. The
--- constructor stands in for Rust's @tracing@ target; the IO backend
--- additionally prefixes FastLogger's cached time and the emitting
--- thread's id, itself cached per thread like the time. The IO backend
+-- documents. The IO backend additionally prefixes FastLogger's cached time
+-- and the emitting thread's id, itself cached per thread like the time, and
 -- renders only events at or above its @TRACE_LEVEL@ floor (unset:
 -- everything); lines below it are dropped before any formatting.
 --
+-- 'LogCtx' has no instances here: an instance must know the context record,
+-- and "DBOS.Transact.Context" imports this module for the carrier its
+-- 'WorkflowCtx' field holds, so the instances live beside the records there.
+--
 -- Rule 4: plain Haskell, no Bluefin imports. Rule 5: the tracer is passed
 -- explicitly, never ambient. No @co-log@ import anywhere in this module.
-module DBOS.Tracer
-  ( -- * Universal carrier
+module DBOS.Transact.Logger
+  ( -- * The app-facing helpers
+    logDebug,
+    logInfo,
+    logWarn,
+    logError,
+
+    -- * The event behind them
+    AppLog (..),
+
+    -- * Context-tracer seam (instances live with the context records)
+    LogCtx (..),
+
+    -- * Universal carrier
     SomeTracer (..),
     runTracer,
     nullTracer,
@@ -263,3 +290,44 @@ nullTracer = SomeTracer CT.nullTracer
 -- emitting thread's id, and the event's own rendering.
 ioTracer :: LoggerBackend -> SomeTracer IO
 ioTracer backend = SomeTracer (fastLoggerTracer backend)
+
+-- * The application-facing seam
+
+-- | The one event the helpers emit: severity and prose, no span fields.
+-- The constructor name is the line's grep target, so every application
+-- line reads @[Info] AppLog: message@ the way a domain line reads
+-- @[Debug] StepRunning: running step double (3)@.
+data AppLog = AppLog LogSeverity Text
+  deriving stock (Eq, Show)
+
+instance LogEvent AppLog where
+  eventSeverity (AppLog severity _) = severity
+  renderEvent (AppLog _ message) = message
+
+instance ToLogStr AppLog where
+  toLogStr = toLogStr . renderLine
+
+-- | Which context a helper was handed. Both views carry the workflow's
+-- tracer, so one set of four helpers serves workflow bodies and step
+-- bodies alike, and the functional dependency pins the monad from the
+-- context so a call site needs no annotation. The instances live with the
+-- context records ("DBOS.Transact.Context"), which import this module for
+-- the carrier; a caller never names the constraint.
+class LogCtx c m | c -> m where
+  contextTracer :: c -> SomeTracer m
+
+-- | Log a debug-severity line through the context's tracer.
+logDebug :: (LogCtx c m, Monad m) => c -> Text -> m ()
+logDebug ctx message = runTracer (contextTracer ctx) (AppLog SeverityDebug message)
+
+-- | Log an info-severity line through the context's tracer.
+logInfo :: (LogCtx c m, Monad m) => c -> Text -> m ()
+logInfo ctx message = runTracer (contextTracer ctx) (AppLog SeverityInfo message)
+
+-- | Log a warning-severity line through the context's tracer.
+logWarn :: (LogCtx c m, Monad m) => c -> Text -> m ()
+logWarn ctx message = runTracer (contextTracer ctx) (AppLog SeverityWarning message)
+
+-- | Log an error-severity line through the context's tracer.
+logError :: (LogCtx c m, Monad m) => c -> Text -> m ()
+logError ctx message = runTracer (contextTracer ctx) (AppLog SeverityError message)

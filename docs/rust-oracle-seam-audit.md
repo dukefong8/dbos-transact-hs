@@ -325,7 +325,7 @@ distinctions never arise.
 
 `new`/`config`/`is_launched`/`launch`/`shutdown` ✓
 (`launchWithEnvironment` extra, for test isolation),
-`register_workflow` → `registerDBOSWorkflow` (+ `Ref` variant) ✓,
+`register_workflow` → `registerWorkflow` (+ `Ref` variant) ✓,
 `run`/`enqueue`/`retrieve`/`dequeue` drivers ✓, management wrappers
 ✓. Missing: `executor_id`/`app_version`/`app_id` accessors (3 trivial
 methods, no test needs them yet). `Tasks`/`runtime`/`spawn_tracked`

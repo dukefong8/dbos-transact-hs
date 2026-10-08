@@ -51,7 +51,7 @@ import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderError)
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..))
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
+import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
 import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextWorkflowMarker, nextStepId, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))

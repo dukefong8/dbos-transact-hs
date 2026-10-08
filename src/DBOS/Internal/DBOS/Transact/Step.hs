@@ -30,7 +30,7 @@ import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Duration (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), durationAsMillis, timestampNow)
 import DBOS.SystemDB.Types (secondsDuration)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
+import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..))

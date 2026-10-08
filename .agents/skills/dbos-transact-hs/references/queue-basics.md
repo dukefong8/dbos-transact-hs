@@ -11,9 +11,9 @@ Register a database-backed queue before use, then enqueue workflows by name. Reg
 
 ```haskell
 q <- registerQueue dbos "email" defaultQueueOptions NeverUpdate
-_ <- enqueueDBOSWorkflow dbos (newWorkflowKey "SendEmail") workflowId (Just (encodeWorkflowValue input)) "email"
+_ <- enqueueWorkflow dbos (newWorkflowKey "SendEmail") workflowId (Just (encodeWorkflowValue input)) "email"
 ```
 
-`registerQueue dbos name options conflict`: `conflict` decides what happens when the queue already exists (`NeverUpdate` keeps the stored limits). `enqueueDBOSWorkflow` joins an existing workflow when the id matches instead of starting a duplicate.
+`registerQueue dbos name options conflict`: `conflict` decides what happens when the queue already exists (`NeverUpdate` keeps the stored limits). `enqueueWorkflow` joins an existing workflow when the id matches instead of starting a duplicate. Enqueueing from inside a workflow body uses `startChildWorkflow` with `startQueue` instead — a recorded child step that replays (see Workflow Constraints).
 
 Difference from TS: TS `new WorkflowQueue(name)` / `DBOS.registerQueue` class form does not exist here. Haskell uses `registerQueue` + `defaultQueueOptions` record updates.

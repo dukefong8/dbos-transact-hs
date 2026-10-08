@@ -19,7 +19,7 @@ post-merge; gate green (11 passed, 1 skipped on the mapped subset).
 | `_delete_checkpoints[_if_owner]` | `dsDeleteCheckpoints` + `clearDatasourceCheckpoints` | Covered (owner gate omitted — clearing runs on the completing executor) |
 | `_check_execution` / `_record_result` / `_record_error` / `_replay_conflicting_step` / `_still_owns` | Internalized (record ops + `adoptTransaction` + `checkOwner`) | Covered by design (depth: fewer methods, same behavior) |
 | `AsyncSQLAlchemyDatasource` + `run_tx_step_async` | — | N/A (direct-style `IO`; behavior covered once) |
-| created-before-launch registry rule | `registerDBOSDataSource` (frozen at launch, thawed on failed launch/shutdown) | Covered |
+| created-before-launch registry rule | `registerDataSource` (frozen at launch, thawed on failed launch/shutdown) | Covered |
 | least-privilege roles, `schema_translate_map`, custom sessionmaker, ORM objects | — | N/A (ORM/deployment layer; no ORM in this port) |
 
 ## Test coverage (`test_datasource.py` sync → `DatasourceTest[Sim]`)

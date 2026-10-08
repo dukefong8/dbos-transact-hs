@@ -112,8 +112,8 @@ import DBOS.SystemDB.Postgres
 import Data.Int (Int64)
 import Data.List (sort)
 import Data.Text qualified as Text
-import DBOS.Transact (nullTracer)
 import Data.UUID qualified as UUID
+import DBOS.Transact.Logger (nullTracer)
 import Data.UUID.V4 qualified as UUID.V4
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders

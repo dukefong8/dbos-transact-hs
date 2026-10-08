@@ -36,7 +36,7 @@ import DBOS.SystemDB.Types
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
+import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
 import DBOS.Transact.Registry (Snapshot, workflowKeyFromRow)
 import DBOS.Transact.Workflow
   ( Tasks,

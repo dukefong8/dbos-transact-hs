@@ -25,7 +25,7 @@ import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Prelude
-import DBOS.Transact (EngineOnly, Error, StartOptions (..), Topic (..), WorkflowId (..), decodeWorkflowValue, encodeWorkflowValue, getWorkflowEvent, sendWorkflowMessage, startDBOSWorkflowRef, startOptionsDefault)
+import DBOS.Transact (EngineOnly, Error, StartOptions (..), Topic (..), WorkflowId (..), decodeWorkflowValue, encodeWorkflowValue, getWorkflowEvent, sendWorkflowMessage, startWorkflowRef, startOptionsDefault)
 import Demo.Http (RouteHandler, runAppOr500, throwRouteError)
 import Hasql.Session qualified as Session
 import IHP.TypedSql.Id (Id' (..))
@@ -107,7 +107,7 @@ settlePayment app paymentId status = runExceptT $ do
 -- for a payment, and no HTTP request should be held open for that.
 startCheckoutWorkflow :: WidgetApp -> Text -> IO (Either (Error EngineOnly) ())
 startCheckoutWorkflow app key = do
-  started <- startDBOSWorkflowRef app.waExec app.waCheckout (startOptionsDefault {startWorkflowId = Just (WorkflowId key)}) Nothing
+  started <- startWorkflowRef app.waExec app.waCheckout (startOptionsDefault {startWorkflowId = Just (WorkflowId key)}) Nothing
   pure (void started)
 
 -- | Wait for one published event, decoded to 'Text'. The same deadline the

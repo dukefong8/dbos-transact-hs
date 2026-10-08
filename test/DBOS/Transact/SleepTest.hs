@@ -27,12 +27,10 @@ import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
-  acquireLoggerBackend,
-  ioTracer,
-  nullTracer,
   sleepPlain,
   sleepStep,
   )
+import DBOS.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep, withWorkflow)
 import DBOS.Transact.ContextTest (connOver)

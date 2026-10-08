@@ -102,7 +102,7 @@ import DBOS.Transact
   shutdown,
   sleepStep,
   startChildWorkflow,
-  startDBOSWorkflowRef,
+  startWorkflowRef,
   startOptionsDefault,
   )
 import DBOS.SystemDB.Error (BackendError (..))
@@ -330,7 +330,7 @@ scenarioPaidCheckout :: WidgetCase m => WidgetFixture m -> m WidgetObservation
 scenarioPaidCheckout wf = do
   wid <- wf.wfFreshWorkflowId
   exec <- wf.wfLaunch
-  _ <- startDBOSWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+  _ <- startWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
   waitEvent wf wid "payment_id"
   _ <- sendWorkflowMessage wf.wfDBOS wid (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("paid" :: Text))
   waitEvent wf wid "order_id"
@@ -344,7 +344,7 @@ scenarioRefusedPayment :: WidgetCase m => WidgetFixture m -> m WidgetObservation
 scenarioRefusedPayment wf = do
   wid <- wf.wfFreshWorkflowId
   exec <- wf.wfLaunch
-  _ <- startDBOSWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+  _ <- startWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
   waitEvent wf wid "payment_id"
   _ <- sendWorkflowMessage wf.wfDBOS wid (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("failed" :: Text))
   waitEvent wf wid "order_id"
@@ -359,7 +359,7 @@ scenarioCannedPaidWriteRefused :: WidgetCase m => WidgetFixture m -> m WidgetObs
 scenarioCannedPaidWriteRefused wf = do
   wid <- wf.wfFreshWorkflowId
   exec <- wf.wfLaunch
-  _ <- startDBOSWorkflowRef exec wf.wfFailingCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+  _ <- startWorkflowRef exec wf.wfFailingCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
   waitEvent wf wid "payment_id"
   _ <- sendWorkflowMessage wf.wfDBOS wid (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("paid" :: Text))
   threadDelay 2000000
@@ -372,7 +372,7 @@ scenarioCrashWhileWaiting :: WidgetCase m => WidgetFixture m -> m (WidgetObserva
 scenarioCrashWhileWaiting wf = do
   wid <- wf.wfFreshWorkflowId
   exec <- wf.wfLaunch
-  _ <- startDBOSWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+  _ <- startWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
   waitEvent wf wid "payment_id"
   before <- observe wf wid
   shutdown wf.wfDBOS
@@ -392,7 +392,7 @@ scenarioCrashMidDispatch :: WidgetCase m => WidgetFixture m -> m WidgetObservati
 scenarioCrashMidDispatch wf = do
   wid <- wf.wfFreshWorkflowId
   exec <- wf.wfLaunch
-  _ <- startDBOSWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+  _ <- startWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
   waitEvent wf wid "payment_id"
   _ <- sendWorkflowMessage wf.wfDBOS wid (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("paid" :: Text))
   waitEvent wf wid "order_id"
@@ -540,7 +540,7 @@ scenarioKilledWhileWaiting :: WidgetCase m => WidgetFixture m -> m (WidgetObserv
 scenarioKilledWhileWaiting wf = do
   wid <- wf.wfFreshWorkflowId
   exec <- wf.wfLaunch
-  _ <- startDBOSWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+  _ <- startWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
   waitEvent wf wid "payment_id"
   before <- observe wf wid
   killed <- wf.wfCheckoutThread
@@ -563,7 +563,7 @@ scenarioKilledMidDispatch :: WidgetCase m => WidgetFixture m -> m WidgetObservat
 scenarioKilledMidDispatch wf = do
   wid <- wf.wfFreshWorkflowId
   exec <- wf.wfLaunch
-  _ <- startDBOSWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+  _ <- startWorkflowRef exec wf.wfCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
   waitEvent wf wid "payment_id"
   _ <- sendWorkflowMessage wf.wfDBOS wid (Just (Topic "payment_status")) Nothing (encodeWorkflowValue ("paid" :: Text))
   waitEvent wf wid "order_id"
@@ -617,7 +617,7 @@ scenarioLostAck wf = do
   wid <- wf.wfFreshWorkflowId
   wf.wfLoseNextAck
   exec <- wf.wfLaunch
-  _ <- startDBOSWorkflowRef exec wf.wfLostAckCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+  _ <- startWorkflowRef exec wf.wfLostAckCheckoutRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
   waitCommit wf wid "create_order"
   threadDelay 200000
   shutdown wf.wfDBOS

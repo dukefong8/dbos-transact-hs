@@ -162,6 +162,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import Data.Word (Word32, Word64)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, withObject, withScientific, withText, (.:), (.=))
+import Data.Aeson.Types (Parser)
 import DBOS.SystemDB.Error (Error, invalidInput)
 import Data.Time.Clock (nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
@@ -1243,6 +1244,46 @@ data Debounce
   | DebounceUnheld
   deriving stock (Eq, Show)
 
+-- | The step output encoding for a bounce, in the shape serde writes: an
+-- externally tagged enum, so a replay in any SDK reads what this one wrote.
+instance ToJSON DebounceHolder where
+  toJSON holder =
+    object
+      [ "workflow_id" .= holder.debounceHolderWorkflowId,
+        "is_debounced" .= holder.debounceHolderIsDebounced,
+        "workflow_name" .= holder.debounceHolderWorkflowName,
+        "class_name" .= holder.debounceHolderClassName,
+        "config_name" .= holder.debounceHolderConfigName,
+        "application_name" .= holder.debounceHolderApplicationName
+      ]
+
+instance FromJSON DebounceHolder where
+  parseJSON = withObject "DebounceHolder" $ \o ->
+    DebounceHolder
+      <$> o .: "workflow_id"
+      <*> o .: "is_debounced"
+      <*> o .: "workflow_name"
+      <*> o .: "class_name"
+      <*> o .: "config_name"
+      <*> o .: "application_name"
+
+instance ToJSON Debounce where
+  toJSON (Debounced wid) =
+    object ["Bounced" .= object ["workflow_id" .= wid]]
+  toJSON (DebounceHeld holder) = object ["Held" .= holder]
+  toJSON DebounceUnheld = String "Unheld"
+
+instance FromJSON Debounce where
+  parseJSON (String "Unheld") = pure DebounceUnheld
+  parseJSON (Object o) =
+    (Debounced <$> (o .: "Bounced" >>= bouncedId))
+      <|> (DebounceHeld <$> o .: "Held")
+  parseJSON _ = fail "Debounce must be Unheld, Bounced, or Held"
+
+bouncedId :: Value -> Parser Text
+bouncedId (Object inner) = inner .: "workflow_id"
+bouncedId _              = fail "Bounced must hold an object"
+
 -- | The workflow holding a deduplication key, described rather than merely
 -- reported so the caller can tell a collision from a coincidence. Mirrors
 -- Rust @DebounceHolder@.
@@ -1752,3 +1793,30 @@ instance FromJSON WorkflowRecord where
       <*> o .: "workflowRecordDebounceDeadline"
       <*> o .: "workflowRecordIsDebounced"
       <*> o .: "workflowRecordAttributes"
+
+instance ToJSON StepRecord where
+  toJSON record =
+    object
+      [ "stepRecordWorkflowId" .= record.stepRecordWorkflowId,
+        "stepRecordStepId" .= record.stepRecordStepId,
+        "stepRecordStepName" .= record.stepRecordStepName,
+        "stepRecordOutput" .= record.stepRecordOutput,
+        "stepRecordError" .= record.stepRecordError,
+        "stepRecordChildWorkflowId" .= record.stepRecordChildWorkflowId,
+        "stepRecordSerialization" .= record.stepRecordSerialization,
+        "stepRecordStartedAt" .= record.stepRecordStartedAt,
+        "stepRecordCompletedAt" .= record.stepRecordCompletedAt
+      ]
+
+instance FromJSON StepRecord where
+  parseJSON = withObject "StepRecord" $ \o ->
+    StepRecord
+      <$> o .: "stepRecordWorkflowId"
+      <*> o .: "stepRecordStepId"
+      <*> o .: "stepRecordStepName"
+      <*> o .: "stepRecordOutput"
+      <*> o .: "stepRecordError"
+      <*> o .: "stepRecordChildWorkflowId"
+      <*> o .: "stepRecordSerialization"
+      <*> o .: "stepRecordStartedAt"
+      <*> o .: "stepRecordCompletedAt"

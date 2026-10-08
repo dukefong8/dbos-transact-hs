@@ -6,7 +6,7 @@ Repo guide for DBOS Haskell.
 
 - `src/DBOS/Transact.hs` is the public DBOS transaction facade.
 - `src/DBOS/<Domain>/*` holds internal parsers, replay logic, and types.
-- `src/DBOS/Transact/Serialization.hs` (Aeson JSON, mirrors Rust `serialization.rs`) and `src/DBOS/Tracer.hs` (explicit `SomeTracer`, no ambient tracer) are plain-Haskell internals with no Bluefin imports.
+- `src/DBOS/Transact/Serialization.hs` (Aeson JSON, mirrors Rust `serialization.rs`) and `src/DBOS/Transact/Logger.hs` (explicit `SomeTracer` carrier, backends, and the app-facing `log*` seam, no ambient tracer) are plain-Haskell internals with no Bluefin imports.
 - `src/DBOS/SystemDB/Postgres.hs` holds `[typedSql| ... |]` sessions over an explicit pool via `ihp-typed-sql` (the `hasql-th` dependency is removed).
 - `test/DBOS/<DomainTest>.hs` holds Tasty specs.
 - Sim trees live beside them: `test/DBOS/<Domain>Sim.hs` (eval-only mirrors over simulated data, never in `defaultMain`), `test/DBOS/IOSimTracer.hs` (the `simTracer` carrier — structured event plus its said line — `runSimCase`, stderr `printSimTrace`), `test/DBOS/SystemDB/IOSim.hs` (the `MockSystemDB`/`MemSystemDB` backends), and `test/DBOS/Transact/<Domain>SimData.hs` (per-domain mock constructors, dup'd across domains on purpose).

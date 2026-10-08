@@ -39,7 +39,11 @@ start = do
   let config =
         config0
           { configAppVersion = Just applicationVersion,
-            configExecutorId = Just executorId
+            configExecutorId = Just executorId,
+            -- The starter drains only its own demo queue: listening to all
+            -- (the default) would sweep other apps' and tests' queue rows in
+            -- a shared database (the DequeuedRowSkipped noise).
+            configListenQueues = Just [demoQueueName]
           }
   dbos <- newDBOS config
   refs <- registerStarterWorkflows dbos >>= either (fail . show) pure

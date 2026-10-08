@@ -1,6 +1,8 @@
-{-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE OverloadedRecordDot   #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE RankNTypes            #-}
 
 -- | The context a durable call runs in, threaded explicitly. Mirrors Rust
 -- @context.rs@: the workflow it belongs to, the step attempt it is inside,
@@ -88,7 +90,7 @@ import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Kind (Type)
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Timestamp, WorkflowId (..))
-import DBOS.Tracer (SomeTracer)
+import DBOS.Transact.Logger (LogCtx (..), SomeTracer)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity, nextExecutionIdentity, runSystemDB)
 import DBOS.Transact.Identity (Identity)
 
@@ -374,6 +376,17 @@ data StepCtx (exec :: Type) m = StepCtx
   { stepCtxWorkflow :: WorkflowCtx exec m,
     stepCtxScope    :: Maybe (StepScope m)
   }
+
+-- | The context records are what the logger helpers accept: each view
+-- carries its execution's tracer, so one set of helpers serves workflow
+-- and step bodies alike. The instances live here — not in
+-- "DBOS.Transact.Logger" — because the log module is the carrier a context
+-- must import, and modules cannot cycle.
+instance LogCtx (WorkflowCtx exec m) m where
+  contextTracer ctx = ctx.wctxTracer
+
+instance LogCtx (StepCtx exec m) m where
+  contextTracer ctx = ctx.stepCtxWorkflow.wctxTracer
 
 -- | Run an execution's body under a fresh workflow context: a new
 -- execution identity, fresh counters, and no step scope. The rank-2

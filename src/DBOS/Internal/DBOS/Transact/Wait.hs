@@ -24,7 +24,7 @@ import Data.Text qualified as Text
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), selectStepName, timestampNow)
-import DBOS.Tracer (LogEvent (..), LogSeverity (..), runTracer)
+import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx (wctxConn, wctxTracer), nextStepId, withSystemDB, workflowId)

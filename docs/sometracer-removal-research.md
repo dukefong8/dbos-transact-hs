@@ -4,6 +4,11 @@
 the cheapest faithful replacement? (Research only; no repo source was modified. Prototypes
 lived under `/var/folders/fk/w27km5892sb7vbt454rpq7b00000gn/T/opencode/sometracer-proto/`.)
 
+**2026-10-07 note.** The module moved and was merged: `DBOS.Tracer` is now
+`DBOS.Transact.Logger` (the former `DBOS.Transact.Log` merged in; the test module is
+`DBOS.LoggerTest`). Paths below are updated to the new locations; line numbers remain those of
+the research snapshot.
+
 **Method / environment.** GHC 9.12.4, cabal-install 3.16.1.0, the repo's own package
 environment via `cabal exec -- ghc`, with the cabal defaults replayed as flags
 (`-XGHC2024 -XDuplicateRecordFields -XNoFieldSelectors -XOverloadedLabels
@@ -18,16 +23,16 @@ was never built. Every result below is a command actually run; exact commands ar
 ## 1. What `SomeTracer` does today
 
 ```haskell
--- src/DBOS/Tracer.hs:96-97
+-- src/DBOS/Transact/Logger.hs:96-97
 data SomeTracer m where
   SomeTracer :: (forall e. (LogEvent e, ToLogStr e, Typeable e) => Tracer m e) -> SomeTracer m
 ```
 
 - `runTracer` is the sole eliminator: `runTracer (SomeTracer tracer) = CT.traceWith tracer`
-  (`src/DBOS/Tracer.hs:102-103`); emission happens only through it (ADR-0017:5, plan Rule 5:
+  (`src/DBOS/Transact/Logger.hs:102-103`); emission happens only through it (ADR-0017:5, plan Rule 5:
   `.lavish/rust-port-plan.html:329`).
-- Backends: `nullTracer` (`src/DBOS/Tracer.hs:108-109`), `ioTracer` over FastLogger
-  (`src/DBOS/Tracer.hs:114-115`), `fastLoggerTracer` (`:82-85`); test-owned sim carriers in
+- Backends: `nullTracer` (`src/DBOS/Transact/Logger.hs:108-109`), `ioTracer` over FastLogger
+  (`src/DBOS/Transact/Logger.hs:114-115`), `fastLoggerTracer` (`:82-85`); test-owned sim carriers in
   `test/DBOS/IOSimTracer.hs:31-41`.
 - The GADT is *the* mechanism that lets one stored value serve many unrelated event types:
   the existential erases the event type at the field, and the rank-N argument keeps the
@@ -66,7 +71,7 @@ Call sites and recovered types:
 | `test/DBOS/Transact/WorkflowTestSim.hs:1626` | `WorkflowEvent` (8 constructors) |
 | `test/DBOS/Transact/ManagementTestSim.hs:326` | `ManagementEvent` (7 constructors) |
 | `test/DBOS/SystemDB/RetryTest.hs:111` | `SysdbEvent` |
-| `test/DBOS/TracerTest.hs:36` | `WorkflowEvent` (`[StepRunning "double" 3]`) |
+| `test/DBOS/LoggerTest.hs:36` | `WorkflowEvent` (`[StepRunning "double" 3]`) |
 
 `test/DBOS/Transact/StepTestSim.hs` and the other Sim trees pass `simTracerSay`/`simTracer`
 into builders (`simConnectionWith`, `simLaunchWith`, `memLaunchOn`, …) 82 times across 10
@@ -233,10 +238,10 @@ kept. `SomeTracer m` also becomes an ordinary `Tracer`, so contra-tracer's `Semi
 instances.
 
 **Cost: the smallest of all candidates.** Bodies only:
-`DBOS/Tracer.hs:96-115` (type + 3 backends), `test/DBOS/IOSimTracer.hs:31-41`,
-`test/DBOS/TracerTest.hs:56-64`, `test/DBOS/SystemDB/NotifierTest.hs:119-120`, plus export
-lists `src/DBOS/Tracer.hs:19` and `src/DBOS/Transact.hs:59` (`SomeTracer (..)` → `SomeTracer`,
-add `SomeEvent (..)`) and imports at `test/DBOS/TracerTest.hs:15`,
+`DBOS/Transact/Logger.hs:96-115` (type + 3 backends), `test/DBOS/IOSimTracer.hs:31-41`,
+`test/DBOS/LoggerTest.hs:56-64`, `test/DBOS/SystemDB/NotifierTest.hs:119-120`, plus export
+lists `src/DBOS/Transact/Logger.hs:19` and `src/DBOS/Transact.hs:59` (`SomeTracer (..)` → `SomeTracer`,
+add `SomeEvent (..)`) and imports at `test/DBOS/LoggerTest.hs:15`,
 `test/DBOS/SystemDB/NotifierTest.hs:32`, `test/DBOS/Transact/ContextTest.hs:58`,
 `test/DBOS/SystemDB/IOSim.hs:80`. All 10 sim-tree files and all 82 `simTracer*` uses are
 untouched; all `selectTraceEventsDynamic` assertions are untouched. If the alias name is
@@ -283,9 +288,9 @@ candidate neither removes the erasure nor satisfies the one-field constraint mor
 | `contextTracer ctx*` calls (survive every candidate) | 16 |
 | Lines containing `SomeTracer` in src+test | 58 (`rg -c SomeTracer src test` summed) |
 | Signature lines `:: … SomeTracer` | 33 |
-| True construction sites (`SomeTracer (…)` or backend wrappers to rewrite under C2) | `src/DBOS/Tracer.hs:108-109,114-115`; `test/DBOS/IOSimTracer.hs:32,38`; `test/DBOS/TracerTest.hs:58`; `test/DBOS/SystemDB/NotifierTest.hs:120` |
+| True construction sites (`SomeTracer (…)` or backend wrappers to rewrite under C2) | `src/DBOS/Transact/Logger.hs:108-109,114-115`; `test/DBOS/IOSimTracer.hs:32,38`; `test/DBOS/LoggerTest.hs:58`; `test/DBOS/SystemDB/NotifierTest.hs:120` |
 | `simTracer*` uses in test files | 82 across 10 files (unchanged under C2) |
-| `SomeTracer (..)` import/export items that would warn on a synonym (`-Wdodgy-imports`/`-Wdodgy-exports`, observed) | `src/DBOS/Tracer.hs:19`, `src/DBOS/Transact.hs:59`, `test/DBOS/TracerTest.hs:15`, `test/DBOS/SystemDB/NotifierTest.hs:32`, `test/DBOS/Transact/ContextTest.hs:58`, `test/DBOS/SystemDB/IOSim.hs:80` |
+| `SomeTracer (..)` import/export items that would warn on a synonym (`-Wdodgy-imports`/`-Wdodgy-exports`, observed) | `src/DBOS/Transact/Logger.hs:19`, `src/DBOS/Transact.hs:59`, `test/DBOS/LoggerTest.hs:15`, `test/DBOS/SystemDB/NotifierTest.hs:32`, `test/DBOS/Transact/ContextTest.hs:58`, `test/DBOS/SystemDB/IOSim.hs:80` |
 
 ## 7. Exact commands run
 
@@ -329,7 +334,7 @@ encoding (candidate 2).**
 
 ## Sources
 
-Repo (file:line): `src/DBOS/Tracer.hs:19,25-30,96-97,102-103,108-109,114-115` ·
+Repo (file:line): `src/DBOS/Transact/Logger.hs:19,25-30,96-97,102-103,108-109,114-115` ·
 `src/DBOS/Transact/Connection.hs:109,117,151` · `src/DBOS/Transact/Context.hs:97,181,193-200` ·
 `src/DBOS/SystemDB/Postgres.hs:1165,1171,1196,1241,1278,1530-1533,1689,2543` ·
 `src/DBOS/SystemDB/Postgres/Notifier.hs:108,113,155,183,230` ·
@@ -343,7 +348,7 @@ Repo (file:line): `src/DBOS/Tracer.hs:19,25-30,96-97,102-103,108-109,114-115` ·
 `docs/adr/0014-tracer-over-contra-tracer.md:3,5,7` · `docs/adr/0015-universal-tracer-no-co-log.md:3-21` ·
 `docs/adr/0016-dual-stack-testing.md:3,24` · `docs/adr/0017-tracer-runner-event-homing-test-sim.md:5,9` ·
 `docs/io-sim-simulations.md:4-11,54-63,105-107`; tests: `test/DBOS/IOSimTracer.hs:31-41` ·
-`test/DBOS/TracerTest.hs:36,56-64` · `test/DBOS/Transact/ContextTestSim.hs:174-181` ·
+`test/DBOS/LoggerTest.hs:36,56-64` · `test/DBOS/Transact/ContextTestSim.hs:174-181` ·
 `test/DBOS/Transact/StepTestSim.hs:143-162` · `test/DBOS/Transact/WorkflowTestSim.hs:1626` ·
 `test/DBOS/Transact/ManagementTestSim.hs:326` · `test/DBOS/SystemDB/RetryTest.hs:111` ·
 `test/DBOS/SystemDB/NotifierTest.hs:107,119-130` · `test/DBOS/SystemDB/PostgresTest.hs:194` ·

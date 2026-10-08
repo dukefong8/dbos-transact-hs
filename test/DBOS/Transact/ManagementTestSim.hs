@@ -33,13 +33,13 @@ import DBOS.Transact
     decodeWorkflowValue,
     handleResult,
     handleStatus,
-    registerDBOSWorkflow,
-    registerDBOSWorkflowRef,
+    registerWorkflow,
+    registerWorkflowRef,
     retrieveWorkflow,
-    runDBOSWorkflow,
+    runWorkflow,
     runStep,
-    runTracer,
     configNew)
+import DBOS.Transact.Logger (runTracer)
 import DBOS.Transact.Recovery (EngineEvent (..))
 import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
@@ -63,6 +63,9 @@ import DBOS.Transact.ManagementCases
     checkResumeMissing,
     checkResumeOntoQueue,
     checkRetrieve,
+    checkListSteps,
+    checkListStepsInWorkflow,
+    checkSingular,
     checkUnlaunched,
     mkMgmtFixture,
     scenarioCancelMissing,
@@ -81,6 +84,9 @@ import DBOS.Transact.ManagementCases
     scenarioResumeMissing,
     scenarioResumeOntoQueue,
     scenarioRetrieve,
+    scenarioListSteps,
+    scenarioListStepsInWorkflow,
+    scenarioSingular,
     scenarioUnlaunched,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
@@ -121,6 +127,9 @@ tests =
       simCase simMgmtFixture "cancelling a tree reaches the children" scenarioCancelTree checkCancelTree traceCancelTree,
       simCase simMgmtFixture "deleting a workflow removes its row" scenarioDelete checkDelete traceDelete,
       simCase simMgmtFixture "a workflow can be retrieved by id" scenarioRetrieve checkRetrieve traceRetrieve,
+      simCase simMgmtFixture "a workflow's steps list in execution order" scenarioListSteps checkListSteps traceListSteps,
+      simCase simMgmtFixture "an in-workflow step listing is itself a step" scenarioListStepsInWorkflow checkListStepsInWorkflow traceListStepsInWorkflow,
+      simCase simMgmtFixture "the singular wrappers move one workflow each" scenarioSingular checkSingular traceSingular,
       simCase simMgmtFixture "forking from the beginning runs the workflow again under a new id" scenarioForkFromBeginning checkForkFromBeginning traceForkFromBeginning,
       simCase simMgmtFixture "a fork takes the id it is given" scenarioForkTakesIdAndQueue checkForkTakesIdAndQueue traceForkTakesIdAndQueue,
       simCase simMgmtFixture "forking from a chosen step replays the steps below it" scenarioForkFromStep checkForkFromStep traceForkFromStep,
@@ -191,6 +200,49 @@ traceDelete tr = do
 traceRetrieve :: forall a. SimTrace a -> IO ()
 traceRetrieve tr = do
   selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-retrieve-sim"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | Three steps run and complete; the outside listing records nothing.
+traceListSteps :: forall a. SimTrace a -> IO ()
+traceListSteps tr = do
+  selectTraceEventsDynamic tr
+    @?= [ StepRunning "one" 0,
+          StepOutputRecorded "one" 0,
+          StepRunning "two" 1,
+          StepOutputRecorded "two" 1,
+          StepRunning "three" 2,
+          StepOutputRecorded "three" 2,
+          WorkflowCompleted "hs-l2-mgmt-liststeps-sim"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The self-listing workflow: first runs, then the listing is recorded
+-- under the cross-SDK step name.
+traceListStepsInWorkflow :: forall a. SimTrace a -> IO ()
+traceListStepsInWorkflow tr = do
+  selectTraceEventsDynamic tr
+    @?= [ StepRunning "first" 0,
+          StepOutputRecorded "first" 0,
+          StepOutputRecorded "DBOS.listWorkflowSteps" 1,
+          WorkflowCompleted "hs-l2-mgmt-liststeps-in-sim"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | Three runs complete; cancel, resume, delete, and fork announce; the
+-- shutdown ends the run.
+traceSingular :: forall a. SimTrace a -> IO ()
+traceSingular tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowEnqueued "hs-l2-mgmt-singular-1-sim" "no-runner-here",
+          WorkflowCompleted "hs-l2-mgmt-singular-2-sim",
+          WorkflowCompleted "hs-l2-mgmt-singular-3-sim"
+        ]
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowsCancelled 1,
+          WorkflowsResumed 1 1,
+          WorkflowsDeleted 1,
+          WorkflowForked "hs-l2-mgmt-singular-3-sim-fork"
+        ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | The source fails, the fork is announced, the driven pass runs the fork to
@@ -327,7 +379,7 @@ stagedBody ran _ wctx = do
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
 runWfSim :: Executor (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
-runWfSim = runDBOSWorkflow
+runWfSim = runWorkflow
 
 retrieveWfSim :: DBOS (IOSim s) -> WorkflowId -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
 retrieveWfSim = retrieveWorkflow
@@ -342,10 +394,10 @@ statusWfSim = handleStatus
 -- signature, so the channel's @e@ stays ambiguous; these pin it while
 -- leaving @s@ universally quantified.
 registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
-registerWfSim = registerDBOSWorkflow
+registerWfSim = registerWorkflow
 
 registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
-registerWfRefSim = registerDBOSWorkflowRef
+registerWfRefSim = registerWorkflowRef
 
 -- * Helpers
 

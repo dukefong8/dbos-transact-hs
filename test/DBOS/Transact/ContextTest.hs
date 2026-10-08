@@ -16,6 +16,8 @@ module DBOS.Transact.ContextTest
     ctxOver,
     connOver,
     Fixture (..),
+    appLogEvents,
+    appLogLines,
     scenarioWorkflowId,
     scenarioStepIds,
     scenarioDenseIds,
@@ -41,6 +43,7 @@ module DBOS.Transact.ContextTest
     scenarioRaceCancelled,
     scenarioRaceCompletes,
     scenarioStepView,
+    scenarioLogLines,
     checkWorkflowId,
     checkStepIds,
     checkDenseIds,
@@ -64,6 +67,7 @@ module DBOS.Transact.ContextTest
     checkRaceCancelled,
     checkRaceCompletes,
     checkStepView,
+    checkLogLines,
     checkScopeStatus,
     checkThrowEscape,
   )
@@ -78,14 +82,19 @@ import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
   Serializer (..),
-  SomeTracer (..),
   WorkflowCtx,
   WorkflowId (..),
-  acquireLoggerBackend,
-  ioTracer,
-  nullTracer,
+  logDebug,
+  logError,
+  logInfo,
+  logWarn,
   secondsDuration,
   workflowId)
+import DBOS.Transact.Logger (AppLog (..), LogEvent (..), LogSeverity (..), SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Transact.LoggerTest (callbackBackend, renderedLines)
+import Data.IORef (newIORef)
+import Data.Text (unpack)
+import System.Log.FastLogger (newTimeCache)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.SystemDB.Types (Timestamp)
 import DBOS.Transact.Context
@@ -114,6 +123,7 @@ import DBOS.Transact.Context
     stepStatusId,
     cancellationToken,
     withStep,
+    withTracer,
     withWorkflow
   )
 import DBOS.Transact.Connection
@@ -504,6 +514,57 @@ checkRaceCompletes = checkEq (Just ("done" :: Text))
 
 checkRaceCancelled :: Maybe Text -> Either String ()
 checkRaceCancelled = checkEq Nothing
+-- | What the log scenario emits, in order: four helper calls through the
+-- workflow view and two through the step view. The live half judges its
+-- captured FastLogger lines against these events; the sim half judges the
+-- typed events and the lines its tracer said.
+appLogEvents :: [AppLog]
+appLogEvents =
+  [ AppLog SeverityInfo "order 7 dispatched",
+    AppLog SeverityDebug "payload 42 bytes",
+    AppLog SeverityWarning "dispatch queue backed up",
+    AppLog SeverityError "courier unavailable",
+    AppLog SeverityInfo "picked from the shelf",
+    AppLog SeverityWarning "shelf scan retried"
+  ]
+
+-- | The same events as the backend renders them — what each captured
+-- line must carry after FastLogger's time and thread prefix.
+appLogLines :: [String]
+appLogLines = map (unpack . renderLine) appLogEvents
+
+-- | The four app-facing helpers emit through the context they are
+-- handed: four lines from the workflow view, then two from the step view
+-- a 'withStep' body receives — all rendered by the FastLogger backend a
+-- production body would log through.
+scenarioLogLines :: Fixture IO -> IO [String]
+scenarioLogLines fixture = do
+  getTime <- newTimeCache "%Y-%m-%dT%H:%M:%S%z"
+  collected <- newIORef []
+  (backend, release) <- callbackBackend getTime SeverityDebug collected
+  ctx <- withTracer (ioTracer backend) <$> fixture.fixtureMkCtx "wf-log"
+  logInfo ctx "order 7 dispatched"
+  logDebug ctx "payload 42 bytes"
+  logWarn ctx "dispatch queue backed up"
+  logError ctx "courier unavailable"
+  marker <- nextWorkflowMarker ctx
+  withStep ctx marker (firstStepStatus 1) $ \stepped -> do
+    logInfo stepped "picked from the shelf"
+    logWarn stepped "shelf scan retried"
+  release
+  renderedLines collected
+
+-- | The captured lines carry every expected line in order; a line may
+-- prefix time and thread id, so the match is on the rendered tail.
+checkLogLines :: [String] -> Either String ()
+checkLogLines rendered = go rendered appLogLines
+  where
+    go [] [] = Right ()
+    go (line : rest) (expected : rest')
+      | expected `isInfixOf` line = go rest rest'
+      | otherwise = Left ("expected a line carrying " <> show expected <> ", got: " <> line)
+    go other expected = Left ("expected " <> show expected <> ", got: " <> show other)
+
 -- * Shared helpers, polymorphic over the same vocabulary.
 
 -- | A wait that polls a cooperative flag instead of sleeping through it.
@@ -558,6 +619,7 @@ tests =
           liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a step view reads its status with the workflow id" scenarioStepView checkStepView,
           liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "raceCancel returns the value when the token stays quiet" scenarioRaceCompletes checkRaceCompletes,
           liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "raceCancel reports cancellation when the token has fired" scenarioRaceCancelled checkRaceCancelled,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a body logs through its context" scenarioLogLines checkLogLines,
           -- Sim only: hand-emitted structural events; typed assertions live only in sim.
           testCase "a context announces through its tracer" (pure ())
         ]

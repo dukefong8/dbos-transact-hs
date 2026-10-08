@@ -23,9 +23,9 @@ Parity evaluation: `docs/transactional-step-parity.md`.
       leaf (`registerDataSource`/`freeze`/`thaw`/`clearDatasourceCheckpoints`);
       frozen at launch (registration after launch refused — the
       created-before-launch rule), thawed on failed launch/shutdown;
-      `runDBOSWorkflow`/`runDBOSWorkflowRef` clear the finished workflow's
+      `runWorkflow`/`runWorkflowRef` clear the finished workflow's
       checkpoints best-effort. Live test: duplicate refused, rows 1→0.
-      Follow-up (recorded): child-workflow completions and `startDBOSWorkflowRef`
+      Follow-up (recorded): child-workflow completions and `startWorkflowRef`
       fire-and-forget starts do not clear yet
 - [x] Outside-workflow entry (`runTxOutside`: same retry loop,
       nothing checkpointed, nothing announced, silent trace)

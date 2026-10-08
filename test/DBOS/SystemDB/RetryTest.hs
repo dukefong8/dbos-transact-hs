@@ -24,10 +24,8 @@ import DBOS.SystemDB
     shouldRetry,
     withRetry,
   )
-import DBOS.Transact
-  (
-  nullTracer)
 import DBOS.SystemDB.Retry (SysdbEvent (..))
+import DBOS.Transact.Logger (nullTracer)
 import DBOS.IOSimTracer (simTracer)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
