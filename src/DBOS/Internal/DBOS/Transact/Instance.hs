@@ -24,6 +24,7 @@ module DBOS.Transact.Instance
     launchExecutor,
     shutdown,
     requireExecutor,
+    withExecutor,
     registerWorkflowRef,
     registerDataSource,
     clearCheckpoints,
@@ -63,7 +64,7 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, forkNew, Topic, WorkflowDelay (..), WorkflowFilter (..), VersionInfo (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
 import DBOS.Transact.Config (Config (..))
 import DBOS.Transact.Config qualified as Config
-import DBOS.Transact.Connection (Connection (..), closeConnection, forApplication, runSystemDB)
+import DBOS.Transact.Connection (Connection (..), releaseConnection, acquireConnection, withConnection)
 import DBOS.Transact.Context (WorkflowCtx)
 import DBOS.Transact.Dequeue (dequeuePass, superviseForever)
 import DBOS.Transact.Error qualified as TransactError
@@ -190,13 +191,16 @@ launchWithEnvironment dbos environment =
             freezeDataSourceRegistry dbos.dbos_datasources
             (backend, releaseFastLogger) <- acquireLoggerBackend
             let tracer = ioTracer backend
-            started <- startExecutor dbos.dbos_config resolved snapshot dbos.dbos_datasources tracer releaseFastLogger `onException` (releaseFastLogger >> thawRegistry dbos.dbos_registry)
+            started <- startExecutor dbos.dbos_config resolved snapshot dbos.dbos_datasources tracer releaseFastLogger `onException` (releaseFastLogger >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources)
             case started of
               Left err -> releaseFastLogger >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources >> pure (Left err)
               Right executor -> do
                 launched <-
                   launchExecutor dbos executor
-                    `onException` (closeConnection executor.conn >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources)
+                    `onException` (releaseConnection executor.conn >> releaseFastLogger >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources)
+                -- A 'Left' here already closed the connection inside
+                -- 'launchExecutor's prepare-failure branch; only the logger
+                -- and the thaws remain.
                 case launched of
                   Left err -> releaseFastLogger >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources >> pure (Left err)
                   Right executor' -> pure (Right executor')
@@ -216,11 +220,15 @@ shutdown dbos =
         cancelled <- abortAll executor.tasks
         when (cancelled > 0) $
           runTracer executor.conn.connTracer (EngineCancelledRunning cancelled)
-        closeConnection executor.conn
+        -- The release runs last: a throwing close then propagates with the
+        -- tracer released and both registries thawed, rather than skipping
+        -- them. No new constraint earns this; the resources are independent,
+        -- so teardown order among them is free.
         runTracer executor.conn.connTracer (EngineShutdown executor.identity.identityAppName)
         executor.releaseTracer
         thawRegistry dbos.dbos_registry
         thawDataSourceRegistry dbos.dbos_datasources
+        releaseConnection executor.conn
 
 runWorkflow :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
             => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
@@ -260,61 +268,48 @@ runWorkflowRef executor ref options input = do
 enqueueWorkflow :: (MonadMVar m)
                 => DBOS m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
 enqueueWorkflow dbos key workflowId input queueName = do
-  running <- requireExecutor dbos "enqueue a workflow"
-  case running of
-    Left err -> pure (Left err)
-    Right executor ->
-      case lookupSnapshotWorkflow key executor.workflows of
-        Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
-        Just _ ->
-          Workflow.enqueueWorkflow
-            executor.conn
-            executor.identity
-            key
-            workflowId
-            input
-            queueName
+  withExecutor dbos "enqueue a workflow" $ \executor ->
+    case lookupSnapshotWorkflow key executor.workflows of
+      Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
+      Just _ ->
+        Workflow.enqueueWorkflow
+          executor.conn
+          executor.identity
+          key
+          workflowId
+          input
+          queueName
 
 dequeueWorkflows :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
                  => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeueWorkflows dbos = do
-  running <- requireExecutor dbos "dequeue workflows"
-  case running of
-    Left err -> pure (Left err)
-    Right executor ->
-      dequeuePass
-        executor.tasks
-        executor.conn
-        executor.identity
-        executor.workflows
-        executor.listen_queues
+  withExecutor dbos "dequeue workflows" $ \executor ->
+    dequeuePass
+      executor.tasks
+      executor.conn
+      executor.identity
+      executor.workflows
+      executor.listen_queues
 
 -- | A handle to a workflow by id. Nothing here has seen the row: the id is
 -- the caller's, taken on faith, which is the one handle shape that waits
 -- for a row to appear rather than reporting it missing.
 retrieveWorkflow :: MonadMVar m
                  => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
-retrieveWorkflow dbos (WorkflowId workflowText) = do
-  running <- requireExecutor dbos "retrieve a workflow"
-  pure $ case running of
-    Left err       -> Left err
-    Right executor -> Right (pollingHandle executor.conn workflowText False)
+retrieveWorkflow dbos (WorkflowId workflowText) =
+  withExecutor dbos "retrieve a workflow" $ \executor ->
+    pure (Right (pollingHandle executor.conn workflowText False))
 
 cancelWorkflows :: (MonadMVar m)
                 => DBOS m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
-cancelWorkflows dbos workflowIds includeChildren = do
-  running <- requireExecutor dbos "cancel workflows"
-  case running of
-    Left err       -> pure (Left err)
-    Right executor -> Management.cancelWorkflows executor.conn workflowIds includeChildren
+cancelWorkflows dbos workflowIds includeChildren =
+  withExecutor dbos "cancel workflows" $ \executor ->
+    Management.cancelWorkflows executor.conn workflowIds includeChildren
 
 resumeWorkflows :: (MonadMVar m)
                 => DBOS m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflows dbos workflowIds queueName = do
-  running <- requireExecutor dbos "resume workflows"
-  case running of
-    Left err       -> pure (Left err)
-    Right executor -> Management.resumeWorkflows executor.conn workflowIds queueName
+  withExecutor dbos "resume workflows" $ \executor -> Management.resumeWorkflows executor.conn workflowIds queueName
 
 -- | Moves a delayed workflow's release: brought forward to now, the
 -- supervisor releases it on its next pass. The launched-instance guard
@@ -322,44 +317,32 @@ resumeWorkflows dbos workflowIds queueName = do
 setWorkflowDelay :: (MonadMVar m)
                  => DBOS m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 setWorkflowDelay dbos workflowId delay = do
-  running <- requireExecutor dbos "set a workflow delay"
-  case running of
-    Left err -> pure (Left err)
-    Right executor -> do
-      result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.setWorkflowDelay db workflowId delay Nothing)
-      case result of
-        Left err -> pure (Left (TransactError.SystemDatabase err))
-        -- Mirrors @set_workflow_delay@: phrased as the request, not the
-        -- effect — the row may already be released, so this announces
-        -- unconditionally.
-        Right () -> do
-          let WorkflowId workflowText = workflowId
-          runTracer executor.conn.connTracer (WorkflowDelayMoveAsked workflowText)
-          pure (Right ())
+  withExecutor dbos "set a workflow delay" $ \executor -> do
+    result <- withConnection executor.conn (\db -> SystemDB.setWorkflowDelay db workflowId delay Nothing)
+    case result of
+      Left err -> pure (Left err)
+      -- Mirrors @set_workflow_delay@: phrased as the request, not the
+      -- effect — the row may already be released, so this announces
+      -- unconditionally.
+      Right () -> do
+        let WorkflowId workflowText = workflowId
+        runTracer executor.conn.connTracer (WorkflowDelayMoveAsked workflowText)
+        pure (Right ())
 
 deleteWorkflows :: (MonadMVar m)
                 => DBOS m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflows dbos workflowIds includeChildren = do
-  running <- requireExecutor dbos "delete workflows"
-  case running of
-    Left err       -> pure (Left err)
-    Right executor -> Management.deleteWorkflows executor.conn workflowIds includeChildren
+  withExecutor dbos "delete workflows" $ \executor -> Management.deleteWorkflows executor.conn workflowIds includeChildren
 
 forkWorkflows :: (MonadMVar m)
               => DBOS m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkWorkflows dbos forks options = do
-  running <- requireExecutor dbos "fork workflows"
-  case running of
-    Left err       -> pure (Left err)
-    Right executor -> Management.forkWorkflows executor.conn forks options
+  withExecutor dbos "fork workflows" $ \executor -> Management.forkWorkflows executor.conn forks options
 
 forkFrom :: (MonadMVar m)
          => DBOS m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFrom dbos workflowIds point options = do
-  running <- requireExecutor dbos "fork from workflows"
-  case running of
-    Left err       -> pure (Left err)
-    Right executor -> Management.forkFrom executor.conn workflowIds point options
+  withExecutor dbos "fork from workflows" $ \executor -> Management.forkFrom executor.conn workflowIds point options
 
 -- | Replaces the attributes attached to a workflow, or clears them when
 -- given 'Nothing'. The launched-instance guard first, as every method on
@@ -367,30 +350,21 @@ forkFrom dbos workflowIds point options = do
 updateWorkflowAttributes :: (MonadMVar m)
                          => DBOS m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 updateWorkflowAttributes dbos workflowId attributes = do
-  running <- requireExecutor dbos "update workflow attributes"
-  case running of
-    Left err       -> pure (Left err)
-    Right executor -> Management.updateWorkflowAttributes executor.conn workflowId attributes
+  withExecutor dbos "update workflow attributes" $ \executor -> Management.updateWorkflowAttributes executor.conn workflowId attributes
 
 -- | Reads the workflows matching a filter. The launched-instance guard
 -- first; the read itself lives in 'Management'.
 listWorkflows :: (MonadMVar m)
               => DBOS m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 listWorkflows dbos filters = do
-  running <- requireExecutor dbos "list workflows"
-  case running of
-    Left err       -> pure (Left err)
-    Right executor -> Management.listWorkflows executor.conn filters
+  withExecutor dbos "list workflows" $ \executor -> Management.listWorkflows executor.conn filters
 
 -- | Reads one workflow's steps in execution order, outputs and errors
 -- included; an id with no row lists nothing rather than failing.
 listWorkflowSteps :: (MonadMVar m)
                   => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
 listWorkflowSteps dbos workflowId = do
-  running <- requireExecutor dbos "list a workflow's steps"
-  case running of
-    Left err       -> pure (Left err)
-    Right executor -> Management.listWorkflowSteps executor.conn workflowId
+  withExecutor dbos "list a workflow's steps" $ \executor -> Management.listWorkflowSteps executor.conn workflowId
 
 -- | Cancels one workflow, children skipped: the singular of
 -- 'cancelWorkflows'. Mirrors Rust @DBOS::cancel@.
@@ -442,45 +416,36 @@ getWorkflowStatus dbos workflowId = lookup workflowId <$> fetchWorkflowStatuses 
 getWorkflowEvent :: (MonadMVar m, MonadDelay m, MonadTime m)
                  => DBOS m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe SerializedWorkflowValue))
 getWorkflowEvent dbos workflowId key wait = do
-  running <- requireExecutor dbos "read an event"
-  case running of
-    Left err -> pure (Left err)
-    Right executor -> do
-      found <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getEvent db workflowId key wait Nothing)
-      pure $ case found of
-        Left err -> Left (TransactError.SystemDatabase err)
-        Right Nothing -> Right Nothing
-        Right (Just encoded) ->
-          Right (Just (SerializedWorkflowValue encoded.encodedValue (Serialization <$> encoded.encodedSerialization)))
+  withExecutor dbos "read an event" $ \executor -> do
+    found <- withConnection executor.conn (\db -> SystemDB.getEvent db workflowId key wait Nothing)
+    pure $ case found of
+      Left err -> Left err
+      Right Nothing -> Right Nothing
+      Right (Just encoded) ->
+        Right (Just (SerializedWorkflowValue encoded.encodedValue (Serialization <$> encoded.encodedSerialization)))
 
 -- | Send one message to a workflow from outside, the caller unrecorded.
 sendWorkflowMessage :: (MonadMVar m)
                     => DBOS m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWorkflowMessage dbos destination topic idempotencyKey value = do
-  running <- requireExecutor dbos "send a message"
-  case running of
-    Left err -> pure (Left err)
-    Right executor -> do
-      let message =
-            SendMessage
-              { sendDestinationId = destination,
-                sendMessageBody = value,
-                sendTopic = topic,
-                sendIdempotencyKey = idempotencyKey
-              }
-      written <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.sendMessage db message ((\(Serialization name) -> name) <$> value.serializedSerialization) Nothing False)
-      pure (either (Left . TransactError.SystemDatabase) Right written)
+  withExecutor dbos "send a message" $ \executor -> do
+    let message =
+          SendMessage
+            { sendDestinationId = destination,
+              sendMessageBody = value,
+              sendTopic = topic,
+              sendIdempotencyKey = idempotencyKey
+            }
+    written <- withConnection executor.conn (\db -> SystemDB.sendMessage db message ((\(Serialization name) -> name) <$> value.serializedSerialization) Nothing False)
+    pure written
 
 -- | Send a batch from outside in one transaction: all or none.
 sendWorkflowMessages :: (MonadMVar m)
                      => DBOS m -> [SendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWorkflowMessages dbos messages = do
-  running <- requireExecutor dbos "send messages"
-  case running of
-    Left err -> pure (Left err)
-    Right executor -> do
-      written <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.sendMessages db messages Nothing Nothing False)
-      pure (either (Left . TransactError.SystemDatabase) Right written)
+  withExecutor dbos "send messages" $ \executor -> do
+    written <- withConnection executor.conn (\db -> SystemDB.sendMessages db messages Nothing Nothing False)
+    pure written
 
 -- | Ids of the most recent workflows with this name, newest first, capped.
 -- | The most recent ids registered under one workflow name: the "last N
@@ -490,27 +455,24 @@ sendWorkflowMessages dbos messages = do
 listWorkflowIdsByName :: (MonadMVar m)
                       => DBOS m -> Text -> Int64 -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 listWorkflowIdsByName dbos name limit = do
-  running <- requireExecutor dbos "list workflows"
-  case running of
-    Left err -> pure (Left err)
-    Right executor -> do
-      listed <-
-        runSystemDB
-          executor.conn.connSysdb
-          ( \db ->
-              SystemDB.listWorkflows
-                db
-                ( defaultWorkflowFilter
-                    { workflowFilterNames = [name],
-                      workflowFilterLimit = Just limit,
-                      workflowFilterSortDesc = True
-                    }
-                )
-                Nothing
-          )
-      pure $ case listed of
-        Left err      -> Left (TransactError.SystemDatabase err)
-        Right records -> Right [record.workflowRecordId | record <- records]
+  withExecutor dbos "list workflows" $ \executor -> do
+    listed <-
+      withConnection
+        executor.conn
+        ( \db ->
+            SystemDB.listWorkflows
+              db
+              ( defaultWorkflowFilter
+                  { workflowFilterNames = [name],
+                    workflowFilterLimit = Just limit,
+                    workflowFilterSortDesc = True
+                  }
+              )
+              Nothing
+        )
+    pure $ case listed of
+      Left err      -> Left err
+      Right records -> Right [record.workflowRecordId | record <- records]
 
 -- | Statuses for the ids that still have a row; a missing row is dropped.
 fetchWorkflowStatuses :: (MonadMVar m) => DBOS m -> [WorkflowId] -> m [(WorkflowId, WorkflowStatus)]
@@ -522,7 +484,7 @@ fetchWorkflowStatuses dbos workflowIds = do
       fetched <-
         traverse
           (\workflowId -> do
-              row <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getWorkflow db workflowId)
+              row <- withConnection executor.conn (\db -> SystemDB.getWorkflow db workflowId)
               pure (workflowId, either (const Nothing) (fmap (.workflowRecordStatus)) row))
           workflowIds
       pure [(workflowId, status) | (workflowId, Just status) <- fetched]
@@ -534,6 +496,14 @@ requireExecutor dbos operation = do
   pure $ case current of
     Nothing       -> Left (TransactError.NotLaunched operation)
     Just executor -> Right executor
+
+-- | Runs the body against the launched executor, or answers
+-- 'TransactError.NotLaunched' naming the call when no executor is
+-- installed: the one home for the read-MVar-plus-@case@ every 'DBOS m'
+-- entry point repeats.
+withExecutor :: MonadMVar m
+             => DBOS m -> Text -> (Executor m -> m (Either (TransactError.Error TransactError.EngineOnly) a)) -> m (Either (TransactError.Error TransactError.EngineOnly) a)
+withExecutor dbos operation body = either (pure . Left) body =<< requireExecutor dbos operation
 
 -- | Register a datasource on the instance unless launch has frozen the
 -- registry or the name is taken: the created-before-launch rule. A failed
@@ -588,7 +558,7 @@ launchExecutor :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTim
 launchExecutor dbos executor = do
   prepared <- prepare executor.conn executor.identity
   case prepared of
-    Left err -> closeConnection executor.conn >> pure (Left err)
+    Left err -> releaseConnection executor.conn >> pure (Left err)
     Right _ -> do
       bindRegistryInstance dbos.dbos_registry executor.conn.connInstanceId
       runTracer executor.conn.connTracer (EngineLaunched executor.identity.identityAppName executor.identity.identityExecutorId executor.identity.identityAppVersion)
@@ -600,7 +570,7 @@ startExecutor :: Config -> Identity -> Snapshot IO -> DataSourceRegistry IO -> S
 startExecutor config' identity' workflowsSnapshot sources tracer releaseTracer = do
   when (snapshotSize workflowsSnapshot == 0) $
     runTracer tracer EngineNoWorkflows
-  acquired <- try (forApplication config' identity' tracer) :: IO (Either SystemDBError.Error (Connection IO))
+  acquired <- try (acquireConnection config' identity' tracer) :: IO (Either SystemDBError.Error (Connection IO))
   case acquired of
     Left err -> pure (Left (TransactError.SystemDatabase err))
     Right conn' -> do
@@ -621,13 +591,13 @@ startExecutor config' identity' workflowsSnapshot sources tracer releaseTracer =
 prepare :: Monad m
         => Connection m -> Identity -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 prepare conn identity' = do
-  registered <- runSystemDB conn.connSysdb (\db -> SystemDB.createApplicationVersion db identity'.identityAppVersion Nothing)
+  registered <- withConnection conn (\db -> SystemDB.createApplicationVersion db identity'.identityAppVersion Nothing)
   case registered of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left err)
     Right () -> do
-      latest <- runSystemDB conn.connSysdb (\db -> SystemDB.getLatestApplicationVersion db Nothing)
+      latest <- withConnection conn (\db -> SystemDB.getLatestApplicationVersion db Nothing)
       case latest of
-        Left err -> pure (Left (TransactError.SystemDatabase err))
+        Left err -> pure (Left err)
         Right (Just version) -> do
           when (version.versionInfoName /= identity'.identityAppVersion) $
             runTracer conn.connTracer (EngineVersionStale identity'.identityAppVersion version.versionInfoName)

@@ -29,7 +29,7 @@ import DBOS.Prelude
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, StepRecord, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionsValidate, forkValidate, forkStepName, listStepsStepName, listWorkflowsStepName, resumeStepName)
-import DBOS.Transact.Connection (Connection (..), runSystemDB)
+import DBOS.Transact.Connection (Connection (..), withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, stepStatusId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
@@ -80,9 +80,9 @@ instance ToLogStr ManagementEvent where
 cancelWorkflows :: Monad m
                 => Connection m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflows conn workflowIds cancelChildren = do
-  result <- runSystemDB conn.connSysdb (\db -> SystemDB.cancelWorkflows db workflowIds cancelChildren Nothing)
+  result <- withConnection conn (\db -> SystemDB.cancelWorkflows db workflowIds cancelChildren Nothing)
   case result of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left err)
     -- Mirrors @cancel_all@: what moved, not what was asked for — silence
     -- when nothing moved.
     Right cancelled -> do
@@ -108,9 +108,9 @@ cancelWorkflowsInWorkflow wctx workflowIds cancelChildren =
 resumeWorkflows :: Monad m
                 => Connection m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflows conn workflowIds queueName = do
-  result <- runSystemDB conn.connSysdb (\db -> SystemDB.resumeWorkflows db workflowIds queueName Nothing)
+  result <- withConnection conn (\db -> SystemDB.resumeWorkflows db workflowIds queueName Nothing)
   case result of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left err)
     -- Mirrors @resume_all@: what moved against what was asked — an id that
     -- had already finished still counts as requested, so this announces
     -- unconditionally.
@@ -142,9 +142,9 @@ deleteWorkflows conn workflowIds deleteChildren =
 deleteWorkflowsWithCaller :: Monad m
                           => Connection m -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflowsWithCaller conn workflowIds deleteChildren caller = do
-  result <- runSystemDB conn.connSysdb (\db -> SystemDB.deleteWorkflows db workflowIds deleteChildren caller)
+  result <- withConnection conn (\db -> SystemDB.deleteWorkflows db workflowIds deleteChildren caller)
   case result of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left err)
     -- Mirrors @delete_all@: silence when no rows went.
     Right deleted -> do
       if deleted == 0
@@ -180,9 +180,9 @@ deleteWorkflowsInWorkflow wctx workflowIds deleteChildren =
 forkWorkflows :: Monad m
               => Connection m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkWorkflows conn forks options = do
-  result <- runSystemDB conn.connSysdb (\db -> SystemDB.forkWorkflows db forks options Nothing)
+  result <- withConnection conn (\db -> SystemDB.forkWorkflows db forks options Nothing)
   case result of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left err)
     Right forked -> do
       announceFork conn forked
       pure (Right forked)
@@ -210,9 +210,9 @@ forkWorkflowsInWorkflow wctx forks options =
 forkFrom :: Monad m
          => Connection m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFrom conn workflowIds point options = do
-  result <- runSystemDB conn.connSysdb (\db -> SystemDB.forkFrom db workflowIds point options Nothing)
+  result <- withConnection conn (\db -> SystemDB.forkFrom db workflowIds point options Nothing)
   case result of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left err)
     Right forked -> do
       announceFork conn forked
       pure (Right forked)
@@ -249,9 +249,9 @@ forkFromInWorkflow wctx workflowIds point options =
 updateWorkflowAttributes :: Monad m
                          => Connection m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 updateWorkflowAttributes conn workflowId attributes = do
-  result <- runSystemDB conn.connSysdb (\db -> SystemDB.updateWorkflowAttributes db workflowId attributes Nothing)
+  result <- withConnection conn (\db -> SystemDB.updateWorkflowAttributes db workflowId attributes Nothing)
   case result of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left err)
     -- Mirrors @update_workflow_attributes@: phrased as the request, not the
     -- effect — no count comes back, so this announces unconditionally.
     Right () -> do
@@ -265,8 +265,8 @@ updateWorkflowAttributes conn workflowId attributes = do
 listWorkflows :: Monad m
               => Connection m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 listWorkflows conn filters = do
-  result <- runSystemDB conn.connSysdb (\db -> SystemDB.listWorkflows db filters Nothing)
-  pure (either (Left . TransactError.SystemDatabase) Right result)
+  result <- withConnection conn (\db -> SystemDB.listWorkflows db filters Nothing)
+  pure result
 
 -- | Reads one workflow's steps in execution order, outputs and errors
 -- included; an id with no row lists nothing rather than failing. Mirrors
@@ -275,8 +275,8 @@ listWorkflows conn filters = do
 listWorkflowSteps :: Monad m
                   => Connection m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
 listWorkflowSteps conn workflowId = do
-  result <- runSystemDB conn.connSysdb (\db -> SystemDB.listSteps db workflowId True Nothing Nothing Nothing)
-  pure (either (Left . TransactError.SystemDatabase) Right result)
+  result <- withConnection conn (\db -> SystemDB.listSteps db workflowId True Nothing Nothing Nothing)
+  pure result
 
 -- | Lists a workflow's steps as a step of the calling workflow, under
 -- the cross-SDK name, so a replayed listing reads the snapshot the first

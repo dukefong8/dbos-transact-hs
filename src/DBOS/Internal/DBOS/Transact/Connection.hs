@@ -13,7 +13,7 @@
 -- Deviation: Rust's @Connection::for_client@ lives in @client.rs@ here,
 -- because it takes a @ClientConfig@ and the client module imports this one
 -- — the surface that owns the configuration is the surface that builds the
--- connection. 'forApplication' stays, because @Config@ and @Identity@ are
+-- connection. 'acquireConnection' stays, because @Config@ and @Identity@ are
 -- below both.
 --
 -- Two counters ride the connection so the engine needs no IO-only
@@ -25,6 +25,7 @@ module DBOS.Transact.Connection
   ( -- * The backend behind a connection
     SomeSystemDB (..),
     runSystemDB,
+    withConnection,
 
     -- * Which surface opened it
     Owner (..),
@@ -32,8 +33,8 @@ module DBOS.Transact.Connection
     -- * The connection
     Connection (..),
     newConnection,
-    forApplication,
-    closeConnection,
+    acquireConnection,
+    releaseConnection,
 
     -- * Per-execution identity and generated ids
     ExecutionIdentity (..),
@@ -48,11 +49,13 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
+import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.SystemDB.Types (Duration)
 import DBOS.Transact.Logger (SomeTracer)
+import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Config (Config (..), Serializer, outcomePollInterval)
 import DBOS.Transact.Identity (Identity (..))
 
@@ -68,6 +71,19 @@ data SomeSystemDB m where
 -- explicitly. This is the one place the existential is unpacked.
 runSystemDB :: SomeSystemDB m -> (forall db. SystemDB.SystemDB db m => db -> m a) -> m a
 runSystemDB (SomeSystemDB db) action = action db
+
+-- | Runs a class method through this connection's backend, mapping a
+-- backend failure into the engine channel: the one home for the
+-- unwrap-plus-'SystemDatabase' bookkeeping every caller repeats. The
+-- caller context travels explicitly on the method, exactly as the class
+-- spells it — 'Nothing' outside a workflow, the placed caller inside —
+-- so this form never defaults it.
+withConnection :: Monad m
+               => Connection m
+               -> (forall db. SystemDB.SystemDB db m => db -> m (Either SystemDBError.Error a))
+               -> m (Either (TransactError.Error c) a)
+withConnection conn action =
+  either (Left . TransactError.SystemDatabase) Right <$> runSystemDB conn.connSysdb action
 
 -- | Which of the two surfaces a connection was opened for. Mirrors Rust
 -- @Owner@; the @Owner@ prefix is the documented collision deviation,
@@ -147,23 +163,26 @@ generatedWorkflowId conn = conn.connGenerateWorkflowId
 -- takes the resolved identity, because an application's every call is
 -- stamped with it. Acquires and activates the backend (verify-only: the
 -- Haskell port never migrates, ADR-0004/0010).
-forApplication :: Config -> Identity -> SomeTracer IO -> IO (Connection IO)
-forApplication config identity tracer = do
-  backend <- Postgres.acquirePostgresSystemDB (backendConfig config identity) tracer
-  Postgres.activatePostgresSystemDB backend
-  -- The workflow-id generator is this connection's only UUID source; one
-  -- draw names the connection itself.
-  instanceId <- uuidWorkflowId
-  newConnection
-    (SomeSystemDB backend)
-    config.configSerializer
-    (Just identity.identityAppName)
-    (outcomePollInterval config)
-    OwnerApplication
-    instanceId
-    uuidWorkflowId
-    uuidEntropy
-    tracer
+acquireConnection :: Config -> Identity -> SomeTracer IO -> IO (Connection IO)
+acquireConnection config identity tracer =
+  bracketOnError
+    (Postgres.acquirePostgresSystemDB (backendConfig config identity) tracer)
+    Postgres.releasePostgresSystemDB
+    $ \backend -> do
+      Postgres.activatePostgresSystemDB backend
+      -- The workflow-id generator is this connection's only UUID source; one
+      -- draw names the connection itself.
+      instanceId <- uuidWorkflowId
+      newConnection
+        (SomeSystemDB backend)
+        config.configSerializer
+        (Just identity.identityAppName)
+        (outcomePollInterval config)
+        OwnerApplication
+        instanceId
+        uuidWorkflowId
+        uuidEntropy
+        tracer
 
 -- | The production id generator: a fresh v4 UUID, as the oracle mints.
 uuidWorkflowId :: IO Text
@@ -173,8 +192,8 @@ uuidWorkflowId = Text.pack . UUID.toString <$> UUID.V4.nextRandom
 -- on this type rather than on its holders because the connection is what is
 -- being closed: the executor reaches it after stopping its workflows, the
 -- client with nothing to stop first.
-closeConnection :: Connection m -> m ()
-closeConnection conn = runSystemDB conn.connSysdb SystemDB.close
+releaseConnection :: Connection m -> m ()
+releaseConnection conn = runSystemDB conn.connSysdb SystemDB.close
 
 backendConfig :: Config -> Identity -> Postgres.Config
 backendConfig config identity =

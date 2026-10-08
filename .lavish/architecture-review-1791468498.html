@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Architecture review for dbos-transact-hs</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 4 4; }
+      .leak { stroke: #dc2626; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      pre.mermaid { margin: 0; }
+      .band { border-left-width: 4px; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+
+      <header class="space-y-3">
+        <p class="text-xs uppercase tracking-widest text-stone-500">Architecture review</p>
+        <h1 class="font-serif text-4xl">dbos-transact-hs</h1>
+        <p class="text-sm text-stone-500">2026-10-08 &middot; informed by <span class="mono">~/dev/haskell-design-system</span> and <span class="mono">docs/adr/</span></p>
+        <div class="flex flex-wrap gap-x-6 gap-y-2 text-xs text-stone-600 pt-1">
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-6 h-4 border-2 border-slate-700 bg-white"></span> module</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-6 border-t-2 border-dashed border-stone-500"></span> seam</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-6 border-t-2 border-red-600"></span> leakage</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-6 h-4 deep rounded-sm"></span> deep module</span>
+          <span class="inline-flex items-center gap-2"><span class="inline-block w-6 h-4 border-2 border-amber-500 bg-amber-50"></span> ADR / HARD RULE constraint</span>
+        </div>
+      </header>
+
+      <section id="candidates" class="space-y-10">
+
+        <!-- ============ 1 ============ -->
+        <article id="guard" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Strong</span>
+            <span class="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-600">in-process</span>
+            <span class="text-xs uppercase tracking-wider text-stone-400">no-locality</span>
+          </div>
+          <h2 class="font-serif text-2xl">Deepen the launched-executor guard</h2>
+          <p class="font-mono text-sm text-stone-600 leading-relaxed">
+            src/DBOS/Internal/DBOS/Transact/Instance.hs (requireExecutor, 23 sites)<br/>
+            Queue.hs (6) &middot; Wait.hs (4) &middot; Event.hs (2) &middot; Debouncer.hs (2)
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">Before &middot; 37 copies</p>
+              <div class="space-y-2 text-xs mono">
+                <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2">Instance.hs &times;23 <span class="text-stone-500">case running of Left… / Right executor →</span></div>
+                <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2">Queue.hs &times;6 <span class="text-stone-500">identical case, own label</span></div>
+                <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2">Wait.hs &times;4 <span class="text-stone-500">identical case, own label</span></div>
+                <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2">Event.hs &times;2 &middot; Debouncer.hs &times;2</div>
+                <div class="border-l-4 border-stone-300 bg-stone-100 px-3 py-2 text-stone-500">labels already drifting:<br/>"register_queue" &middot; "get_event" &middot; "app_id"<br/>vs "cancel workflows" &middot; "read a queue"</div>
+              </div>
+            </div>
+            <div class="rounded-lg border border-slate-700 p-4 deep text-slate-100">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After &middot; one guard</p>
+              <div class="space-y-2 text-xs mono">
+                <div class="border-l-4 border-emerald-400 bg-slate-800 px-3 py-2">Instance.hs<br/><span class="text-slate-300">withExecutor :: DBOS m -&gt; Text -&gt;<br/>&nbsp;&nbsp;(Executor m -&gt; m a) -&gt; m (Either EngineOnly a)</span></div>
+                <div class="border-l-4 border-slate-600 bg-slate-900/70 px-3 py-2 text-slate-300">Queue &middot; Wait &middot; Event &middot; Debouncer<br/>call the guard; the case block is gone</div>
+                <div class="border-l-4 border-slate-600 bg-slate-900/70 px-3 py-2 text-slate-300">label spelled once, same style everywhere</div>
+              </div>
+            </div>
+          </div>
+
+          <p class="text-sm"><strong>Problem.</strong> The precondition "the application must be launched" is owned by <span class="mono">Instance</span> but enforced by copy-paste in five modules, so the guard's shape and its label drift independently.</p>
+          <p class="text-sm"><strong>Solution.</strong> Move the read-MVar-plus-<span class="mono">case</span> into one combinator beside <span class="mono">requireExecutor</span>; every call site becomes the operation body it always was.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+            <li>locality: guard fixed in one place</li>
+            <li>leverage: one interface, 37 call sites</li>
+            <li>labels stop drifting</li>
+            <li>tests keep hitting the facade</li>
+            <li>deletion test: boilerplate vanishes</li>
+          </ul>
+          <div class="rounded-md bg-amber-50 border border-amber-200 px-4 py-2 text-sm text-amber-900">
+            No ADR conflict: the combinator keeps <span class="mono">DBOS m</span> explicit, so ADR-0026's rejection of ambient context stands.
+          </div>
+        </article>
+
+        <!-- ============ 2 ============ -->
+        <article id="sysdb-call" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Strong</span>
+            <span class="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-600">ports &amp; adapters</span>
+            <span class="text-xs uppercase tracking-wider text-stone-400">shallow seam</span>
+          </div>
+          <h2 class="font-serif text-2xl">Give the System Database call seam its policy</h2>
+          <p class="font-mono text-sm text-stone-600 leading-relaxed">
+            src/DBOS/Internal/DBOS/Transact/Connection.hs (runSystemDB)<br/>
+            90 call sites across 16 modules &middot; DBOS/SystemDB/Class.hs (61 methods, 19 with trailing caller context)
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">Before &middot; policy at every call site</p>
+              <pre class="mermaid">
+flowchart TB
+  C1["Client.hs &times;15"] --> R["runSystemDB<br/>(one function, no policy)"]
+  C2["Workflow.hs &times;12"] --> R
+  C3["Dequeue &middot; Queue &middot; Management<br/>&middot; Instance &middot; Handle &middot; 10 more"] --> R
+  R --> M1["map Left err by hand<br/>&times;27"]
+  R --> M2["pass bare Nothing<br/>for caller context<br/>&times;~30"]
+  classDef leak stroke:#dc2626,fill:#fee2e2,color:#7f1d1d;
+  class M1,M2 leak
+              </pre>
+            </div>
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">After &middot; seam absorbs bookkeeping</p>
+              <pre class="mermaid">
+flowchart TB
+  C1["16 modules"] --> R2["sysdb call form:<br/>unwrap + error mapping + caller context"]
+  R2 --> K["SystemDB class<br/>unchanged, oracle-verbatim"]
+  classDef deep fill:#0f172a,stroke:#0f172a,color:#e2e8f0;
+  classDef seam stroke:#0f172a,stroke-width:3px;
+  class R2 deep
+  class K seam
+              </pre>
+            </div>
+          </div>
+
+          <p class="text-sm"><strong>Problem.</strong> <span class="mono">runSystemDB</span> is a one-line coercion: every caller re-implements the unwrap, the <span class="mono">Left err</span> mapping, and the optional caller-context argument, so the seam carries no depth and the boilerplate lives at 90 sites.</p>
+          <p class="text-sm"><strong>Solution.</strong> Deepen the seam in <span class="mono">Connection</span>: a call form that takes the caller context once (defaulted) and maps <span class="mono">Error</span> into the engine channel, leaving the class methods verbatim.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+            <li>leverage: one interface, 90 sites</li>
+            <li>locality: error mapping in one module</li>
+            <li>interface drops a positional Maybe</li>
+            <li>tests exercise the mapping once</li>
+          </ul>
+          <div class="rounded-md bg-amber-50 border border-amber-200 px-4 py-2 text-sm text-amber-900">
+            Respects ADR-0009 (explicit <span class="mono">db</span> argument, no ReaderT) and the HARD RULE that class methods keep their Rust spellings. <span class="mono">updateQueue</span>'s caller-supplied validation callback (<span class="mono">QueueRecord -&gt; QueueRecord -&gt; Either Error ()</span>) is the same leak: policy pushed through the adapter seam, worth folding into this candidate.
+          </div>
+        </article>
+
+        <!-- ============ 3 ============ -->
+        <article id="retry" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">Worth exploring</span>
+            <span class="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-600">in-process</span>
+            <span class="text-xs uppercase tracking-wider text-stone-400">no-locality</span>
+          </div>
+          <h2 class="font-serif text-2xl">One home for the retry loop shape</h2>
+          <p class="font-mono text-sm text-stone-600 leading-relaxed">
+            src/DBOS/Internal/DBOS/SystemDB/Retry.hs (withRetry, RetryPolicy)<br/>
+            Datasource.hs (3 hand-rolled loops: checkWithRetry, attemptTransaction, runTxOutside) &middot; Dequeue.hs (backoff 2.0 / scale-back 0.9 / jitter)
+          </p>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-4">
+            <div class="grid grid-cols-3 gap-4 text-xs">
+              <div class="border-t-4 border-stone-400 pt-3">
+                <p class="mono uppercase tracking-wider text-stone-500 mb-2">Backend.hs</p>
+                <p class="mono">withRetry &times;3</p>
+                <p class="text-stone-500 mt-1">policy as data, MonadDelay, announced as SysdbEvent, sim-tested</p>
+              </div>
+              <div class="border-t-4 border-red-500 pt-3">
+                <p class="mono uppercase tracking-wider text-stone-500 mb-2">Datasource.hs</p>
+                <p class="mono">3 own loops</p>
+                <p class="text-stone-500 mt-1">initial 1.0 ms, &times;1.5, cap 2000.0 ms spelled as locals, retry logic inline with the tx body</p>
+              </div>
+              <div class="border-t-4 border-red-500 pt-3">
+                <p class="mono uppercase tracking-wider text-stone-500 mb-2">Dequeue.hs</p>
+                <p class="mono">3rd policy</p>
+                <p class="text-stone-500 mt-1">backoff and scale-back constants beside the sweep</p>
+              </div>
+            </div>
+            <div class="mt-4 pt-3 border-t border-dashed border-stone-300 flex items-center justify-center">
+              <span class="text-xs text-stone-500">"how DBOS retries" has three answers; the port plan already records wiring as pending</span>
+            </div>
+          </div>
+
+          <p class="text-sm"><strong>Problem.</strong> The <span class="mono">Retry</span> module owns a deep interface (<span class="mono">RetryPolicy</span> as data, monad-polymorphic loop, entropy, event channel), yet two of the three retry paths re-implement the loop beside their own constants.</p>
+          <p class="text-sm"><strong>Solution.</strong> Reuse <span class="mono">withRetry</span>'s loop shape with per-path policy values, keeping each path's classification and constants exactly where the oracle has them.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+            <li>locality: loop bugs fixed once</li>
+            <li>leverage: Retry tested, reused twice</li>
+            <li>policy readable as a value</li>
+            <li>sim coverage via MonadDelay</li>
+          </ul>
+          <div class="rounded-md bg-amber-50 border border-amber-200 px-4 py-2 text-sm text-amber-900">
+            Oracle fidelity: the transaction backoff mirrors Rust's transaction retry and the dequeue backoff mirrors <span class="mono">dequeue.rs</span>. Only the loop <em>shape</em> moves; constants, classification, and event names stay put, or the behavioral diff against <span class="mono">~/dev/dbos-transact-rust</span> drifts.
+          </div>
+        </article>
+
+        <!-- ============ 4 ============ -->
+        <article id="management" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">Worth exploring</span>
+            <span class="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-600">in-process</span>
+            <span class="text-xs uppercase tracking-wider text-stone-400">no-locality</span>
+          </div>
+          <h2 class="font-serif text-2xl">Write each management operation once</h2>
+          <p class="font-mono text-sm text-stone-600 leading-relaxed">
+            Management.hs (base + *InWorkflow) &middot; Instance.hs (guard + delegate copies) &middot; Client.hs (client* shapes) &middot; DBOS/Transact.hs (facade names)
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">Before &middot; 5 operations &times; 3 shapes</p>
+              <table class="w-full text-xs mono text-left">
+                <thead class="text-stone-400 uppercase tracking-wider">
+                  <tr><th class="py-1"></th><th>base</th><th>InWorkflow</th><th>instance</th></tr>
+                </thead>
+                <tbody class="divide-y divide-stone-100">
+                  <tr><td class="py-1 text-stone-500">cancel</td><td class="bg-red-50">def</td><td class="bg-red-50">re-wrapped</td><td class="bg-red-50">guard + delegate</td></tr>
+                  <tr><td class="py-1 text-stone-500">resume</td><td class="bg-red-50">def</td><td class="bg-red-50">re-wrapped</td><td class="bg-red-50">guard + delegate</td></tr>
+                  <tr><td class="py-1 text-stone-500">delete</td><td class="bg-red-50">def</td><td class="bg-red-50">re-wrapped</td><td class="bg-red-50">guard + delegate</td></tr>
+                  <tr><td class="py-1 text-stone-500">list</td><td class="bg-red-50">def</td><td class="bg-red-50">re-wrapped</td><td class="bg-red-50">guard + delegate</td></tr>
+                  <tr><td class="py-1 text-stone-500">fork</td><td class="bg-red-50">def</td><td class="bg-red-50">re-wrapped</td><td class="bg-red-50">guard + delegate</td></tr>
+                </tbody>
+              </table>
+              <p class="text-stone-500 mt-2">~15 definitions; the middle column is one identical <span class="mono">runStepWith stepOptionsDefault wctx …</span> body</p>
+            </div>
+            <div class="rounded-lg border border-slate-700 p-4 deep text-slate-100">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After &middot; wrappers derive</p>
+              <div class="space-y-2 text-xs mono">
+                <div class="border-l-4 border-emerald-400 bg-slate-800 px-3 py-2">Management.hs: one implementation per operation</div>
+                <div class="border-l-4 border-slate-600 bg-slate-900/70 px-3 py-2 text-slate-300">one generic step wrapper: <span class="text-slate-400">op → runStepWith … (\_ → op conn …)</span></div>
+                <div class="border-l-4 border-slate-600 bg-slate-900/70 px-3 py-2 text-slate-300">one guard combinator (candidate 1) in Instance</div>
+                <div class="border-l-4 border-slate-600 bg-slate-900/70 px-3 py-2 text-slate-300">facade export list untouched</div>
+              </div>
+            </div>
+          </div>
+
+          <p class="text-sm"><strong>Problem.</strong> One management operation concept has no single home: each shape re-derives the wrapping policy, so a behavior change (caller context, tracing, filtering) means editing three modules in lockstep.</p>
+          <p class="text-sm"><strong>Solution.</strong> One implementation per operation; the step wrapper and the executor guard become shared plumbing, while every exported name keeps its spelling.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+            <li>locality: operation logic in one place</li>
+            <li>leverage: wrappers stop paying per operation</li>
+            <li>interface unchanged for apps</li>
+            <li>tests cross the facade as before</li>
+          </ul>
+          <div class="rounded-md bg-amber-50 border border-amber-200 px-4 py-2 text-sm text-amber-900">
+            Facade discipline: every name imported into <span class="mono">DBOS.Transact</span> must stay exported, and Rust fidelity fixes the operation names. This candidate deepens the implementation only; the interface is frozen by AGENTS.md and ADR-0031/0032.
+          </div>
+        </article>
+
+        <!-- ============ 5 ============ -->
+        <article id="serialization" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Strong</span>
+            <span class="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-600">in-process</span>
+            <span class="text-xs uppercase tracking-wider text-stone-400">shallow, no locality</span>
+          </div>
+          <h2 class="font-serif text-2xl">Let the codec own tag unwrapping and error prose</h2>
+          <p class="font-mono text-sm text-stone-600 leading-relaxed">
+            src/DBOS/Internal/DBOS/Transact/Serialization.hs (owner)<br/>
+            inline cases: Step.hs &times;2, Select, Event, Message &times;2, Wait, Handle &middot; rendering: Step, Datasource, Event, Message, Wait (+ Registry variant)
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">Before</p>
+              <pre class="text-xs mono leading-snug bg-stone-50 rounded p-3 overflow-x-auto">case encoded.serializedSerialization of
+  Just (Serialization name') -> …
+  Nothing                    -> …
+<span class="text-red-600"># same shape at 8 sites, 8 modules</span>
+
+CodecNotJson _ input -&gt; "invalid JSON: " &lt;&gt; input
+<span class="text-red-600"># verbatim in 5 files, 6th is a variant</span></pre>
+            </div>
+            <div class="rounded-lg border border-slate-700 p-4 deep text-slate-100">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After</p>
+              <pre class="text-xs mono leading-snug bg-slate-900 rounded p-3">-- Serialization.hs
+serializationOf :: SerializedWorkflowValue
+                -&gt; Maybe Serialization
+renderCodecError :: CodecError -&gt; Text
+
+<span class="text-emerald-300"># 8 call sites become 1 line each</span>
+<span class="text-emerald-300"># prose lives beside the constructor</span></pre>
+            </div>
+          </div>
+
+          <p class="text-sm"><strong>Problem.</strong> Pure, zero-dependency logic with no home: two functions' worth of code exists as inline <span class="mono">case</span> expressions and a verbatim string repeated across eight modules, so a message change means a five-file sweep.</p>
+          <p class="text-sm"><strong>Solution.</strong> Add the two functions to the module that already defines <span class="mono">SerializedWorkflowValue</span> and <span class="mono">CodecError</span>; call sites shrink to a single name.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+            <li>locality: codec prose beside the codec</li>
+            <li>deletion test: passes cleanly</li>
+            <li>tests target one module</li>
+            <li>zero new dependencies</li>
+          </ul>
+        </article>
+
+        <!-- ============ 6 ============ -->
+        <article id="test-surface" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">Worth exploring</span>
+            <span class="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-600">mock / test seam</span>
+            <span class="text-xs uppercase tracking-wider text-stone-400">interface granularity</span>
+          </div>
+          <h2 class="font-serif text-2xl">Match the ctx toolkit's interface to how tests use it</h2>
+          <p class="font-mono text-sm text-stone-600 leading-relaxed">
+            src/DBOS/Internal/DBOS/Transact/Context.hs &middot; test/DBOS/Transact/ContextTest.hs (connOver, ctxOver)<br/>
+            identical import clause in ~9 test files &middot; ContextTest helpers imported by 8 more
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">Before</p>
+              <div class="space-y-1.5 text-xs mono">
+                <div class="border border-stone-200 rounded px-2 py-1.5 bg-stone-50">EventCases: Context <span class="text-stone-500">(firstStepStatus, nextStepId, nextWorkflowMarker, withStep, withWorkflow)</span></div>
+                <div class="border border-stone-200 rounded px-2 py-1.5 bg-stone-50">WidgetSim: Context <span class="text-stone-500">(firstStepStatus, nextWorkflowMarker, withStep, withWorkflow)</span></div>
+                <div class="border border-stone-200 rounded px-2 py-1.5 bg-stone-50">SleepTestSim / StepCases / DatasourceCases … <span class="text-stone-500">same five names</span></div>
+                <div class="border border-stone-200 rounded px-2 py-1.5 bg-amber-50 border-amber-300">8 files import <span class="text-amber-800">ContextTest (connOver)</span> &mdash; a *Test module acting as a helper host</div>
+              </div>
+            </div>
+            <div class="rounded-lg border border-slate-700 p-4 deep text-slate-100">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After</p>
+              <div class="space-y-1.5 text-xs mono">
+                <div class="border border-slate-600 rounded px-2 py-1.5 bg-slate-900">Context: one grouped toolkit surface <span class="text-slate-400">(the five names travel together)</span></div>
+                <div class="border border-slate-600 rounded px-2 py-1.5 bg-slate-900">test harness module owns connOver / ctxOver</div>
+                <div class="border border-slate-600 rounded px-2 py-1.5 bg-slate-900 text-slate-300">each test imports the harness, not a sibling test</div>
+              </div>
+            </div>
+          </div>
+
+          <p class="text-sm"><strong>Problem.</strong> The seam exists, but its interface granularity doesn't match use: tests repeat the same selective import clause, and a test module doubles as a helper library for eight other tests.</p>
+          <p class="text-sm"><strong>Solution.</strong> Export the invariant toolkit as one grouped surface and move <span class="mono">connOver</span>/<span class="mono">ctxOver</span> out of a <span class="mono">*Test</span> module into a harness the tests share.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+            <li>leverage: one import, many tests</li>
+            <li>locality: harness changes in one file</li>
+            <li>test-on-test coupling removed</li>
+          </ul>
+          <div class="rounded-md bg-amber-50 border border-amber-200 px-4 py-2 text-sm text-amber-900">
+            ADR-0022 sanctions tests importing peers &mdash; that stays. This candidate only relocates test-side helpers, and ADR-0029's gates (<span class="mono">neg_</span>/<span class="mono">w_</span> witnesses) must keep compiling unchanged.
+          </div>
+        </article>
+
+        <!-- ============ 7 ============ -->
+        <article id="sysdb-adapter" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="rounded-full bg-slate-200 px-3 py-1 text-xs font-semibold text-slate-700">Speculative</span>
+            <span class="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-600">ports &amp; adapters</span>
+            <span class="text-xs uppercase tracking-wider text-stone-400">wide adapter</span>
+          </div>
+          <h2 class="font-serif text-2xl">Narrow the System Database adapter's concerns</h2>
+          <p class="font-mono text-sm text-stone-600 leading-relaxed">
+            src/DBOS/Internal/DBOS/SystemDB/Postgres/Backend.hs (3,668 lines, ~65 exports, 4 importers)<br/>
+            Postgres/Statements.hs (2,633 lines, ~111 exports, 1 importer) &middot; Class.hs (61 methods)
+          </p>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="rounded-lg border border-slate-200 bg-white p-4">
+              <p class="text-xs uppercase tracking-wider text-stone-400 mb-3">Before &middot; mass</p>
+              <div class="space-y-3">
+                <div class="flex items-center gap-3"><span class="w-28 text-xs mono text-stone-500">interface</span><div class="h-6 bg-stone-300" style="width:78%"></div><span class="text-xs text-stone-400">~65 exports</span></div>
+                <div class="flex items-center gap-3"><span class="w-28 text-xs mono text-stone-500">Backend impl</span><div class="h-6 bg-slate-700" style="width:96%"></div><span class="text-xs text-stone-400">3,668</span></div>
+                <div class="flex items-center gap-3"><span class="w-28 text-xs mono text-stone-500">+ Statements</span><div class="h-6 bg-slate-500" style="width:88%"></div><span class="text-xs text-stone-400">2,633</span></div>
+                <p class="text-xs text-stone-500 pt-1">typed-SQL sessions, pool/config, migration verify, error classification, polling loops &mdash; four concerns, one module</p>
+              </div>
+            </div>
+            <div class="rounded-lg border border-slate-700 p-4 deep text-slate-100">
+              <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After &middot; policy extracted, module split only with an ADR</p>
+              <div class="space-y-3">
+                <div class="flex items-center gap-3"><span class="w-28 text-xs mono text-slate-400">interface</span><div class="h-6 bg-emerald-500/70" style="width:34%"></div><span class="text-xs text-slate-400">capability only</span></div>
+                <div class="flex items-center gap-3"><span class="w-28 text-xs mono text-slate-400">caller bookkeeping</span><div class="h-6 bg-slate-600" style="width:30%"></div><span class="text-xs text-slate-400">moved to the seam (candidate 2)</span></div>
+                <div class="flex items-center gap-3"><span class="w-28 text-xs mono text-slate-400">adapter body</span><div class="h-6 bg-slate-400" style="width:70%"></div><span class="text-xs text-slate-400">unchanged until an ADR allows a split</span></div>
+              </div>
+            </div>
+          </div>
+
+          <p class="text-sm"><strong>Problem.</strong> The one real adapter behind the port's one real seam holds four concerns, so following a single query means bouncing <span class="mono">Dequeue &rarr; Backend &rarr; Statements</span>, and the class interface carries call-site bookkeeping rather than capability.</p>
+          <p class="text-sm"><strong>Solution.</strong> First, shrink the interface (candidate 2 does this); only then consider splitting the adapter, with an ADR recording the deviation.</p>
+          <ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+            <li>locality: one concern per read</li>
+            <li>interface stops exposing bookkeeping</li>
+            <li>Statements already satisfies the private-helper rule</li>
+          </ul>
+          <div class="rounded-md bg-amber-50 border border-amber-200 px-4 py-2 text-sm text-amber-900">
+            Contradicts the HARD RULE (one Rust module = one Haskell module) if taken as a split: <span class="mono">Backend</span>/<span class="mono">Statements</span> mirror the Rust <span class="mono">sysdb/postgres</span> modules, and a split requires an ADR in <span class="mono">docs/adr/</span>. Only the interface shrink is safe without one &mdash; which is why this sits at Speculative behind candidate 2.
+          </div>
+        </article>
+
+      </section>
+
+      <section id="top-recommendation" class="rounded-xl border-2 border-slate-800 bg-white p-8 space-y-4">
+        <p class="text-xs uppercase tracking-widest text-stone-500">Top recommendation</p>
+        <h2 class="font-serif text-3xl"><a href="#guard" class="underline decoration-emerald-500 decoration-2 underline-offset-4">Deepen the launched-executor guard</a></h2>
+        <p class="text-sm text-stone-700 max-w-3xl">
+          It is the purest deletion test in the codebase: 37 copies of the same <span class="mono">case</span> across five modules, an invariant owned by <span class="mono">Instance</span> and enforced everywhere else, and labels already drifting into two dialects. One combinator concentrates that complexity with no ADR, no HARD RULE, and no facade change in the way, and it makes candidate 4 cheaper: the guard half of every management copy disappears with it. Do it first, then candidate 2 for leverage across 90 call sites.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>

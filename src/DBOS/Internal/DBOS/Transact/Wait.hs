@@ -26,10 +26,10 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), selectStepName, timestampNow)
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Connection (Connection (..), runSystemDB)
+import DBOS.Transact.Connection (Connection (..), withConnection)
 import DBOS.Transact.Context (WorkflowCtx (wctxConn, wctxTracer), nextStepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
-import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
+import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor)
 
 -- | Announcements from the wait paths, homed here with their owner.
 -- Mirrors the @wait.rs@ debug sites: a replayed @select_workflow@ reads
@@ -149,29 +149,20 @@ joinWorkflows wctx workflowIds = do
 waitForWorkflow :: (MonadMVar m, MonadDelay m, MonadTime m)
                 => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) AwaitedOutcome)
 waitForWorkflow dbos awaitedWorkflowId = do
-  running <- requireExecutor dbos "wait for a workflow"
-  case running of
-    Left err -> pure (Left err)
-    Right executor -> do
-      result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.awaitWorkflowResult db awaitedWorkflowId executor.conn.connOutcomePollInterval True)
-      pure (either (Left . TransactError.SystemDatabase) Right result)
+  withExecutor dbos "wait for a workflow" $ \executor -> do
+    result <- withConnection executor.conn (\db -> SystemDB.awaitWorkflowResult db awaitedWorkflowId executor.conn.connOutcomePollInterval True)
+    pure result
 
 waitForFirstWorkflow :: (MonadMVar m, MonadDelay m, MonadTime m)
                      => DBOS m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowId)
 waitForFirstWorkflow dbos workflowIds = do
-  running <- requireExecutor dbos "wait for the first workflow"
-  case running of
-    Left err -> pure (Left err)
-    Right executor -> do
-      result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.awaitFirstWorkflowId db workflowIds executor.conn.connOutcomePollInterval)
-      pure (either (Left . TransactError.SystemDatabase) Right result)
+  withExecutor dbos "wait for the first workflow" $ \executor -> do
+    result <- withConnection executor.conn (\db -> SystemDB.awaitFirstWorkflowId db workflowIds executor.conn.connOutcomePollInterval)
+    pure result
 
 waitForWorkflows :: (MonadMVar m, MonadDelay m, MonadTime m)
                  => DBOS m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 waitForWorkflows dbos workflowIds = do
-  running <- requireExecutor dbos "wait for workflows"
-  case running of
-    Left err -> pure (Left err)
-    Right executor -> do
-      result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.awaitWorkflowIds db workflowIds executor.conn.connOutcomePollInterval)
-      pure (either (Left . TransactError.SystemDatabase) Right result)
+  withExecutor dbos "wait for workflows" $ \executor -> do
+    result <- withConnection executor.conn (\db -> SystemDB.awaitWorkflowIds db workflowIds executor.conn.connOutcomePollInterval)
+    pure result

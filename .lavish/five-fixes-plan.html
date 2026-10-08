@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Five fixes — guard, seam, and three connection leaks</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+  .band { border-left-width: 4px; }
+  body { overflow-x: hidden; }
+  .wrap { overflow-wrap: anywhere; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-6 py-12 space-y-10">
+
+<header class="space-y-3">
+<p class="text-xs uppercase tracking-widest text-stone-500">Implementation plan</p>
+<h1 class="font-serif text-4xl">Five fixes: guard, seam, three leaks</h1>
+<p class="text-sm text-stone-600 max-w-3xl">Goal: delete the two copy-paste seams and close the three resource-bracketing holes, with no ADR, no HARD RULE deviation, and no facade change. Current state verified against <span class="mono">src/</span> on 2026-10-08. Recommended order: <strong>3 → 1 → 2 → 4 → 5</strong> (leak first because it is a one-liner, then guard, then seam, then launch/shutdown bracketing).</p>
+<div class="flex flex-wrap gap-2 text-xs">
+<span class="rounded-full bg-emerald-100 px-3 py-1 font-semibold text-emerald-800">1 · guard — Strong</span>
+<span class="rounded-full bg-emerald-100 px-3 py-1 font-semibold text-emerald-800">2 · seam — Strong*</span>
+<span class="rounded-full bg-red-100 px-3 py-1 font-semibold text-red-800">3 · acquireConnection leak</span>
+<span class="rounded-full bg-red-100 px-3 py-1 font-semibold text-red-800">4 · launch logger leak</span>
+<span class="rounded-full bg-red-100 px-3 py-1 font-semibold text-red-800">5 · shutdown safety</span>
+</div>
+</header>
+
+<!-- 1 -->
+<article id="guard" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
+<div class="flex flex-wrap items-center gap-3">
+<span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Strong · do second</span>
+<span class="text-xs uppercase tracking-wider text-stone-400">no-locality → one home</span>
+</div>
+<h2 class="font-serif text-2xl">1 · Deepen the launched-executor guard</h2>
+<p class="font-mono text-sm text-stone-600 wrap">src/DBOS/Internal/DBOS/Transact/Instance.hs:530 (requireExecutor) · 30 call sites: Instance ×20, Queue ×5, Wait ×3, Event ×1, Debouncer ×1</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4">
+<p class="text-xs uppercase tracking-wider text-stone-400 mb-2">Before · 30 × 3 lines</p>
+<div class="band border-red-500 bg-red-50 px-3 py-2 text-xs mono wrap">running &lt;- requireExecutor dbos "label"<br/>case running of<br/>&nbsp;&nbsp;Left err -&gt; pure (Left err)<br/>&nbsp;&nbsp;Right executor -&gt; …</div>
+<p class="text-xs text-stone-500 mt-2">Labels drifting: <span class="mono">"register_queue" · "get_event" · "app_id"</span> vs <span class="mono">"cancel workflows" · "read a queue"</span>.</p>
+</div>
+<div class="rounded-lg border border-slate-700 p-4 deep text-slate-100">
+<p class="text-xs uppercase tracking-wider text-slate-400 mb-2">After · one combinator</p>
+<div class="band border-emerald-400 bg-slate-800 px-3 py-2 text-xs mono wrap">withExecutor :: MonadMVar m<br/>&nbsp;&nbsp;=&gt; DBOS m -&gt; Text<br/>&nbsp;&nbsp;-&gt; (Executor m -&gt; m (Either (Error EngineOnly) a))<br/>&nbsp;&nbsp;-&gt; m (Either (Error EngineOnly) a)<br/>withExecutor dbos op k = either (pure . Left) k =&lt;&lt; requireExecutor dbos op</div>
+<p class="text-xs text-slate-300 mt-2">Body keeps the <span class="mono">Either</span> channel — the review draft's <span class="mono">(Executor m -&gt; m a)</span> shape nests <span class="mono">Either</span> and is wrong.</p>
+</div>
+</div>
+<ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+<li>Non-uniform sites need variants: <span class="mono">Event.hs:148</span> lifts via <span class="mono">PendingStep + liftEngine</span>; <span class="mono">Instance.hs:152,160,167</span> are pure <span class="mono">fmap</span>; <span class="mono">Instance.hs:299</span> is a pure <span class="mono">case</span>.</li>
+<li>Normalize labels in the same sweep (prose dialect, not snake).</li>
+<li>No ADR, no HARD RULE, facade untouched; makes item 4's Instance half cheaper.</li>
+</ul>
+<div id="diff-guard"></div>
+</article>
+
+<!-- 2 -->
+<article id="seam" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
+<div class="flex flex-wrap items-center gap-3">
+<span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Strong* · do third</span>
+<span class="text-xs uppercase tracking-wider text-stone-400">shallow seam → policy inside</span>
+</div>
+<h2 class="font-serif text-2xl">2 · Give the SystemDB call seam its policy</h2>
+<p class="font-mono text-sm text-stone-600 wrap">src/DBOS/Internal/DBOS/Transact/Connection.hs:69 (runSystemDB) · src/DBOS/Internal/DBOS/Transact/Context.hs:341 (withSystemDB) · src/DBOS/Internal/DBOS/SystemDB/Class.hs:42–107 (~60 methods, ~19 with trailing Maybe (WorkflowId, Int))</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4">
+<p class="text-xs uppercase tracking-wider text-stone-400 mb-2">Before · policy at every site</p>
+<div class="band border-red-500 bg-red-50 px-3 py-2 text-xs mono wrap">result &lt;- runSystemDB conn.connSysdb (\db -&gt; SystemDB.cancelWorkflows db ids x Nothing)<br/>pure (either (Left . SystemDatabase) Right result)</div>
+<p class="text-xs text-stone-500 mt-2">50+ hand mappings (<span class="mono">Client.hs:338,345,363 · Wait.hs:147,157 · Queue.hs:300,311</span>); ~30 bare <span class="mono">Nothing</span> caller contexts (<span class="mono">Client.hs:362,369 · Management.hs:83,111</span>).</p>
+</div>
+<div class="rounded-lg border border-slate-700 p-4 deep text-slate-100">
+<p class="text-xs uppercase tracking-wider text-slate-400 mb-2">After · two call forms, class verbatim</p>
+<div class="band border-emerald-400 bg-slate-800 px-3 py-2 text-xs mono wrap">withConnection :: Connection m -&gt; (forall db. SystemDB db m =&gt; db -&gt; m (Either Error a)) -&gt; m (Either (Error c) a)<br/>callWctx :: WorkflowCtx exec m -&gt; (caller-aware variant deriving Just caller)</div>
+<p class="text-xs text-slate-300 mt-2">Outside defaults <span class="mono">Nothing</span>; inside derives <span class="mono">Just caller</span> from placement (<span class="mono">Message.hs:106 · Event.hs:103</span>). Error channel polymorphic via <span class="mono">liftEngine</span>, not <span class="mono">EngineOnly</span>-only.</p>
+</div>
+</div>
+<ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+<li>Fold <span class="mono">updateQueue</span>'s validation callback (<span class="mono">Class.hs:92</span>) into <span class="mono">Queue.hs</span> — same policy-through-seam leak.</li>
+<li>Respects ADR-0009 (explicit handle arg) and HARD RULE (class spellings frozen).</li>
+<li>*Star because the draft's single <span class="mono">EngineOnly</span> helper does not fit step bodies returning <span class="mono">Either (Error c)</span>.</li>
+</ul>
+<div id="diff-seam"></div>
+</article>
+
+<!-- 3 -->
+<article id="forapp" class="rounded-xl border border-red-200 bg-white p-6 shadow-sm space-y-4">
+<div class="flex flex-wrap items-center gap-3">
+<span class="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-800">Leak · do first (one-liner)</span>
+</div>
+<h2 class="font-serif text-2xl">3 · Bracket <span class="mono">acquireConnection</span>'s activate</h2>
+<p class="font-mono text-sm text-stone-600 wrap">src/DBOS/Internal/DBOS/Transact/Connection.hs:152–153</p>
+<p class="text-sm"><strong>Problem.</strong> Acquire-then-activate with no bracket: if <span class="mono">activatePostgresSystemDB</span> throws, the pool is never released. The client path already does it right with <span class="mono">bracketOnError</span> (<span class="mono">Client.hs:180</span>). Same latent shape in <span class="mono">Backend.hs:1036</span> (<span class="mono">Pool.acquire</span> then <span class="mono">fromPool</span>).</p>
+<p class="text-sm"><strong>Solution.</strong> Mirror the client: <span class="mono">bracketOnError acquire release activate-then-build</span> in <span class="mono">acquireConnection</span>; same wrap for <span class="mono">acquire/fromPool</span>.</p>
+<div id="diff-forapp"></div>
+</article>
+
+<!-- 4 -->
+<article id="launch" class="rounded-xl border border-red-200 bg-white p-6 shadow-sm space-y-4">
+<div class="flex flex-wrap items-center gap-3">
+<span class="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-800">Leak · do fourth</span>
+</div>
+<h2 class="font-serif text-2xl">4 · Close the launch exception gap</h2>
+<p class="font-mono text-sm text-stone-600 wrap">src/DBOS/Internal/DBOS/Transact/Instance.hs:193,199</p>
+<p class="text-sm"><strong>Problem.</strong> <span class="mono">Left</span> paths are safe (<span class="mono">launchExecutor:591</span> closes before returning <span class="mono">Left</span>), but the exception path at <span class="mono">:199</span> runs <span class="mono">releaseConnection + thaw</span> without <span class="mono">releaseFastLogger</span> (the <span class="mono">:193 onException</span> only covers <span class="mono">startExecutor</span>), and thaws registry without datasources.</p>
+<p class="text-sm"><strong>Solution.</strong> One <span class="mono">onException/bracketOnError</span> around start+launch covering <span class="mono">releaseFastLogger + releaseConnection + both thaws</span>. Not fixable with the guard — the guard assumes an installed executor.</p>
+<div id="diff-launch"></div>
+</article>
+
+<!-- 5 -->
+<article id="shutdown" class="rounded-xl border border-red-200 bg-white p-6 shadow-sm space-y-4">
+<div class="flex flex-wrap items-center gap-3">
+<span class="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-800">Leak · do last</span>
+</div>
+<h2 class="font-serif text-2xl">5 · Make shutdown exception-safe</h2>
+<p class="font-mono text-sm text-stone-600 wrap">src/DBOS/Internal/DBOS/Transact/Instance.hs:219–223</p>
+<p class="text-sm"><strong>Problem.</strong> If <span class="mono">releaseConnection (:219)</span> throws, the <span class="mono">EngineShutdown</span> trace, <span class="mono">releaseTracer</span>, and both thaws are skipped — registries stay frozen, logger leaks.</p>
+<p class="text-sm"><strong>Solution.</strong> Bracket the close: trace + release + thaws in the release/finally arm so they run regardless. Same review for double-<span class="mono">activate</span> (<span class="mono">Backend.hs:1062 swapMVar</span> orphans the first flush task).</p>
+<div id="diff-shutdown"></div>
+</article>
+
+<section class="rounded-xl border-2 border-slate-800 bg-white p-8 space-y-3">
+<p class="text-xs uppercase tracking-widest text-stone-500">Risks &amp; gates</p>
+<ul class="text-sm space-y-1 list-disc list-inside text-stone-700">
+<li>Caller-context defaulting is the main behavioral risk (item 2): outside <span class="mono">Nothing</span> vs inside <span class="mono">Just caller</span> must stay distinct; cover both with live tests.</li>
+<li>Label normalization (item 1) changes <span class="mono">NotLaunched</span> prose — check tests pinning those strings.</li>
+<li>Gates per AGENTS.md: <span class="mono">make db-migrate</span>, watcher pair green, <span class="mono">cabal test all</span> idle-only, then psql row check.</li>
+</ul>
+</section>
+
+</main>
+<script type="module">
+import { FileDiff } from "https://esm.sh/@pierre/diffs@1.2.10?bundle";
+const theme = { light: "github-light", dark: "github-dark" };
+const options = { theme, themeType: "light", overflow: "wrap", diffStyle: "unified" };
+function render(sel, oldName, oldStr, newName, newStr) {
+  new FileDiff(options).render({ containerWrapper: document.querySelector(sel),
+    oldFile: { name: oldName, contents: oldStr }, newFile: { name: newName, contents: newStr } });
+}
+render("#diff-guard", "Instance.hs (before)",
+`running <- requireExecutor dbos "cancel workflows"
+case running of
+  Left err -> pure (Left err)
+  Right executor -> Management.cancelWorkflows executor.conn ids x`,
+"Instance.hs (after)",
+`withExecutor dbos "cancel workflows" $ \\executor ->
+  Management.cancelWorkflows executor.conn ids x`);
+render("#diff-seam", "Client.hs (before)",
+`result <- runSystemDB client.conn.connSysdb (\\db -> SystemDB.cancelWorkflows db ids x Nothing)
+pure (either (Left . TransactError.SystemDatabase) Right result)`,
+"Connection.hs (after)",
+`withConnection client.conn (\\db -> SystemDB.cancelWorkflows db ids x Nothing)
+-- mapping + Nothing-default live in withConnection; class unchanged`);
+render("#diff-forapp", "Connection.hs (before)",
+`acquireConnection config identity tracer = do
+  backend <- Postgres.acquirePostgresSystemDB (backendConfig config identity) tracer
+  Postgres.activatePostgresSystemDB backend
+  newConnection (SomeSystemDB backend) ...`,
+"Connection.hs (after)",
+`acquireConnection config identity tracer =
+  bracketOnError
+    (Postgres.acquirePostgresSystemDB (backendConfig config identity) tracer)
+    Postgres.releasePostgresSystemDB $ \\backend -> do
+      Postgres.activatePostgresSystemDB backend
+      newConnection (SomeSystemDB backend) ...`);
+render("#diff-launch", "Instance.hs (before)",
+`launched <- launchExecutor dbos executor
+  \`onException\` (releaseConnection executor.conn >> thawRegistry ...)
+case launched of
+  Left err -> releaseFastLogger >> thawRegistry ... >> pure (Left err)`,
+"Instance.hs (after)",
+`-- one handler covering logger + connection + both thaws,
+-- on both Left and exception paths
+launched <- launchExecutor dbos executor
+  \`onException\` (releaseConnection executor.conn >> releaseFastLogger >> thawBoth ...)
+case launched of
+  Left err -> releaseConnection executor.conn >> releaseFastLogger >> thawBoth ... >> pure (Left err)`);
+render("#diff-shutdown", "Instance.hs (before)",
+`releaseConnection executor.conn
+runTracer ... (EngineShutdown ...)
+executor.releaseTracer
+thawRegistry ...; thawDataSourceRegistry ...`,
+"Instance.hs (after)",
+`-- close in try/finally: trace + release + thaws always run
+bracket_ (pure ()) (runTracer ... (EngineShutdown ...) >> executor.releaseTracer >> thawBoth ...)
+  (releaseConnection executor.conn)`);
+</script>
+</body>
+</html>

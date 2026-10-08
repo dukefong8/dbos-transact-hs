@@ -28,11 +28,11 @@ import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration, QueueName (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), addTimeout, durationAsMillis, internalQueueName, timestampNow)
 import DBOS.Transact.Config (serializerName)
-import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
+import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, withConnection)
 import DBOS.Transact.Context (WorkflowCtx (wctxConn), insideAStep, nextStepId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), pollingHandle)
-import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor, startWorkflow)
+import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor, startWorkflow)
 import DBOS.Transact.Registry (WorkflowKey (..), WorkflowRef (..), refName, registryInstanceId)
 import DBOS.Transact.Workflow (Enqueue (..), Timeout (..), StartOptions (..), childWorkflowId, enqueueNew, startChildWorkflow, startOptionsDefault)
 
@@ -74,14 +74,11 @@ debounce :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
             Maybe SerializedWorkflowValue ->
             m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 debounce dbos userRef def key period input = do
-  required <- requireExecutor dbos "debounce a workflow"
-  case required of
+  withExecutor dbos "debounce a workflow" $ \exec -> case checkPeriod period of
     Left err -> pure (Left err)
-    Right exec -> case checkPeriod period of
-      Left err -> pure (Left err)
-      Right () -> do
-        pinned <- generatedWorkflowId exec.conn
-        bounceLoop exec pinned Nothing
+    Right () -> do
+      pinned <- generatedWorkflowId exec.conn
+      bounceLoop exec pinned Nothing
   where
     bounceLoop exec pinned caller = do
       now <- timestampNow
@@ -89,9 +86,9 @@ debounce dbos userRef def key period input = do
         Nothing ->
           pure (Left (TransactError.InvalidArgument "debounce" "the debounce period does not resolve to a representable wake time"))
         Just delayUntil -> do
-          bounced <- runSystemDB exec.conn.connSysdb (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest exec delayUntil) caller)
+          bounced <- withConnection exec.conn (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest exec delayUntil) caller)
           case bounced of
-            Left err -> pure (Left (TransactError.SystemDatabase err))
+            Left err -> pure (Left err)
             Right (Debounced wid) -> pure (Right (pollingHandle exec.conn wid True))
             Right (DebounceHeld holder) -> case classifyBounce holder (refName userRef) (refClassName userRef) (targetApp exec) of
               BounceRetry -> bounceLoop exec pinned caller
@@ -171,9 +168,9 @@ debounceInWorkflow wctx userRef def key period input = do
         Nothing ->
           pure (Left (TransactError.InvalidArgument "debounce" "the debounce period does not resolve to a representable wake time"))
         Just delayUntil -> do
-          bounced <- runSystemDB conn.connSysdb (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest conn delayUntil) caller)
+          bounced <- withConnection conn (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest conn delayUntil) caller)
           case bounced of
-            Left err -> pure (Left (TransactError.SystemDatabase err))
+            Left err -> pure (Left err)
             Right (Debounced wid) -> pure (Right (pollingHandle conn wid True))
             Right (DebounceHeld holder) -> case classifyBounce holder (refName userRef) (refClassName userRef) (targetApp conn) of
               BounceRetry -> bounceLoop conn pinned caller

@@ -143,6 +143,8 @@ pendingGetEvent :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadD
                    Duration ->
                    m (PendingStep exec m (Either (TransactError.Error c) (Maybe value)))
 pendingGetEvent dbos wctx destination key timeout = do
+  -- Stays on 'requireExecutor': the unlaunched branch answers a 'PendingStep'
+  -- refusal, not a bare 'Left', so 'withExecutor' does not fit.
   running <- requireExecutor dbos "get_event"
   case running of
     Left err -> pure (PendingStep getEventStepName Nothing (pure (Left (TransactError.liftEngine err))))
