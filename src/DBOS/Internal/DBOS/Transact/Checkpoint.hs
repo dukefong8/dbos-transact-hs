@@ -89,7 +89,8 @@ placementAt sctx stepId' =
 -- instance identities, which is what the two halves would disagree about.
 -- Callers check their own launch first, so a call to an unlaunched
 -- instance moves no counter.
-takenPlacement :: MonadSTM m => Connection m -> Text -> WorkflowCtx exec m -> m (Either (Error e) (StepPlacement exec m))
+takenPlacement :: MonadSTM m
+               => Connection m -> Text -> WorkflowCtx exec m -> m (Either (Error e) (StepPlacement exec m))
 takenPlacement conn operation wctx = do
   stepped <- insideAStep wctx
   -- Ordered as the oracle orders it: inside a step nothing is

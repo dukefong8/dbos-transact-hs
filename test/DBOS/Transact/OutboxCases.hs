@@ -111,17 +111,15 @@ txMarkCfg = TransactionConfig {txName = Just "update_notification_status", txIso
 
 -- | Variant A body (shared): insert-order transaction, notification send
 -- step, mark-sent transaction. Returns the order id.
-atomicBody ::
-  forall m exec.
-  (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) =>
-  DataSource m ->
-  (Tx m -> Text -> Text -> Int -> m Int) ->
-  (Tx m -> Int -> m ()) ->
-  m () ->
-  m Bool ->
-  (Text, Text, Int) ->
-  WorkflowCtx exec m ->
-  m (Either (Error EngineOnly) Int)
+atomicBody :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+           => DataSource m ->
+              (Tx m -> Text -> Text -> Int -> m Int) ->
+              (Tx m -> Int -> m ()) ->
+              m () ->
+              m Bool ->
+              (Text, Text, Int) ->
+              WorkflowCtx exec m ->
+              m (Either (Error EngineOnly) Int)
 atomicBody ds insertOp markOp noteSent takeFail (cust, item, qty) wctx = do
   placed <- runTxStep ds txInsertCfg wctx (\sctx tx -> Right <$> insertOp tx cust item qty)
   case placed of
@@ -148,16 +146,14 @@ instance Aeson.FromJSON Envelope where
 
 -- | The enqueued notification body (shared): send step, then mark-sent
 -- transaction. The envelope arrives as recorded inputs.
-notifyBody ::
-  forall m exec.
-  (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) =>
-  DataSource m ->
-  (Tx m -> Int -> m ()) ->
-  m () ->
-  m Bool ->
-  Envelope ->
-  WorkflowCtx exec m ->
-  m (Either (Error EngineOnly) ())
+notifyBody :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+           => DataSource m ->
+              (Tx m -> Int -> m ()) ->
+              m () ->
+              m Bool ->
+              Envelope ->
+              WorkflowCtx exec m ->
+              m (Either (Error EngineOnly) ())
 notifyBody ds markOp noteSent takeFail (Envelope args) wctx = do
   let (oid, _cust, _item) = args
   flight <- runStep wctx "send_notification" (\_ -> do
@@ -171,16 +167,14 @@ notifyBody ds markOp noteSent takeFail (Envelope args) wctx = do
 
 -- | Variant B placement (shared): order insert plus notification enqueue in
 -- one outside transaction — both commit or neither does.
-placeEnqueued ::
-  forall m.
-  (MonadDelay m, MonadCatch m) =>
-  DataSource m ->
-  (Tx m -> Text -> Text -> Int -> m Int) ->
-  (Tx m -> Int -> Text -> m WorkflowId) ->
-  Text ->
-  Text ->
-  Int ->
-  m (Either BackendError (Int, WorkflowId))
+placeEnqueued :: forall m. (MonadDelay m, MonadCatch m)
+              => DataSource m ->
+                 (Tx m -> Text -> Text -> Int -> m Int) ->
+                 (Tx m -> Int -> Text -> m WorkflowId) ->
+                 Text ->
+                 Text ->
+                 Int ->
+                 m (Either BackendError (Int, WorkflowId))
 placeEnqueued ds insertOp enqueueOp cust item qty =
   runTxOutside ds txInsertCfg (\tx -> do
     oid <- insertOp tx cust item qty
@@ -203,7 +197,8 @@ findNotification dbos tag = do
 -- | Drives the executor's listened queues once, returning what was claimed.
 -- Throws on a database failure; an empty claim is fine (the supervisor may
 -- have taken the row first — claims are atomic, outcomes identical).
-driveQueue :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m) => DBOS m -> m [WorkflowId]
+driveQueue :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
+           => DBOS m -> m [WorkflowId]
 driveQueue dbos = do
   driven <- dequeueWorkflows dbos
   case driven of
@@ -215,7 +210,8 @@ driveQueue dbos = do
 -- follows a claim finishes in microseconds, while a still-running body
 -- would move the row again. Bounded; throws on timeout instead of hanging
 -- the suite.
-waitClaimed :: (MonadDelay m, MonadThrow m) => OutboxFixture m -> WorkflowId -> m (Maybe WorkflowStatus)
+waitClaimed :: (MonadDelay m, MonadThrow m)
+            => OutboxFixture m -> WorkflowId -> m (Maybe WorkflowStatus)
 waitClaimed fx wid = go (200 :: Int)
   where
     statusOf row = case row of
@@ -253,11 +249,9 @@ readRowShared sysdb wid = do
 -- | Variant A commits atomically: the workflow succeeds, one order row
 -- reads SENT, one completed send. Returns the count, status, row status,
 -- and completions.
-scenarioAtomicCommit ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) =>
-  OutboxFixture m ->
-  m (Int, Maybe Text, Maybe WorkflowStatus, Int)
+scenarioAtomicCommit :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+                     => OutboxFixture m ->
+                        m (Int, Maybe Text, Maybe WorkflowStatus, Int)
 scenarioAtomicCommit fx = do
   tag <- fx.obFreshTag "atomic-commit"
   wid <- fx.obFreshWid "atomic-commit"
@@ -287,11 +281,9 @@ checkAtomicCommit (count, status, row, sent)
 -- then runs clean to one SENT order and one send. Returns the first row,
 -- count, status, completions, then the resumed row, count, status,
 -- completions.
-scenarioAtomicRollback ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) =>
-  OutboxFixture m ->
-  m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
+scenarioAtomicRollback :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+                       => OutboxFixture m ->
+                          m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
 scenarioAtomicRollback fx = do
   tag <- fx.obFreshTag "atomic-rollback"
   wid <- fx.obFreshWid "atomic-rollback"
@@ -334,11 +326,9 @@ checkAtomicRollback (row1, count1, status1, sent1, row2, count2, status2, sent2)
 -- | Variant B commits atomically: one order row, one found enqueue, and the
 -- driven notification succeeds to SENT with one send. Returns the count,
 -- whether the enqueue was found, the row status, order status, completions.
-scenarioEnqueueCommit ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) =>
-  OutboxFixture m ->
-  m (Int, Bool, Maybe WorkflowStatus, Maybe Text, Int)
+scenarioEnqueueCommit :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+                      => OutboxFixture m ->
+                         m (Int, Bool, Maybe WorkflowStatus, Maybe Text, Int)
 scenarioEnqueueCommit fx = do
   tag <- fx.obFreshTag "enqueue-commit"
   placed <- fx.obPlaceEnqueued tag "Widget B" 1
@@ -371,11 +361,9 @@ checkEnqueueCommit (count, found, row, status, sent)
 -- (fault consumed) commits and the replacement notification runs to SENT.
 -- Returns the first error presence, count, found, sent, then the
 -- replacement count, status, completions, row status.
-scenarioEnqueueRollbackApp ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) =>
-  OutboxFixture m ->
-  m (Bool, Int, Bool, Int, Int, Maybe Text, Int, Maybe WorkflowStatus)
+scenarioEnqueueRollbackApp :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+                           => OutboxFixture m ->
+                              m (Bool, Int, Bool, Int, Int, Maybe Text, Int, Maybe WorkflowStatus)
 scenarioEnqueueRollbackApp fx = do
   tag <- fx.obFreshTag "enqueue-rollback-app"
   fx.obArmTxThrow
@@ -413,11 +401,9 @@ checkEnqueueRollbackApp (failed, count1, found1, sent1, count2, status2, sent2, 
 -- | Variant B rolls back on a database error after the insert: same
 -- all-or-nothing shape through the engine-error path, with the replacement
 -- driven to SENT.
-scenarioEnqueueRollbackDb ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) =>
-  OutboxFixture m ->
-  m (Bool, Int, Bool, Int, Int, Maybe Text, Int, Maybe WorkflowStatus)
+scenarioEnqueueRollbackDb :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+                          => OutboxFixture m ->
+                             m (Bool, Int, Bool, Int, Int, Maybe Text, Int, Maybe WorkflowStatus)
 scenarioEnqueueRollbackDb fx = do
   tag <- fx.obFreshTag "enqueue-rollback-db"
   fx.obArmTxDbError
@@ -457,11 +443,9 @@ checkEnqueueRollbackDb (failed, count1, found1, sent1, count2, status2, sent2, r
 -- send); the resume adopts the insert and completes to one SENT order and
 -- one send. Returns the first row, count, status, completions, then the
 -- resumed row, count, status, completions.
-scenarioAtomicRedrive ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) =>
-  OutboxFixture m ->
-  m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
+scenarioAtomicRedrive :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+                      => OutboxFixture m ->
+                         m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
 scenarioAtomicRedrive fx = do
   tag <- fx.obFreshTag "atomic-redrive"
   wid <- fx.obFreshWid "atomic-redrive"
@@ -507,11 +491,9 @@ checkAtomicRedrive (row1, count1, status1, sent1, row2, count2, status2, sent2)
 -- panic (order PENDING-notification, no send), resume to one SENT order
 -- and one send. Returns the first row, count, status, completions, then
 -- the resumed row, count, status, completions.
-scenarioEnqueueRedrive ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) =>
-  OutboxFixture m ->
-  m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
+scenarioEnqueueRedrive :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+                       => OutboxFixture m ->
+                          m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
 scenarioEnqueueRedrive fx = do
   tag <- fx.obFreshTag "enqueue-redrive"
   placed <- fx.obPlaceEnqueued tag "Widget B" 1

@@ -181,7 +181,8 @@ scenarioSiblingRefused fx = withCtxOf fx $ \ctx -> do
         (isElsewhereRefused "checkout" "inside a step of workflow wf-1" "inside a different step of workflow wf-1" (checkHere (PlacementInsideStep first) "checkout" (Just second)))
 
 -- | Placement predicates and descriptions read the same everywhere.
-scenarioPlacementNames :: forall m. (MonadSTM m) => CheckpointFixture m -> m (Bool, Bool, Bool, Text, Text, Text)
+scenarioPlacementNames :: forall m. (MonadSTM m)
+                       => CheckpointFixture m -> m (Bool, Bool, Bool, Text, Text, Text)
 scenarioPlacementNames fx = withCtxOf fx $ \ctx -> do
   pure
     ( insideAWorkflow Outside == False,

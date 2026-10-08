@@ -85,11 +85,9 @@ orThrow = either (throwIO . userError . show) pure
 -- | A recorded workflow step runs once and replays: two executions over
 -- fresh contexts, exactly as a recovered run does. Returns both results,
 -- the body's run count, and the observed step id.
-scenarioRecordReplay ::
-  forall m.
-  (MonadSTM m, MonadTime m, MonadCatch m) =>
-  StepFixture m ->
-  m (Int, Int, Int, Maybe Int)
+scenarioRecordReplay :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+                     => StepFixture m ->
+                        m (Int, Int, Int, Maybe Int)
 scenarioRecordReplay fx = do
   wid <- fx.sfFreshId "record"
   calls <- newTVarIO (0 :: Int)
@@ -106,13 +104,11 @@ scenarioRecordReplay fx = do
   pure (first, second, count, seen)
 
 -- | The counting body: records its step id, counts entries, answers 42.
-countingBody ::
-  forall exec m.
-  (MonadSTM m) =>
-  StrictTVar m Int ->
-  StrictTVar m (Maybe Int) ->
-  StepCtx exec m ->
-  m Int
+countingBody :: forall exec m. (MonadSTM m)
+             => StrictTVar m Int ->
+                StrictTVar m (Maybe Int) ->
+                StepCtx exec m ->
+                m Int
 countingBody calls observed sctx = do
   atomically (writeTVar observed (stepId sctx))
   atomically (modifyTVar calls (+ 1))
@@ -120,11 +116,9 @@ countingBody calls observed sctx = do
 
 -- | A step inside a step body runs plainly and takes no id. Returns the
 -- outer result with whether each level checkpointed.
-scenarioNestedPlain ::
-  forall m.
-  (MonadSTM m, MonadTime m, MonadCatch m) =>
-  StepFixture m ->
-  m (Int, Bool, Bool)
+scenarioNestedPlain :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+                    => StepFixture m ->
+                       m (Int, Bool, Bool)
 scenarioNestedPlain fx = do
   wid <- fx.sfFreshId "nested"
   fx.sfInitRow wid
@@ -138,11 +132,9 @@ scenarioNestedPlain fx = do
   pure (result, placed, free)
 
 -- | The nesting body: the inner call runs plainly inside the outer step.
-nestingBody ::
-  forall exec m.
-  (MonadThrow m) =>
-  StepCtx exec m ->
-  m Int
+nestingBody :: forall exec m. (MonadThrow m)
+            => StepCtx exec m ->
+               m Int
 nestingBody s = do
   inner <- runNestedStep s "inner" (\_ -> pure (7 :: Int))
   case inner of
@@ -153,11 +145,9 @@ nestingBody s = do
 -- reads its narrowed view's status, proving the handoff as well as the
 -- checkpoint. Returns the first result, the observed status, the replay,
 -- and the run count.
-scenarioScopedView ::
-  forall m.
-  (MonadSTM m, MonadTime m, MonadCatch m) =>
-  StepFixture m ->
-  m (Int, Maybe StepStatus, Int, Int)
+scenarioScopedView :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+                   => StepFixture m ->
+                      m (Int, Maybe StepStatus, Int, Int)
 scenarioScopedView fx = do
   wid <- fx.sfFreshId "scoped"
   calls <- newTVarIO (0 :: Int)
@@ -174,13 +164,11 @@ scenarioScopedView fx = do
   pure (first, seen, replay, count)
 
 -- | The scoped body: records its narrowed status, counts entries, answers 42.
-scopedBody ::
-  forall exec m.
-  (MonadSTM m) =>
-  StrictTVar m Int ->
-  StrictTVar m (Maybe StepStatus) ->
-  StepCtx exec m ->
-  m Int
+scopedBody :: forall exec m. (MonadSTM m)
+           => StrictTVar m Int ->
+              StrictTVar m (Maybe StepStatus) ->
+              StepCtx exec m ->
+              m Int
 scopedBody calls observed s = do
   atomically (writeTVar observed (stepCtxStatus s))
   atomically (modifyTVar calls (+ 1))
@@ -189,22 +177,18 @@ scopedBody calls observed s = do
 -- | A nested step through the step view is plain and takes no id: the same
 -- shape as 'scenarioNestedPlain', kept as its own case because the trees
 -- assert different seams around it (checkpoints live, traces sim).
-scenarioNestedStepView ::
-  forall m.
-  (MonadSTM m, MonadTime m, MonadCatch m) =>
-  StepFixture m ->
-  m (Int, Bool, Bool)
+scenarioNestedStepView :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+                       => StepFixture m ->
+                          m (Int, Bool, Bool)
 scenarioNestedStepView = scenarioNestedPlain
 
 -- | A pending scoped step claims its id at build and replays: the build
 -- hands back step zero, the drive records under it, and a second run adopts
 -- the recording. Returns the first outcome, the claimed id, the replay,
 -- and the run count.
-scenarioPendingScoped ::
-  forall m.
-  (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
-  StepFixture m ->
-  m (Int, Maybe Int, Int, Int)
+scenarioPendingScoped :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                      => StepFixture m ->
+                         m (Int, Maybe Int, Int, Int)
 scenarioPendingScoped fx = do
   wid <- fx.sfFreshId "pending"
   calls <- newTVarIO (0 :: Int)
@@ -222,23 +206,19 @@ scenarioPendingScoped fx = do
   pure (first, claimed, replay, count)
 
 -- | The pending body: counts entries, answers 42.
-pendingBody ::
-  forall exec m.
-  (MonadSTM m) =>
-  StrictTVar m Int ->
-  StepCtx exec m ->
-  m (Either (Error EngineOnly) Int)
+pendingBody :: forall exec m. (MonadSTM m)
+            => StrictTVar m Int ->
+               StepCtx exec m ->
+               m (Either (Error EngineOnly) Int)
 pendingBody calls _ = do
   atomically (modifyTVar calls (+ 1))
   pure (Right 42)
 
 -- | Durable sleep reuses its recorded wake time: the replay adopts the
 -- original wake instead of sleeping again. Returns both outcomes.
-scenarioDurableSleep ::
-  forall m.
-  (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m) =>
-  StepFixture m ->
-  m ((), ())
+scenarioDurableSleep :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m)
+                     => StepFixture m ->
+                        m ((), ())
 scenarioDurableSleep fx = do
   wid <- fx.sfFreshId "sleep"
   fx.sfInitRow wid
@@ -254,11 +234,9 @@ scenarioDurableSleep fx = do
 -- once, and both attempts observe the inner call carrying the enclosing
 -- status whole. Returns the leading result, the retried outcome, the
 -- attempt count, the nested observations, and the recorded step names.
-scenarioNestedEnclosing ::
-  forall m.
-  (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
-  StepFixture m ->
-  m ((), (), Int, [(Maybe StepStatus, Maybe StepStatus, Maybe Int)], [Text])
+scenarioNestedEnclosing :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                        => StepFixture m ->
+                           m ((), (), Int, [(Maybe StepStatus, Maybe StepStatus, Maybe Int)], [Text])
 scenarioNestedEnclosing fx = do
   wid <- fx.sfFreshId "nested-status"
   seen <- newTVarIO ([] :: [(Maybe StepStatus, Maybe StepStatus, Maybe Int)])
@@ -279,13 +257,11 @@ scenarioNestedEnclosing fx = do
 
 -- | The enclosing body: observes the inner call's status against the outer
 -- status, fails the first attempt, and succeeds the retry.
-enclosingBody ::
-  forall exec m.
-  (MonadSTM m) =>
-  StrictTVar m [(Maybe StepStatus, Maybe StepStatus, Maybe Int)] ->
-  StrictTVar m Int ->
-  StepCtx exec m ->
-  m (Either (Error EngineOnly) ())
+enclosingBody :: forall exec m. (MonadSTM m)
+              => StrictTVar m [(Maybe StepStatus, Maybe StepStatus, Maybe Int)] ->
+                 StrictTVar m Int ->
+                 StepCtx exec m ->
+                 m (Either (Error EngineOnly) ())
 enclosingBody seen attempts sctx = do
   let outer = stepStatus sctx
   inner <- runNestedStep sctx "inner" (innerObserve seen outer)
@@ -299,13 +275,11 @@ enclosingBody seen attempts sctx = do
         else pure (Right ())
 
 -- | The inner observation: records the enclosing status beside its own.
-innerObserve ::
-  forall exec m.
-  (MonadSTM m) =>
-  StrictTVar m [(Maybe StepStatus, Maybe StepStatus, Maybe Int)] ->
-  Maybe StepStatus ->
-  StepCtx exec m ->
-  m ()
+innerObserve :: forall exec m. (MonadSTM m)
+             => StrictTVar m [(Maybe StepStatus, Maybe StepStatus, Maybe Int)] ->
+                Maybe StepStatus ->
+                StepCtx exec m ->
+                m ()
 innerObserve seen outer innerSctx = do
   let innerStatus = stepStatus innerSctx
       innerId = stepId innerSctx
@@ -314,11 +288,9 @@ innerObserve seen outer innerSctx = do
 -- | A cancellation token outside a step never fires on its own: the
 -- abandoned step blows its deadline, which fires the workflow scope's token.
 -- Returns whether the abandonment timed out.
-scenarioTokenQuiet ::
-  forall m.
-  (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) =>
-  StepFixture m ->
-  m Bool
+scenarioTokenQuiet :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                   => StepFixture m ->
+                      m Bool
 scenarioTokenQuiet fx = do
   wid <- fx.sfFreshId "quiet-token"
   fx.sfInitRow wid

@@ -9,7 +9,6 @@
 module DBOS.Transact.Dequeue (QueueEvent (..), dequeuePass, superviseForever) where
 
 import DBOS.Prelude
-import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -190,7 +189,8 @@ workerBudget limits running
 -- | One dequeue and the dispatch of whatever it claimed, reporting the
 -- contended flag the caller backs off on. Announcements go through the
 -- connection's tracer.
-pollOnce :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> m (Bool, [WorkflowId])
+pollOnce :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+         => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> m (Bool, [WorkflowId])
 pollOnce conn identity workflows tasks running queue = do
   if not (resolvedIsPartitioned limits)
     then do
@@ -331,7 +331,8 @@ shuffled seed keys = Map.elems (go (length keys - 1) (seed `xor` 1) initial)
 -- tally before the dispatch so the next iteration's counts include it even
 -- if this one is still starting. Walked in claim order, not in the order
 -- the read came back, because claim order is what priority is for.
-dispatchClaimed :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> m ()
+dispatchClaimed :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> m ()
 dispatchClaimed conn identity workflows tasks running queue partition claimed
   | null claimed = pure ()
   | otherwise = do
@@ -389,7 +390,8 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed
 -- for, returning their names. From the table, never from what this
 -- instance registered; a transient read failure keeps the previous set
 -- rather than emptying it.
-refreshQueueSet :: MonadSTM m => Connection m -> Identity -> StrictTVar m (Map Text QueueRecord) -> StrictTVar m Bool -> Maybe [Text] -> m [Text]
+refreshQueueSet :: MonadSTM m
+                => Connection m -> Identity -> StrictTVar m (Map Text QueueRecord) -> StrictTVar m Bool -> Maybe [Text] -> m [Text]
 refreshQueueSet conn identity queues warnedInternal listenQueues = do
   listed <- runSystemDB conn.connSysdb (\db -> SystemDB.listQueues db Unset)
   case listed of
@@ -436,7 +438,8 @@ internalQueueRecord =
 -- aborts the task. The interval is held across iterations, which is the
 -- point: a contended queue stays backed off rather than rediscovering the
 -- contention.
-pollQueue :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> m ()
+pollQueue :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+          => Tasks m -> Connection m -> Identity -> Snapshot m -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> m ()
 pollQueue tasks conn identity workflows queues running name = go (secondsDuration 1)
   where
     go interval = do
@@ -461,7 +464,8 @@ pollQueue tasks conn identity workflows queues running name = go (secondsDuratio
 
 -- | The supervisor: transition, rebuild the set, spawn and reap one worker
 -- per queue, and sleep a second.
-superviseForever :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m ()
+superviseForever :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                 => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m ()
 superviseForever tasks conn identity workflows listenQueues = do
   queues <- newTVarIO Map.empty
   workers <- newTVarIO Map.empty
@@ -486,7 +490,7 @@ superviseForever tasks conn identity workflows listenQueues = do
           spawned <-
             spawnTracked
               tasks
-              ( MThrow.finally
+              ( finally
                   (pollQueue tasks conn identity workflows queues running name)
                   (atomically (modifyTVar workers (Map.delete name)))
               )
@@ -504,16 +508,17 @@ superviseForever tasks conn identity workflows listenQueues = do
 -- only learns what was claimed. A stored internal-queue row is skipped like
 -- the supervisor skips it: the synthetic record's no-limit cadence always
 -- wins, and the row's presence is said out loud.
-dequeuePass :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+dequeuePass :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+            => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeuePass tasks conn identity workflows listenQueues = do
   passStart <- getCurrentTime
   transitioned <- runSystemDB conn.connSysdb (\db -> SystemDB.transitionDelayedWorkflows db)
   case transitioned of
-    Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+    Left err -> pure (Left (TransactError.SystemDatabase err))
     Right _ -> do
       listed <- runSystemDB conn.connSysdb (\db -> SystemDB.listQueues db Unset)
       case listed of
-        Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+        Left err -> pure (Left (TransactError.SystemDatabase err))
         Right records -> do
           running <- newRunning
           let internalName = case internalQueueName of QueueName name -> name

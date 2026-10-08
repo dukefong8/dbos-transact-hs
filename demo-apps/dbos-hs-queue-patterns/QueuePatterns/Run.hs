@@ -67,7 +67,7 @@ start = do
   exec <- launch dbos >>= either (die . Text.pack . show) pure
   -- The three queues, mirroring the Python @DBOS.register_queue@ calls.
   -- Registered after launch (they need the executor), like the starter's.
-  _ <- registerQueue dbos concurrencyQueueName (defaultQueueOptions {concurrency = Just 5}) NeverUpdate >>= either (die . Text.pack . show) pure
+  _ <- registerQueue dbos concurrencyQueueName (defaultQueueOptions {globalConcurrency = Just 5}) NeverUpdate >>= either (die . Text.pack . show) pure
   _ <- registerQueue dbos partitionedQueueName (defaultQueueOptions {partitionConcurrency = Just 1}) NeverUpdate >>= either (die . Text.pack . show) pure
   _ <- registerQueue dbos rateLimitedQueueName (defaultQueueOptions {rateLimit = Just (RateLimit 2 (secondsDuration 10))}) NeverUpdate >>= either (die . Text.pack . show) pure
   _ <- registerQueue dbos debouncerQueueName defaultQueueOptions NeverUpdate >>= either (die . Text.pack . show) pure

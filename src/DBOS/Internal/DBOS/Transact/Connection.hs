@@ -112,7 +112,8 @@ data Connection m = Connection
 -- supplies the @m Text@ workflow-id generator the engine mints ids with
 -- when a caller names none, plus the tracer the connection's workers and
 -- workflow contexts announce resource-lifetime events through.
-newConnection :: MonadSTM m => SomeSystemDB m -> Serializer -> Maybe Text -> Duration -> Owner -> Text -> m Text -> m Word32 -> SomeTracer m -> m (Connection m)
+newConnection :: MonadSTM m
+              => SomeSystemDB m -> Serializer -> Maybe Text -> Duration -> Owner -> Text -> m Text -> m Word32 -> SomeTracer m -> m (Connection m)
 newConnection sysdb serializer appName pollInterval owner instanceId generate entropy tracer = do
   counter <- newTVarIO 0
   pure

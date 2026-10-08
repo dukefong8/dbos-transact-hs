@@ -55,13 +55,14 @@ import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 
 -- | A registered queue as this process understands it. Limits are resolved
--- to their effective scope, not reported by raw database column.
+-- to their effective scope, not reported by raw database column. The
+-- priority flag is gone (every queue dispatches in priority order, as both
+-- SDK oracles hold); the record still carries the legacy column.
 data Queue = Queue
   { name :: Text,
     concurrency :: Maybe Int,
     workerConcurrency :: Maybe Int,
     rateLimit :: Maybe RateLimit,
-    priorityEnabled :: Bool,
     partitionConcurrency :: Maybe Int,
     partitionWorkerConcurrency :: Maybe Int,
     partitionRateLimit :: Maybe RateLimit,
@@ -70,13 +71,21 @@ data Queue = Queue
   deriving stock (Eq, Show)
 
 -- | Queue limits as supplied at registration. Every default is unbounded,
--- with one-second polling.
+-- with one-second polling. 'globalConcurrency' is the supported spelling
+-- for the fleet limit; 'concurrency' is its deprecated alias (explicit
+-- wins), retained because both SDK oracles keep it. There is no priority
+-- option: every queue dispatches in priority order, so registration always
+-- persists the legacy column as true.
 data QueueOptions = QueueOptions
-  { concurrency :: Maybe Int,
+  { -- | Deprecated alias for 'globalConcurrency': explicit wins. Retained
+    -- because both SDK oracles keep it. (A @DEPRECATED@ pragma would fire
+    -- on the receipt's live field too, so the deprecation is documented,
+    -- not pragma-enforced.)
+    concurrency :: Maybe Int,
+    globalConcurrency :: Maybe Int,
     workerConcurrency :: Maybe Int,
     pollingInterval :: Duration,
     rateLimit :: Maybe RateLimit,
-    priorityEnabled :: Bool,
     partitionConcurrency :: Maybe Int,
     partitionWorkerConcurrency :: Maybe Int,
     partitionRateLimit :: Maybe RateLimit
@@ -87,23 +96,25 @@ defaultQueueOptions :: QueueOptions
 defaultQueueOptions =
   QueueOptions
     { concurrency = Nothing,
+      globalConcurrency = Nothing,
       workerConcurrency = Nothing,
       pollingInterval = secondsDuration 1,
       rateLimit = Nothing,
-      priorityEnabled = False,
       partitionConcurrency = Nothing,
       partitionWorkerConcurrency = Nothing,
       partitionRateLimit = Nothing
     }
 
 -- | A partial change. 'Leave' differs from 'Set Nothing': only the latter
--- clears an optional limit.
+-- clears an optional limit. The concurrency pair follows the options
+-- precedence: an explicit 'globalConcurrency' wins over 'concurrency'.
 data QueueChange = QueueChange
-  { concurrency :: Change (Maybe Int),
+  { -- | Deprecated alias for 'globalConcurrency', as on the options.
+    concurrency :: Change (Maybe Int),
+    globalConcurrency :: Change (Maybe Int),
     workerConcurrency :: Change (Maybe Int),
     pollingInterval :: Change Duration,
     rateLimit :: Change (Maybe RateLimit),
-    priorityEnabled :: Change Bool,
     partitionConcurrency :: Change (Maybe Int),
     partitionWorkerConcurrency :: Change (Maybe Int),
     partitionRateLimit :: Change (Maybe RateLimit)
@@ -114,10 +125,10 @@ defaultQueueChange :: QueueChange
 defaultQueueChange =
   QueueChange
     { concurrency = Leave,
+      globalConcurrency = Leave,
       workerConcurrency = Leave,
       pollingInterval = Leave,
       rateLimit = Leave,
-      priorityEnabled = Leave,
       partitionConcurrency = Leave,
       partitionWorkerConcurrency = Leave,
       partitionRateLimit = Leave
@@ -138,7 +149,6 @@ queueFromRecord record =
           concurrency = limits.resolvedConcurrency,
           workerConcurrency = limits.resolvedWorkerConcurrency,
           rateLimit = limits.resolvedRateLimit,
-          priorityEnabled = record.queueRecordPriorityEnabled,
           partitionConcurrency = limits.resolvedPartitionConcurrency,
           partitionWorkerConcurrency = limits.resolvedPartitionWorkerConcurrency,
           partitionRateLimit = limits.resolvedPartitionRateLimit,
@@ -154,10 +164,12 @@ queueIsPartitioned receipt =
 queueOptionsToNewQueue :: Text -> QueueOptions -> NewQueue
 queueOptionsToNewQueue queueName options =
   (newQueue queueName)
-    { newQueueConcurrency = options.concurrency,
+    { newQueueConcurrency = effectiveConcurrency options,
       newQueueWorkerConcurrency = options.workerConcurrency,
       newQueueRateLimit = options.rateLimit,
-      newQueuePriorityEnabled = options.priorityEnabled,
+      -- Legacy column, still read by other SDKs: every queue is a priority
+      -- queue now, so registration always persists true, as Python does.
+      newQueuePriorityEnabled = True,
       newQueuePartitionQueue = anyPresent options,
       newQueuePartitionConcurrency = options.partitionConcurrency,
       newQueuePartitionWorkerConcurrency = options.partitionWorkerConcurrency,
@@ -169,6 +181,11 @@ queueOptionsToNewQueue queueName options =
       case (configured.partitionConcurrency, configured.partitionWorkerConcurrency, configured.partitionRateLimit) of
         (Nothing, Nothing, Nothing) -> False
         _ -> True
+
+-- | The fleet limit the options mean: the explicit spelling wins over the
+-- deprecated alias, as both SDK oracles resolve it.
+effectiveConcurrency :: QueueOptions -> Maybe Int
+effectiveConcurrency options = options.globalConcurrency <|> options.concurrency
 
 queueChangeToUpdate :: QueueChange -> Queue -> QueueUpdate
 queueChangeToUpdate change current =
@@ -182,10 +199,14 @@ queueChangeToUpdate change current =
           || maybeChanged change.partitionWorkerConcurrency current.partitionWorkerConcurrency /= Nothing
           || maybeChanged change.partitionRateLimit current.partitionRateLimit /= Nothing
    in update
-        { queueUpdateConcurrency = change.concurrency,
+        { queueUpdateConcurrency = effectiveChange change,
           queueUpdateWorkerConcurrency = change.workerConcurrency,
           queueUpdateRateLimit = change.rateLimit,
-          queueUpdatePriorityEnabled = change.priorityEnabled,
+          -- Legacy column, still read by other SDKs: every materialized
+          -- update persists true, as Python's upsert does. This keeps an
+          -- otherwise-empty change non-empty, so an empty update writes
+          -- its (unchanged) row rather than skipping.
+          queueUpdatePriorityEnabled = Set True,
           queueUpdatePartitionQueue = if partitionTouched then Set resultingPartitioned else Leave,
           queueUpdatePartitionConcurrency = change.partitionConcurrency,
           queueUpdatePartitionWorkerConcurrency = change.partitionWorkerConcurrency,
@@ -195,6 +216,12 @@ queueChangeToUpdate change current =
   where
     maybeChanged (Set value) _ = value
     maybeChanged Leave oldValue = oldValue
+    -- The fleet-limit change the update means: the explicit spelling wins
+    -- over the deprecated alias, as both SDK oracles resolve it.
+    effectiveChange change = case (change.globalConcurrency, change.concurrency) of
+      (Set value, _) -> Set value
+      (Leave, Set value) -> Set value
+      (Leave, Leave) -> Leave
 
 validateQueueOptions :: Text -> QueueOptions -> Either (TransactError.Error TransactError.EngineOnly) ()
 validateQueueOptions queueName options =
@@ -206,18 +233,21 @@ validateQueueOptions queueName options =
             ("queue `" <> queueName <> "`: invalid " <> field <> ": " <> detail)
         )
   where
+    -- Validation judges the effective fleet limit (explicit wins over the
+    -- deprecated alias), never either spelling alone.
+    fleet = effectiveConcurrency options
     firstInvalid =
       first
-        [ positive "concurrency" options.concurrency,
+        [ positive "concurrency" fleet,
           positive "worker_concurrency" options.workerConcurrency,
-          ordered "worker_concurrency" "concurrency" options.workerConcurrency options.concurrency,
+          ordered "worker_concurrency" "concurrency" options.workerConcurrency fleet,
           nonzeroDuration "polling_interval" options.pollingInterval,
           rate "rate_limit" options.rateLimit,
           rate "partition_rate_limit" options.partitionRateLimit,
           positive "partition_concurrency" options.partitionConcurrency,
           positive "partition_worker_concurrency" options.partitionWorkerConcurrency,
           ordered "partition_worker_concurrency" "partition_concurrency" options.partitionWorkerConcurrency options.partitionConcurrency,
-          ordered "partition_concurrency" "concurrency" options.partitionConcurrency options.concurrency,
+          ordered "partition_concurrency" "concurrency" options.partitionConcurrency fleet,
           ordered "partition_worker_concurrency" "worker_concurrency" options.partitionWorkerConcurrency options.workerConcurrency,
           partitionRate options.partitionRateLimit options.rateLimit
         ]
@@ -249,7 +279,8 @@ validateQueueOptions queueName options =
     (<|>) (Just value) _ = Just value
     (<|>) Nothing other = other
 
-registerQueue :: (MonadMVar m) => DBOS m -> Text -> QueueOptions -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
+registerQueue :: (MonadMVar m)
+              => DBOS m -> Text -> QueueOptions -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
 registerQueue dbos queueName options conflict
   | Just refusal <- reserved queueName = pure (Left refusal)
   | otherwise = case validateQueueOptions queueName options of
@@ -266,28 +297,31 @@ registerQueue dbos queueName options conflict
               let new = (queueOptionsToNewQueue queueName options) {newQueueApplicationName = Just executor.identity.identityAppName}
               inserted <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.upsertQueue db new policy)
               case inserted of
-                Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+                Left err -> pure (Left (TransactError.SystemDatabase err))
                 Right _ -> queueRecord executor queueName
 
-queue :: (MonadMVar m) => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe Queue))
+queue :: (MonadMVar m)
+      => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe Queue))
 queue dbos queueName = do
   required <- requireExecutor dbos "read a queue"
   case required of
     Left err -> pure (Left err)
     Right executor -> do
       result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getQueue db queueName)
-      pure (fmap (fmap queueFromRecord) (either (Left . TransactError.ErrorSystemDatabase) Right result))
+      pure (fmap (fmap queueFromRecord) (either (Left . TransactError.SystemDatabase) Right result))
 
-listQueues :: (MonadMVar m) => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [Queue])
+listQueues :: (MonadMVar m)
+           => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [Queue])
 listQueues dbos = do
   required <- requireExecutor dbos "list queues"
   case required of
     Left err -> pure (Left err)
     Right executor -> do
       result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.listQueues db (Named [executor.identity.identityAppName]))
-      pure (fmap (map queueFromRecord) (either (Left . TransactError.ErrorSystemDatabase) Right result))
+      pure (fmap (map queueFromRecord) (either (Left . TransactError.SystemDatabase) Right result))
 
-updateQueue :: (MonadMVar m) => DBOS m -> Text -> QueueChange -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
+updateQueue :: (MonadMVar m)
+            => DBOS m -> Text -> QueueChange -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
 updateQueue dbos queueName change = case reserved queueName of
   Just refusal -> pure (Left refusal)
   Nothing -> do
@@ -297,7 +331,7 @@ updateQueue dbos queueName change = case reserved queueName of
       Right executor -> do
         stored <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getQueue db queueName)
         case stored of
-          Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+          Left err -> pure (Left (TransactError.SystemDatabase err))
           Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
           Right (Just record) -> do
             -- A legacy-partitioned row cannot take a per-partition limit:
@@ -327,9 +361,10 @@ updateQueue dbos queueName change = case reserved queueName of
                   Right () -> do
                     let update = queueChangeToUpdate change currentQueue
                     updated <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.updateQueue db queueName update (\_ _ -> Right ()))
-                    pure (queueFromRecord <$> either (Left . TransactError.ErrorSystemDatabase) Right updated)
+                    pure (queueFromRecord <$> either (Left . TransactError.SystemDatabase) Right updated)
 
-deleteQueue :: (MonadMVar m) => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+deleteQueue :: (MonadMVar m)
+            => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 deleteQueue dbos queueName = case reserved queueName of
   Just refusal -> pure (Left refusal)
   Nothing -> do
@@ -338,7 +373,7 @@ deleteQueue dbos queueName = case reserved queueName of
       Left err -> pure (Left err)
       Right executor -> do
         result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.deleteQueue db queueName)
-        pure (() <$ either (Left . TransactError.ErrorSystemDatabase) Right result)
+        pure (() <$ either (Left . TransactError.SystemDatabase) Right result)
 
 -- | The engine's own queue is not one anybody registers, updates, or
 -- deletes: it has no row and takes no limits. Mirrors the oracle's
@@ -354,21 +389,23 @@ reserved queueName =
             )
       | otherwise -> Nothing
 
-queueRecord :: (Monad m) => Executor m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
+queueRecord :: (Monad m)
+            => Executor m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
 queueRecord executor queueName = do
   result <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getQueue db queueName)
   pure $ case result of
-    Left err -> Left (TransactError.ErrorSystemDatabase err)
+    Left err -> Left (TransactError.SystemDatabase err)
     Right Nothing -> Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` was not returned after registration"))
     Right (Just record) -> Right (queueFromRecord record)
 
-resolveConflict :: (Monad m) => Executor m -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) OnExistingQueue)
+resolveConflict :: (Monad m)
+                => Executor m -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) OnExistingQueue)
 resolveConflict _ AlwaysUpdate = pure (Right UpdateExisting)
 resolveConflict _ NeverUpdate = pure (Right LeaveExisting)
 resolveConflict executor UpdateIfLatestVersion = do
   latest <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getLatestApplicationVersion db (Just executor.identity.identityAppName))
   pure $ case latest of
-    Left err -> Left (TransactError.ErrorSystemDatabase err)
+    Left err -> Left (TransactError.SystemDatabase err)
     Right Nothing -> Right UpdateExisting
     Right (Just version)
       | version.versionInfoName == executor.identity.identityAppVersion -> Right UpdateExisting
@@ -378,10 +415,10 @@ queueOptionsAfterChange :: QueueChange -> Queue -> QueueOptions
 queueOptionsAfterChange change current =
   QueueOptions
     { concurrency = apply change.concurrency current.concurrency,
+      globalConcurrency = applyEffective change current.concurrency,
       workerConcurrency = apply change.workerConcurrency current.workerConcurrency,
       pollingInterval = apply change.pollingInterval current.pollingInterval,
       rateLimit = apply change.rateLimit current.rateLimit,
-      priorityEnabled = apply change.priorityEnabled current.priorityEnabled,
       partitionConcurrency = apply change.partitionConcurrency current.partitionConcurrency,
       partitionWorkerConcurrency = apply change.partitionWorkerConcurrency current.partitionWorkerConcurrency,
       partitionRateLimit = apply change.partitionRateLimit current.partitionRateLimit
@@ -389,3 +426,9 @@ queueOptionsAfterChange change current =
   where
     apply Leave value = value
     apply (Set value) _ = value
+    -- The merged effective limit: a change on either spelling lands on the
+    -- explicit one, so validation below judges what the write will store.
+    applyEffective diff fallback = case (diff.globalConcurrency, diff.concurrency) of
+      (Set value, _) -> value
+      (Leave, Set value) -> value
+      (Leave, Leave) -> fallback

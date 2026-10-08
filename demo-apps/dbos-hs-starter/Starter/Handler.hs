@@ -9,7 +9,7 @@
 module Starter.Handler
   ( getPageView,
     getWorkflowProgress,
-    startWorkflow,
+    startWorkflowRoute,
     getQueueStatus,
     enqueueWorkflows,
     applyConcurrency,
@@ -49,7 +49,7 @@ import DBOS.Transact
     listWorkflowIdsByName,
     newWorkflowKey,
     queue,
-    startWorkflowRef,
+    startWorkflow,
     startOptionsDefault,
     sendWorkflowMessage,
     sendWorkflowMessages,
@@ -106,8 +106,8 @@ lastStepOf app task = do
     recorded <- either (const Nothing) id stored
     either (const Nothing) Just (decodeWorkflowValue "result" (Just recorded))))
 
-startWorkflow :: StarterApp -> Text -> RouteHandler ()
-startWorkflow app taskId = do
+startWorkflowRoute :: StarterApp -> Text -> RouteHandler ()
+startWorkflowRoute app taskId = do
   _ <- liftIO (startBackground app app.staRefs.starterExampleRef (WorkflowId taskId))
   pure ()
 
@@ -142,10 +142,10 @@ applyConcurrency app requested = do
           demoQueueName
           ( QueueChange
               { concurrency = Leave,
+                globalConcurrency = Leave,
                 workerConcurrency = Set (Just (max 1 requested)),
                 pollingInterval = Leave,
                 rateLimit = Leave,
-                priorityEnabled = Leave,
                 partitionConcurrency = Leave,
                 partitionWorkerConcurrency = Leave,
                 partitionRateLimit = Leave
@@ -259,7 +259,7 @@ fetchQueueWorkerConcurrency dbos name = do
 -- running rather than failing.
 startBackground :: StarterApp -> WorkflowRef IO EngineOnly -> WorkflowId -> IO WorkflowId
 startBackground app ref (WorkflowId widText) = do
-  _ <- startWorkflowRef app.staExec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}) Nothing
+  _ <- startWorkflow app.staExec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}) Nothing
   pure (WorkflowId widText)
 
 freshId :: Text -> IO WorkflowId

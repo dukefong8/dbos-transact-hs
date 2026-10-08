@@ -105,7 +105,7 @@ Define one record of step functions per workflow, keyed by `StepCtx`, plus build
 ### Key Constraints
 
 - Do NOT call, start, or enqueue workflows from within steps
-- Do NOT use uncontrolled concurrency to start workflows — use `startWorkflowRef` or queues
+- Do NOT use uncontrolled concurrency to start workflows — use `startWorkflow` or queues
 - Workflows MUST be deterministic — non-deterministic operations go in steps
 - Do NOT mutate globals from workflows or steps
 - Register workflows and datasources BEFORE `launch` — registering after is refused

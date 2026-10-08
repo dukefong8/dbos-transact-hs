@@ -247,19 +247,19 @@ public here (used by instance/dequeue), `pub(crate)` there.
 
 | Oracle variant | Haskell |
 |---|---|
-| `NotLaunched{operation}` | ✓ `ErrorNotLaunched` |
-| `AlreadyLaunched{operation}` | ✓ `ErrorAlreadyLaunched` |
+| `NotLaunched{operation}` | ✓ `NotLaunched` |
+| `AlreadyLaunched{operation}` | ✓ `AlreadyLaunched` |
 | `NotInWorkflow{operation}` | ✓ `NotInWorkflow` |
 | `InsideStep{operation}` | ✓ `InsideStep` |
 | `WrongInstance{operation}` | ✓ `WrongInstance` |
 | `Config(String)` | ✓ `ErrorConfig` |
 | `InvalidArgument{operation,detail}` | ✓ `InvalidArgument` |
-| `AlreadyRegistered{key}` | ✓ `ErrorAlreadyRegistered` |
+| `AlreadyRegistered{key}` | ✓ `AlreadyRegistered` |
 | `Serialization{what,message,source}` | ◐ `ErrorSerialization{what,message}` (no `source`) |
-| `Deserialization{what,message,source}` | ◐ `ErrorDeserialization{what,message}` (no `source`) |
-| `SystemDatabase(sysdb::Error)` | ✓ `ErrorSystemDatabase` |
+| `Deserialization{what,message,source}` | ◐ `Deserialization{what,message}` (no `source`) |
+| `SystemDatabase(sysdb::Error)` | ✓ `SystemDatabase` |
 | `StepFailed{step,message}` | ✓ `StepFailed` |
-| `WorkflowFailed{workflow_id,message}` | ✓ `ErrorWorkflowFailed` |
+| `WorkflowFailed{workflow_id,message}` | ✓ `WorkflowFailed` |
 | `StepBuiltElsewhere{step,built,polled}` | ✓ `StepBuiltElsewhere` |
 | `Application(E)` | ✗ (no application error channel — typed-IO phase) |
 | `NotRegistered{key}` | ✗ |
@@ -270,8 +270,8 @@ public here (used by instance/dequeue), `pub(crate)` there.
 | `MaxRecoveryAttemptsExceeded{workflow_id,recovery_attempts}` | ✗ engine-level (sysdb variant exists) |
 | `StepTimeout{step,timeout}` | ✗ (no step timeouts — retry wiring) |
 | `MaxStepRetriesExceeded{step,attempts,errors}` | ✗ (no retries — retry wiring) |
-| — | extra `ErrorWorkflowNotRegistered{key}` (registry level, no counterpart) |
-| — | extra `ErrorWorkflowClaimLost{workflowId}` (claim level, no counterpart) |
+| — | extra `NotRegistered{key}` (registry level, no counterpart) |
+| — | extra `WorkflowClaimLost{workflowId}` (claim level, no counterpart) |
 | `EngineOnly` / `DurableError` / `Result` / `map_application` / `control` / `lift` | ✗ (all fall with the untyped channel) |
 
 ### `serialization.rs` → `Transact.Codec` ✓

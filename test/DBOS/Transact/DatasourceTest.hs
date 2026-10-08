@@ -297,7 +297,7 @@ tests =
                 replayed <- dsRunOver backend wfId $ \wctx ->
                   runTxStep ds second wctx (\_ _ -> pure (Right ("changed" :: Text))) :: IO (Either (Error EngineOnly) Text)
                 case replayed of
-                  Left (ErrorSystemDatabase (SysDB.UnexpectedStep {stepId = recordedStep, expected = want, recorded = got})) -> do
+                  Left (SystemDatabase (SysDB.UnexpectedStep {stepId = recordedStep, expected = want, recorded = got})) -> do
                     recordedStep @?= 0
                     want @?= "second_step"
                     got @?= "first_step"

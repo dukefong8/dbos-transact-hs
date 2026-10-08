@@ -63,7 +63,6 @@ import DBOS.Transact
   Tx (..),
   WorkflowCtx,
   WorkflowId (..),
-  application,
   encodeWorkflowValue,
   registerDataSource,
   runTxOutside,
@@ -179,7 +178,8 @@ protoConfig = TransactionConfig {txName = Just "proto_step", txIsolation = Just 
 
 -- | Python @test_sync_ds_records_and_replays@: a fresh execution replays
 -- the recorded output without re-running the body.
-scenarioCommitReplay :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
+scenarioCommitReplay :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                     => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
 scenarioCommitReplay fx = do
   fake <- fx.dsFixtureMkDs
   let counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right "v1" :: Either (Error EngineOnly) Text)
@@ -191,15 +191,17 @@ scenarioCommitReplay fx = do
 -- | Python @test_sync_ds_records_and_replays_errors@ (replay half): a
 -- recorded failure decodes back to itself. The record half follows once
 -- the body-failure channel lands.
-scenarioErrorReplays :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error Text) Text)
+scenarioErrorReplays :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                     => DsFixture m -> m (Either (Error Text) Text)
 scenarioErrorReplays fx = do
   fake <- fx.dsFixtureMkDs
-  atomically (writeTVar fake.fakeRows (Map.singleton ("ds-wf-2", 0) (RecordedError (encodeErrorText (application ("boom" :: Text) :: Error Text)))))
+  atomically (writeTVar fake.fakeRows (Map.singleton ("ds-wf-2", 0) (RecordedError (encodeErrorText (ErrorApplication ("boom" :: Text) :: Error Text)))))
   runFixture fx "ds-wf-2" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("unused" :: Text)))
 
 -- | Python @test_sync_ds_retries_on_serialization_error@: two retriable
 -- failures, then success, with the injections consumed.
-scenarioRetryThenSuccess :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
+scenarioRetryThenSuccess :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                         => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
 scenarioRetryThenSuccess fx = do
   fake <- fx.dsFixtureMkDs
   atomically (writeTVar fake.fakeTransients 2)
@@ -209,7 +211,8 @@ scenarioRetryThenSuccess fx = do
 
 -- | Python @test_sync_ds_conflicts_when_duplicate_execution_wins@: a
 -- concurrent winner committed first, so this execution adopts it.
-scenarioConflictAdopts :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text)
+scenarioConflictAdopts :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                       => DsFixture m -> m (Either (Error EngineOnly) Text)
 scenarioConflictAdopts fx = do
   fake <- fx.dsFixtureMkDs
   atomically (writeTVar fake.fakeConflictOnce True)
@@ -219,7 +222,8 @@ scenarioConflictAdopts fx = do
 -- through a context whose scope field predates the running body, so the
 -- shared depth counter reports it. Refused with 'InsideStep' before
 -- anything is written.
-scenarioCaptureRefused :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
+scenarioCaptureRefused :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                       => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
 scenarioCaptureRefused fx = do
   fake <- fx.dsFixtureMkDs
   result <- runFixture fx "ds-wf-5-captured" $ \wctx -> do
@@ -231,10 +235,11 @@ scenarioCaptureRefused fx = do
 
 -- | The record half: a body failure records, and replay returns it
 -- without re-running the body.
-scenarioBodyFailureRecorded :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error Text) Text, Either (Error Text) Text, Int)
+scenarioBodyFailureRecorded :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                            => DsFixture m -> m (Either (Error Text) Text, Either (Error Text) Text, Int)
 scenarioBodyFailureRecorded fx = do
   fake <- fx.dsFixtureMkDs
-  let failing _ = pure (Left (application ("boom" :: Text)))
+  let failing _ = pure (Left (ErrorApplication ("boom" :: Text)))
       counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right ("v" :: Text))
   first <- runFixture fx "ds-wf-6" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ tx -> failing tx)
   second <- runFixture fx "ds-wf-6" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ tx -> counted tx)
@@ -242,7 +247,8 @@ scenarioBodyFailureRecorded fx = do
   pure (first, second, runs)
 
 -- | A transient pre-check read is retried, then the transaction runs.
-scenarioPrecheckRetry :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
+scenarioPrecheckRetry :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                      => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
 scenarioPrecheckRetry fx = do
   fake <- fx.dsFixtureMkDs
   atomically (writeTVar fake.fakeTransients 1)
@@ -253,7 +259,8 @@ scenarioPrecheckRetry fx = do
 -- | Python @test_sync_ds_runs_outside_workflow@: outside any workflow the
 -- body runs transactionally (transients retried) but checkpoints nothing.
 -- Takes only the fake: no context exists out here.
-scenarioRunsOutside :: (MonadSTM m, MonadDelay m, MonadCatch m) => m (FakeDs m) -> m (Either BackendError Text, Int, Int)
+scenarioRunsOutside :: (MonadSTM m, MonadDelay m, MonadCatch m)
+                    => m (FakeDs m) -> m (Either BackendError Text, Int, Int)
 scenarioRunsOutside mkDs = do
   fake <- mkDs
   atomically (writeTVar fake.fakeTransients 1)
@@ -265,14 +272,15 @@ scenarioRunsOutside mkDs = do
 -- | Python completion clearing (`delete_checkpoints` shape): deleting
 -- from a step drops later checkpoints (earlier ones stay, replaying),
 -- and deleting everything re-runs the body.
-scenarioDeleteCheckpoints :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
+scenarioDeleteCheckpoints :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                          => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
 scenarioDeleteCheckpoints fx = do
   fake <- fx.dsFixtureMkDs
   let counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right ("v" :: Text))
       clean wid step = do
         cleared <- fake.fakeSource.dsDeleteCheckpoints (WorkflowId wid) step
         case cleared of
-          Left err -> pure (Left (ErrorSystemDatabase (SysDB.Backend err)))
+          Left err -> pure (Left (SystemDatabase (SysDB.Backend err)))
           Right () -> pure (Right "cleaned")
   (first, second) <-
     runFixture fx "ds-wf-9" $ \wctx -> do
@@ -290,14 +298,15 @@ scenarioDeleteCheckpoints fx = do
 -- lost to an execution owned by another executor, so this execution stops
 -- instead of adopting. Staged through the 'SystemDB' class so both stacks
 -- run it: the row carries a foreign executor on live and sim alike.
-scenarioOwnershipMoved :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) => DsFixture m -> Text -> m (Either (Error EngineOnly) Text)
+scenarioOwnershipMoved :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                       => DsFixture m -> Text -> m (Either (Error EngineOnly) Text)
 scenarioOwnershipMoved fx wfId = do
   fake <- fx.dsFixtureMkDs
   started <- runFixture fx wfId $ \wctx ->
     withSystemDB wctx (\db -> initWorkflow db ((newWorkflow wfId) {newWorkflowExecutorId = Just "other-executor"}) Nothing Fresh Nothing)
 
   case started of
-    Left err -> pure (Left (ErrorSystemDatabase err))
+    Left err -> pure (Left (SystemDatabase err))
     Right _ -> do
       atomically (writeTVar fake.fakeConflictOnce True)
       runFixture fx wfId $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("loser" :: Text)))
@@ -305,7 +314,8 @@ scenarioOwnershipMoved fx wfId = do
 -- | The registry's created-before-launch rule and completion clearing,
 -- over an instance that never launches: registration is open, a duplicate
 -- name is refused, and clearing empties the fake's rows.
-scenarioRegistryLifecycle :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadMVar m) => DBOS m -> DsFixture m -> Text -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Int, Int)
+scenarioRegistryLifecycle :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadMVar m)
+                          => DBOS m -> DsFixture m -> Text -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Int, Int)
 scenarioRegistryLifecycle dbos fx wid = do
   fake <- fx.dsFixtureMkDs
   first <- registerDataSource dbos fake.fakeSource
@@ -345,14 +355,14 @@ checkCommitReplay (first, second, runs) = do
 -- | The recorded failure decodes back to itself.
 checkErrorReplays :: Either (Error Text) Text -> Either String ()
 checkErrorReplays result =
-  unless (result == Left (application "boom")) $ Left ("expected the recorded failure, got: " <> show result)
+  unless (result == Left (ErrorApplication "boom")) $ Left ("expected the recorded failure, got: " <> show result)
 
 -- | The body failure records, and the replay returns it without running
 -- the body again.
 checkBodyFailureRecorded :: (Either (Error Text) Text, Either (Error Text) Text, Int) -> Either String ()
 checkBodyFailureRecorded (first, second, runs) = do
-  unless (first == Left (application "boom")) $ Left ("expected the body failure, got: " <> show first)
-  unless (second == Left (application "boom")) $ Left ("expected the replay to return the failure, got: " <> show second)
+  unless (first == Left (ErrorApplication "boom")) $ Left ("expected the body failure, got: " <> show first)
+  unless (second == Left (ErrorApplication "boom")) $ Left ("expected the replay to return the failure, got: " <> show second)
   unless (runs == 0) $ Left ("expected the body never to succeed, got: " <> show runs)
 
 -- | Both retriable failures are consumed and the body runs once.

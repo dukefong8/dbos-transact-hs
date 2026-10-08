@@ -42,7 +42,6 @@ module DBOS.Transact.Datasource
 where
 
 import DBOS.Prelude
-import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (pack)
 import Data.Text qualified as Text
@@ -189,14 +188,16 @@ instance ToLogStr TransactionEvent where
 -- the body is a step like any other (nested durable calls are refused by
 -- the leaf rule, the checkpoint id is visible, and a retry gets a fresh
 -- marker and token).
-runTxStep :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> TransactionConfig -> WorkflowCtx exec m -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
+runTxStep :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+          => DataSource m -> TransactionConfig -> WorkflowCtx exec m -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
 runTxStep ds config wctx body =
   runTxStepWith ds config wctx body
 
 -- | The shared transaction path: the shaped body receives the attempt's
 -- context (the scoped entry turns it into the step view) and the
 -- transaction handle.
-runTxStepWith :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> TransactionConfig -> WorkflowCtx exec m -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
+runTxStepWith :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+              => DataSource m -> TransactionConfig -> WorkflowCtx exec m -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
 runTxStepWith ds config wctx body = do
   -- Refused through the handed context or a captured parent alike: a
   -- transaction inside a step would checkpoint under the wrong id.
@@ -229,7 +230,8 @@ runTxStepWith ds config wctx body = do
 -- | Pre-check with the oracle's retry: a transient read failure backs off
 -- and retries ('_check_execution_with_retry'); anything else is control.
 -- Attempt numbers restart here — the transaction loop counts its own.
-checkWithRetry :: (MonadSTM m, MonadDelay m) => DataSource m -> SomeTracer m -> WorkflowId -> Text -> Int -> m (Either BackendError (Maybe RecordedOutcome))
+checkWithRetry :: (MonadSTM m, MonadDelay m)
+               => DataSource m -> SomeTracer m -> WorkflowId -> Text -> Int -> m (Either BackendError (Maybe RecordedOutcome))
 checkWithRetry ds tracer wid stepName stepId = loop 1 initialBackoffMs
   where
     DataSource {dsCheck = checkStep} = ds
@@ -248,22 +250,23 @@ checkWithRetry ds tracer wid stepName stepId = loop 1 initialBackoffMs
 -- | One attempt: body plus checkpoint insert in a single transaction. A
 -- held checkpoint throws 'TxConflict' to roll the attempt's application
 -- writes back; transport failures surface as 'Left' through the adapter.
-attemptTransaction :: forall a e exec m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack) => DataSource m -> WorkflowCtx exec m -> Maybe IsolationLevel -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
+attemptTransaction :: forall a e exec m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+                   => DataSource m -> WorkflowCtx exec m -> Maybe IsolationLevel -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
 attemptTransaction ds wctx isolation body tracer wid stepName stepId n waitMs = do
   let DataSource {dsWithTransaction = withTx} = ds
       DataSource {dsRecordOutput = recordOutput} = ds
       DataSource {dsRecordError = recordError} = ds
   marker <- nextWorkflowMarker wctx
   outcome <-
-    MThrow.try (withTx isolation $ \tx -> do
+    try (withTx isolation $ \tx -> do
       bodyOutcome <- withStep wctx marker (firstStepStatus stepId) (\sctx -> body sctx tx)
       case bodyOutcome of
         Left err -> do
           wrote <- recordError tx wid stepName stepId (encodeErrorText err)
-          if wrote then pure (Left err) else MThrow.throwIO TxConflict
+          if wrote then pure (Left err) else throwIO TxConflict
         Right value -> do
           wrote <- recordOutput tx wid stepName stepId (encodeWorkflowValue value).serializedText
-          if wrote then pure (Right value) else MThrow.throwIO TxConflict)
+          if wrote then pure (Right value) else throwIO TxConflict)
   case outcome of
     Left TxConflict -> adoptTransaction ds wctx tracer wid stepName stepId
     Right (Left err) -> handleBackend err
@@ -288,7 +291,8 @@ attemptTransaction ds wctx isolation body tracer wid stepName stepId n waitMs = 
 -- executor) against the row: a missing or unowned row adopts; a row held
 -- by another executor rethrows, since per-execution tokens would provably
 -- differ there too. Same-executor races adopt (join, don't fail).
-adoptTransaction :: (FromJSON a, FromJSON e, MonadSTM m, MonadDelay m) => DataSource m -> WorkflowCtx exec m -> SomeTracer m -> WorkflowId -> Text -> Int -> m (Either (Error e) a)
+adoptTransaction :: (FromJSON a, FromJSON e, MonadSTM m, MonadDelay m)
+                 => DataSource m -> WorkflowCtx exec m -> SomeTracer m -> WorkflowId -> Text -> Int -> m (Either (Error e) a)
 adoptTransaction ds wctx tracer wid@(WorkflowId widText) stepName stepId = do
   ruling <- checkOwner wctx wid
   case ruling of
@@ -311,7 +315,7 @@ checkOwner :: Monad m => WorkflowCtx exec m -> WorkflowId -> m (Either (Error e)
 checkOwner wctx wid = do
   found <- withSystemDB wctx (\db -> SystemDB.getWorkflow db wid)
   pure $ case found of
-    Left err -> Left (ErrorSystemDatabase err)
+    Left err -> Left (SystemDatabase err)
     Right Nothing -> Right Nothing
     Right (Just row) -> case row.workflowRecordOwnerXid of
       Nothing -> Right Nothing
@@ -323,7 +327,7 @@ checkOwner wctx wid = do
 -- owner keeps it. A control signal, never an outcome.
 ownershipMoved :: WorkflowId -> Text -> Error e
 ownershipMoved (WorkflowId widText) owner =
-  ErrorSystemDatabase
+  SystemDatabase
     ( SystemDBError.Backend
         ( BackendError
             { backendMessage = "workflow " <> widText <> " is owned by executor " <> owner,
@@ -339,14 +343,14 @@ ownershipMoved (WorkflowId widText) owner =
 data TxConflict = TxConflict
   deriving stock (Eq, Show)
 
-instance MThrow.Exception TxConflict
+instance Exception TxConflict
 
 -- | A registered checkpoint whose step name is not the call's: the
 -- workflow changed shape between executions. Mirrors the oracle's
 -- @UnexpectedStep@ and the name check @operation_outputs@ already applies.
 unexpectedTransaction :: WorkflowId -> Text -> Int -> Text -> Error e
 unexpectedTransaction (WorkflowId widText) expected stepId recorded =
-  ErrorSystemDatabase
+  SystemDatabase
     ( SystemDBError.UnexpectedStep
         { workflowId = widText
         , stepId = stepId
@@ -361,7 +365,7 @@ unexpectedTransaction (WorkflowId widText) expected stepId recorded =
 replayRecorded :: (FromJSON a, FromJSON e) => Text -> RecordedOutcome -> Either (Error e) a
 replayRecorded stepName = \case
   RecordedOutput text -> case decodeWorkflowValue "result" (Just (SerializedWorkflowValue text Nothing)) of
-    Left err -> Left (ErrorDeserialization "result" (codecMessage err))
+    Left err -> Left (Deserialization "result" (codecMessage err))
     Right value -> Right value
   RecordedError text -> case decodeErrorText text of
     Left _ -> Left (StepFailed stepName ("recorded transaction error is not decodable: " <> text))
@@ -375,7 +379,7 @@ replayRecorded stepName = \case
 -- | A backend failure as a control signal: recorded nowhere, so the row
 -- stays pending and recovery re-runs. Mirrors the step runner's mapping.
 controlErr :: BackendError -> Error e
-controlErr err = ErrorSystemDatabase (SystemDBError.Backend err)
+controlErr err = SystemDatabase (SystemDBError.Backend err)
 
 -- | Retriable serialization-class failures, by SQLSTATE class. Mirrors the
 -- backend's @"40" -> Transient@ verdict without importing its classifier.
@@ -406,12 +410,13 @@ maxBackoffMs = 2000.0
 -- and nothing is announced — there is no execution to record against
 -- (mirrors the oracle running plainly outside workflows). Backend
 -- failures surface as 'Left'; anything else the body throws propagates.
-runTxOutside :: (MonadDelay m, MonadCatch m) => DataSource m -> TransactionConfig -> (Tx m -> m a) -> m (Either BackendError a)
+runTxOutside :: (MonadDelay m, MonadCatch m)
+             => DataSource m -> TransactionConfig -> (Tx m -> m a) -> m (Either BackendError a)
 runTxOutside ds config body = loop (1 :: Int) initialBackoffMs
   where
     DataSource {dsWithTransaction = withTx} = ds
     loop n waitMs = do
-      outcome <- MThrow.try (withTx config.txIsolation body)
+      outcome <- try (withTx config.txIsolation body)
       case outcome of
         Left sysErr -> case sysErr of
           SystemDBError.Backend err -> handleBackend err
@@ -445,15 +450,16 @@ newDataSourceRegistry = DataSourceRegistry <$> newMVar [] <*> newMVar False
 
 -- | Register one datasource unless launch has frozen the registry or its
 -- name is taken.
-registerDataSource :: MonadMVar m => DataSourceRegistry m -> DataSource m -> m (Either (Error EngineOnly) ())
+registerDataSource :: MonadMVar m
+                   => DataSourceRegistry m -> DataSource m -> m (Either (Error EngineOnly) ())
 registerDataSource registry source = do
   frozen <- readMVar registry.dsrFrozen
   if frozen
-    then pure (Left (ErrorAlreadyLaunched "register_datasource"))
+    then pure (Left (AlreadyLaunched "register_datasource"))
     else
       modifyMVar registry.dsrSources $ \sources ->
         case find ((== source.dsName) . (.dsName)) sources of
-          Just _ -> pure (sources, Left (ErrorAlreadyRegistered ("datasource " <> source.dsName)))
+          Just _ -> pure (sources, Left (AlreadyRegistered ("datasource " <> source.dsName)))
           Nothing -> pure (source : sources, Right ())
 
 -- | The registered datasources, oldest first.
@@ -472,12 +478,13 @@ thawDataSourceRegistry registry = modifyMVar_ registry.dsrFrozen (const (pure Fa
 -- | Clear a finished workflow's checkpoints from every registered
 -- datasource, best effort and silent: a leftover row is harmless, since a
 -- later replay adopts from it or re-runs.
-clearDatasourceCheckpoints :: forall m. (MonadMVar m, MThrow.MonadCatch m) => DataSourceRegistry m -> WorkflowId -> m ()
+clearDatasourceCheckpoints :: forall m. (MonadMVar m, MonadCatch m)
+                           => DataSourceRegistry m -> WorkflowId -> m ()
 clearDatasourceCheckpoints registry wid = do
   sources <- snapshotDatasources registry
   mapM_
     ( \source -> do
-        _ <- MThrow.try (source.dsDeleteCheckpoints wid 0) :: m (Either SomeException (Either BackendError ()))
+        _ <- try (source.dsDeleteCheckpoints wid 0) :: m (Either SomeException (Either BackendError ()))
         pure ()
     )
     sources

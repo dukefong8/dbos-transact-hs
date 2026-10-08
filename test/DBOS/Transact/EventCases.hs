@@ -116,20 +116,18 @@ data EventFixture m = EventFixture
 -- 'Identity's, connection app name, id naming, and id/entropy generators,
 -- plus its 'SomeSystemDB' and 'SomeTracer'. Live passes Postgres +
 -- FastLogger; sim passes 'MemSystemDB' + the sim carrier.
-mkEventFixture ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  Config ->
-  Config ->
-  Identity ->
-  Identity ->
-  Text ->
-  (Text -> WorkflowId) ->
-  m Text ->
-  m Word32 ->
-  SomeSystemDB m ->
-  SomeTracer m ->
-  m (EventFixture m)
+mkEventFixture :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+               => Config ->
+                  Config ->
+                  Identity ->
+                  Identity ->
+                  Text ->
+                  (Text -> WorkflowId) ->
+                  m Text ->
+                  m Word32 ->
+                  SomeSystemDB m ->
+                  SomeTracer m ->
+                  m (EventFixture m)
 mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genId genEntropy sysdb tracer = do
   conn <- mkConn
   otherConn <- mkConn
@@ -185,13 +183,15 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
 
 -- | Engine-only driver alias: the recovery and order cases read through
 -- this, so the error channel pins to 'EngineOnly' once.
-runRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Executor m -> WorkflowRef m EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+       => Executor m -> WorkflowRef m EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runRef = runWorkflowRef
 
 -- | A wait that polls for a published event instead of sleeping through it.
 -- Under IOSim the timeout is virtual, so a hung wait fails fast; live it
 -- throws after fifty polls, which tasty reports as a failure.
-waitForEvent :: (MonadMVar m, MonadDelay m, MonadTime m, MonadThrow m) => DBOS m -> WorkflowId -> Text -> m ()
+waitForEvent :: (MonadMVar m, MonadDelay m, MonadTime m, MonadThrow m)
+             => DBOS m -> WorkflowId -> Text -> m ()
 waitForEvent dbos wid key = go (50 :: Int)
   where
     go 0 = throwIO (userError "the workflow never published an event")
@@ -203,14 +203,12 @@ waitForEvent dbos wid key = go (50 :: Int)
 
 -- | The recovery body: publishes the offered value (or "republished" when
 -- the offer is already taken), then parks until released.
-progressBody ::
-  forall exec m.
-  (MonadMVar m, MonadSTM m) =>
-  StrictMVar m Text ->
-  StrictMVar m () ->
-  () ->
-  WorkflowCtx exec m ->
-  m (Either (Error EngineOnly) Int)
+progressBody :: forall exec m. (MonadMVar m, MonadSTM m)
+             => StrictMVar m Text ->
+                StrictMVar m () ->
+                () ->
+                WorkflowCtx exec m ->
+                m (Either (Error EngineOnly) Int)
 progressBody offer release () wctx = do
   proposal <- tryTakeMVar offer
   published <- setEvent wctx "progress" (maybe "republished" id proposal)
@@ -219,25 +217,21 @@ progressBody offer release () wctx = do
     Right () -> takeMVar release >> pure (Right 7)
 
 -- | Reads through the other instance: refused, never combined.
-readerBody ::
-  forall exec m.
-  (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m) =>
-  DBOS m ->
-  () ->
-  WorkflowCtx exec m ->
-  m (Either (Error EngineOnly) (Maybe Int))
+readerBody :: forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+           => DBOS m ->
+              () ->
+              WorkflowCtx exec m ->
+              m (Either (Error EngineOnly) (Maybe Int))
 readerBody other () wctx = do
   built <- pendingGetEvent other wctx (WorkflowId "wf-1") "answer" (millisDuration 0)
   built.pendingRun
 
 -- | The same read from inside a step: plain, nothing checkpointed.
-inStepReaderBody ::
-  forall exec m.
-  (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m) =>
-  DBOS m ->
-  () ->
-  WorkflowCtx exec m ->
-  m (Either (Error EngineOnly) (Maybe Int))
+inStepReaderBody :: forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                 => DBOS m ->
+                    () ->
+                    WorkflowCtx exec m ->
+                    m (Either (Error EngineOnly) (Maybe Int))
 inStepReaderBody other () wctx = do
   stepped <- runStep wctx "read" $ \inner -> do
     built <- pendingGetEvent other inner.stepCtxWorkflow (WorkflowId "wf-1") "answer" (millisDuration 0)
@@ -248,13 +242,11 @@ inStepReaderBody other () wctx = do
 
 -- | Builds a sleep, a set, a get, and a step, then drives them out of
 -- build order. The ids stay in build order regardless.
-outOfOrderBody ::
-  forall exec m.
-  (MonadMVar m, MonadAsync m, MonadTime m, MonadDelay m, MonadCatch m) =>
-  DBOS m ->
-  () ->
-  WorkflowCtx exec m ->
-  m (Either (Error EngineOnly) ())
+outOfOrderBody :: forall exec m. (MonadMVar m, MonadAsync m, MonadTime m, MonadDelay m, MonadCatch m)
+               => DBOS m ->
+                  () ->
+                  WorkflowCtx exec m ->
+                  m (Either (Error EngineOnly) ())
 outOfOrderBody dbos () wctx = do
   a <- pendingSleep wctx (millisDuration 1)
   b <- pendingSetEvent wctx "b" (1 :: Int)
@@ -276,11 +268,9 @@ outOfOrderBody dbos () wctx = do
 
 -- | A workflow can publish and replay an event. Returns the first read
 -- and the replay's read.
-scenarioPublishReplay ::
-  forall m.
-  (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m) =>
-  EventFixture m ->
-  m (Maybe Text, Maybe Text)
+scenarioPublishReplay :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m)
+                      => EventFixture m ->
+                         m (Maybe Text, Maybe Text)
 scenarioPublishReplay fx = do
   wid <- fx.efFreshId "event"
   let WorkflowId widText = wid
@@ -305,11 +295,9 @@ scenarioPublishReplay fx = do
 -- | A reading workflow is checkpointed and a reading step is not. Returns
 -- the outside read with its steps, and the inside read with its steps
 -- plus whether the slot after the step stayed empty.
-scenarioCheckpointedRead ::
-  forall m.
-  (MonadAsync m, MonadCatch m, MonadTime m, MonadDelay m) =>
-  EventFixture m ->
-  m ((Maybe Int, [(Int, Text)]), (Maybe Int, [(Int, Text)], Bool))
+scenarioCheckpointedRead :: forall m. (MonadAsync m, MonadCatch m, MonadTime m, MonadDelay m)
+                         => EventFixture m ->
+                            m ((Maybe Int, [(Int, Text)]), (Maybe Int, [(Int, Text)], Bool))
 scenarioCheckpointedRead fx = do
   wid <- fx.efFreshId "event-steps"
   let WorkflowId prefix = wid
@@ -345,11 +333,9 @@ scenarioCheckpointedRead fx = do
 
 -- | A refused set event spends no step id. Returns the refusal's operation
 -- and the step counter before and after.
-scenarioRefusedSet ::
-  forall m.
-  (MonadSTM m, MonadCatch m) =>
-  EventFixture m ->
-  m (Text, Int, Int)
+scenarioRefusedSet :: forall m. (MonadSTM m, MonadCatch m)
+                   => EventFixture m ->
+                      m (Text, Int, Int)
 scenarioRefusedSet fx = do
   wid <- fx.efFreshId "event-refusal"
   let WorkflowId widText = wid
@@ -370,11 +356,9 @@ scenarioRefusedSet fx = do
 
 -- | A getEvent through a captured parent is plain and moves no ids.
 -- Returns the read and the step counter before and after.
-scenarioCapturedRead ::
-  forall m.
-  (MonadSTM m, MonadCatch m, MonadTime m, MonadDelay m) =>
-  EventFixture m ->
-  m (Maybe Int, Int, Int)
+scenarioCapturedRead :: forall m. (MonadSTM m, MonadCatch m, MonadTime m, MonadDelay m)
+                     => EventFixture m ->
+                        m (Maybe Int, Int, Int)
 scenarioCapturedRead fx = do
   wid <- fx.efFreshId "event-captured"
   let WorkflowId prefix = wid
@@ -405,11 +389,9 @@ scenarioCapturedRead fx = do
   pure (read, before, after)
 
 -- | A replayed set event does not republish. Returns what the reader sees.
-scenarioReplayNoRepublish ::
-  forall m.
-  (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m) =>
-  EventFixture m ->
-  m (Maybe Text)
+scenarioReplayNoRepublish :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m)
+                          => EventFixture m ->
+                             m (Maybe Text)
 scenarioReplayNoRepublish fx = do
   wid <- fx.efFreshId "event-replay"
   let WorkflowId widText = wid
@@ -436,11 +418,9 @@ scenarioReplayNoRepublish fx = do
 
 -- | Progress events survive recovery without republishing. Returns the
 -- recovered result and the kept event value.
-scenarioRecoveryKeepsFirst ::
-  forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  EventFixture m ->
-  m (Int, Text)
+scenarioRecoveryKeepsFirst :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                           => EventFixture m ->
+                              m (Int, Text)
 scenarioRecoveryKeepsFirst fx = do
   bracket fx.efNewDBOS shutdown $ \dbos -> do
     offer <- newEmptyMVar
@@ -485,11 +465,9 @@ scenarioRecoveryKeepsFirst fx = do
 -- | Reading through another instance from inside a workflow is refused,
 -- while the in-step read stays plain. Returns whether the refusal fired
 -- and what the plain read found.
-scenarioWrongInstance ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  EventFixture m ->
-  m (Bool, Maybe Int)
+scenarioWrongInstance :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                      => EventFixture m ->
+                         m (Bool, Maybe Int)
 scenarioWrongInstance fx = do
   bracket fx.efNewOtherDBOS shutdown $ \other ->
     bracket fx.efNewDBOS shutdown $ \owner -> do
@@ -520,11 +498,9 @@ scenarioWrongInstance fx = do
 
 -- | Library calls driven out of build order keep the ids they were built
 -- with. Returns the recorded steps.
-scenarioOutOfOrderIds ::
-  forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  EventFixture m ->
-  m [(Int, Text)]
+scenarioOutOfOrderIds :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                      => EventFixture m ->
+                         m [(Int, Text)]
 scenarioOutOfOrderIds fx = do
   bracket fx.efNewDBOS shutdown $ \dbos -> do
     refE <- registerWorkflowRef dbos (newWorkflowKey "joins") (outOfOrderBody dbos)

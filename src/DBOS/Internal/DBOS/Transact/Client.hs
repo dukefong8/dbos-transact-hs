@@ -175,7 +175,7 @@ connectClient config =
     Right () -> do
       acquired <- try (Postgres.acquirePostgresSystemDB backendConfig nullTracer) :: IO (Either SystemDBError.Error PostgresSystemDB)
       case acquired of
-        Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+        Left err -> pure (Left (TransactError.SystemDatabase err))
         Right backend ->
           bracketOnError (pure backend) Postgres.releasePostgresSystemDB $ \systemDB -> do
             Postgres.activatePostgresSystemDB systemDB
@@ -252,7 +252,8 @@ enqueueOptionsOn shape =
 -- | Enqueues a workflow by name, onto a queue, and hands back a polling
 -- handle to it. Asks for nothing else: the client's app name is stamped,
 -- no version is recorded, and the id is generated.
-enqueueClientWorkflow :: MonadSTM m => Client m -> Text -> Text -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+enqueueClientWorkflow :: MonadSTM m
+                      => Client m -> Text -> Text -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 enqueueClientWorkflow client workflowName queueName input =
   enqueueClientWorkflowWith client workflowName (enqueueOptionsNew queueName) input
 
@@ -261,7 +262,8 @@ enqueueClientWorkflow client workflowName queueName input =
 -- latest registered version — while a named version pins the row to
 -- executors running exactly that code. A deduplication collision is refused,
 -- unless the policy asks to join the holder instead.
-enqueueClientWorkflowWith :: MonadSTM m => Client m -> Text -> EnqueueOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+enqueueClientWorkflowWith :: MonadSTM m
+                          => Client m -> Text -> EnqueueOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 enqueueClientWorkflowWith client workflowName options input = do
   case validateEnqueue options.queue of
     Left err -> pure (Left err)
@@ -312,16 +314,18 @@ retrieveClientWorkflow client workflowId =
 -- | A workflow's status, or 'Nothing' if there is no such workflow. The
 -- one-shot read behind 'handleStatus', for a caller with an id and no
 -- handle.
-workflowStatusClient :: Monad m => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe WorkflowStatus))
+workflowStatusClient :: Monad m
+                     => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe WorkflowStatus))
 workflowStatusClient client workflowId = do
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.getWorkflow db workflowId)
   pure $ case result of
-    Left err -> Left (TransactError.ErrorSystemDatabase err)
+    Left err -> Left (TransactError.SystemDatabase err)
     Right Nothing -> Right Nothing
     Right (Just record) -> Right (Just record.workflowRecordStatus)
 
 -- | Send one message to a workflow from outside, the caller unrecorded.
-clientSendMessage :: Monad m => Client m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+clientSendMessage :: Monad m
+                  => Client m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 clientSendMessage client destination topic idempotencyKey value = do
   let message =
         SendMessage
@@ -331,81 +335,92 @@ clientSendMessage client destination topic idempotencyKey value = do
             sendIdempotencyKey = idempotencyKey
           }
   written <- runSystemDB client.conn.connSysdb (\db -> SystemDB.sendMessage db message ((\(Serialization name) -> name) <$> value.serializedSerialization) Nothing False)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right written)
+  pure (either (Left . TransactError.SystemDatabase) Right written)
 
 -- | Send a batch from outside in one transaction: all or none.
-clientSendMessages :: Monad m => Client m -> [SendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+clientSendMessages :: Monad m
+                   => Client m -> [SendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 clientSendMessages client messages = do
   written <- runSystemDB client.conn.connSysdb (\db -> SystemDB.sendMessages db messages Nothing Nothing False)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right written)
+  pure (either (Left . TransactError.SystemDatabase) Right written)
 
 -- | Read another workflow's event from outside, waiting up to the duration.
-clientGetEvent :: (MonadDelay m, MonadTime m) => Client m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe SerializedWorkflowValue))
+clientGetEvent :: (MonadDelay m, MonadTime m)
+               => Client m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe SerializedWorkflowValue))
 clientGetEvent client workflowId key wait = do
   found <- runSystemDB client.conn.connSysdb (\db -> SystemDB.getEvent db workflowId key wait Nothing)
   pure $ case found of
-    Left err -> Left (TransactError.ErrorSystemDatabase err)
+    Left err -> Left (TransactError.SystemDatabase err)
     Right Nothing -> Right Nothing
     Right (Just encoded) ->
       Right (Just (SerializedWorkflowValue encoded.encodedValue (Serialization <$> encoded.encodedSerialization)))
 
 -- | Cancel workflows from outside.
-clientCancelWorkflows :: Monad m => Client m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+clientCancelWorkflows :: Monad m
+                      => Client m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 clientCancelWorkflows client workflowIds includeChildren = do
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.cancelWorkflows db workflowIds includeChildren Nothing)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+  pure (either (Left . TransactError.SystemDatabase) Right result)
 
 -- | Resume workflows from outside, optionally onto a queue.
-clientResumeWorkflows :: Monad m => Client m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+clientResumeWorkflows :: Monad m
+                      => Client m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 clientResumeWorkflows client workflowIds queueName = do
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.resumeWorkflows db workflowIds queueName Nothing)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+  pure (either (Left . TransactError.SystemDatabase) Right result)
 
 -- | Delete workflows from outside.
-clientDeleteWorkflows :: Monad m => Client m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
+clientDeleteWorkflows :: Monad m
+                      => Client m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 clientDeleteWorkflows client workflowIds includeChildren = do
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.deleteWorkflows db workflowIds includeChildren Nothing)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+  pure (either (Left . TransactError.SystemDatabase) Right result)
 
 -- | Fork workflows from outside.
-clientForkWorkflows :: Monad m => Client m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+clientForkWorkflows :: Monad m
+                    => Client m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 clientForkWorkflows client forks options = do
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.forkWorkflows db forks options Nothing)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+  pure (either (Left . TransactError.SystemDatabase) Right result)
 
 -- | The registered application versions.
-clientListApplicationVersions :: Monad m => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) [VersionInfo])
+clientListApplicationVersions :: Monad m
+                              => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) [VersionInfo])
 clientListApplicationVersions client = do
   result <- runSystemDB client.conn.connSysdb SystemDB.listApplicationVersions
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+  pure (either (Left . TransactError.SystemDatabase) Right result)
 
 -- | The latest registered application version, optionally scoped to one
 -- application. Unscoped reads the global latest, which concurrent tenants
 -- can move under you: prefer the scoped form in tests and deployments.
-clientLatestApplicationVersion :: Monad m => Client m -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe VersionInfo))
+clientLatestApplicationVersion :: Monad m
+                               => Client m -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe VersionInfo))
 clientLatestApplicationVersion client application = do
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.getLatestApplicationVersion db application)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+  pure (either (Left . TransactError.SystemDatabase) Right result)
 
 -- | Promote a version by stamping it now, making it the latest: a rollback
 -- is a promotion of the older version.
-clientPromoteVersion :: (MonadDelay m, MonadTime m) => Client m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+clientPromoteVersion :: (MonadDelay m, MonadTime m)
+                     => Client m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 clientPromoteVersion client version = do
   now <- timestampNow
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.updateApplicationVersionTimestamp db version now Nothing)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+  pure (either (Left . TransactError.SystemDatabase) Right result)
 
 -- | List workflows by filter from outside.
-clientListWorkflows :: Monad m => Client m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
+clientListWorkflows :: Monad m
+                    => Client m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 clientListWorkflows client filters = do
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.listWorkflows db filters Nothing)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+  pure (either (Left . TransactError.SystemDatabase) Right result)
 
 -- | Reads one workflow's steps, outputs and errors included. Nothing is
 -- checkpointed: a client has no step counter of its own to agree with a
 -- workflow's, and an id with no row lists nothing rather than failing.
 -- Mirrors Rust @Client::list_workflow_steps@.
-clientListWorkflowSteps :: Monad m => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+clientListWorkflowSteps :: Monad m
+                        => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
 clientListWorkflowSteps client workflowId = do
   result <- runSystemDB client.conn.connSysdb (\db -> SystemDB.listSteps db workflowId True Nothing Nothing Nothing)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right result)
+  pure (either (Left . TransactError.SystemDatabase) Right result)

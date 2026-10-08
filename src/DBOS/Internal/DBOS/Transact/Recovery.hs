@@ -55,13 +55,14 @@ instance LogEvent EngineEvent where
 instance ToLogStr EngineEvent where
   toLogStr = toLogStr . renderLine
 
-reenqueueForRecovery :: Monad m => Connection m -> Text -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+reenqueueForRecovery :: Monad m
+                     => Connection m -> Text -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 reenqueueForRecovery conn executorId applicationVersion = do
   let QueueName recoveryQueue = internalQueueName
   result <-
     runSystemDB conn.connSysdb (\db -> SystemDB.reenqueueForRecovery db [executorId] applicationVersion recoveryQueue)
   case result of
-    Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+    Left err -> pure (Left (TransactError.SystemDatabase err))
     Right recovered -> do
       runTracer conn.connTracer (EngineRecovered (length recovered))
       pure (Right recovered)

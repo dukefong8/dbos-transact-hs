@@ -16,6 +16,6 @@ _  <- updateQueue dbos "email" (defaultQueueChange { workerConcurrency = Set (Ju
 _  <- deleteQueue dbos "email"
 ```
 
-`registerQueue` with `NeverUpdate` keeps stored limits when the queue exists; other `QueueConflict` policies replace them. Priority queues require `priorityEnabled = True` before enqueued priorities take effect.
+`registerQueue` with `NeverUpdate` keeps stored limits when the queue exists; other `QueueConflict` policies replace them. Every queue dispatches in priority order — there is no priority option; enqueued priorities take effect unconditionally. The fleet limit has two spellings: `globalConcurrency` wins over the deprecated `concurrency` alias.
 
 Difference from TS: TS client methods are `registerQueue` / `retrieveQueue` / `deleteQueue` on `DBOS` or `DBOSClient`. Haskell splits app-side (`registerQueue`, `updateQueue`, `deleteQueue`, `listQueues`, `queue`) from client-side equivalents in `DBOS.Transact.Client`.

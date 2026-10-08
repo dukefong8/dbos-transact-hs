@@ -43,6 +43,7 @@ import DBOS.Transact.Logger (runTracer)
 import DBOS.Transact.Recovery (EngineEvent (..))
 import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Transact.Step qualified as StepEvent
 import DBOS.Transact.Connection (SomeSystemDB (..))
 import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
 import DBOS.Transact.ManagementCases
@@ -249,7 +250,7 @@ traceSingular tr = do
 -- success on the retry, and the shutdown ends the run.
 traceForkFromBeginning :: forall a. SimTrace a -> IO ()
 traceForkFromBeginning tr = do
-  selectTraceEventsDynamic tr @?= [WorkflowFailed "hs-l2-mgmt-fork-src-sim", WorkflowCompleted "hs-l2-mgmt-fork-src-sim-fork"]
+  selectTraceEventsDynamic tr @?= [StepEvent.WorkflowFailed "hs-l2-mgmt-fork-src-sim", WorkflowCompleted "hs-l2-mgmt-fork-src-sim-fork"]
   selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-mgmt-fork-src-sim-fork"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
@@ -291,7 +292,7 @@ traceForkFromFailure tr = do
   selectTraceEventsDynamic tr
     @?= [ StepRunning "one" 0,
           StepOutputRecorded "one" 0,
-          WorkflowFailed "hs-l2-mgmt-fork-fail-src-sim",
+          StepEvent.WorkflowFailed "hs-l2-mgmt-fork-fail-src-sim",
           StepRunning "one" 0,
           StepOutputRecorded "one" 0,
           StepRunning "two" 1,
@@ -393,10 +394,12 @@ statusWfSim = handleStatus
 -- | The sim-side registration aliases: a locally defined body has no
 -- signature, so the channel's @e@ stays ambiguous; these pin it while
 -- leaving @s@ universally quantified.
-registerWfSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
+registerWfSim :: (FromJSON a, ToJSON r)
+              => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
 registerWfSim = registerWorkflow
 
-registerWfRefSim :: (FromJSON a, ToJSON r) => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
+registerWfRefSim :: (FromJSON a, ToJSON r)
+                 => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
 registerWfRefSim = registerWorkflowRef
 
 -- * Helpers

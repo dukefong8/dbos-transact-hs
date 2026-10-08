@@ -10,7 +10,7 @@ tags: pattern, idempotency
 Starting a workflow with an explicit id joins the already-running workflow instead of starting a second one. Use a business key (order id) as the workflow id.
 
 ```haskell
-_ <- startWorkflowRef exec ref (startOptionsDefault { startWorkflowId = Just key }) (Just (encodeWorkflowValue input))
+_ <- startWorkflow exec ref (startOptionsDefault { startWorkflowId = Just key }) (Just (encodeWorkflowValue input))
 ```
 
 The same key through `enqueueWorkflow` or the client dedups. Keys are the primary defense against double-submit from HTTP handlers.

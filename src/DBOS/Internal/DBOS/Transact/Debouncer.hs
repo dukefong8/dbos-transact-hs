@@ -32,7 +32,7 @@ import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystem
 import DBOS.Transact.Context (WorkflowCtx (wctxConn), insideAStep, nextStepId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), pollingHandle)
-import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor, startWorkflowRef)
+import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor, startWorkflow)
 import DBOS.Transact.Registry (WorkflowKey (..), WorkflowRef (..), refName, registryInstanceId)
 import DBOS.Transact.Workflow (Enqueue (..), Timeout (..), StartOptions (..), childWorkflowId, enqueueNew, startChildWorkflow, startOptionsDefault)
 
@@ -65,15 +65,14 @@ debouncerNew =
 -- call for a quiet key enqueues a fresh debounced row; concurrent calls
 -- join it through the bounce, extending its delay and replacing its
 -- inputs. Answers a handle to the user workflow.
-debounce ::
-  (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m) =>
-  DBOS m ->
-  WorkflowRef m TransactError.EngineOnly ->
-  Debouncer ->
-  Text ->
-  Duration ->
-  Maybe SerializedWorkflowValue ->
-  m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+debounce :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
+         => DBOS m ->
+            WorkflowRef m TransactError.EngineOnly ->
+            Debouncer ->
+            Text ->
+            Duration ->
+            Maybe SerializedWorkflowValue ->
+            m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 debounce dbos userRef def key period input = do
   required <- requireExecutor dbos "debounce a workflow"
   case required of
@@ -92,23 +91,23 @@ debounce dbos userRef def key period input = do
         Just delayUntil -> do
           bounced <- runSystemDB exec.conn.connSysdb (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest exec delayUntil) caller)
           case bounced of
-            Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+            Left err -> pure (Left (TransactError.SystemDatabase err))
             Right (Debounced wid) -> pure (Right (pollingHandle exec.conn wid True))
             Right (DebounceHeld holder) -> case classifyBounce holder (refName userRef) (refClassName userRef) (targetApp exec) of
               BounceRetry -> bounceLoop exec pinned caller
               BounceRaise ->
                 pure
                   ( Left
-                      ( TransactError.ErrorSystemDatabase
+                      ( TransactError.SystemDatabase
                           (SystemDBError.QueueDeduplicated {workflowId = pinned, queueName = queueName, deduplicationId = dedupKey})
                       )
                   )
             Right DebounceUnheld -> do
-              enqueued <- startWorkflowRef exec userRef (debounceOptions def queueName dedupKey period (Just (WorkflowId pinned))) input
+              enqueued <- startWorkflow exec userRef (debounceOptions def queueName dedupKey period (Just (WorkflowId pinned))) input
               case enqueued of
                 -- A concurrent debounce grabbed the key between bounce and
                 -- enqueue; loop to bounce that workflow instead.
-                Left (TransactError.ErrorSystemDatabase (SystemDBError.QueueDeduplicated {})) -> bounceLoop exec pinned caller
+                Left (TransactError.SystemDatabase (SystemDBError.QueueDeduplicated {})) -> bounceLoop exec pinned caller
                 -- The fresh row is queued, so its handle is already a
                 -- polling one; respelled to the caller's error type.
                 other -> pure (adoptHandle exec <$> other)
@@ -136,15 +135,14 @@ debounce dbos userRef def key period input = do
 -- starts a child of the running workflow, which replays through its own
 -- checkpoint; its id derives from the parent and the bounce's step, so a
 -- replay re-enqueues the same id rather than a second row.
-debounceInWorkflow ::
-  (MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m) =>
-  WorkflowCtx exec m ->
-  WorkflowRef m TransactError.EngineOnly ->
-  Debouncer ->
-  Text ->
-  Duration ->
-  Maybe SerializedWorkflowValue ->
-  m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+debounceInWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+                   => WorkflowCtx exec m ->
+                      WorkflowRef m TransactError.EngineOnly ->
+                      Debouncer ->
+                      Text ->
+                      Duration ->
+                      Maybe SerializedWorkflowValue ->
+                      m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 debounceInWorkflow wctx userRef def key period input = do
   stepped <- insideAStep wctx
   if stepped
@@ -153,7 +151,7 @@ debounceInWorkflow wctx userRef def key period input = do
       refInstance <- registryInstanceId userRef.refRegistry
       let conn = wctx.wctxConn
       case refInstance of
-        Nothing -> pure (Left (TransactError.ErrorNotLaunched {operation = "debounce a workflow"}))
+        Nothing -> pure (Left (TransactError.NotLaunched {operation = "debounce a workflow"}))
         Just instanceId
           | instanceId /= conn.connInstanceId ->
               pure (Left (TransactError.WrongInstance {operation = "debounce a workflow"}))
@@ -175,21 +173,21 @@ debounceInWorkflow wctx userRef def key period input = do
         Just delayUntil -> do
           bounced <- runSystemDB conn.connSysdb (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest conn delayUntil) caller)
           case bounced of
-            Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+            Left err -> pure (Left (TransactError.SystemDatabase err))
             Right (Debounced wid) -> pure (Right (pollingHandle conn wid True))
             Right (DebounceHeld holder) -> case classifyBounce holder (refName userRef) (refClassName userRef) (targetApp conn) of
               BounceRetry -> bounceLoop conn pinned caller
               BounceRaise ->
                 pure
                   ( Left
-                      ( TransactError.ErrorSystemDatabase
+                      ( TransactError.SystemDatabase
                           (SystemDBError.QueueDeduplicated {workflowId = pinned, queueName = queueName, deduplicationId = dedupKey})
                       )
                   )
             Right DebounceUnheld -> do
               enqueued <- startChildWorkflow wctx userRef (debounceOptions def queueName dedupKey period (Just (WorkflowId pinned))) input
               case enqueued of
-                Left (TransactError.ErrorSystemDatabase (SystemDBError.QueueDeduplicated {})) -> bounceLoop conn pinned caller
+                Left (TransactError.SystemDatabase (SystemDBError.QueueDeduplicated {})) -> bounceLoop conn pinned caller
                 other -> pure (adoptHandleConn conn <$> other)
     bounceRequest conn delayUntil =
       DebounceRequest

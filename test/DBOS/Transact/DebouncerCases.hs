@@ -57,7 +57,8 @@ data DebouncerFixture m = DebouncerFixture
 -- | Drives the executor's listened queues once, returning what was claimed.
 -- Throws on a database failure; an empty claim is fine (the supervisor may
 -- have taken the row first — claims are atomic, outcomes identical).
-driveQueue :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m) => DBOS m -> m [WorkflowId]
+driveQueue :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
+           => DBOS m -> m [WorkflowId]
 driveQueue dbos = do
   driven <- dequeueWorkflows dbos
   case driven of
@@ -68,11 +69,9 @@ driveQueue dbos = do
 -- returns its id; the row runs once its delay passes with those inputs.
 -- Returns the creation status, dedup key, debounced flag, deadline
 -- presence, then the settled status, outputs, and run count.
-scenarioFirstDebounceDelays ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m) =>
-  DebouncerFixture m ->
-  m (Maybe WorkflowStatus, Maybe Text, Bool, Bool, Maybe WorkflowStatus, [Text], Int)
+scenarioFirstDebounceDelays :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+                            => DebouncerFixture m ->
+                               m (Maybe WorkflowStatus, Maybe Text, Bool, Bool, Maybe WorkflowStatus, [Text], Int)
 scenarioFirstDebounceDelays fx = do
   tag <- fx.dbFreshTag "debounce-first"
   let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
@@ -106,11 +105,9 @@ checkFirstDebounceDelays (atCreate, key, isDebounced, hasDeadline, settled, outp
 -- inputs, and returns the same user id; one run carries the last inputs.
 -- Returns whether both handles agree, the delays, then the settled
 -- status, outputs, and run count.
-scenarioSecondDebounceCoalesces ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m) =>
-  DebouncerFixture m ->
-  m (Bool, Maybe Timestamp, Maybe Timestamp, Maybe WorkflowStatus, [Text], Int)
+scenarioSecondDebounceCoalesces :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+                                => DebouncerFixture m ->
+                                   m (Bool, Maybe Timestamp, Maybe Timestamp, Maybe WorkflowStatus, [Text], Int)
 scenarioSecondDebounceCoalesces fx = do
   tag <- fx.dbFreshTag "debounce-coalesce"
   let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
@@ -150,22 +147,20 @@ checkSecondDebounceCoalesces (sameId, delay1, delay2, settled, outputs, runs)
 -- | A foreign holder (a plain queued row on the same key) refuses the
 -- debounce instead of joining it: no user row, no run. Returns the
 -- refusal and the run count.
-scenarioForeignHolderRefused ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m) =>
-  DebouncerFixture m ->
-  m (Bool, Int)
+scenarioForeignHolderRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+                             => DebouncerFixture m ->
+                                m (Bool, Int)
 scenarioForeignHolderRefused fx = do
   tag <- fx.dbFreshTag "debounce-foreign"
   let def = debouncerNew {debouncerQueueName = Just fx.dbForeignQueue}
       key = "echo-" <> tag
-  planted <- startWorkflowRef fx.dbExecutor fx.dbOtherRef (startOptionsDefault {startQueue = Just ((enqueueNew fx.dbForeignQueue) {deduplicationId = Just key})}) Nothing
+  planted <- startWorkflow fx.dbExecutor fx.dbOtherRef (startOptionsDefault {startQueue = Just ((enqueueNew fx.dbForeignQueue) {deduplicationId = Just key})}) Nothing
   _ <- case (planted :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) of
     Right _ -> pure ()
     Left err -> throwIO (userError ("expected the foreign row planted, got: " <> show err))
   debounced <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 3) (Just (encodeWorkflowValue ("one" :: Text)))
   refused <- case debounced of
-    Left (ErrorSystemDatabase SystemDB.QueueDeduplicated {}) -> pure True
+    Left (SystemDatabase SystemDB.QueueDeduplicated {}) -> pure True
     Left err -> throwIO (userError ("expected a deduplication refusal, got: " <> show err))
     Right joined -> throwIO (userError ("expected no user row, got: " <> show joined.workflowId))
   runs <- fx.dbUserRuns
@@ -182,11 +177,9 @@ checkForeignHolderRefused (refused, runs)
 -- the user row still runs once with those inputs. Returns the parent
 -- status, whether its steps name the bounce, then the user status,
 -- outputs, and run count.
-scenarioInWorkflowDebounceRecordsStep ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m) =>
-  DebouncerFixture m ->
-  m (Maybe WorkflowStatus, Bool, Maybe WorkflowStatus, [Text], Int)
+scenarioInWorkflowDebounceRecordsStep :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+                                      => DebouncerFixture m ->
+                                         m (Maybe WorkflowStatus, Bool, Maybe WorkflowStatus, [Text], Int)
 scenarioInWorkflowDebounceRecordsStep fx = do
   tag <- fx.dbFreshTag "debounce-in-workflow"
   parentWid <- fx.dbFreshWid "debounce-in-workflow"
@@ -222,11 +215,9 @@ checkInWorkflowDebounceRecordsStep (parentStatus, namesBounce, userStatus, outpu
 -- supervisor's transition sweep releases due rows on every queue, which
 -- would clear the key the second bounce must find.
 -- Returns the stamped deadline and the second delay.
-scenarioTimeoutCapsExtension ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m) =>
-  DebouncerFixture m ->
-  m (Maybe Timestamp, Maybe Timestamp)
+scenarioTimeoutCapsExtension :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m)
+                             => DebouncerFixture m ->
+                                m (Maybe Timestamp, Maybe Timestamp)
 scenarioTimeoutCapsExtension fx = do
   tag <- fx.dbFreshTag "debounce-timeout"
   let def = debouncerNew {debouncerQueueName = Just fx.dbForeignQueue, debouncerTimeout = Just (secondsDuration 2)}

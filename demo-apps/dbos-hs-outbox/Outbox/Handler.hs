@@ -22,7 +22,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.Transact (Duration, EngineOnly, Error, IsolationLevel (..), StartOptions (..), TransactionConfig (..), Tx (..), WorkflowId (..), encodeWorkflowValue, getWorkflowEvent, runTxOutside, secondsDuration, startWorkflowRef, startOptionsDefault, toDataSource)
+import DBOS.Transact (Duration, EngineOnly, Error, IsolationLevel (..), StartOptions (..), TransactionConfig (..), Tx (..), WorkflowId (..), encodeWorkflowValue, getWorkflowEvent, runTxOutside, secondsDuration, startWorkflow, startOptionsDefault, toDataSource)
 import Demo.Http (RouteHandler, runAppOr500, throwRouteError)
 import Hasql.Session qualified as Session
 import IHP.TypedSql.Id (Id' (..))
@@ -74,7 +74,7 @@ startPlaceOrder app customer item quantity = runExceptT $ do
   wid <- liftIO (WorkflowId <$> UUID.toText <$> UUID.V4.nextRandom)
   let input = Just (encodeWorkflowValue (customer, item, quantity))
       options = startOptionsDefault {startWorkflowId = Just wid}
-  _ <- ExceptT (startWorkflowRef app.obExec app.obPlaceOrder options input)
+  _ <- ExceptT (startWorkflow app.obExec app.obPlaceOrder options input)
   pure wid
 
 -- | One transaction: the order row and the enqueued notification workflow

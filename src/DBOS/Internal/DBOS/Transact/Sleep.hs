@@ -38,20 +38,23 @@ instance LogEvent SleepEvent where
 instance ToLogStr SleepEvent where
   toLogStr = toLogStr . renderLine
 
-sleepStep :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sleepStep :: (MonadSTM m, MonadTime m, MonadDelay m)
+          => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sleepStep wctx duration = placeCall wctx >>= driveSleep wctx duration
 
 -- | A sleep built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the wait runs when the
 -- pending value is awaited or raced.
-pendingSleep :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
+pendingSleep :: (MonadSTM m, MonadTime m, MonadDelay m)
+             => WorkflowCtx exec m -> Duration -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
 pendingSleep wctx duration = do
   placement <- placeCall wctx
   pure (PendingStep sleepStepName (Just placement) (driveSleep wctx duration placement))
 
 -- | Drives a placed sleep: a plain wait inside a step or outside a
 -- workflow, otherwise the recorded wake-time wait under the claimed id.
-driveSleep :: (MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Duration -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+driveSleep :: (MonadSTM m, MonadTime m, MonadDelay m)
+           => WorkflowCtx exec m -> Duration -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 driveSleep wctx duration placement =
   case checkHere placement sleepStepName (Just (stepCtxBoundary wctx)) of
     Left err -> pure (Left err)
@@ -65,7 +68,7 @@ driveSleep wctx duration placement =
       let workflowId' = WorkflowId (workflowId wctx')
       recordedWake <- withSystemDB wctx' (\db -> SystemDB.recordSleep db workflowId' stepId' duration)
       case recordedWake of
-        Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+        Left err -> pure (Left (TransactError.SystemDatabase err))
         Right wakeAt -> do
           now <- timestampNow
           let remainingMillis = max 0 (timestampToEpochMs wakeAt - timestampToEpochMs now)

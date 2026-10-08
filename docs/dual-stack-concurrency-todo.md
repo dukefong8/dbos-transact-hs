@@ -243,7 +243,7 @@ Converted 2026-10-01 (slices 25-26, panics and unlaunched runs):
   `checkPanic` (the body's exception escapes; row stays PENDING, no
   error column). Sim trace: `WorkflowPanicked`.
 - "running before launch is refused" — `scenarioRunBeforeLaunch`/
-  `checkRunBeforeLaunch` (`ErrorNotLaunched` names the call). Sim trace:
+  `checkRunBeforeLaunch` (`NotLaunched` names the call). Sim trace:
   empty, no events at all (nothing launched).
   Both: live 51 green, sim 51 green, flip guard failed both halves.
   Still open: remaining 14 sim cases, 4 staged sites, un-mirrored tails.

@@ -60,7 +60,8 @@ branches2 =
 -- | A fresh select claims its id and records a winner: the row carries
 -- step 0 under the select name with the winner as output, and a second
 -- pass replays the winner.
-scenarioFreshWinner :: forall m. (MonadSTM m, MonadTime m) => SelectFixture m -> m (Bool, Int, Int, Text, Maybe Text, Int)
+scenarioFreshWinner :: forall m. (MonadSTM m, MonadTime m)
+                    => SelectFixture m -> m (Bool, Int, Int, Text, Maybe Text, Int)
 scenarioFreshWinner fx = do
   isFresh <- scfWith fx $ \ctx -> do
     checked <- checkSelect ctx branches2
@@ -84,7 +85,8 @@ scenarioFreshWinner fx = do
 
 -- | A winner outside the branches that exist now is refused, naming this
 -- run's shape and the stale winner.
-scenarioStaleWinner :: forall m. (MonadSTM m, MonadTime m) => SelectFixture m -> m (Bool, Maybe (Int, Text, Text))
+scenarioStaleWinner :: forall m. (MonadSTM m, MonadTime m)
+                    => SelectFixture m -> m (Bool, Maybe (Int, Text, Text))
 scenarioStaleWinner fx = do
   isFresh <- scfWith fx $ \ctx -> do
     checked <- checkSelect ctx branches2
@@ -98,7 +100,7 @@ scenarioStaleWinner fx = do
   refused <- scfWith fx $ \ctx -> do
     replayed <- checkSelect ctx branches2
     case replayed of
-      Left (ErrorSystemDatabase (SysDB.UnexpectedStep {stepId, expected, recorded = recordedText})) ->
+      Left (SystemDatabase (SysDB.UnexpectedStep {stepId, expected, recorded = recordedText})) ->
         pure (Just (stepId, expected, recordedText))
       _ -> pure Nothing
   pure (isFresh, refused)
@@ -109,7 +111,7 @@ scenarioStaleWinner fx = do
 scenarioControlError :: (Maybe (Error EngineOnly), Bool, Maybe (Error EngineOnly), Maybe (Error EngineOnly), Maybe (Error EngineOnly))
 scenarioControlError =
   ( controlError (Left (Interrupted {workflowId = "wf"})),
-    case controlError (Left (ErrorSystemDatabase (SysDB.WorkflowCancelled {workflowId = "wf"}))) of
+    case controlError (Left (SystemDatabase (SysDB.WorkflowCancelled {workflowId = "wf"}))) of
       Just _ -> True
       Nothing -> False,
     controlError (Left (StepFailed "s" "boom")),

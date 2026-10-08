@@ -28,7 +28,6 @@ module DBOS.Transact.Datasource.Postgres
 where
 
 import DBOS.Prelude
-import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Int (Int32)
 import Data.Text qualified as Text
 import Hasql.Connection qualified as Connection
@@ -78,7 +77,7 @@ acquireAppDataSourceIn :: Text -> Text -> Int -> IO AppDataSource
 acquireAppDataSourceIn schema url maxConnections = do
   if validSchemaName schema
     then pure ()
-    else MThrow.throwIO (invalidInput "schema" ("not a usable schema name: " <> schema))
+    else throwIO (invalidInput "schema" ("not a usable schema name: " <> schema))
   let settings = ConnSettings.connectionString url
   pool <-
     Pool.acquire
@@ -219,7 +218,7 @@ txRunner :: Connection.Connection -> Statement.Statement params result -> params
 txRunner conn stmt params = do
   ran <- Connection.use conn (Session.statement params stmt)
   case ran of
-    Left se -> MThrow.throwIO (Backend (sessionErr (Pool.SessionUsageError se)))
+    Left se -> throwIO (Backend (sessionErr (Pool.SessionUsageError se)))
     Right value -> pure value
 
 -- | The live 'DataSource': pre-checks through the pool, transactions on
@@ -240,7 +239,7 @@ toDataSource app =
               Just text -> Right (Just (RecordedOutput text))
               Nothing -> Right Nothing,
       dsWithTransaction = \isolation action -> do
-        attempted <- MThrow.try (transactionAttempt isolation action)
+        attempted <- try (transactionAttempt isolation action)
         pure $ case attempted of
           Left err -> Left (unwrapBackend err)
           Right outcome -> outcome,
@@ -259,7 +258,7 @@ toDataSource app =
       acquired <- Connection.acquire app.appSettings
       case acquired of
         Left ce ->
-          MThrow.throwIO
+          throwIO
             ( Backend
                 ( BackendError
                     { backendMessage = showText ce,
@@ -276,12 +275,12 @@ toDataSource app =
     -- @Error@ and still passes through to the runner's adopt path.
     transactionAttempt :: forall a. Maybe IsolationLevel -> (Tx IO -> IO a) -> IO (Either BackendError a)
     transactionAttempt isolation action =
-      MThrow.bracket acquireConn Connection.release $ \conn -> do
+      bracket acquireConn Connection.release $ \conn -> do
         began <- Connection.use conn (Session.script (beginSql isolation))
         case began of
           Left se -> pure (Left (sessionErr (Pool.SessionUsageError se)))
           Right () -> do
-            outcome <- MThrow.try (action (Tx (txRunner conn)))
+            outcome <- try (action (Tx (txRunner conn)))
             case outcome of
               Left sysErr -> rollbackQuiet conn >> pure (Left (unwrapBackend sysErr))
               Right value -> do

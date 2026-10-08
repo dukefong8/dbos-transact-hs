@@ -123,14 +123,13 @@ jitter bits (Duration backoff) =
 -- the bound in practice is the caller. The retried region runs more than
 -- once, so nothing that identifies this attempt may be generated inside
 -- it.
-withRetry ::
-  MonadDelay m =>
-  RetryPolicy ->
-  Text ->
-  SomeTracer m ->
-  m Word32 ->
-  m (Either Error a) ->
-  m (Either Error a)
+withRetry :: MonadDelay m
+          => RetryPolicy ->
+             Text ->
+             SomeTracer m ->
+             m Word32 ->
+             m (Either Error a) ->
+             m (Either Error a)
 withRetry policy operation tracer nextEntropy work = go policy.retryPolicyInitialBackoff (0 :: Integer)
   where
     go backoff attempt = do

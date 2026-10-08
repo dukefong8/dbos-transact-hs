@@ -109,7 +109,8 @@ refName ref = case ref.refKey of WorkflowKey name _ _ -> name
 -- Bodies take the scoped workflow view: the converted shape, where a body
 -- can only reach the scoped entries. The old context-level entry was
 -- deleted once every caller converted (C5b).
-registerWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
+registerWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
+                    => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
 registerWorkflowRef registry key body = do
   registered <- registerTypedWorkflow registry key body
   pure ((\() -> WorkflowRef registry key) <$> registered)
@@ -135,7 +136,8 @@ newtype ErasedWorkflow m = ErasedWorkflow
 -- every durable call the body makes takes the view it was handed or one
 -- derived from it. The type-erased form is the same either way, so the
 -- registry seam is unchanged.
-registerTypedWorkflow :: forall argument result e m. (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m) => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+registerTypedWorkflow :: forall argument result e m. (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
+                      => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 registerTypedWorkflow registry key body =
   registerErasedWorkflow registry key $ ErasedWorkflow $ \input wctx ->
     case decodeWorkflowValue "argument" input of
@@ -149,8 +151,8 @@ registerTypedWorkflow registry key body =
     codecError :: Text -> CodecError -> TransactError.Error e
     codecError what err =
       case err of
-        CodecNotJson _ input -> TransactError.ErrorDeserialization what input
-        CodecTypeMismatch _ message -> TransactError.ErrorDeserialization what (Text.pack message)
+        CodecNotJson _ input -> TransactError.Deserialization what input
+        CodecTypeMismatch _ message -> TransactError.Deserialization what (Text.pack message)
 
 -- | The mutable set of registrations. Its lock protects both the map and
 -- whether launch has frozen it, so insertion cannot slip past a snapshot.
@@ -181,14 +183,15 @@ registryInstanceId (Registry stateVar) =
 
 -- | Add a type-erased workflow unless the full identity is already present
 -- or launch has taken its snapshot.
-registerErasedWorkflow :: MonadMVar m => Registry m -> WorkflowKey -> ErasedWorkflow m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+registerErasedWorkflow :: MonadMVar m
+                       => Registry m -> WorkflowKey -> ErasedWorkflow m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 registerErasedWorkflow (Registry stateVar) key workflow =
   modifyMVar stateVar $ \state@(RegistryState workflows frozen instanceId) ->
     if frozen
-      then pure (state, Left (TransactError.ErrorAlreadyLaunched "register_workflow"))
+      then pure (state, Left (TransactError.AlreadyLaunched "register_workflow"))
       else
         case Map.lookup key workflows of
-          Just _ -> pure (state, Left (TransactError.ErrorAlreadyRegistered (renderWorkflowKey key)))
+          Just _ -> pure (state, Left (TransactError.AlreadyRegistered (renderWorkflowKey key)))
           Nothing -> pure (RegistryState (Map.insert key workflow workflows) False instanceId, Right ())
 
 -- | Freeze registrations and take an immutable snapshot atomically.

@@ -22,7 +22,6 @@ import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
-    application,
     EngineOnly, CodecError,
     Config (..),
     Environment (..),
@@ -54,7 +53,7 @@ import DBOS.Transact
     selectWorkflow,
     startChildWorkflow,
     shutdown,
-    startWorkflowRef,
+    startWorkflow,
     startOptionsDefault,
     waitForWorkflow,
   )
@@ -420,7 +419,7 @@ tests =
               payBody () _ = do
                 charged <- charge
                 pure $ case charged of
-                  Left refused -> Left (application (Gateway (Text.pack (show refused))))
+                  Left refused -> Left (ErrorApplication (Gateway (Text.pack (show refused))))
                   Right () -> Right ()
           payRegistered <- registerWorkflow dbos payKey payBody
           case payRegistered of
@@ -429,7 +428,7 @@ tests =
           exec <- launchExec dbos isolatedEnvironment
           ran <- runWorkflow exec payKey (WorkflowId payText) (Just (encodeWorkflowValue ()))
           case ran of
-            Left (Application (Gateway {reason})) -> reason @?= "the gateway refused the card"
+            Left (ErrorApplication (Gateway {reason})) -> reason @?= "the gateway refused the card"
             other -> fail ("expected the boundary conversion, got: " <> show other)
           reader <- getBackend
           payRow <- getWorkflow reader (WorkflowId payText)
@@ -438,7 +437,7 @@ tests =
               row.workflowRecordStatus @?= Error
               case row.workflowRecordError of
                 Just recorded -> case decodeErrorText recorded :: Either Text (Error PaymentError) of
-                  Right (Application (Gateway {reason})) -> reason @?= "the gateway refused the card"
+                  Right (ErrorApplication (Gateway {reason})) -> reason @?= "the gateway refused the card"
                   other -> fail ("expected the encoded error in the column, got: " <> show other)
                 Nothing -> fail "the pay workflow recorded no error"
             other -> fail ("expected the pay row, got: " <> show other),
@@ -650,7 +649,7 @@ runWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe Seri
 runWfRef = runWorkflowRef
 
 startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
-startWfRef = startWorkflowRef
+startWfRef = startWorkflow
 
 awaitWf :: WorkflowCtx exec IO -> WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 awaitWf = awaitChild

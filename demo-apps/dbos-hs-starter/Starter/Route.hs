@@ -97,8 +97,8 @@ dispatchStarter app route req respond = case route of
     task <- liftIO (postedParam req "id")
     runView pageView (getPageView app (fromMaybe "workflows" tab) task) req respond
   StartWorkflowAction {taskId = task}
-    | isHtmx req -> runView timelineView (startWorkflow app task >> getWorkflowProgress app task) req respond
-    | otherwise -> runEmpty (startWorkflow app task) req respond
+    | isHtmx req -> runView timelineView (startWorkflowRoute app task >> getWorkflowProgress app task) req respond
+    | otherwise -> runEmpty (startWorkflowRoute app task) req respond
   LastStepAction {taskId = task}
     | isHtmx req -> runViewTriggering workflowTrigger timelineView (getWorkflowProgress app task) req respond
     | otherwise -> runRespond lastStepResponse (getWorkflowProgress app task) req respond

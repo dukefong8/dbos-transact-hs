@@ -88,18 +88,16 @@ data HandleFixture m = HandleFixture
 -- 'Identity', connection app name, id naming, and id/entropy generators,
 -- plus its 'SomeSystemDB' and 'SomeTracer'. Live passes Postgres +
 -- FastLogger; sim passes 'MemSystemDB' + the sim carrier.
-mkHandleFixture ::
-  forall m.
-  (MonadMVar m, MonadSTM m, MonadThrow m) =>
-  Config ->
-  Identity ->
-  Text ->
-  (Text -> WorkflowId) ->
-  m Text ->
-  m Word32 ->
-  SomeSystemDB m ->
-  SomeTracer m ->
-  m (HandleFixture m)
+mkHandleFixture :: forall m. (MonadMVar m, MonadSTM m, MonadThrow m)
+                => Config ->
+                   Identity ->
+                   Text ->
+                   (Text -> WorkflowId) ->
+                   m Text ->
+                   m Word32 ->
+                   SomeSystemDB m ->
+                   SomeTracer m ->
+                   m (HandleFixture m)
 mkHandleFixture config identity connApp nameScheme genId genEntropy sysdb tracer = do
   conn <- mkConn
   pure
@@ -151,25 +149,27 @@ registerDouble dbos = do
 -- | Engine-only driver aliases: every scenario reads through these, so the
 -- error channel pins to 'EngineOnly' once instead of at each call site.
 -- Local copies are deliberate: this module carries only the aliases it uses.
-runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+      => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
-retrieveWf :: forall m. (MonadMVar m) => DBOS m -> WorkflowId -> m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))
+retrieveWf :: forall m. (MonadMVar m)
+           => DBOS m -> WorkflowId -> m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))
 retrieveWf = retrieveWorkflow
 
-resultWf :: forall m. (MonadDelay m, MonadTime m, MonadMVar m, MonadThrow m) => WorkflowHandle m EngineOnly -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+resultWf :: forall m. (MonadDelay m, MonadTime m, MonadMVar m, MonadThrow m)
+         => WorkflowHandle m EngineOnly -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 resultWf = handleResult
 
-statusWf :: forall m. (MonadMVar m) => WorkflowHandle m EngineOnly -> m (Either (Error EngineOnly) (Maybe WorkflowStatus))
+statusWf :: forall m. (MonadMVar m)
+         => WorkflowHandle m EngineOnly -> m (Either (Error EngineOnly) (Maybe WorkflowStatus))
 statusWf = handleStatus
 
 -- | A retrieved handle names its workflow and reads its status. Returns the
 -- requested id, the handle's id, and the status it reports.
-scenarioRetrieveStatus ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  HandleFixture m ->
-  m (Text, Text, Maybe WorkflowStatus)
+scenarioRetrieveStatus :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                       => HandleFixture m ->
+                          m (Text, Text, Maybe WorkflowStatus)
 scenarioRetrieveStatus fx = do
   bracket fx.hfNewDBOS shutdown $ \dbos -> do
     registerDouble dbos
@@ -191,11 +191,9 @@ scenarioRetrieveStatus fx = do
           Right mStatus -> pure (widText, handle.workflowId, mStatus)
 
 -- | A handle result adopts the recorded output. Returns the decoded value.
-scenarioResultAdopts ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  HandleFixture m ->
-  m Int
+scenarioResultAdopts :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                     => HandleFixture m ->
+                        m Int
 scenarioResultAdopts fx = do
   bracket fx.hfNewDBOS shutdown $ \dbos -> do
     registerDouble dbos
@@ -220,11 +218,9 @@ scenarioResultAdopts fx = do
 
 -- | A handle result reports the error a failed run recorded. Returns the
 -- failure's step and message fields.
-scenarioFailError ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  HandleFixture m ->
-  m (Text, Text)
+scenarioFailError :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                  => HandleFixture m ->
+                     m (Text, Text)
 scenarioFailError fx = do
   bracket fx.hfNewDBOS shutdown $ \dbos -> do
     let key = newWorkflowKey "fails"
@@ -251,11 +247,9 @@ scenarioFailError fx = do
 
 -- | A handle over a deleted row reports its absence. Returns the deleted
 -- count and the status the fresh handle reads.
-scenarioDeletedAbsent ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  HandleFixture m ->
-  m (Word64, Maybe WorkflowStatus)
+scenarioDeletedAbsent :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                      => HandleFixture m ->
+                         m (Word64, Maybe WorkflowStatus)
 scenarioDeletedAbsent fx = do
   bracket fx.hfNewDBOS shutdown $ \dbos -> do
     let key = newWorkflowKey "delete-me"
@@ -287,11 +281,9 @@ scenarioDeletedAbsent fx = do
 -- | Dropping a handle does not stop the workflow: retrieved and immediately
 -- dropped while the run is in flight, a fresh handle still reads the
 -- completed result. Returns the decoded value.
-scenarioDropHandle ::
-  forall m.
-  (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  HandleFixture m ->
-  m Int
+scenarioDropHandle :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                   => HandleFixture m ->
+                      m Int
 scenarioDropHandle fx = do
   bracket fx.hfNewDBOS shutdown $ \dbos -> do
     registerDouble dbos
@@ -319,11 +311,9 @@ scenarioDropHandle fx = do
 
 -- | A scoped await records the child's result under the parent. Returns the
 -- decoded value and the parent's recorded step names.
-scenarioScopedAwait ::
-  forall m.
-  (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) =>
-  HandleFixture m ->
-  m (Int, [Text])
+scenarioScopedAwait :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                    => HandleFixture m ->
+                       m (Int, [Text])
 scenarioScopedAwait fx = do
   parentWid <- fx.hfFreshId "handle-await-parent"
   childWid <- fx.hfFreshId "handle-await-child"

@@ -23,7 +23,7 @@ goodOutsideStart ::
   forall exec. Executor IO -> WorkflowRef IO () -> WorkflowCtx exec IO -> IO ()
 goodOutsideStart exec ref wctx = do
   _ <- runStep wctx "probe" $ \_sctx -> do
-    _ <- (startWorkflowRef exec ref undefined Nothing :: IO (Either (Error EngineOnly) (WorkflowHandle IO ())))
+    _ <- (startWorkflow exec ref undefined Nothing :: IO (Either (Error EngineOnly) (WorkflowHandle IO ())))
     pure ()
   pure ()
 

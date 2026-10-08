@@ -78,7 +78,7 @@ import DBOS.Transact
     runWorkflow,
     runStep,
     shutdown,
-    startWorkflowRef,
+    startWorkflow,
     startOptionsDefault,
     waitForWorkflow,
     cancelWorkflowsInWorkflow,
@@ -544,7 +544,7 @@ tests =
             probe <- (runStep wctx "probe" (const (pure ())) :: IO (Either (Error EngineOnly) ()))
             pure (refused, probe)
         case refused of
-          Left (ErrorSystemDatabase (SystemDB.InvalidInput {})) -> pure ()
+          Left (SystemDatabase (SystemDB.InvalidInput {})) -> pure ()
           other -> fail ("expected an argument refusal, got: " <> show other)
         case probe of
           Left err -> fail (show err)
@@ -587,7 +587,7 @@ runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowVal
 runWf = runWorkflow
 
 startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
-startWfRef = startWorkflowRef
+startWfRef = startWorkflow
 
 retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
 retrieveWf = retrieveWorkflow
@@ -708,7 +708,8 @@ isolatedEnvironment =
       environmentExecutorId = Nothing
     }
 
-registerRefOrFail :: (FromJSON argument, ToJSON result) => DBOS IO -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) result)) -> IO (WorkflowRef IO EngineOnly)
+registerRefOrFail :: (FromJSON argument, ToJSON result)
+                  => DBOS IO -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) result)) -> IO (WorkflowRef IO EngineOnly)
 registerRefOrFail dbos key body = do
   registered <- registerWorkflowRef dbos key body
   either (fail . show) pure registered

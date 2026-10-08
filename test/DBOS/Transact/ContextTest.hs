@@ -75,7 +75,6 @@ where
 
 import DBOS.DualStack (liveCase)
 import DBOS.Prelude
-import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.List (isInfixOf)
 import DBOS.SystemDB.Postgres (PostgresSystemDB)
 import DBOS.SystemDB.Postgres qualified as Postgres
@@ -232,7 +231,8 @@ scenarioDenseIds fx = do
   third <- nextStepId ctx
   pure (first, second, third)
 
-scenarioAttemptScope :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe Int, Maybe Int, Maybe Int)
+scenarioAttemptScope :: (MonadSTM m, MonadCatch m)
+                     => Fixture m -> m (Maybe Int, Maybe Int, Maybe Int)
 scenarioAttemptScope fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
   innerMarker <- nextWorkflowMarker ctx
@@ -241,7 +241,8 @@ scenarioAttemptScope fx = do
   let after = stepId (stepCtxBoundary ctx)
   pure (outside, inner, after)
 
-scenarioScopeStatus :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe StepStatus, Bool, (Maybe StepStatus, Maybe Int, Bool))
+scenarioScopeStatus :: (MonadSTM m, MonadCatch m)
+                    => Fixture m -> m (Maybe StepStatus, Bool, (Maybe StepStatus, Maybe Int, Bool))
 scenarioScopeStatus fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
   marker <- nextWorkflowMarker ctx
@@ -331,10 +332,11 @@ scenarioStateInterop fx = do
   _ <- pure ctx
   readTVarIO ref
 
-scenarioThrowEscape :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Either MThrow.SomeException Int)
+scenarioThrowEscape :: (MonadSTM m, MonadCatch m)
+                    => Fixture m -> m (Either SomeException Int)
 scenarioThrowEscape fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
-  MThrow.try (nextStepId ctx >> MThrow.throwIO (userError "boom") >> pure 0)
+  try (nextStepId ctx >> throwIO (userError "boom") >> pure 0)
 
 scenarioCoopFlag :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m) => Fixture m -> m ()
 scenarioCoopFlag _ = do
@@ -345,7 +347,8 @@ scenarioCoopFlag _ = do
   atomically (writeTVar stop True)
   waitFor (takeMVar done)
 
-scenarioForkCounter :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m) => Fixture m -> m (Int, Int)
+scenarioForkCounter :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m)
+                    => Fixture m -> m (Int, Int)
 scenarioForkCounter fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
   first <- nextStepId ctx
@@ -438,7 +441,7 @@ checkScopeStatus result =
       checkEq (3 :: Int, 1 :: Word) (stepStatusId status, stepStatusCurrentAttempt status)
     other -> Left ("expected proper Nothing and scoped status, got: " <> show other)
 
-checkThrowEscape :: Either MThrow.SomeException Int -> Either String ()
+checkThrowEscape :: Either SomeException Int -> Either String ()
 checkThrowEscape outcome =
   case outcome of
     Left err
@@ -568,7 +571,8 @@ checkLogLines rendered = go rendered appLogLines
 -- * Shared helpers, polymorphic over the same vocabulary.
 
 -- | A wait that polls a cooperative flag instead of sleeping through it.
-waitForFlag :: (MonadSTM m, MonadMVar m, MonadDelay m) => StrictTVar m Bool -> StrictMVar m () -> m ()
+waitForFlag :: (MonadSTM m, MonadMVar m, MonadDelay m)
+            => StrictTVar m Bool -> StrictMVar m () -> m ()
 waitForFlag stop done = do
   flag <- readTVarIO stop
   if flag
@@ -583,7 +587,7 @@ waitFor action = do
   result <- timeout 5000000 action
   case result of
     Just value -> pure value
-    Nothing -> MThrow.throwIO (userError "the waiter was never woken")
+    Nothing -> throwIO (userError "the waiter was never woken")
 
 -- * The live tree: the shared scenarios over a real 'PostgresSystemDB'
 -- with a FastLogger tracer, for @main@.

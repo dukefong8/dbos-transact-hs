@@ -166,5 +166,7 @@ Soft conventions: they apply only where the Rust oracle and the plan rules (`.la
 - DON'T reach for optics (`optics`/`aeson-optics`/`optics-th`) for reads or simple updates — optics is reserved for deep nested updates only. No such case exists, so the deps stay out (`aeson-optics` is additionally unusable: capped at `base<4.20`, incompatible with GHC 9.12).
 - `.ghci` discipline: `:set` iff cabal enables it, else `:seti` (a `:set -XNoFieldSelectors` once broke every ghci load while cabal stayed green).
 - Exports: explicit export lists, grouped by concept (see `DBOS.Transact`).
+- Signatures: constraints ride the `::` line, `=>` opens the next line aligned under `::`, body follows `=>` with continuations aligned beneath it:
+  `func :: (C1, ...)` / `     => T1 ->` / `        T2`. Unconstrained multi-line bodies stay as-is (nothing to align).
 - Typeclasses: concrete modules now; a second real backend earns the Port pattern, test fakes use records-of-functions.
 - Recorded deviations: member-import style is kept (not qualified-everything); ported sum-constructor names stand as ported from Rust (constructor-suffix rule ignored).

@@ -96,7 +96,7 @@ tests =
         shutdown dbos
         assertEqual "shutdown drops the executor" False =<< isLaunched dbos
         missing <- dbosAppVersion dbos
-        missing @?= Left (ErrorNotLaunched "app_version")
+        missing @?= Left (NotLaunched "app_version")
         relaunched <- launchWithEnvironment dbos isolatedEnvironment
         case relaunched of
           Left err -> fail (displayException err)
@@ -337,7 +337,7 @@ tests =
             bracket (newDBOS loserConfig) shutdown $ \loser -> do
               loserStarted <- launchWithEnvironment loser isolatedEnvironment
               case loserStarted of
-                Left (ErrorSystemDatabase _) -> pure ()
+                Left (SystemDatabase _) -> pure ()
                 Left other -> fail ("attempt " <> show attempt <> ": expected a system-database refusal, got: " <> show other)
                 Right _ -> fail ("attempt " <> show attempt <> ": a conflicting launch succeeded")
           -- The server drops a session shortly after its client goes away,

@@ -146,5 +146,6 @@ stayedQuiet token = do
 
 -- | The simple step runner at the engine-only channel: top-level test
 -- calls do not sit in an annotated body, so the channel needs pinning.
-runStep :: (FromJSON value, ToJSON value) => WorkflowCtx exec IO -> Text -> (StepCtx exec IO -> IO value) -> IO (Either (Error EngineOnly) value)
+runStep :: (FromJSON value, ToJSON value)
+        => WorkflowCtx exec IO -> Text -> (StepCtx exec IO -> IO value) -> IO (Either (Error EngineOnly) value)
 runStep wctx name body = Transact.runStep wctx name body

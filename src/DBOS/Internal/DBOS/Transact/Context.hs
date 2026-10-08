@@ -86,7 +86,6 @@ module DBOS.Transact.Context
 where
 
 import DBOS.Prelude
-import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Kind (Type)
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Timestamp, WorkflowId (..))
@@ -102,7 +101,7 @@ import DBOS.Transact.Identity (Identity)
 data LocalTaskOutcome a
   = LocalTaskValue a
   | LocalTaskCancelled
-  | LocalTaskPanic MThrow.SomeException
+  | LocalTaskPanic SomeException
 
 -- | How a body reaches the task registry of the executor running it, so a
 -- child it starts is detached, counted, and abortable by shutdown — the
@@ -159,7 +158,8 @@ data WorkflowState m = WorkflowState
 
 -- | A workflow's state: the id, the deadline the row carries, and the
 -- identity that tells a re-run of the same id apart from the run itself.
-newWorkflowState :: MonadSTM m => Text -> Maybe Timestamp -> ExecutionIdentity -> m (WorkflowState m)
+newWorkflowState :: MonadSTM m
+                 => Text -> Maybe Timestamp -> ExecutionIdentity -> m (WorkflowState m)
 newWorkflowState workflowText deadlineAt identity = do
   stepRef <- newTVarIO 0
   markerRef <- newTVarIO 0
@@ -392,7 +392,8 @@ instance LogCtx (StepCtx exec m) m where
 -- execution identity, fresh counters, and no step scope. The rank-2
 -- continuation binds the execution scope — values built inside cannot
 -- escape it, so one run's counters never leak into another's.
-withWorkflow :: MonadSTM m => Connection m -> Identity -> WorkflowId -> Maybe Timestamp -> (forall exec. WorkflowCtx exec m -> m a) -> m a
+withWorkflow :: MonadSTM m
+             => Connection m -> Identity -> WorkflowId -> Maybe Timestamp -> (forall exec. WorkflowCtx exec m -> m a) -> m a
 withWorkflow conn identity (WorkflowId widText) deadline run = do
   execution <- nextExecutionIdentity conn
   state <- newWorkflowState widText deadline execution
@@ -406,7 +407,8 @@ withWorkflow conn identity (WorkflowId widText) deadline run = do
 -- continuation; it binds the brand at the call site exactly like the old
 -- 'newCtx' did. Nothing here exposes allocation to a 'StepCtx' — the
 -- narrowed view still owns no allocator.
-newWorkflowCtx :: MonadSTM m => Connection m -> Identity -> WorkflowState m -> m (WorkflowCtx exec m)
+newWorkflowCtx :: MonadSTM m
+               => Connection m -> Identity -> WorkflowState m -> m (WorkflowCtx exec m)
 newWorkflowCtx conn identity state =
   pure
     WorkflowCtx
@@ -429,7 +431,8 @@ newWorkflowCtx conn identity state =
 -- safe: a stuck depth degrades later calls to plain rather than
 -- corrupting any position. The scope lives on the view handed to the body
 -- alone, so it goes out of scope with the body however the body ends.
-withStep :: (MonadSTM m, MonadCatch m) => WorkflowCtx exec m -> StepMarker -> StepStatus -> (StepCtx exec m -> m a) -> m a
+withStep :: (MonadSTM m, MonadCatch m)
+         => WorkflowCtx exec m -> StepMarker -> StepStatus -> (StepCtx exec m -> m a) -> m a
 withStep wctx marker status body = do
   scope <- newStepScope marker status
   atomically (modifyTVar wctx.wctxState.stepDepthRef (+ 1))

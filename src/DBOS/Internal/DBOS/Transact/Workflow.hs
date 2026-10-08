@@ -29,7 +29,7 @@ module DBOS.Transact.Workflow
     runOptionsToStartOptions,
     childWorkflowId,
     resolveEnqueueCollision,
-    startWorkflowRef,
+    startWorkflow,
     runWorkflowRef,
     startChildWorkflow,
     maxRecoveryAttempts,
@@ -51,7 +51,6 @@ import DBOS.Prelude
 -- the oracle matches with @join.is_cancelled()@. Nothing here forks,
 -- throws, or waits through base; all effects stay on io-classes.
 import Control.Exception (AsyncException (..))
-import Control.Monad.Class.MonadThrow qualified as MThrow
 import Data.Aeson (FromJSON, Value)
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
@@ -80,10 +79,12 @@ maxRecoveryAttempts = 100
 -- | Start a registered workflow using the SystemDB class-backed engine.
 -- The connection, resolved identity and task registry belong to the
 -- executor; the body takes the explicit context it runs in.
-runRegisteredWorkflow :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runRegisteredWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
+                      => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runRegisteredWorkflow = runRegisteredWorkflowWithSubmission Fresh
 
-runRegisteredWorkflowWithSubmission :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Submission -> Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runRegisteredWorkflowWithSubmission :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
+                                    => Submission -> Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runRegisteredWorkflowWithSubmission submission tasks conn identity snapshot key workflowId input =
   runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflowId input (workflowNewWorkflow conn identity key workflowId input Nothing)
 
@@ -99,14 +100,15 @@ runRegisteredWorkflowWithSubmission submission tasks conn identity snapshot key 
 -- run. The caller then waits on the spawned task, which is what makes a
 -- shutdown that aborts it visible here as 'TransactError.Interrupted'
 -- rather than as a hang.
-runRegisteredWorkflowWithRow :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Submission -> Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runRegisteredWorkflowWithRow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
+                             => Submission -> Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflowId@(WorkflowId workflowText) input new =
   case lookupSnapshotWorkflow key snapshot of
-    Nothing -> pure (Left (TransactError.ErrorWorkflowNotRegistered (renderWorkflowKey key)))
+    Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
     Just workflow -> do
       initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) submission Nothing)
       case initialized of
-        Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+        Left err -> pure (Left (TransactError.SystemDatabase err))
         Right result
           | not result.initResultShouldExecute -> do
               runTracer conn.connTracer (WorkflowAlreadyOwned workflowText)
@@ -128,7 +130,7 @@ runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflo
                 LocalTaskCancelled -> pure (Left (TransactError.Interrupted {workflowId = workflowText}))
                 -- The body's own failure escapes to the waiter, as the
                 -- oracle resumes the panic into its awaiting caller.
-                LocalTaskPanic err -> MThrow.throwIO err
+                LocalTaskPanic err -> throwIO err
 -- | The spawner the engine injects into an execution's context, closing
 -- over the executor's task registry: a child started from a body is
 -- detached, counted, and abortable by shutdown, exactly like a directly
@@ -136,19 +138,20 @@ runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflo
 -- execution hands its grandchildren is its own. The outcome lands in the
 -- returned box while the task unwinds, so a handle awaiting a task the
 -- shutdown aborted still learns 'LocalTaskCancelled' rather than hanging.
-tasksSpawner :: (MonadFork m, MThrow.MonadMask m, MonadSTM m, MonadMVar m) => Tasks m -> TaskSpawner m
+tasksSpawner :: (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m)
+             => Tasks m -> TaskSpawner m
 tasksSpawner tasks = spawner
   where
     spawner = TaskSpawner $ \action -> do
       channel <- newEmptyMVar
-      spawned <- spawnTracked tasks $ MThrow.mask $ \restore -> do
-        result <- MThrow.try (restore (action spawner))
+      spawned <- spawnTracked tasks $ mask $ \restore -> do
+        result <- try (restore (action spawner))
         -- The fill below is masked back over: only the body runs
         -- interruptibly, so a kill landing around the body still leaves the
         -- outcome in the box.
         putMVar channel $ case result of
           Right value -> LocalTaskValue value
-          Left err -> case MThrow.fromException err :: Maybe AsyncException of
+          Left err -> case fromException err :: Maybe AsyncException of
             Just ThreadKilled -> LocalTaskCancelled
             _                 -> LocalTaskPanic err
       -- A refused arrival never forked, so the parent fills the
@@ -165,11 +168,12 @@ tasksSpawner tasks = spawner
 -- owned row — does not return what it computed itself. The recorded failure
 -- travels as the payload the row holds, and the caller's channel decides
 -- how to decode it.
-adoptRecordedFailure :: (MonadDelay m, MonadTime m) => Connection m -> WorkflowId -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
+adoptRecordedFailure :: (MonadDelay m, MonadTime m)
+                     => Connection m -> WorkflowId -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
 adoptRecordedFailure conn wid@(WorkflowId workflowText) = do
   awaited <- runSystemDB conn.connSysdb (\db -> SystemDB.awaitWorkflowResult db wid conn.connOutcomePollInterval True)
   pure $ case awaited of
-    Left err -> Left (TransactError.FailureControl (TransactError.ErrorSystemDatabase err))
+    Left err -> Left (TransactError.FailureControl (TransactError.SystemDatabase err))
     Right (AwaitedSucceeded output serialization) ->
       Right (SerializedWorkflowValue <$> output <*> pure (Serialization <$> serialization))
     Right (AwaitedFailed message _) -> Left (TransactError.FailureRecorded message)
@@ -181,14 +185,15 @@ adoptRecordedFailure conn wid@(WorkflowId workflowText) = do
     Right (AwaitedParked attempts) ->
       Left
         ( TransactError.FailureControl
-            ( TransactError.ErrorSystemDatabase
+            ( TransactError.SystemDatabase
                 (SystemDBError.ErrorMaxRecoveryAttemptsExceeded {workflowId = workflowText, limit = attempts})
             )
         )
 
 -- | The typed face of 'adoptRecordedFailure': the recorded failure decoded
 -- back into the caller's channel.
-adoptRecordedOutcome :: (MonadDelay m, MonadTime m, FromJSON e) => Connection m -> WorkflowId -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+adoptRecordedOutcome :: (MonadDelay m, MonadTime m, FromJSON e)
+                     => Connection m -> WorkflowId -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 adoptRecordedOutcome conn (WorkflowId workflowText) = do
   adopted <- adoptRecordedFailure conn (WorkflowId workflowText)
   pure (either (Left . TransactError.failureError workflowText) Right adopted)
@@ -198,20 +203,21 @@ adoptRecordedOutcome conn (WorkflowId workflowText) = do
 -- what is left, and children inherit the instant rather than a fresh budget.
 -- The spawner rides the context, so a child this body starts is detached
 -- into the same registry and hands its own children the same capability.
-executeRegisteredWorkflow :: (MonadTimer m, MonadTime m, MThrow.MonadCatch m) => TaskSpawner m -> Connection m -> Identity -> WorkflowId -> ErasedWorkflow m -> Maybe SerializedWorkflowValue -> Maybe Timestamp -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
+executeRegisteredWorkflow :: (MonadTimer m, MonadTime m, MonadCatch m)
+                          => TaskSpawner m -> Connection m -> Identity -> WorkflowId -> ErasedWorkflow m -> Maybe SerializedWorkflowValue -> Maybe Timestamp -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
 executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowText) workflow input deadline = do
-  attempted <- MThrow.try (runBody)
+  attempted <- try (runBody)
   case attempted of
     -- Shutdown aborts the task: the row stays PENDING on purpose, with no
     -- panic line — a kill is not a bug. Anything else escaping the body is
     -- one, and the row it leaves behind is for recovery. Mirrors
     -- @PanicLog@: the guard fires on the unwind, never on a returned
     -- outcome.
-    Left se -> case MThrow.fromException se of
-      Just ThreadKilled -> MThrow.throwIO se
+    Left se -> case fromException se of
+      Just ThreadKilled -> throwIO se
       _ -> do
         runTracer conn.connTracer (WorkflowPanicked workflowText)
-        MThrow.throwIO se
+        throwIO se
     Right value -> pure value
   where
     -- The scope the body runs in: fresh counters, the row's deadline, and
@@ -252,8 +258,8 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
       saved <- runSystemDB conn.connSysdb (\db -> SystemDB.recordWorkflowOutcome db workflowId outcome)
       case saved of
         Left dbError -> do
-          runTracer conn.connTracer (WorkflowOutcomeRecordFailed (TransactError.renderTransactError (TransactError.ErrorSystemDatabase dbError :: (TransactError.Error TransactError.EngineOnly))))
-          pure (Left (TransactError.FailureControl (TransactError.ErrorSystemDatabase dbError)))
+          runTracer conn.connTracer (WorkflowOutcomeRecordFailed (TransactError.renderTransactError (TransactError.SystemDatabase dbError :: (TransactError.Error TransactError.EngineOnly))))
+          pure (Left (TransactError.FailureControl (TransactError.SystemDatabase dbError)))
         Right Recorded -> case fallback of
           Right _ -> do
             runTracer conn.connTracer (WorkflowCompleted workflowText)
@@ -269,7 +275,7 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
       TransactError.FailureRecorded _ -> False
     failureControl failure = case failure of
       TransactError.FailureControl err      -> err
-      TransactError.FailureRecorded payload -> TransactError.ErrorWorkflowFailed {workflowId = workflowText, message = payload}
+      TransactError.FailureRecorded payload -> TransactError.WorkflowFailed {workflowId = workflowText, message = payload}
     -- A durable cancellation, unless the row already reached an outcome while
     -- the race ran — then the recorded outcome is what the run reports, as
     -- Rust's deadline-loses-to-outcome rule does.
@@ -278,12 +284,12 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
       cancelled <- runSystemDB conn.connSysdb (\db -> SystemDB.cancelWorkflows db [workflowId] False Nothing)
       case cancelled of
         Left dbError -> do
-          runTracer conn.connTracer (WorkflowDeadlineRecordFailed workflowText (TransactError.renderTransactError (TransactError.ErrorSystemDatabase dbError :: (TransactError.Error TransactError.EngineOnly))))
-          pure (Left (TransactError.FailureControl (TransactError.ErrorSystemDatabase dbError)))
+          runTracer conn.connTracer (WorkflowDeadlineRecordFailed workflowText (TransactError.renderTransactError (TransactError.SystemDatabase dbError :: (TransactError.Error TransactError.EngineOnly))))
+          pure (Left (TransactError.FailureControl (TransactError.SystemDatabase dbError)))
         Right [] -> do
           runTracer conn.connTracer (WorkflowDeadlineRaced workflowText)
           adoptRecordedFailure conn workflowId
-        Right _ -> pure (Left (TransactError.FailureControl (TransactError.ErrorSystemDatabase (SystemDBError.WorkflowCancelled {workflowId = workflowText}))))
+        Right _ -> pure (Left (TransactError.FailureControl (TransactError.SystemDatabase (SystemDBError.WorkflowCancelled {workflowId = workflowText}))))
 
 -- | Initializes a claimed row and spawns its body as a tracked task,
 -- mirroring @dequeue.rs@'s @dispatch@: the claim already flipped the row to
@@ -291,22 +297,23 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
 -- @PENDING@ is left alone. A parked row (the recovery cap is exceeded) is a
 -- skip, not a fault. The release action runs when the spawned task ends, or
 -- immediately on every path that does not spawn.
-spawnRegisteredWorkflowWithRow :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> m () -> Submission -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe (ThreadId m)))
+spawnRegisteredWorkflowWithRow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                               => Tasks m -> m () -> Submission -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe (ThreadId m)))
 spawnRegisteredWorkflowWithRow tasks release submission conn identity snapshot key workflowId@(WorkflowId _) input new =
   case lookupSnapshotWorkflow key snapshot of
-    Nothing -> release >> pure (Left (TransactError.ErrorWorkflowNotRegistered (renderWorkflowKey key)))
+    Nothing -> release >> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
     Just workflow -> do
       initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) submission Nothing)
       case initialized of
         Left SystemDBError.ErrorMaxRecoveryAttemptsExceeded {} -> release >> pure (Right Nothing)
-        Left err -> release >> pure (Left (TransactError.ErrorSystemDatabase err))
+        Left err -> release >> pure (Left (TransactError.SystemDatabase err))
         Right result
           | result.initResultStatus /= Pending -> release >> pure (Right Nothing)
           | otherwise -> do
               spawned <-
                 spawnTracked
                   tasks
-                  ( MThrow.finally
+                  ( finally
                       (void (executeRegisteredWorkflow (tasksSpawner tasks) conn identity workflowId workflow input result.initResultDeadline))
                       release
                   )
@@ -320,10 +327,11 @@ spawnRegisteredWorkflowWithRow tasks release submission conn identity snapshot k
 -- | Create an enqueued workflow row without running its body. A queue worker
 -- later claims it and invokes the registered body with the dequeue
 -- submission.
-enqueueWorkflow :: Monad m => Connection m -> Identity -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
+enqueueWorkflow :: Monad m
+                => Connection m -> Identity -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
 enqueueWorkflow conn identity key workflowId input queueName = do
   initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db (workflowNewWorkflow conn identity key workflowId input (Just queueName)) (Just maxRecoveryAttempts) Fresh Nothing)
-  pure (either (Left . TransactError.ErrorSystemDatabase) Right initialized)
+  pure (either (Left . TransactError.SystemDatabase) Right initialized)
 
 workflowNewWorkflow :: Connection m -> Identity -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Maybe Text -> NewWorkflow
 workflowNewWorkflow conn identity key (WorkflowId workflowText) input queueName =
@@ -534,7 +542,8 @@ childWorkflowId chosen parent generated =
 -- under 'ReturnExisting' hands back a handle to whoever holds it, and
 -- anything else reports the collision. Shared by client and reference
 -- enqueues so the two surfaces never diverge.
-resolveEnqueueCollision :: Monad m => Connection m -> Enqueue -> Text -> Error -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+resolveEnqueueCollision :: Monad m
+                        => Connection m -> Enqueue -> Text -> Error -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 resolveEnqueueCollision conn shape _offeredId err =
   case (shape.duplicationPolicy, shape.deduplicationId) of
     (ReturnExisting, Just key) -> case err of
@@ -546,10 +555,10 @@ resolveEnqueueCollision conn shape _offeredId err =
           Right (Just (WorkflowId holderId)) -> do
             runTracer conn.connTracer (WorkflowDedupJoined holderId key)
             pure (Right (pollingHandle conn holderId True))
-          Right Nothing -> pure (Left (TransactError.ErrorSystemDatabase err))
-          Left lookupErr -> pure (Left (TransactError.ErrorSystemDatabase lookupErr))
-      _ -> pure (Left (TransactError.ErrorSystemDatabase err))
-    _ -> pure (Left (TransactError.ErrorSystemDatabase err))
+          Right Nothing -> pure (Left (TransactError.SystemDatabase err))
+          Left lookupErr -> pure (Left (TransactError.SystemDatabase lookupErr))
+      _ -> pure (Left (TransactError.SystemDatabase err))
+    _ -> pure (Left (TransactError.SystemDatabase err))
 
 -- | The debounce creation fields a start carries onto its row: the delay
 -- capped at the timeout's deadline (as the oracle's executor caps its delay
@@ -580,8 +589,9 @@ debounceCreation queue now = case queue of
 -- tasks at once — the workflow's life is the executor's, so dropping the
 -- handle must not stop the run — while a queued row is the supervisor's,
 -- as the oracle returns a polling handle for enqueues.
-startWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m) => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
-startWorkflowRef tasks conn identity snapshot ref options input =
+startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+              => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startWorkflow tasks conn identity snapshot ref options input =
   case traverse validateEnqueue options.startQueue of
     Left err -> pure (Left (TransactError.liftEngine err))
     Right _ -> do
@@ -618,7 +628,7 @@ startWorkflowRef tasks conn identity snapshot ref options input =
               runTracer conn.connTracer (WorkflowAlreadyOwned workflowText)
               pure (Right (pollingHandle conn workflowText True))
           | otherwise -> case lookupSnapshotWorkflow key snapshot of
-              Nothing -> pure (Left (TransactError.ErrorWorkflowNotRegistered (renderWorkflowKey key)))
+              Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
               Just workflow -> do
                 channel <-
                   spawnLocal
@@ -629,7 +639,7 @@ startWorkflowRef tasks conn identity snapshot ref options input =
                 pure (Right (localHandle conn workflowText channel))
         Left err -> case options.startQueue of
           Just shape -> fmap (either (Left . TransactError.liftEngine) Right) (resolveEnqueueCollision conn shape workflowText err)
-          Nothing    -> pure (Left (TransactError.ErrorSystemDatabase err))
+          Nothing    -> pure (Left (TransactError.SystemDatabase err))
 
 -- | Runs the referenced workflow durably and waits for its result: one
 -- init records the row with everything the options name, then the shared
@@ -637,7 +647,8 @@ startWorkflowRef tasks conn identity snapshot ref options input =
 -- awaits whoever does. A run cannot be a start plus a second init — the
 -- second init would always read back the start's foreign owner and poll a
 -- row nothing runs — so the record and the decision are one upsert.
-runWorkflowRef :: (MonadFork m, MThrow.MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e) => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runWorkflowRef :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
+               => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflowRef tasks conn identity snapshot ref options input = do
   now <- timestampNow
   generated <- generatedWorkflowId conn
@@ -666,7 +677,8 @@ runWorkflowRef tasks conn identity snapshot ref options input = do
 -- follow-up. Starting from inside a step is 'InsideStep': a step is a
 -- leaf, and an id-allocating call inside one would shift every later step
 -- onto the wrong replay slot.
-startChildWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MThrow.MonadCatch m) => WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startChildWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+                   => WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startChildWorkflow wctx ref options input = do
   -- A start inside a step body is refused — and a start through a captured
   -- parent while a step body runs is the same leaf violation with a scope
@@ -685,7 +697,7 @@ startChildWorkflow wctx ref options input = do
       refInstance <- registryInstanceId (ref.refRegistry)
       let conn = wctx.wctxConn
       case refInstance of
-        Nothing -> pure (Left (TransactError.ErrorNotLaunched {operation = "start a workflow"}))
+        Nothing -> pure (Left (TransactError.NotLaunched {operation = "start a workflow"}))
         Just instanceId
           | instanceId /= conn.connInstanceId ->
               pure (Left (TransactError.WrongInstance {operation = "start a workflow"}))
@@ -706,7 +718,7 @@ startChildWorkflow wctx ref options input = do
           childText = childWorkflowId options.startWorkflowId (Just (parentText, parentStepId)) generated
       recorded <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db (WorkflowId parentText) parentStepId name)
       case recorded of
-        Left err -> pure (Left (TransactError.ErrorSystemDatabase err))
+        Left err -> pure (Left (TransactError.SystemDatabase err))
         Right (Just stored) -> case stored.stepRecordChildWorkflowId of
           -- The launch is recorded against the parent: a replay finds the
           -- child it already started. The child's own row belongs to the
@@ -717,7 +729,7 @@ startChildWorkflow wctx ref options input = do
           Nothing ->
             pure
               ( Left
-                  ( TransactError.ErrorSystemDatabase
+                  ( TransactError.SystemDatabase
                       ( UnexpectedStep
                           { workflowId = parentText,
                             stepId = parentStepId,
@@ -765,7 +777,7 @@ startChildWorkflow wctx ref options input = do
                 (Just spawner, Nothing) | result.initResultShouldExecute -> do
                   resolved <- lookupRegistryWorkflow key (ref.refRegistry)
                   case resolved of
-                    Nothing -> pure (Left (TransactError.ErrorWorkflowNotRegistered (renderWorkflowKey key)))
+                    Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
                     Just child -> do
                       channel <-
                         spawnLocal spawner $ \childSpawner ->
@@ -783,10 +795,10 @@ startChildWorkflow wctx ref options input = do
                     -- reached from here.
                     mapped <- runSystemDB conn.connSysdb (\db -> SystemDB.recordChildWorkflow db (WorkflowId parentText) (WorkflowId holder.workflowId) parentStepId name (Just now))
                     pure $ case mapped of
-                      Left recordErr -> Left (TransactError.ErrorSystemDatabase recordErr)
+                      Left recordErr -> Left (TransactError.SystemDatabase recordErr)
                       Right _        -> Right holder
                   Left joinErr -> pure (Left (TransactError.liftEngine joinErr))
-              Nothing -> pure (Left (TransactError.ErrorSystemDatabase err))
+              Nothing -> pure (Left (TransactError.SystemDatabase err))
 
 -- | Abort handles to reach running tasks with, and a count of how many are
 -- still alive to wait on. Mirrors Rust @Tasks@: nothing here holds a
@@ -838,8 +850,9 @@ newTasks = do
 -- would hold the count above zero forever and hang the sweep. A refused
 -- arrival never forks, so no kill can land before a child that was never
 -- born — which is what left refused outcome boxes empty before.
-spawnTracked :: forall m. (MonadFork m, MThrow.MonadMask m, MonadSTM m, MonadMVar m) => Tasks m -> m () -> m (Maybe (ThreadId m))
-spawnTracked tasks action = MThrow.mask $ \restore ->
+spawnTracked :: forall m. (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m)
+             => Tasks m -> m () -> m (Maybe (ThreadId m))
+spawnTracked tasks action = mask $ \restore ->
   -- One lock hold around check, count, fork, and registration: the sweep
   -- snapshots its kill list under the same lock, so an arrival is either
   -- refused before the flag flips or registered before the snapshot is
@@ -858,9 +871,9 @@ spawnTracked tasks action = MThrow.mask $ \restore ->
       else do
         tid <- forkIO $ do
           self <- myThreadId
-          outcome <- MThrow.try (restore action) :: m (Either MThrow.SomeException ())
+          outcome <- try (restore action) :: m (Either SomeException ())
           departed tasks self
-          either MThrow.throwIO pure outcome
+          either throwIO pure outcome
         -- Registration under the same hold: the flag cannot have flipped
         -- since the check above, so this always registers — but the child
         -- may already have departed on a parallel scheduler, in which case
@@ -891,7 +904,7 @@ abortAll tasks = do
   mapM_ killThread toAbort
   atomically $ do
     st <- readTVar tasks.tasksState
-    if st.live == 0 then pure () else retry
+    unless (st.live == 0) $ retry
   pure (length toAbort)
 
 -- | Records a departing task, saturating and deregistering: a double

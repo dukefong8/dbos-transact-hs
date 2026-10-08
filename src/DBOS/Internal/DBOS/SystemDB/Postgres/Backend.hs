@@ -1812,7 +1812,8 @@ instance Aeson.FromJSON ScheduleRecord where
 -- this build cannot read, is malformed — a step that ran has an answer.
 -- Mirrors the oracle's @replayed_output@; 'replayedDebounce' is the same
 -- function at the debounce lane's type.
-replayStepOutput :: Aeson.FromJSON a => WorkflowId -> Int -> Text -> Statements.StepCheckRaw -> Either Error a
+replayStepOutput :: Aeson.FromJSON a
+                 => WorkflowId -> Int -> Text -> Statements.StepCheckRaw -> Either Error a
 replayStepOutput wid stepId stepName raw = case raw.stepCheckOutput of
   Nothing ->
     Left
@@ -1841,7 +1842,8 @@ replayStepOutput wid stepId stepName raw = case raw.stepCheckOutput of
 -- output is recorded. Mirrors the oracle's @run_transactional_step@. A
 -- failure before anything is written commits nothing, so the replay runs
 -- the work again.
-runCallerStep :: (Aeson.ToJSON a, Aeson.FromJSON a) => PostgresSystemDB -> Text -> WorkflowId -> Int -> Timestamp -> Tx.Transaction (Either Error a) -> IO (Either Error a)
+runCallerStep :: (Aeson.ToJSON a, Aeson.FromJSON a)
+              => PostgresSystemDB -> Text -> WorkflowId -> Int -> Timestamp -> Tx.Transaction (Either Error a) -> IO (Either Error a)
 runCallerStep env stepName callerWid callerStep startedAt work = do
   completedAt <- timestampToEpochMs <$> timestampNow
   let callerText = unwrapWorkflowId callerWid

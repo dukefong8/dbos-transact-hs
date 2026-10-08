@@ -71,13 +71,15 @@ sendBulkOptionsDefault = SendBulkOptions {forks = ForksSkip}
 -- | Send a typed message to another workflow. At a workflow boundary the
 -- send is checkpointed under its own operation id; inside a step it is plain
 -- and the enclosing step's checkpoint stands for the send.
-send :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+send :: (ToJSON value, MonadSTM m)
+     => WorkflowCtx exec m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 send wctx destination topic idempotencyKey value =
   sendWith wctx destination value (sendOptionsDefault {topic = topic, idempotencyKey = idempotencyKey})
 
 -- | 'send' with the options rather than the defaults: a topic, an
 -- idempotency key, or the fork fan-out. Mirrors Rust @send_with@.
-sendWith :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> WorkflowId -> value -> SendOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendWith :: (ToJSON value, MonadSTM m)
+         => WorkflowCtx exec m -> WorkflowId -> value -> SendOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWith wctx destination value options = do
   let workflowText = workflowId wctx
       encoded = encodeWorkflowValue value
@@ -103,7 +105,7 @@ sendWith wctx destination value options = do
         pure (Just (WorkflowId workflowText, stepId'))
   written <- withSystemDB wctx (\db -> SystemDB.sendMessage db message serialization caller sendToForks)
   pure $ case written of
-    Left err -> Left (TransactError.ErrorSystemDatabase err)
+    Left err -> Left (TransactError.SystemDatabase err)
     Right () -> Right ()
 
 -- | Send many messages in one transaction: all or none. The batch is
@@ -112,12 +114,14 @@ sendWith wctx destination value options = do
 -- step's checkpoint standing for the send. Payloads are encoded before the
 -- step id is taken, so a message that cannot be encoded is a send that never
 -- happened. Mirrors Rust @send_bulk@.
-sendBulk :: (ToJSON value, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Message value] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendBulk :: (ToJSON value, MonadTimer m, MonadTime m, MonadAsync m, MonadCatch m)
+         => WorkflowCtx exec m -> [Message value] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendBulk wctx messages = sendBulkWith wctx messages sendBulkOptionsDefault
 
 -- | 'sendBulk' with the options rather than the defaults: the fork
 -- fan-out. Mirrors Rust @send_bulk_with@.
-sendBulkWith :: (ToJSON value, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m) => WorkflowCtx exec m -> [Message value] -> SendBulkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sendBulkWith :: (ToJSON value, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+             => WorkflowCtx exec m -> [Message value] -> SendBulkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendBulkWith wctx messages options = do
   let encoded = map encodeMessage messages
       serialization = case encoded of
@@ -145,14 +149,15 @@ sendBulkWith wctx messages options = do
             }
     plainSend wctx' encodedMessages serialization caller = do
       written <- withSystemDB wctx' (\db -> SystemDB.sendMessages db encodedMessages serialization caller (options.forks == ForksInclude))
-      pure (either (Left . TransactError.ErrorSystemDatabase) Right written)
+      pure (either (Left . TransactError.SystemDatabase) Right written)
 
 -- | Consume the oldest matching message, waiting up to the polling duration.
 -- It is checkpointed as a read plus timeout so replay returns the same
 -- message (or absence) instead of consuming another one. Receives from
 -- inside a step are refused because the enclosing step cannot identify the
 -- consumed message on a retry.
-recv :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> Maybe Topic -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
+recv :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m)
+     => WorkflowCtx exec m -> Maybe Topic -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
 recv wctx topic timeout = do
   -- Refused through the handed context or a captured parent alike: the
   -- enclosing step cannot identify the consumed message on a retry.
@@ -169,11 +174,11 @@ recv wctx topic timeout = do
             Just (Topic name) -> Just name
       found <- withSystemDB wctx (\db -> SystemDB.recv db workflowId' stepId' timeoutStepId topicText timeout)
       pure $ case found of
-        Left err -> Left (TransactError.ErrorSystemDatabase err)
+        Left err -> Left (TransactError.SystemDatabase err)
         Right Nothing -> Right Nothing
         Right (Just encoded) ->
           case decodeWorkflowValue "message" (Just (storedValue encoded)) of
-            Left err -> Left (TransactError.ErrorDeserialization "message" (codecMessage err))
+            Left err -> Left (TransactError.Deserialization "message" (codecMessage err))
             Right value -> Right (Just value)
   where
     codecMessage err =

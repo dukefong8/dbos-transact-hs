@@ -79,9 +79,9 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty WidgetTest.tests
 --- $> tasty DeadlinesTest.tests
 --- $> tasty DeadlinesSim.tests
--- $> tasty DebouncerTest.tests
--- $> tasty DebouncerSim.tests
---- $> tasty ErrorTest.tests
+--- $> tasty DebouncerTest.tests
+--- $> tasty DebouncerSim.tests
+-- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests
 --- $> tasty EventSim.tests
 --- $> tasty HandleTest.tests

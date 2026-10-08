@@ -28,20 +28,23 @@ import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 -- | Publish a value on the current workflow. A write is a checkpointed
 -- operation and is refused from inside a step, where allocating another
 -- operation id would shift replay order.
-setEvent :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+setEvent :: (ToJSON value, MonadSTM m)
+         => WorkflowCtx exec m -> Text -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 setEvent wctx key value = placeCall wctx >>= driveSetEvent wctx key value
 
 -- | A publish built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the write runs when the
 -- pending value is awaited or raced.
-pendingSetEvent :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
+pendingSetEvent :: (ToJSON value, MonadSTM m)
+                => WorkflowCtx exec m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
 pendingSetEvent wctx key value = do
   placement <- placeCall wctx
   pure (PendingStep setEventStepName (Just placement) (driveSetEvent wctx key value placement))
 
 -- | Drives a placed publish: refused from inside a step, otherwise the
 -- checkpointed write under the claimed id.
-driveSetEvent :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+driveSetEvent :: (ToJSON value, MonadSTM m)
+              => WorkflowCtx exec m -> Text -> value -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 driveSetEvent wctx key value placement =
   case checkHere placement setEventStepName (Just (stepCtxBoundary wctx)) of
     Left err -> pure (Left err)
@@ -67,7 +70,7 @@ driveSetEvent wctx key value placement =
                 serialization
           )
       pure $ case written of
-        Left err -> Left (TransactError.ErrorSystemDatabase err)
+        Left err -> Left (TransactError.SystemDatabase err)
         Right () -> Right ()
 
 -- | Read an event of another workflow, waiting up to the polling duration.
@@ -76,7 +79,8 @@ driveSetEvent wctx key value placement =
 -- observes the same value (including absence) as the original execution.
 -- Inside a step the enclosing step checkpoint stands for the read, so it
 -- runs plainly. Mirrors Rust @get_event(workflow_id, key, timeout)@.
-getEvent :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m) => WorkflowCtx exec m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
+getEvent :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m)
+         => WorkflowCtx exec m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
 getEvent wctx destination key timeout = do
   let workflowText = workflowId wctx
   -- Inside a step the enclosing checkpoint stands for the read — through
@@ -104,13 +108,14 @@ getEvent wctx destination key timeout = do
 -- back into the caller's channel. Shared by the eager read and the pending
 -- drive, which differ only in whose connection serves them and which ids
 -- the read was claimed under.
-adoptEventValue :: FromJSON value => Either Error (Maybe EncodedValue) -> Either (TransactError.Error e) (Maybe value)
+adoptEventValue :: FromJSON value
+                => Either Error (Maybe EncodedValue) -> Either (TransactError.Error e) (Maybe value)
 adoptEventValue found = case found of
-  Left err -> Left (TransactError.ErrorSystemDatabase err)
+  Left err -> Left (TransactError.SystemDatabase err)
   Right Nothing -> Right Nothing
   Right (Just encoded) ->
     case decodeWorkflowValue "event value" (Just (toStoredValue encoded)) of
-      Left err -> Left (TransactError.ErrorDeserialization "event value" (codecMessage err))
+      Left err -> Left (TransactError.Deserialization "event value" (codecMessage err))
       Right value -> Right (Just value)
   where
     codecMessage err =
@@ -130,14 +135,13 @@ adoptEventValue found = case found of
 -- is claimed or read; inside a step the read is plain, with nothing to
 -- disagree about. A refusal is carried in the pending value, so the caller
 -- keeps its single error channel. Mirrors Rust @DBOS::get_event@.
-pendingGetEvent ::
-  (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m) =>
-  DBOS m ->
-  WorkflowCtx exec m ->
-  WorkflowId ->
-  Text ->
-  Duration ->
-  m (PendingStep exec m (Either (TransactError.Error c) (Maybe value)))
+pendingGetEvent :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+                => DBOS m ->
+                   WorkflowCtx exec m ->
+                   WorkflowId ->
+                   Text ->
+                   Duration ->
+                   m (PendingStep exec m (Either (TransactError.Error c) (Maybe value)))
 pendingGetEvent dbos wctx destination key timeout = do
   running <- requireExecutor dbos "get_event"
   case running of
@@ -155,14 +159,13 @@ pendingGetEvent dbos wctx destination key timeout = do
 
 -- | Drives a placed read: the recorded form of whatever the database
 -- answers, decoded back into the caller's channel.
-driveGetEvent ::
-  (FromJSON value, MonadMVar m, MonadTime m, MonadDelay m) =>
-  Executor m ->
-  Maybe GetEventCaller ->
-  WorkflowId ->
-  Text ->
-  Duration ->
-  m (Either (TransactError.Error c) (Maybe value))
+driveGetEvent :: (FromJSON value, MonadMVar m, MonadTime m, MonadDelay m)
+              => Executor m ->
+                 Maybe GetEventCaller ->
+                 WorkflowId ->
+                 Text ->
+                 Duration ->
+                 m (Either (TransactError.Error c) (Maybe value))
 driveGetEvent executor caller destination key timeout = do
   found <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getEvent db destination key timeout caller)
   pure (adoptEventValue found)
