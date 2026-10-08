@@ -26,7 +26,6 @@ module DBOS.Transact.Config
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Types (Duration, durationIsZero, secondsDuration)
 import DBOS.Transact.Error (EngineOnly, Error (..))

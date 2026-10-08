@@ -17,7 +17,6 @@ where
 
 import DBOS.Prelude
 import Data.Int (Int64)
-import Data.Text (Text)
 import Data.Text qualified as Text
 
 -- | What went wrong talking to the system database. Names match the Rust

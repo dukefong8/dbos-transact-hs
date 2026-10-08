@@ -22,7 +22,6 @@ module DBOS.Transact.Identity
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.Transact.Config (Config (..))
 import DBOS.Transact.Error (EngineOnly, Error (..))

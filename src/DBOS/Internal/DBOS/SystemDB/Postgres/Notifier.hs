@@ -40,10 +40,8 @@ where
 import DBOS.Prelude
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Functor.Contravariant (contramap)
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Notify (Registry, keyFor, wake)
 import DBOS.SystemDB.Retry (SysdbEvent (..))
@@ -159,7 +157,7 @@ signal notifier channel workflowId key = do
           let batch = Map.findWithDefault Set.empty channel pending'
               pending'' = Map.insert channel (Set.insert payload batch) pending'
           writeTVar notifier.pending pending''
-          pure (sum (map Set.size (Map.elems pending'')) == 1)
+          pure (Map.foldl' (\n s -> n + Set.size s) 0 pending'' == 1)
         -- Only the payload that opens a batch wakes the loop, and that is
         -- what makes the window a window: the rest ride along on the flush it
         -- already scheduled, rather than each cutting it short.

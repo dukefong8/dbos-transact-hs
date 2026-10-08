@@ -154,13 +154,8 @@ module DBOS.SystemDB.Types
 where
 
 import DBOS.Prelude
-import Data.Char (isAscii, isAsciiLower, isDigit)
 import Data.Int (Int64)
-import Data.List (find)
-import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Text.Encoding (encodeUtf8)
-import Data.Word (Word32, Word64)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, withObject, withScientific, withText, (.:), (.=))
 import Data.Aeson.Types (Parser)
 import DBOS.SystemDB.Error (Error, invalidInput)

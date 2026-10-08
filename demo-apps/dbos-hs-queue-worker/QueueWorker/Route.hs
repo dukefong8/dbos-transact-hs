@@ -17,7 +17,7 @@ module QueueWorker.Route
 where
 
 import Demo.Http
-import IHP.Router.WAI (HasPath (..), UrlCapture (..), routes)
+import IHP.Router.WAI (HasPath (..), routes)
 import Network.HTTP.Types (StdMethod (..), status404)
 import Network.Wai (Application, responseLBS)
 import Prelude

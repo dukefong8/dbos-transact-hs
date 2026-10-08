@@ -12,7 +12,6 @@ import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import Data.Text qualified as Text
 import DBOS.IOSimTracer (simTracer)
-import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOnWith, newMemDB, simInstance)
 import DBOS.Transact

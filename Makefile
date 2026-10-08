@@ -59,7 +59,7 @@ env:
 	rm .ghc.environment.*$(GHC)* || true
 	cabal install -w ghc-$(GHC) --enable-documentation \
 		--package-env . --lib \
-		base containers stm-containers unordered-containers vector template-haskell \
+		base containers foldl stm-containers unordered-containers vector template-haskell \
 		aeson bytestring text rerefined safe-wild-cards strict-wrapper time uuid \
 		contra-tracer contravariant fast-logger io-sim io-classes mtl \
 		hasql ihp-typed-sql hasql-pool hasql-transaction hasql-postgresql-types \

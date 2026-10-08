@@ -45,14 +45,11 @@ module DBOS.Transact.OutboxCases
   )
 where
 
-import Control.Applicative ((<|>))
 import Data.Aeson (Value (..), decodeStrict)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.Text qualified as Text
-import Data.Text.Encoding (encodeUtf8)
 import DBOS.Prelude
-import DBOS.SystemDB (AwaitedOutcome (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter)
+import DBOS.SystemDB (WorkflowFilter (..), WorkflowRecord (..), defaultWorkflowFilter)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError)
 import DBOS.Transact
@@ -249,7 +246,7 @@ readRowShared sysdb wid = do
 -- | Variant A commits atomically: the workflow succeeds, one order row
 -- reads SENT, one completed send. Returns the count, status, row status,
 -- and completions.
-scenarioAtomicCommit :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+scenarioAtomicCommit :: forall m. (MonadMVar m, MonadCatch m)
                      => OutboxFixture m ->
                         m (Int, Maybe Text, Maybe WorkflowStatus, Int)
 scenarioAtomicCommit fx = do
@@ -281,7 +278,7 @@ checkAtomicCommit (count, status, row, sent)
 -- then runs clean to one SENT order and one send. Returns the first row,
 -- count, status, completions, then the resumed row, count, status,
 -- completions.
-scenarioAtomicRollback :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+scenarioAtomicRollback :: forall m. (MonadMVar m, MonadCatch m)
                        => OutboxFixture m ->
                           m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
 scenarioAtomicRollback fx = do
@@ -326,7 +323,7 @@ checkAtomicRollback (row1, count1, status1, sent1, row2, count2, status2, sent2)
 -- | Variant B commits atomically: one order row, one found enqueue, and the
 -- driven notification succeeds to SENT with one send. Returns the count,
 -- whether the enqueue was found, the row status, order status, completions.
-scenarioEnqueueCommit :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+scenarioEnqueueCommit :: forall m. (MonadMVar m, MonadCatch m)
                       => OutboxFixture m ->
                          m (Int, Bool, Maybe WorkflowStatus, Maybe Text, Int)
 scenarioEnqueueCommit fx = do
@@ -361,7 +358,7 @@ checkEnqueueCommit (count, found, row, status, sent)
 -- (fault consumed) commits and the replacement notification runs to SENT.
 -- Returns the first error presence, count, found, sent, then the
 -- replacement count, status, completions, row status.
-scenarioEnqueueRollbackApp :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+scenarioEnqueueRollbackApp :: forall m. (MonadMVar m, MonadCatch m)
                            => OutboxFixture m ->
                               m (Bool, Int, Bool, Int, Int, Maybe Text, Int, Maybe WorkflowStatus)
 scenarioEnqueueRollbackApp fx = do
@@ -401,7 +398,7 @@ checkEnqueueRollbackApp (failed, count1, found1, sent1, count2, status2, sent2, 
 -- | Variant B rolls back on a database error after the insert: same
 -- all-or-nothing shape through the engine-error path, with the replacement
 -- driven to SENT.
-scenarioEnqueueRollbackDb :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+scenarioEnqueueRollbackDb :: forall m. (MonadMVar m, MonadCatch m)
                           => OutboxFixture m ->
                              m (Bool, Int, Bool, Int, Int, Maybe Text, Int, Maybe WorkflowStatus)
 scenarioEnqueueRollbackDb fx = do
@@ -443,7 +440,7 @@ checkEnqueueRollbackDb (failed, count1, found1, sent1, count2, status2, sent2, r
 -- send); the resume adopts the insert and completes to one SENT order and
 -- one send. Returns the first row, count, status, completions, then the
 -- resumed row, count, status, completions.
-scenarioAtomicRedrive :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+scenarioAtomicRedrive :: forall m. (MonadMVar m, MonadCatch m)
                       => OutboxFixture m ->
                          m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
 scenarioAtomicRedrive fx = do
@@ -491,7 +488,7 @@ checkAtomicRedrive (row1, count1, status1, sent1, row2, count2, status2, sent2)
 -- panic (order PENDING-notification, no send), resume to one SENT order
 -- and one send. Returns the first row, count, status, completions, then
 -- the resumed row, count, status, completions.
-scenarioEnqueueRedrive :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+scenarioEnqueueRedrive :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
                        => OutboxFixture m ->
                           m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
 scenarioEnqueueRedrive fx = do

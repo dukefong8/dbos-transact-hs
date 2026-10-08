@@ -20,19 +20,19 @@ import Data.Text qualified as Text
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowId (..), WorkflowRecord (..), newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowRecord (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
 import DBOS.SystemDB.Error qualified as SysErr
-import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simInstance)
+import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB)
 import DBOS.Transact
 import DBOS.Transact.Workflow (maxRecoveryAttempts)
 import DBOS.Transact.Datasource (RecordedOutcome (..), TransactionEvent (..))
 import DBOS.Transact.OutboxCases
 import DBOS.Transact.Recovery (EngineEvent (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
-import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup, testGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
+import Test.Tasty.HUnit ((@?=))
 
 tests :: TestTree
 tests =

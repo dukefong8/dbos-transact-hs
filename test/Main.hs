@@ -8,7 +8,6 @@ import DBOS.SystemDB.NotifyTest qualified as SystemDBNotify
 import DBOS.SystemDB.PostgresTest qualified as SystemDBPostgres
 import DBOS.SystemDB.RetryTest qualified as SystemDBRetry
 import DBOS.SystemDB.TypesTest qualified as SystemDBTypes
-import DBOS.Transact.LoggerTest qualified as Logger
 import DBOS.Transact.CheckpointTest qualified as CheckpointTest
 import DBOS.Transact.CheckpointTestSim qualified as CheckpointSim
 import DBOS.Transact.ClientTest qualified as ClientTest
@@ -17,9 +16,6 @@ import DBOS.Transact.ContextTest qualified as ContextTest
 import DBOS.Transact.ContextTestSim qualified as ContextSim
 import DBOS.Transact.DatasourceTest qualified as DatasourceTest
 import DBOS.Transact.DatasourceTestSim qualified as DatasourceSim
-import DBOS.Transact.QueueTestSim qualified as QueueSim
-import DBOS.Transact.WidgetSim qualified as WidgetSim
-import DBOS.Transact.WidgetTest qualified as WidgetTest
 import DBOS.Transact.DeadlinesTest qualified as DeadlinesTest
 import DBOS.Transact.DeadlinesTestSim qualified as DeadlinesSim
 import DBOS.Transact.DebouncerTest qualified as DebouncerTest
@@ -31,6 +27,7 @@ import DBOS.Transact.HandleTest qualified as HandleTest
 import DBOS.Transact.HandleTestSim qualified as HandleSim
 import DBOS.Transact.IdentityTest qualified as IdentityTest
 import DBOS.Transact.InstanceTest qualified as InstanceTest
+import DBOS.Transact.LoggerTest qualified as Logger
 import DBOS.Transact.ManagementTest qualified as ManagementTest
 import DBOS.Transact.ManagementTestSim qualified as ManagementSim
 import DBOS.Transact.MessageTest qualified as MessageTest
@@ -38,6 +35,7 @@ import DBOS.Transact.MessageTestSim qualified as MessageSim
 import DBOS.Transact.OutboxTest qualified as OutboxTest
 import DBOS.Transact.OutboxTestSim qualified as OutboxSim
 import DBOS.Transact.QueueTest qualified as QueueTest
+import DBOS.Transact.QueueTestSim qualified as QueueSim
 import DBOS.Transact.RegistryTest qualified as RegistryTest
 import DBOS.Transact.SelectTest qualified as SelectTest
 import DBOS.Transact.SelectTestSim qualified as SelectSim
@@ -51,6 +49,8 @@ import DBOS.Transact.StepTest qualified as StepTest
 import DBOS.Transact.StepTestSim qualified as StepSim
 import DBOS.Transact.WaitTest qualified as WaitTest
 import DBOS.Transact.WaitTestSim qualified as WaitSim
+import DBOS.Transact.WidgetSim qualified as WidgetSim
+import DBOS.Transact.WidgetTest qualified as WidgetTest
 import DBOS.Transact.WorkflowTest qualified as WorkflowTest
 import DBOS.Transact.WorkflowTestSim qualified as WorkflowSim
 import System.IO.Silently (capture)
@@ -67,49 +67,49 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SystemDBTypes.tests
 --- $> tasty Logger.tests
 --- $> tasty CheckpointTest.tests
---- $> tasty CheckpointSim.tests
+-- $> tasty CheckpointSim.tests
 --- $> tasty ClientTest.tests
 --- $> tasty ConfigTest.tests
 --- $> tasty ContextTest.tests
---- $> tasty ContextSim.tests
+-- $> tasty ContextSim.tests
 --- $> tasty DatasourceTest.tests
---- $> tasty DatasourceSim.tests
---- $> tasty QueueSim.tests
---- $> tasty WidgetSim.tests
+-- $> tasty DatasourceSim.tests
+-- $> tasty QueueSim.tests
+-- $> tasty WidgetSim.tests
 --- $> tasty WidgetTest.tests
 --- $> tasty DeadlinesTest.tests
---- $> tasty DeadlinesSim.tests
+-- $> tasty DeadlinesSim.tests
 --- $> tasty DebouncerTest.tests
---- $> tasty DebouncerSim.tests
--- $> tasty ErrorTest.tests
+-- $> tasty DebouncerSim.tests
+--- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests
---- $> tasty EventSim.tests
+-- $> tasty EventSim.tests
 --- $> tasty HandleTest.tests
---- $> tasty HandleSim.tests
+-- $> tasty HandleSim.tests
 --- $> tasty IdentityTest.tests
 --- $> tasty InstanceTest.tests
 --- $> tasty ManagementTest.tests
---- $> tasty ManagementSim.tests
+-- $> tasty ManagementSim.tests
 --- $> tasty MessageTest.tests
---- $> tasty MessageSim.tests
+-- $> tasty MessageSim.tests
 --- $> tasty OutboxTest.tests
---- $> tasty OutboxSim.tests
+-- $> tasty OutboxSim.tests
 --- $> tasty QueueTest.tests
 --- $> tasty RegistryTest.tests
 --- $> tasty SelectTest.tests
---- $> tasty SelectSim.tests
+-- $> tasty SelectSim.tests
 --- $> tasty SerializationTest.tests
 --- $> tasty SimTest.tests
 --- $> tasty SleepTest.tests
---- $> tasty SleepSim.tests
+-- $> tasty SleepSim.tests
 --- $> tasty StepRetryTest.tests
---- $> tasty StepRetrySim.tests
+-- $> tasty StepRetrySim.tests
 --- $> tasty StepTest.tests
---- $> tasty StepSim.tests
+-- $> tasty StepSim.tests
 --- $> tasty WaitTest.tests
---- $> tasty WaitSim.tests
+-- $> tasty WaitSim.tests
 --- $> tasty WorkflowTest.tests
---- $> tasty WorkflowSim.tests
+-- $> tasty WorkflowSim.tests
 main :: IO ()
 main = defaultMain tests
 

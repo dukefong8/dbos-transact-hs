@@ -53,7 +53,6 @@ where
 import DBOS.Prelude
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Text (Text)
 import DBOS.SystemDB.Types (nullTopicSentinel)
 
 -- | The channel a message notification arrives on, published by migration 1's

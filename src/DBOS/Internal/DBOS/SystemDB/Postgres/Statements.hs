@@ -1722,12 +1722,13 @@ descendantsSession root = go [] Set.empty [root]
     go acc _ [] = pure acc
     go acc seen frontier = do
       children <- directChildrenSession frontier
-      let (seen', fresh) = foldl' absorb (seen, []) children
+      let (seen', freshRev) = foldl' absorb (seen, []) children
+          fresh = reverse freshRev
       go (acc <> fresh) seen' fresh
     absorb (seen, fresh) child
       | child == root = (seen, fresh)
       | Set.member child seen = (seen, fresh)
-      | otherwise = (Set.insert child seen, fresh <> [child])
+      | otherwise = (Set.insert child seen, child : fresh)
 
 -- | One breadth-first level: the ids whose parent is one of the given ids.
 -- An array parameter (@parent_workflow_id = ANY($1)@), which is why this is

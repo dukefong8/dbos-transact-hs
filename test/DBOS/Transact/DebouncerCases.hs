@@ -28,10 +28,9 @@ module DBOS.Transact.DebouncerCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (StepRecord (..), Timestamp (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), debounceStepName)
+import DBOS.SystemDB (Timestamp (..), WorkflowRecord (..), debounceStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
-import DBOS.Transact.Connection (SomeSystemDB, runSystemDB)
 import DBOS.Transact.Instance (dequeueWorkflows)
 
 -- | Domain operations each backend implements: the fixture launches over
@@ -69,7 +68,7 @@ driveQueue dbos = do
 -- returns its id; the row runs once its delay passes with those inputs.
 -- Returns the creation status, dedup key, debounced flag, deadline
 -- presence, then the settled status, outputs, and run count.
-scenarioFirstDebounceDelays :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+scenarioFirstDebounceDelays :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
                             => DebouncerFixture m ->
                                m (Maybe WorkflowStatus, Maybe Text, Bool, Bool, Maybe WorkflowStatus, [Text], Int)
 scenarioFirstDebounceDelays fx = do
@@ -105,7 +104,7 @@ checkFirstDebounceDelays (atCreate, key, isDebounced, hasDeadline, settled, outp
 -- inputs, and returns the same user id; one run carries the last inputs.
 -- Returns whether both handles agree, the delays, then the settled
 -- status, outputs, and run count.
-scenarioSecondDebounceCoalesces :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+scenarioSecondDebounceCoalesces :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
                                 => DebouncerFixture m ->
                                    m (Bool, Maybe Timestamp, Maybe Timestamp, Maybe WorkflowStatus, [Text], Int)
 scenarioSecondDebounceCoalesces fx = do
@@ -147,7 +146,7 @@ checkSecondDebounceCoalesces (sameId, delay1, delay2, settled, outputs, runs)
 -- | A foreign holder (a plain queued row on the same key) refuses the
 -- debounce instead of joining it: no user row, no run. Returns the
 -- refusal and the run count.
-scenarioForeignHolderRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+scenarioForeignHolderRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
                              => DebouncerFixture m ->
                                 m (Bool, Int)
 scenarioForeignHolderRefused fx = do
@@ -177,7 +176,7 @@ checkForeignHolderRefused (refused, runs)
 -- the user row still runs once with those inputs. Returns the parent
 -- status, whether its steps name the bounce, then the user status,
 -- outputs, and run count.
-scenarioInWorkflowDebounceRecordsStep :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+scenarioInWorkflowDebounceRecordsStep :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
                                       => DebouncerFixture m ->
                                          m (Maybe WorkflowStatus, Bool, Maybe WorkflowStatus, [Text], Int)
 scenarioInWorkflowDebounceRecordsStep fx = do
@@ -215,7 +214,7 @@ checkInWorkflowDebounceRecordsStep (parentStatus, namesBounce, userStatus, outpu
 -- supervisor's transition sweep releases due rows on every queue, which
 -- would clear the key the second bounce must find.
 -- Returns the stamped deadline and the second delay.
-scenarioTimeoutCapsExtension :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioTimeoutCapsExtension :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
                              => DebouncerFixture m ->
                                 m (Maybe Timestamp, Maybe Timestamp)
 scenarioTimeoutCapsExtension fx = do

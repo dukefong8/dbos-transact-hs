@@ -25,7 +25,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8')
 import Demo.Http
-import IHP.Router.WAI (HasPath (..), UrlCapture (..), routes)
+import IHP.Router.WAI (HasPath (..), routes)
 import Network.HTTP.Types (StdMethod (..), hContentType, status400, status404)
 import Network.HTTP.Types.URI (parseQuery)
 import Network.Wai (Application, Request, queryString, requestHeaders, responseLBS, strictRequestBody)

@@ -76,14 +76,11 @@ module DBOS.Transact.Logger
   )
 where
 
-import Control.Tracer (Tracer, contramap, mkTracer)
+import Control.Tracer (Tracer, mkTracer)
 import Control.Tracer qualified as CT
-import Data.Char (isSpace, toLower)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
-import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Typeable (Typeable)
 import DBOS.Prelude
 import System.Environment (lookupEnv)
 import System.Log.FastLogger (LogStr, LogType' (..), TimedFastLogger, ToLogStr (..), defaultBufSize, newTimeCache, newTimedFastLogger)

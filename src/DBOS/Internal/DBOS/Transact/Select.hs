@@ -259,7 +259,7 @@ selectStepOn _ [] =
 selectStepOn _ [_] =
   pure (Left (TransactError.ErrorConfig "selectStep races two or more durable steps; one branch is not a race"))
 selectStepOn wctx arms = do
-  let branches = foldl (\bs arm -> case arm of SelectArm _ pending _ -> pushBranch pending bs) newBranches arms
+  let branches = foldl' (\bs arm -> case arm of SelectArm _ pending _ -> pushBranch pending bs) newBranches arms
   checked <- checkSelect wctx branches
   case checked of
     Left err -> pure (Left err)

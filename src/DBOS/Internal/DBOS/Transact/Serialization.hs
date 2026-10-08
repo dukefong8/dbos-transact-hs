@@ -22,8 +22,7 @@ import DBOS.Prelude
 import Data.Aeson (FromJSON, Result (..), ToJSON, Value, eitherDecodeStrict, encode, fromJSON)
 import Data.ByteString.Lazy (toStrict)
 import Data.Map.Strict (Map)
-import Data.Text (Text)
-import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Text.Encoding (decodeUtf8)
 import DBOS.SystemDB.Types (Serialization (..), SerializedWorkflowValue (..))
 
 data CodecError

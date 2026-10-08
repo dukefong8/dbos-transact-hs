@@ -23,10 +23,8 @@ module DBOS.SystemDB.Retry
 where
 
 import DBOS.Prelude
-import Data.Text (Text)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import Data.Word (Word32)
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), renderError)
 import DBOS.SystemDB.Types (Duration (..), durationAsMillis, secondsDuration)
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)

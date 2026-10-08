@@ -15,14 +15,13 @@ module DBOS.Transact.OutboxTest (tests) where
 import DBOS.DualStack (liveCaseWith)
 import DBOS.Prelude
 import Data.Aeson qualified as Aeson
-import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
 import Data.Text qualified as Text
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text.Encoding (decodeUtf8)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (WorkflowId (..), WorkflowRecord (..))
+import DBOS.SystemDB (WorkflowRecord (..))
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
 import DBOS.Transact.Connection (SomeSystemDB (..))

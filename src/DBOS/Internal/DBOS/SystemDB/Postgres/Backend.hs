@@ -87,7 +87,6 @@ import DBOS.Prelude
 
 import Data.Aeson (eitherDecodeStrict)
 import Data.Aeson qualified as Aeson
-import Data.Aeson.Types (Parser)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Int (Int64)
 import Data.List qualified as List

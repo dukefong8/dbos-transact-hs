@@ -12,7 +12,6 @@ import Data.Text qualified as Text
 import DBOS.SystemDB (RateLimit (..))
 import DBOS.Transact
   ( Config (..),
-    Debouncer (..),
     QueueConflict (..),
     QueueOptions (..),
     configFromEnv,

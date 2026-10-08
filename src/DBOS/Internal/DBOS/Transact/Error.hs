@@ -29,8 +29,8 @@ where
 import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
-import Data.Text (Text, pack, unpack)
-import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Text (pack, unpack)
+import Data.Text.Encoding (decodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Duration, durationAsMillis)
