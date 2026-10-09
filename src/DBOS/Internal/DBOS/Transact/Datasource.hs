@@ -4,17 +4,39 @@
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Transactional steps: application writes and the step checkpoint commit
--- in one database transaction on a separate application pool (Rule 4:
--- plain Haskell, no Bluefin imports). The port's own seam — Rust has no
--- counterpart yet (see ADR-0021) — shaped branch-for-branch against Python
--- @SQLAlchemyDatasource.run_tx_step@ and TypeScript @KnexDataSource@: a
--- pre-check replays the recorded outcome, one transaction holds the user
--- writes and the checkpoint insert, an already-recorded conflict adopts the
--- winner, retriable failures loop with backoff, and ownership conflicts are
--- rethrown unrecorded. The handle is explicit ('Tx' threaded into the body)
--- where the oracles use ambient storage; the engine ('runTxStep',
--- staged next) allocates the step id from the explicit context.
+-- | Transactional steps: the application's writes and the step checkpoint
+-- commit in one database transaction. A pre-check replays the recorded
+-- outcome, one transaction holds the body writes and the checkpoint insert,
+-- an already-recorded conflict adopts the winner, retriable failures loop
+-- with backoff, and ownership conflicts are rethrown unrecorded.
+--
+-- The seam is a record of operations rather than a connection pool, because
+-- the two things a transactional step needs from the database have different
+-- scopes and a pool offers only one of them:
+--
+-- * Affinity-free reads. Checking a recorded outcome, reading the step name
+--   a row holds, deleting checkpoints — each is a single self-contained
+--   statement that any connection may serve, and each wants a pooled,
+--   short-lived session. Nothing outside the transaction depends on which
+--   connection served it.
+--
+-- * A transaction scope holding exactly one connection. The body and the
+--   checkpoint must share a single commit, so one connection is held from
+--   @BEGIN@ through the body to @COMMIT@, and rolled back on any escape.
+--   The body is an effectful computation that issues statements and does
+--   other work between them, so the scope cannot be a closed statement
+--   script: it must outlive individual statements and keep the connection
+--   pinned for their whole span. Every application statement and both
+--   checkpoint writes therefore run on that held connection — never through
+--   an ambient or ambient-resolved handle, which is why 'Tx' is threaded
+--   explicitly into the body instead.
+--
+-- So a transactional-step backend supplies two shapes of operation:
+-- single-statement reads that need no affinity, and one call that opens a
+-- transaction, hands the body a 'Tx' pinned to the held connection, and
+-- closes it. Which resources back those operations is the backend's
+-- business. Keeping the record polymorphic in its monad also lets one
+-- runner serve live backends and simulated ones unchanged.
 module DBOS.Transact.Datasource
   ( -- * Configuration
     IsolationLevel (..),
@@ -41,21 +63,21 @@ module DBOS.Transact.Datasource
   )
 where
 
-import DBOS.Prelude
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (pack)
 import Data.Text qualified as Text
-import Hasql.Statement qualified as Statement
+import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderError)
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..))
-import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextWorkflowMarker, nextStepId, withStep, withSystemDB, workflowId)
+import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import GHC.Stack (HasCallStack)
+import Hasql.Statement qualified as Statement
 import System.Log.FastLogger (ToLogStr (..))
 
 -- | The isolation of the application transaction. Mirrors the Postgres
@@ -72,7 +94,7 @@ data IsolationLevel
 -- Minimal v1: a step name and an isolation level. No @readOnly@ fast-path —
 -- an unreadtable optimisation that earns its own case when an app needs it.
 data TransactionConfig = TransactionConfig
-  { txName :: Maybe Text,
+  { txName      :: Maybe Text,
     txIsolation :: Maybe IsolationLevel
   }
   deriving stock (Eq, Show)
@@ -111,23 +133,23 @@ newtype Tx m = Tx { txStatement :: forall p r. Statement.Statement p r -> p -> m
 -- one @Tx.Transaction@ holding the body; the record calls run inside that
 -- transaction, so application writes and the checkpoint share one commit.
 data DataSource m = DataSource
-  { dsName :: Text,
-    dsSchema :: Text,
-    dsCheck :: WorkflowId -> Text -> Int -> m (Either BackendError (Maybe RecordedOutcome)),
-    dsWithTransaction :: forall a. Maybe IsolationLevel -> (Tx m -> m a) -> m (Either BackendError a),
+  { dsName              :: Text,
+    dsSchema            :: Text,
+    dsCheck             :: WorkflowId -> Text -> Int -> m (Either BackendError (Maybe RecordedOutcome)),
+    dsWithTransaction   :: forall a. Maybe IsolationLevel -> (Tx m -> m a) -> m (Either BackendError a),
     -- | Checkpoint write inside the transaction: 'True' means the row was
     -- written, 'False' means another execution already holds it (adopt
     -- the recorded row — never sniff @23505@: a violation from the
     -- application's own tables is its failure, not a conflict).
     -- Transport failures throw rather than return 'Left', so a failed
     -- write always aborts the attempt it rode in on.
-    dsRecordOutput :: Tx m -> WorkflowId -> Text -> Int -> Text -> m Bool,
+    dsRecordOutput      :: Tx m -> WorkflowId -> Text -> Int -> Text -> m Bool,
     -- | Failure checkpoint, same commit as the output write: a body
     -- failure records rather than escapes, so replay returns it as itself.
-    dsRecordError :: Tx m -> WorkflowId -> Text -> Int -> Text -> m Bool,
+    dsRecordError       :: Tx m -> WorkflowId -> Text -> Int -> Text -> m Bool,
     -- | The step name a row holds: the replay name check, the transaction
     -- counterpart of @operation_outputs.function_name@.
-    dsStepName :: WorkflowId -> Int -> m (Either BackendError (Maybe Text)),
+    dsStepName          :: WorkflowId -> Int -> m (Either BackendError (Maybe Text)),
     -- | Delete checkpoints from a step onward: completion cleanup and
     -- rewind. Best effort like the oracle — a leftover row is harmless.
     dsDeleteCheckpoints :: WorkflowId -> Int -> m (Either BackendError ())
@@ -148,12 +170,12 @@ data TransactionEvent
   deriving stock (Eq, Show)
 
 instance LogEvent TransactionEvent where
-  eventSeverity TransactionRunning {}           = SeverityDebug
-  eventSeverity TransactionReplaying {}         = SeverityDebug
-  eventSeverity TransactionOutputRecorded {}    = SeverityDebug
-  eventSeverity TransactionErrorRecorded {}     = SeverityDebug
+  eventSeverity TransactionRunning {}            = SeverityDebug
+  eventSeverity TransactionReplaying {}          = SeverityDebug
+  eventSeverity TransactionOutputRecorded {}     = SeverityDebug
+  eventSeverity TransactionErrorRecorded {}      = SeverityDebug
   eventSeverity TransactionConflictAdopted {}    = SeverityDebug
-  eventSeverity TransactionOwnershipLost {}     = SeverityWarning
+  eventSeverity TransactionOwnershipLost {}      = SeverityWarning
   eventSeverity TransactionSerializationRetry {} = SeverityWarning
   renderEvent (TransactionRunning workflowText name stepId') =
     "running transaction step " <> name <> " (" <> showText stepId' <> ") workflow_id=" <> workflowText
@@ -272,7 +294,7 @@ attemptTransaction ds wctx isolation body tracer wid stepName stepId n waitMs = 
     Right (Left err) -> handleBackend err
     Right (Right answer) -> do
       case answer of
-        Left _ -> runTracer tracer (TransactionErrorRecorded widText stepName stepId)
+        Left _  -> runTracer tracer (TransactionErrorRecorded widText stepName stepId)
         Right _ -> runTracer tracer (TransactionOutputRecorded widText stepName stepId)
       pure answer
   where
@@ -321,7 +343,7 @@ checkOwner wctx wid = do
       Nothing -> Right Nothing
       Just _ -> case row.workflowRecordExecutorId of
         Just owner | owner /= wctx.wctxIdentity.identityExecutorId -> Right (Just owner)
-        _ -> Right Nothing
+        _                                                          -> Right Nothing
 
 -- | Another executor owns the workflow: stop without recording, so the
 -- owner keeps it. A control signal, never an outcome.
@@ -365,15 +387,15 @@ unexpectedTransaction (WorkflowId widText) expected stepId recorded =
 replayRecorded :: (FromJSON a, FromJSON e) => Text -> RecordedOutcome -> Either (Error e) a
 replayRecorded stepName = \case
   RecordedOutput text -> case decodeWorkflowValue "result" (Just (SerializedWorkflowValue text Nothing)) of
-    Left err -> Left (Deserialization "result" (codecMessage err))
+    Left err    -> Left (Deserialization "result" (codecMessage err))
     Right value -> Right value
   RecordedError text -> case decodeErrorText text of
-    Left _ -> Left (StepFailed stepName ("recorded transaction error is not decodable: " <> text))
+    Left _    -> Left (StepFailed stepName ("recorded transaction error is not decodable: " <> text))
     Right err -> Left err
   where
     codecMessage err =
       case err of
-        CodecNotJson _ input -> "invalid JSON: " <> input
+        CodecNotJson _ input       -> "invalid JSON: " <> input
         CodecTypeMismatch _ detail -> pack detail
 
 -- | A backend failure as a control signal: recorded nowhere, so the row
@@ -386,7 +408,7 @@ controlErr err = SystemDatabase (SystemDBError.Backend err)
 isRetriable :: BackendError -> Bool
 isRetriable err = case err.backendSqlState of
   Just code -> "40" `Text.isPrefixOf` code
-  Nothing -> False
+  Nothing   -> False
 
 -- | A conflict with no recorded row to adopt: unreachable by construction
 -- (the signal means a row was written), so control rather than data.
@@ -420,7 +442,7 @@ runTxOutside ds config body = loop (1 :: Int) initialBackoffMs
       case outcome of
         Left sysErr -> case sysErr of
           SystemDBError.Backend err -> handleBackend err
-          _ -> pure (Left (synthBackend sysErr))
+          _                         -> pure (Left (synthBackend sysErr))
         Right (Left err) -> handleBackend err
         Right (Right value) -> pure (Right value)
       where
@@ -442,7 +464,7 @@ runTxOutside ds config body = loop (1 :: Int) initialBackoffMs
 -- shutdown thaws it again.
 data DataSourceRegistry m = DataSourceRegistry
   { dsrSources :: StrictMVar m [DataSource m],
-    dsrFrozen :: StrictMVar m Bool
+    dsrFrozen  :: StrictMVar m Bool
   }
 
 newDataSourceRegistry :: MonadMVar m => m (DataSourceRegistry m)
@@ -459,7 +481,7 @@ registerDataSource registry source = do
     else
       modifyMVar registry.dsrSources $ \sources ->
         case find ((== source.dsName) . (.dsName)) sources of
-          Just _ -> pure (sources, Left (AlreadyRegistered ("datasource " <> source.dsName)))
+          Just _  -> pure (sources, Left (AlreadyRegistered ("datasource " <> source.dsName)))
           Nothing -> pure (source : sources, Right ())
 
 -- | The registered datasources, oldest first.

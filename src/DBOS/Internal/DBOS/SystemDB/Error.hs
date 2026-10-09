@@ -3,8 +3,7 @@
 
 -- | What can go wrong talking to the system database. Mirrors Rust
 -- @sysdb::error@: shared by the retry layer, the input validators and any
--- second backend, and deliberately backend-agnostic. Plain Haskell, no
--- Bluefin imports.
+-- second backend, and deliberately backend-agnostic.
 module DBOS.SystemDB.Error
   ( Error (..),
     BackendError (..),

@@ -1,12 +1,11 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
 
--- | Internal step runner (Rule 4: plain Haskell, no Bluefin imports).
--- Mirrors @step.rs@ for plain steps: run the body once and record its
--- output, or replay the recorded outcome without running the body.
--- A throwing body propagates: the failure is recorded at the workflow
--- level by 'runWorkflow', never as a step error row — a step that throws
--- re-runs on recovery by design.
+-- | Internal step runner. Mirrors @step.rs@ for plain steps: run the body
+-- once and record its output, or replay the recorded outcome without running
+-- the body. A throwing body propagates: the failure is recorded at the
+-- workflow level by 'runWorkflow', never as a step error row — a step that
+-- throws re-runs on recovery by design.
 module DBOS.Transact.Step
   ( StepError (..),
     WorkflowEvent (..),
@@ -295,7 +294,7 @@ instance Show (StepOptions e) where
       <> ", preemptible = "
       <> show options.preemptible
       <> ", should_retry = "
-      <> show (maybe False (const True) options.shouldRetry)
+      <> show (isJust options.shouldRetry)
       <> "}"
 
 -- | The wait before the attempt following @failures@ failures:

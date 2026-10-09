@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Internal JSON codec for durable workflow values (Rule 4: plain Haskell,
--- no Bluefin imports). Mirrors @serialization.rs@: @()@ encodes as @"null"@
--- (aeson would give @[]@, so zero-argument workflows use 'encodeUnit'), an
--- absent value decodes as JSON @null@, and failures name the half that failed
+-- | Internal JSON codec for durable workflow values. Mirrors
+-- @serialization.rs@: @()@ encodes as @"null"@ (aeson would give @[]@, so
+-- zero-argument workflows use 'encodeUnit'), an absent value decodes as JSON
+-- @null@, and failures name the half that failed
 -- (@argument@, @result@, @error@). The format tag is @rust_serde@: aeson
 -- output is plain JSON, keeping Haskell-written rows readable by Python
 -- DBOS. Verified against the oracle: no divergence (same tag, same

@@ -1,4 +1,10 @@
-# Full co-log for the LoggerT runner (amends the Rule 5 logging decision)
+# Full co-log for the LoggerT runner (RETIRED — superseded by 0015; amends the Rule 5 logging decision)
+
+Status: retired 2026-09-30 by ADR-0015. `co-log` and `co-log-core` are no
+longer cabal dependencies, no module imports either, and the `LoggerT` runner
+below was never the shape that shipped — `SomeTracer` over contra-tracer with
+FastLogger as the IO backend is. Kept as the record of why the `LoggerT`
+shape was tried; nothing here describes current code.
 
 `DBOS.Transact.Logger` now depends on full `co-log` (added to the cabal commons `build-depends` beside `co-log-core`), not just `co-log-core`. The reason is the `LoggerT` runner the engine adopts from the Playground shape: `runLogger :: LoggerT Colog.Message IO a -> IO a` runs a `Colog.Message` action against the bracketed `ioLogAction` stdout backend (`usingLoggerT (cmap fmtLogStr logger)`), with `fmtLogStr = (<> "\n") . Colog.fmtMessage`. `Colog.Message`, `Colog.Monad`, and `Colog.fmtMessage` exist only in full `co-log`; `co-log-core` has the actions and severities but neither the message type nor the transformer.
 

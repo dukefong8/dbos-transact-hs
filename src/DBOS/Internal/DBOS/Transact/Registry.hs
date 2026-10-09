@@ -2,11 +2,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Internal workflow registry (Rule 4: plain Haskell, no Bluefin imports).
--- Mirrors @registry.rs@: registration turns a named body into a JSON-in /
--- JSON-out closure the executor can call knowing only a row. Bodies take the
--- pool explicitly — there is no ambient context — plus the workflow id their
--- steps run under and the stored input, if any.
+-- | Internal workflow registry. Mirrors @registry.rs@: registration turns a
+-- named body into a JSON-in / JSON-out closure the executor can call knowing
+-- only a row. Bodies take the pool explicitly — there is no ambient context —
+-- plus the workflow id their steps run under and the stored input, if any.
 module DBOS.Transact.Registry
   ( WorkflowKey (..),
     newWorkflowKey,

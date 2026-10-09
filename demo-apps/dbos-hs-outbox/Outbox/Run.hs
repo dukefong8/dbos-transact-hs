@@ -50,9 +50,9 @@ start = do
             -- shared database.
             configListenQueues = Just [notificationQueueName]
           }
-  -- The app datasource reads the app's own database: @DATABASE_URL@ when set,
-  -- else the system URL. The typedSql statements in Store.hs name outbox_store
-  -- directly; this schema must stay in step with them.
+  -- The app datasource reads the app's own database: @APP_DATABASE_URL@
+  -- when set, else the system URL. The typedSql statements in Store.hs name
+  -- outbox_store directly; this schema must stay in step with them.
   app <- acquireAppDataSourceInFromEnv "outbox_store" config0.configDatabaseUrl 5
   created <- runAppSession app createSchemaSession
   either (die . Text.pack . show) pure created

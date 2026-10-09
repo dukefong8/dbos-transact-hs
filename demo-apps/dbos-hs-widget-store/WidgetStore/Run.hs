@@ -53,9 +53,9 @@ start = do
             -- database.
             configListenQueues = Just []
           }
-  -- The app datasource reads the app's own database: @DATABASE_URL@ when set,
-  -- else the system URL. The typedSql statements in Store.hs name widget_store
-  -- directly; this schema must stay in step with them.
+  -- The app datasource reads the app's own database: @APP_DATABASE_URL@
+  -- when set, else the system URL. The typedSql statements in Store.hs name
+  -- widget_store directly; this schema must stay in step with them.
   app <- acquireAppDataSourceInFromEnv "widget_store" config0.configDatabaseUrl 5
   created <- runAppSession app createSchemaSession
   either (die . Text.pack . show) pure created

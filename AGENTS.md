@@ -84,13 +84,12 @@ The database must always be migrated with the Rust runner first: run `make db-mi
 ## Guardrails
 
 - **Commits wait for the user's `/review`** (standing rule): do not commit unprompted; a slice lands only when the user invokes `/review` with the gates green.
-- **Database URLs: `DBOS_DATABASE_URL` is the system database, `DATABASE_URL` is the application's own datasource.** The two are read separately (`DBOS.SystemDB.Postgres.configFromEnv` vs `DBOS.Transact.Config.appDatabaseUrlFromEnv`); a single-database deployment sets both to the same URL, and the app pool falls back to the system URL when `DATABASE_URL` is unset.
+- **Database URLs: `DBOS_DATABASE_URL` is the system database, `APP_DATABASE_URL` is the application's own datasource.** The two are read separately (`DBOS.SystemDB.Postgres.configFromEnv` vs `DBOS.Transact.Config.appDatabaseUrlFromEnv`); a single-database deployment sets both to the same URL, and the app pool falls back to the system URL when `APP_DATABASE_URL` is unset. A plain `DATABASE_URL` is **not** ours: `ihp-typed-sql`'s quasiquoter reads it at compile time for `[typedSql| ... |]` describe, so `make widget-db` and the demo `schema.sql` steps use it and must keep doing so.
 - **MUST: NEVER store e2e or other ad-hoc harness scripts in the project folder.** Throwaway runners, crash/restart loops, Chrome/E2E drivers, live side-by-side comparison scripts, fuzz drivers, and snoop harnesses live outside the repo. Keep them under the operator's own scratch space (for example `~/.local/share/…` or a `scratch/` directory outside the workspace) and check them in only when a script is a durable, reviewed part of the build or test story (e.g. `Makefile` targets and the in-repo test suite). A `.sh`/`.py` file that exists only to poke a running demo or drive a one-off investigation does not belong in the tree.
 - Keep tests on public behavior, not implementation details.
 - Do not refactor while red.
 - Do not add schema migrations in Haskell.
 - Keep Python DBOS schema compatibility as the boundary.
-- Two layers: plain-Haskell internals hold all logic; Bluefin 0.9 `Ask`/`IOE` capabilities live only at the external seam, never in internals. Do not add DBOS-specific `Handle` records.
 - Use the existing tmux `make env` / `ghciwatch` pane; do not start duplicate watchers. `ghciwatch` owns `ghcid.txt`; never add a `tee` or redirect to it.
 
 ## Haskell Design Conventions (`~/dev/haskell-design-system`)
@@ -98,12 +97,11 @@ The database must always be migrated with the Rust runner first: run `make db-mi
 Soft conventions: they apply only where the Rust oracle and the plan rules (`.lavish/rust-port-plan.html` §6) are silent. The oracle wins on behavior; the plan wins on architecture.
 
 - Two layers (ADR-0006): plain-Haskell internals (no Bluefin imports) hold all logic and tests; thin Bluefin capabilities live only at the external seam. Bluefin may depend inward, never outward.
-- Errors (Rule 3): per-domain `Either` ADTs in the core (`CodecError`, `StepError`, `WorkflowRunError`, the shared `DBOS.SystemDB.Error`); base async exceptions (`AsyncCancelled`) rethrown without recording at the edges. Impure internals constrain effects with `io-classes` where timing must be simulated (ADR-0008: `MonadDelay` in `DBOS.SystemDB.Retry`, IO in production, IOSim in tests); no unified `DbosError`, no `WorkflowCtx` record — the plan §6 records what was predicted vs built.
 - Base funnel: `DBOS.Prelude` re-exports base through short aliases (`import Control.Monad as Monad`, `import Data.Maybe as Base`, alongside the io-classes aliases) — `import DBOS.Prelude` is the only base import a module needs. Never import a funneled base module per-file; when new base names are needed, extend the Prelude with another alias re-export instead. Always prefer io-classes over the `async`/`stm`/exception packages — no `Control.Concurrent.Async`, `Control.Concurrent.STM`, or `Control.Exception` imports; the single sanctioned exception is `AsyncException` identity in `Workflow.hs` (the abort channel matches `ThreadKilled`, which io-classes 1.11 does not expose — noted at the import). Demo apps are client code on the facade and keep explicit `Prelude`, outside the funnel.
-- Tracing (Rule 5): explicit `SomeTracer m` (contra-tracer GADT, universal over event types), never ambient; per-domain event ADTs homed with their owners (`EngineEvent` in `Recovery`, `SysdbEvent` in `Retry`, `WorkflowEvent` in `Step`, `QueueEvent` in `Dequeue`, `ManagementEvent` in `Management`) with `LogEvent`+`ToLogStr`; a line is severity + constructor name + prose (`renderLine`, the name from `show`), and the IO backend prefixes FastLogger's time and the emitting `ThreadId` (pre-formatted once per thread in a capped cache, `LoggerBackend`'s second field) and renders only events at or above its `TRACE_LEVEL` floor (read once at acquisition; below-floor events are dropped before formatting); emission only through `runTracer`; `showText` in the Prelude. FastLogger Rank-N backend on IO (stderr — stdout carries results), `traceM` on IOSim (the sim carrier also says each rendered line, for `printSimTrace`); sim trees print via the test-owned carrier (`printSimTrace` to pane stderr, never into `ghcid.txt`); co-log is out (ADR-0015).
+- Tracing (Rule 5): explicit `SomeTracer m` (contra-tracer GADT, universal over event types), never ambient; per-domain event ADTs homed with their owners (`EngineEvent` in `Recovery`, `SysdbEvent` in `Retry`, `WorkflowEvent` in `Step`, `QueueEvent` in `Dequeue`, `ManagementEvent` in `Management`) with `LogEvent`+`ToLogStr`; a line is severity + constructor name + prose (`renderLine`, the name from `show`), and the IO backend prefixes FastLogger's time and the emitting `ThreadId` (pre-formatted once per thread in a capped cache, `LoggerBackend`'s second field) and renders only events at or above its `TRACE_LEVEL` floor (read once at acquisition; below-floor events are dropped before formatting); emission only through `runTracer`; `showText` in the Prelude. FastLogger Rank-N backend on IO (stderr — stdout carries results), `traceM` on IOSim (the sim carrier also says each rendered line, for `printSimTrace`); sim trees print via the test-owned carrier (`printSimTrace` to pane stderr, never into `ghcid.txt`); co-log is retired (ADR-0015; no dependency and no import remains — do not reintroduce it).
 - Sim mirrors (ADR-0020): a `*Sim` case must drive the same engine functions as its live half — only the backend and the scheduler/clock may differ. Staged effects, re-encoded call sequences, hand-emitted events, and test-side `forkIO`/`killThread`/poll stand-ins are defects; cases the simulator cannot run (preemption-dependent) are marked IO-only with an `-- IO only:` comment above the case (plain name; the reason also lives in ADR-0020's running list), never dropped. Build plan: `docs/dual-stack-concurrency-todo.md`.
 - Deriving: every clause carries an explicit `stock`/`newtype` strategy.
-- Records (`NoFieldSelectors` + `OverloadedRecordDot`, both in cabal `default-extensions`).
+- Records (`NoFieldSelectors` + `OverloadedRecordDot` + `DuplicateRecordFields` + `RecordWildCards`, all in cabal `default-extensions`).
   Field access, in this order — stop at the first that fits:
   1. **Record dot** — the default. Requires the field in scope (import it,
      e.g. `WorkflowCtx (wctxConn)`) and a record type concrete enough for
@@ -127,22 +125,22 @@ Soft conventions: they apply only where the Rust oracle and the plan rules (`.la
      rest come from the in-scope bind: `let MkA {..} = myA in MkA {c = 13, ..}`.
      It is a cabal default (and a `.ghci` `:set`, like the other record
      extensions); the spread reads plain in-scope variables, so it sidesteps
-     duplicate-field ambiguity rather than resolving it.
-  3. **Record pattern with a type annotation or TypeApplication** — when the
-     type cannot be inferred at the pattern. GHC 9.12 rejects a type
-     application on a record constructor (`R @Int{f = 1}` is a parse error), so
-     annotate the scrutinee or the field instead:
+     duplicate-field ambiguity rather than resolving it. `..` takes no
+     expression — `C {..}` and `C {f = x, ..}` only, never `C {..e}`; updates
+     accept no `..` at all (`GHC-70712`).
+  3. **Record pattern with a type annotation** — when the
+     type cannot be inferred at the pattern. Annotate
+     the scrutinee or the field instead:
      `case (found :: Maybe WorkflowRecord) of ...`,
      `(R {f = x :: Int})`, `Right (numbers :: [Int]) -> ...` (`WorkflowTest`).
      An annotation can also pin an *update's* target:
      `(myA :: A) {c = 13}` — but on a field name shared under
      `DuplicateRecordFields` this is the type-directed disambiguation GHC
      deprecates (`-Wambiguous-fields` fires by default). The warning is a
-     future-GHC deprecation, not an error: when the type-directed
-     disambiguation is intended, it is safe to silence per file with
-     `{-# OPTIONS_GHC -Wno-ambiguous-fields #-}`; otherwise prefer the
+     future-GHC deprecation, not an error, and it is already silenced
+     project-wide (`-Wno-ambiguous-fields` in cabal `ghc-options`), so no
+     per-file pragma is needed; otherwise prefer the
      rule-2 spread or the rule-4 qualified field.
-     TypeApplications are only for non-record constructors: `go (Just @Int x) = ...`.
   4. **Module-qualified constructor (and qualified fields in construction, update,
      and patterns)** — last resort for duplicate-field ambiguity:
      `SystemDBError.WorkflowCancelled {workflowId = workflowId wctx'}` and
@@ -160,8 +158,11 @@ Soft conventions: they apply only where the Rust oracle and the plan rules (`.la
      Dot reads cannot be
      qualified (`r.M.f` is a parse error), so a qualified read goes through
      2 or 3, never a dot chain.
+- DO import records narrowly: `(..)` imports are the collision surface — prefer
+  member imports (`WorkflowCtx (wctxConn)`) or the qualified form
+  (`import Context qualified as WorkflowCtx (WorkflowCtx (..))`); a full `(..)`
+  of two records sharing a bare name in one module is ambiguous.
 - DO update and construct with record syntax: `row { rowWorkflowId = wid }`, `SerializedWorkflowValue { serializedText = t, ... }`.
-- DO add a per-file `{-# LANGUAGE OverloadedRecordDot #-}` wherever dot syntax is used (ghci loads don't inherit cabal defaults; `.ghci` keeps it `:seti`).
 - DON'T call bare field selectors as functions (`rowWorkflowId row`) — they don't exist under `NoFieldSelectors`.
 - DON'T reach for optics (`optics`/`aeson-optics`/`optics-th`) for reads or simple updates — optics is reserved for deep nested updates only. No such case exists, so the deps stay out (`aeson-optics` is additionally unusable: capped at `base<4.20`, incompatible with GHC 9.12).
 - `.ghci` discipline: `:set` iff cabal enables it, else `:seti` (a `:set -XNoFieldSelectors` once broke every ghci load while cabal stayed green).

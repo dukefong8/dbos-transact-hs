@@ -36,8 +36,7 @@
 -- and "DBOS.Transact.Context" imports this module for the carrier its
 -- 'WorkflowCtx' field holds, so the instances live beside the records there.
 --
--- Rule 4: plain Haskell, no Bluefin imports. Rule 5: the tracer is passed
--- explicitly, never ambient. No @co-log@ import anywhere in this module.
+-- Rule 5: the tracer is passed explicitly, never ambient.
 module DBOS.Transact.Logger
   ( -- * The app-facing helpers
     logDebug,
@@ -85,9 +84,8 @@ import DBOS.Prelude
 import System.Environment (lookupEnv)
 import System.Log.FastLogger (LogStr, LogType' (..), TimedFastLogger, ToLogStr (..), defaultBufSize, newTimeCache, newTimedFastLogger)
 
--- | Severity as data: which tag the rendered line carries. Mirrors the
--- four co-log levels the engine's call sites used, without the library.
--- The constructor order is the severity order, so the derived 'Ord' is
+-- | Severity as data: which tag the rendered line carries. The four levels
+-- the engine's call sites used, in severity order, so the derived 'Ord' is
 -- what the backend's @TRACE_LEVEL@ threshold compares against.
 data LogSeverity
   = SeverityDebug

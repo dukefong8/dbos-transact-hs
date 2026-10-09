@@ -257,8 +257,8 @@ withWidgetFixture body = do
             -- default) would sweep other tests' queue fixtures.
             configListenQueues = Just []
           }
-  -- The app datasource reads the app's own database: @DATABASE_URL@ when
-  -- set, else the system URL.
+  -- The app datasource reads the app's own database: @APP_DATABASE_URL@
+  -- when set, else the system URL.
   app <- acquireAppDataSourceInFromEnv schema config0.configDatabaseUrl 2
   tables <- pure (widgetTables schema)
   createWidgetSchema app tables

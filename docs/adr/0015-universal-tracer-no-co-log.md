@@ -1,4 +1,8 @@
-# Universal tracer over contra-tracer; co-log deleted (supersedes ADR-0013/0014)
+# Universal tracer over contra-tracer; co-log retired (supersedes ADR-0013/0014)
+
+Status: current. This is the decision that retired co-log — it is out of the
+cabal file, out of `make env`, and out of every module's imports; nothing is
+left to migrate.
 
 `DBOS.Logger` (co-log `LogAction m Text`) is deleted. Its replacement is `DBOS.Transact.Logger`'s `SomeTracer` GADT — one universal carrier over the Rank-N shape both backends already have:
 

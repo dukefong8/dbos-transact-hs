@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
 
 -- | The client: reaching a DBOS application from outside it. Mirrors Rust
 -- @client.rs@: a client talks only to the system database — it enqueues
@@ -9,7 +9,7 @@
 -- has no application version of its own.
 --
 -- Queue, schedule, and version surfaces shared with the application ride the
--- same SystemDB methods; porting them onto 'Client' is L2 follow-up (NOTE).
+-- same SystemDB methods.
 module DBOS.Transact.Client
   ( -- * Configuration
     ClientConfig (..),
@@ -47,46 +47,25 @@ module DBOS.Transact.Client
   )
 where
 
-import DBOS.Prelude
 import Data.Aeson (Value)
 import Data.Map.Strict (Map)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
+import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types
-  ( Duration,
-    EncodedValue (..),
-    Fork (..),
-    ForkOptions (..),
-    IdempotencyKey (..),
-    NewWorkflow (..),
-    SendMessage (..),
-    Serialization (..),
-    SerializedWorkflowValue (..),
-    StepRecord,
-    Submission (..),
-    Topic (..),
-    VersionInfo (..),
-    WorkflowFilter (..),
-    WorkflowId (..),
-    WorkflowRecord (..),
-    WorkflowStatus,
-    durationIsZero,
-    newWorkflow,
-    timestampNow,
-  )
-import DBOS.Transact.Serialization (encodeAttributes)
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewWorkflow (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, timestampNow)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
-import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), releaseConnection, generatedWorkflowId, newConnection, runSystemDB, withConnection)
+import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, runSystemDB, withConnection)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
 import DBOS.Transact.Logger (nullTracer)
+import DBOS.Transact.Serialization (encodeAttributes)
 import DBOS.Transact.Workflow (Enqueue (..), enqueueNew, maxRecoveryAttempts, resolveEnqueueCollision, storedPriority, validateEnqueue)
 import System.Environment (lookupEnv)
 
@@ -95,14 +74,14 @@ import System.Environment (lookupEnv)
 -- listen set, and no migrate — four fields that must not be set is four
 -- fields that should not exist.
 data ClientConfig = ClientConfig
-  { appName :: Maybe Text,
-    databaseUrl :: Text,
-    maxConnections :: Word,
-    schema :: Text,
-    serializer :: Serializer,
-    useListenNotify :: Bool,
-    pollingConcurrency :: Maybe Word,
-    outcomePollInterval :: Maybe Duration,
+  { appName              :: Maybe Text,
+    databaseUrl          :: Text,
+    maxConnections       :: Word,
+    schema               :: Text,
+    serializer           :: Serializer,
+    useListenNotify      :: Bool,
+    pollingConcurrency   :: Maybe Word,
+    outcomePollInterval  :: Maybe Duration,
     notificationCoalesce :: Maybe Duration
   }
   deriving stock (Eq, Show)
@@ -220,13 +199,13 @@ closeClient client = releaseConnection client.conn
 -- where the runtime's start keeps them too, so the two surfaces never spell
 -- the same things differently.
 data EnqueueOptions = EnqueueOptions
-  { queue :: Enqueue,
+  { queue      :: Enqueue,
     workflowId :: Maybe Text,
-    className :: Maybe Text,
+    className  :: Maybe Text,
     configName :: Maybe Text,
-    appName :: Maybe Text,
+    appName    :: Maybe Text,
     appVersion :: Maybe Text,
-    timeout :: Maybe Duration,
+    timeout    :: Maybe Duration,
     attributes :: Maybe (Map Text Value)
   }
   deriving stock (Eq, Show)
@@ -273,10 +252,10 @@ enqueueClientWorkflowWith client workflowName options input = do
           workflowText = fromMaybe generated options.workflowId
           serialization = case input >>= (.serializedSerialization) of
             Just (Serialization name) -> Just name
-            Nothing -> Just (serializerName client.conn.connSerializer)
+            Nothing                   -> Just (serializerName client.conn.connSerializer)
           applicationName = case options.appName of
             Just name -> Just name
-            Nothing -> client.conn.connAppName
+            Nothing   -> client.conn.connAppName
           new =
             (newWorkflow workflowText)
               { newWorkflowName = Just workflowName,
@@ -298,7 +277,7 @@ enqueueClientWorkflowWith client workflowName options input = do
               }
       initialized <- runSystemDB client.conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh Nothing)
       case initialized of
-        Right _ -> pure (Right (handle True workflowText))
+        Right _  -> pure (Right (handle True workflowText))
         Left err -> resolveEnqueueCollision client.conn shape workflowText err
   where
     handle failMissing workflowText =
@@ -319,8 +298,8 @@ workflowStatusClient :: Monad m
 workflowStatusClient client workflowId = do
   result <- withConnection client.conn (\db -> SystemDB.getWorkflow db workflowId)
   pure $ case result of
-    Left err -> Left err
-    Right Nothing -> Right Nothing
+    Left err            -> Left err
+    Right Nothing       -> Right Nothing
     Right (Just record) -> Right (Just record.workflowRecordStatus)
 
 -- | Send one message to a workflow from outside, the caller unrecorded.

@@ -90,13 +90,13 @@ What does **not** exist (all probed, see Evidence):
 
 ## 3. What the repo rules say
 
-**Two layers (Rule 4).** `AGENTS.md:61`: "Two layers: plain-Haskell internals
+**Two layers.** `AGENTS.md:61`: "Two layers: plain-Haskell internals
 hold all logic; Bluefin 0.9 `Ask`/`IOE` capabilities live only at the
 external seam, never in internals." `AGENTS.md:68`: "plain-Haskell internals
 (**no Bluefin imports**) hold all logic and tests". ADR-0006 says the same:
 "The internal layer is plain Haskell with no Bluefin imports"
 (`docs/adr/0006-two-layer-bluefin-seam.md:3`). The prohibition is **Bluefin
-specifically**, not every effect framework — and plan Rule 4 goes further,
+specifically**, not every effect framework — and the plan goes further,
 listing "`MonadAsync/MonadSTM` constraints for io-sim" as part of the
 internal layer (`.lavish/rust-port-plan.html:242`). The plan's stated target
 is "Built on plain `IO` + `io-classes` with `io-sim` tests"
@@ -137,7 +137,7 @@ it carries no SQLSTATE/kind to classify on.
 
 | Effect (Rust) | io-classes class (or none) | Fits two-layer rule? | Recommendation |
 |---|---|---|---|
-| Sleep (`retry.rs:118`) | `MonadDelay.threadDelay :: Int -> m ()` (`MonadTimer.hs:29`); IOSim instance `Types.hs:722` | Yes — io-classes ≠ Bluefin (`AGENTS.md:61,68`); Rule 4 explicitly allows monad constraints in internals (`rust-port-plan.html:242`) | **Adopt** `MonadDelay` for the retry core. It is the one class both backends already satisfy, and it is what makes retry delays virtual-time deterministic. Keep `Millis` and the existing microsecond conversion (`Step.hs:123-124`). |
+| Sleep (`retry.rs:118`) | `MonadDelay.threadDelay :: Int -> m ()` (`MonadTimer.hs:29`); IOSim instance `Types.hs:722` | Yes — io-classes ≠ Bluefin (`AGENTS.md:61,68`); the two-layers rule explicitly allows monad constraints in internals (`rust-port-plan.html:242`) | **Adopt** `MonadDelay` for the retry core. It is the one class both backends already satisfy, and it is what makes retry delays virtual-time deterministic. Keep `Millis` and the existing microsecond conversion (`Step.hs:123-124`). |
 | Timeouts (`registerDelay`/`timeout`) | `MonadTimer` (`MonadTimer.hs:32-38`) | Yes | **Reject for retry**: `retry.rs` has no timeout; cancellation is the caller's (`retry.rs:83-85`). Defer `MonadTimer` until a caller needs it. `timeoutCancellable` does not exist in 1.11 (only `si-timers`' `registerDelayCancellable`, not a direct dep). |
 | Wall clock | `MonadTime`/`MonadMonotonicTimeNSec` (`MonadTime.hs:23-35`) | Yes | **Reject for retry**: `retry.rs` never reads a clock; the sleep is relative. Relevant only if/when `sleepStep`'s `getPOSIXTime` (`Step.hs:120-121`) is generalized. |
 | Entropy for jitter (`retry.rs:134`) | **None exists** (probe: no `MonadRandom`) | n/a | **Adopt a pure-argument shape**: `jitter :: Word32 -> Millis -> Millis` plus an injected `m Word32` source. Production: `uuid` v4 (already a dep; mirrors Rust). Sim: deterministic counter/list (mirrors `io-sim-simulations.md:148-151`). **Reject** `MonadUnique` (counter, not uniform, `MonadUnique.hs:39`) and `MonadST`+STRef as the default (see §5). |

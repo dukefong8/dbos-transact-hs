@@ -2561,8 +2561,8 @@ data NotificationRecordRaw = NotificationRecordRaw
 allNotificationsStatement :: Statement.Statement Text [NotificationRecordRaw]
 allNotificationsStatement =
   Statement.preparable
-    ( "select message_uuid, topic::text, message, serialization, created_at_epoch_ms, consumed \
-      \from dbos.notifications where destination_uuid = $1 order by created_at_epoch_ms" )
+    "select message_uuid, topic::text, message, serialization, created_at_epoch_ms, consumed \
+      \from dbos.notifications where destination_uuid = $1 order by created_at_epoch_ms"
     (Encoders.param (Encoders.nonNullable Encoders.text))
     ( Decoders.rowList
         ( NotificationRecordRaw

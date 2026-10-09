@@ -1,19 +1,17 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
 
--- | Application-pool binding for transactional steps (Rule 4: plain
--- Haskell, no Bluefin imports). The live 'DataSource' behind
--- 'DBOS.Transact.Datasource': a hasql pool for affinity-free sessions
--- (pre-checks, verification) plus one raw connection per transaction,
--- driven with explicit @BEGIN@/@COMMIT@/@ROLLBACK@ so an @IO@ body
--- sequenced between statements shares the commit (ADR-0021 addendum —
--- @runTransactionAt@ only accepts closed @Tx.Transaction@ bodies, which
--- an @IO@ body cannot join). Checkpoint statements are hand-written
--- 'Statement' values over the configured schema (default @dbos@; the demo
--- runs @widget_store@) (ADR-0011: typedSql
--- sessions do not compose, and here there is no transaction to compose
--- into — each statement runs via 'txStatement' on the held connection).
--- Verify-only: tables are checked, never migrated (ADR-0004).
+-- | Application-pool binding for transactional steps. The live 'DataSource'
+-- behind 'DBOS.Transact.Datasource': a hasql pool for affinity-free sessions
+-- (pre-checks, verification) plus one raw connection per transaction, driven
+-- with explicit @BEGIN@/@COMMIT@/@ROLLBACK@ so an @IO@ body sequenced between
+-- statements shares the commit — the transaction scope has to outlive
+-- individual statements and keep its connection pinned for their whole span,
+-- which a pooled session cannot do. Checkpoint statements are hand-written
+-- 'Statement' values over the configured schema (default @dbos@) (ADR-0011:
+-- typedSql sessions do not compose, and here there is no transaction to
+-- compose into — each statement runs via 'txStatement' on the held
+-- connection). Verify-only: tables are checked, never migrated (ADR-0004).
 module DBOS.Transact.Datasource.Postgres
   ( AppDataSource,
     acquireAppDataSource,
@@ -27,9 +25,14 @@ module DBOS.Transact.Datasource.Postgres
   )
 where
 
-import DBOS.Prelude
 import Data.Int (Int32)
 import Data.Text qualified as Text
+import DBOS.Prelude
+import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput, renderError)
+import DBOS.SystemDB.Postgres.Backend qualified as SystemPostgres (classifyUsageError)
+import DBOS.SystemDB.Types (WorkflowId (..))
+import DBOS.Transact.Config qualified as Config
+import DBOS.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), Tx (..))
 import Hasql.Connection qualified as Connection
 import Hasql.Connection.Settings qualified as ConnSettings
 import Hasql.Decoders qualified as Decoders
@@ -38,11 +41,6 @@ import Hasql.Pool qualified as Pool
 import Hasql.Pool.Config qualified as PoolConfig
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
-import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput, renderError)
-import DBOS.SystemDB.Postgres.Backend qualified as SystemPostgres (classifyUsageError)
-import DBOS.Transact.Config qualified as Config
-import DBOS.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), Tx (..))
-import DBOS.SystemDB.Types (WorkflowId (..))
 
 -- | An application database behind a transactional-step datasource: a
 -- pool for sessions plus the settings to open per-transaction
@@ -51,8 +49,8 @@ import DBOS.SystemDB.Types (WorkflowId (..))
 -- interpolates the validated schema.
 data AppDataSource = AppDataSource
   { appSessionPool :: Pool.Pool,
-    appSettings :: ConnSettings.Settings,
-    appSchema :: Text
+    appSettings    :: ConnSettings.Settings,
+    appSchema      :: Text
   }
 
 -- | Open the pool over the default @dbos@ checkpoint schema. Never
@@ -60,14 +58,14 @@ data AppDataSource = AppDataSource
 acquireAppDataSource :: Text -> Int -> IO AppDataSource
 acquireAppDataSource = acquireAppDataSourceIn "dbos"
 
--- | Open the pool taking the URL from the environment: @DATABASE_URL@ (the
--- deployment convention for an application's own database), falling back to
--- the system URL the caller passes for single-database setups. The schema is
--- the checkpoint schema, as in 'acquireAppDataSourceIn'.
+-- | Open the pool taking the URL from the environment: @APP_DATABASE_URL@
+-- (the application datasource's own database), falling back to the system
+-- URL the caller passes for single-database setups. The schema is the
+-- checkpoint schema, as in 'acquireAppDataSourceIn'.
 acquireAppDataSourceInFromEnv :: Text -> Text -> Int -> IO AppDataSource
 acquireAppDataSourceInFromEnv schema systemUrl maxConnections = do
   appUrl <- Config.appDatabaseUrlFromEnv
-  acquireAppDataSourceIn schema (maybe systemUrl id appUrl) maxConnections
+  acquireAppDataSourceIn schema (fromMaybe systemUrl appUrl) maxConnections
 
 -- | Open the pool over a named checkpoint schema, the oracle's
 -- @schemaName@ parameter. The name is validated and quoted before it
@@ -113,13 +111,13 @@ releaseAppDataSource app = Pool.release app.appSessionPool
 beginSql :: Maybe IsolationLevel -> Text
 beginSql isolation =
   case isolation of
-    Nothing -> "BEGIN"
+    Nothing    -> "BEGIN"
     Just level -> "BEGIN TRANSACTION ISOLATION LEVEL " <> levelSql level
   where
     levelSql ReadUncommitted = "READ UNCOMMITTED"
-    levelSql ReadCommitted = "READ COMMITTED"
-    levelSql RepeatableRead = "REPEATABLE READ"
-    levelSql Serializable = "SERIALIZABLE"
+    levelSql ReadCommitted   = "READ COMMITTED"
+    levelSql RepeatableRead  = "REPEATABLE READ"
+    levelSql Serializable    = "SERIALIZABLE"
 
 -- | One session through the pool, outside any transaction: pre-checks,
 -- verification probes, and reads the tests own. Checkpoint writes never
@@ -142,7 +140,7 @@ runAppSession app session = do
 sessionErr :: Pool.UsageError -> BackendError
 sessionErr usage = case SystemPostgres.classifyUsageError usage of
   Backend err -> err
-  other -> BackendError {backendMessage = renderError other, backendSqlState = Nothing, backendKind = Permanent}
+  other       -> BackendError {backendMessage = renderError other, backendSqlState = Nothing, backendKind = Permanent}
 
 -- | The checkpoint table exists. Verify-only: a missing table is a
 -- permanent backend error, never a migration.
@@ -218,7 +216,7 @@ txRunner :: Connection.Connection -> Statement.Statement params result -> params
 txRunner conn stmt params = do
   ran <- Connection.use conn (Session.statement params stmt)
   case ran of
-    Left se -> throwIO (Backend (sessionErr (Pool.SessionUsageError se)))
+    Left se     -> throwIO (Backend (sessionErr (Pool.SessionUsageError se)))
     Right value -> pure value
 
 -- | The live 'DataSource': pre-checks through the pool, transactions on
@@ -237,11 +235,11 @@ toDataSource app =
             Just message -> Right (Just (RecordedError message))
             Nothing -> case output of
               Just text -> Right (Just (RecordedOutput text))
-              Nothing -> Right Nothing,
+              Nothing   -> Right Nothing,
       dsWithTransaction = \isolation action -> do
         attempted <- try (transactionAttempt isolation action)
         pure $ case attempted of
-          Left err -> Left (unwrapBackend err)
+          Left err      -> Left (unwrapBackend err)
           Right outcome -> outcome,
       dsStepName = \(WorkflowId widText) step ->
         runAppSession app (Session.statement (widText, fromIntegral step) (nameTxStatement app.appSchema)),
@@ -286,7 +284,7 @@ toDataSource app =
               Right value -> do
                 done <- Connection.use conn (Session.script "COMMIT")
                 case done of
-                  Left se -> pure (Left (sessionErr (Pool.SessionUsageError se)))
+                  Left se  -> pure (Left (sessionErr (Pool.SessionUsageError se)))
                   Right () -> pure (Right value)
     rollbackQuiet :: Connection.Connection -> IO ()
     rollbackQuiet conn = do
@@ -295,4 +293,4 @@ toDataSource app =
     unwrapBackend :: Error -> BackendError
     unwrapBackend err = case err of
       Backend backend -> backend
-      _ -> BackendError {backendMessage = renderError err, backendSqlState = Nothing, backendKind = Permanent}
+      _               -> BackendError {backendMessage = renderError err, backendSqlState = Nothing, backendKind = Permanent}

@@ -8,8 +8,8 @@
 -- @validate@, and @outcome_poll_interval@.
 --
 -- The system database comes from @DBOS_DATABASE_URL@; the application's own
--- datasource reads @DATABASE_URL@ (see 'appDatabaseUrlFromEnv'), so the two
--- may point at different servers.
+-- datasource reads @APP_DATABASE_URL@ (see 'appDatabaseUrlFromEnv'), so the
+-- two may point at different servers.
 module DBOS.Transact.Config
   ( databaseUrlEnv,
     appDatabaseUrlEnv,
@@ -36,11 +36,12 @@ databaseUrlEnv :: Text
 databaseUrlEnv = "DBOS_DATABASE_URL"
 
 -- | The variable the *application* datasource reads: the app's own database,
--- which may be a different server than the system database. @DATABASE_URL@ is
--- the deploy convention libpq tooling and the compile-time typedSql describe
--- already use; a single-database deployment sets both to the same URL.
+-- which may be a different server than the system database. Distinct from
+-- the system database's @DBOS_DATABASE_URL@, and from the plain
+-- @DATABASE_URL@ that libpq tooling and the compile-time typedSql describe
+-- already use; a single-database deployment sets all three to the same URL.
 appDatabaseUrlEnv :: Text
-appDatabaseUrlEnv = "DATABASE_URL"
+appDatabaseUrlEnv = "APP_DATABASE_URL"
 
 -- | The application datasource URL from the environment, or 'Nothing' when
 -- unset or empty. The caller decides the fallback (usually the system URL).

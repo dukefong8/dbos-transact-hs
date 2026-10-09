@@ -10,10 +10,9 @@
 -- pool, in one module. The session half pins each statement's SQL
 -- (explicit column lists; star selects are rejected at compile time) and
 -- decodes rows into domain types at the boundary; the pool half runs those
--- sessions with polling loops for blocking reads. Plain Haskell, no Bluefin
--- imports — the Bluefin seam lives outward of this module.
+-- sessions with polling loops for blocking reads.
 module DBOS.SystemDB.Postgres.Backend
-  (     Pool.Pool,
+  ( Pool.Pool,
     WorkflowStartDecision (..),
     DbosMigration (..),
     acquirePool,

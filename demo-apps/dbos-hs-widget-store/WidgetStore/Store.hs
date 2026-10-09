@@ -16,7 +16,8 @@
 -- engine's held connection inside a workflow step (@Tx.txStatement@ — the
 -- application write and the step checkpoint share one commit), and through
 -- the datasource pool in a handler (@runAppSession . Session.statement ()@).
--- The compile-time typedSql describe connects to @$DATABASE_URL@, so
+-- The compile-time typedSql describe connects to @$DATABASE_URL@ (the
+-- quasiquoter's own variable, not the datasource's @APP_DATABASE_URL@), so
 -- @make widget-db@ (schema.sql) must have run before the first build.
 --
 -- typedSql names the shapes: primary keys decode as @Id' table@ (the type

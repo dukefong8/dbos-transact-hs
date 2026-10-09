@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
 
 -- | Durable sleep, one-to-one with Rust @sleep.rs@: record the wake time,
 -- wait until it, and on replay wait only what is left of the original wait.
@@ -7,15 +7,15 @@
 -- the wake time, so an hour's sleep reads as an hour rather than an instant.
 module DBOS.Transact.Sleep (sleepStep, pendingSleep, sleepPlain, SleepEvent (..)) where
 
-import DBOS.Prelude
 import Data.Int (Int64)
-import System.Log.FastLogger (ToLogStr (..))
+import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
-import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
-import DBOS.Transact.Context (WorkflowCtx (wctxTracer), stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
+import DBOS.Transact.Context (WorkflowCtx (wctxTracer), stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
+import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
+import System.Log.FastLogger (ToLogStr (..))
 
 -- | Announcements from the sleep paths, homed here with their owner.
 -- Mirrors the @sleep.rs@ debug sites: an uncheckpointed sleep inside a
@@ -29,7 +29,7 @@ data SleepEvent
 
 instance LogEvent SleepEvent where
   eventSeverity SleepUncheckpointed {} = SeverityDebug
-  eventSeverity SleepUntilWake {} = SeverityDebug
+  eventSeverity SleepUntilWake {}      = SeverityDebug
   renderEvent (SleepUncheckpointed durationMs) =
     "the sleep is not checkpointed: it is outside a workflow, or inside a step duration_ms=" <> showText durationMs
   renderEvent (SleepUntilWake stepId' remainingMs) =
@@ -62,7 +62,7 @@ driveSleep wctx duration placement =
       -- Inside a step the sleep is plain: the enclosing step's checkpoint
       -- stands for everything its body did, and taking an id here would shift
       -- every step after it on replay. Mirrors Rust's @InsideStep@ placement.
-      runTracer (wctx.wctxTracer) (SleepUncheckpointed (durationAsMillis duration))
+      runTracer wctx.wctxTracer (SleepUncheckpointed (durationAsMillis duration))
       sleepPlain duration >> pure (Right ())
     Right (DurabilityRecorded wctx' stepId') -> do
       let workflowId' = WorkflowId (workflowId wctx')
@@ -72,7 +72,7 @@ driveSleep wctx duration placement =
         Right wakeAt -> do
           now <- timestampNow
           let remainingMillis = max 0 (timestampToEpochMs wakeAt - timestampToEpochMs now)
-          runTracer (wctx'.wctxTracer) (SleepUntilWake stepId' remainingMillis)
+          runTracer wctx'.wctxTracer (SleepUntilWake stepId' remainingMillis)
           threadDelay (millisToMicros remainingMillis)
           pure (Right ())
 

@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
 
--- | Internal workflow runner (Rule 4: plain Haskell, no Bluefin imports).
--- Runs a registered body and records its outcome: @SUCCESS@ with the output,
--- or @ERROR@ with the failure. A missing row is started first; an existing
--- row runs straight into the body, whose steps replay from their
+-- | Internal workflow runner. Runs a registered body and records its outcome:
+-- @SUCCESS@ with the output, or @ERROR@ with the failure. A missing row is
+-- started first; an existing row runs straight into the body, whose steps
+-- replay from their
 -- checkpoints — which is the whole of crash recovery at this layer. A row
 -- that already carries an outcome replays it without running the body, and a
 -- row owned by another executor is left alone (@WorkflowClaimLost@):
