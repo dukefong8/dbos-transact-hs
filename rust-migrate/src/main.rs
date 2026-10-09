@@ -19,9 +19,9 @@ use migrations::DEFAULT_SCHEMA;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let url = std::env::var("DATABASE_URL")
+    let url = std::env::var("APP_DATABASE_URL")
         .or_else(|_| std::env::var("DBOS_DATABASE_URL"))
-        .expect("DATABASE_URL or DBOS_DATABASE_URL must be set");
+        .expect("APP_DATABASE_URL or DBOS_DATABASE_URL must be set");
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&url)
