@@ -28,6 +28,8 @@ import DBOS.Transact.StepCases
     checkNestedEnclosing,
     checkNestedPlain,
     checkNestedStepView,
+    checkNestedWorkflowId,
+    checkSmuggledPlain,
     checkPendingScoped,
     checkRecordReplay,
     checkScopedView,
@@ -36,6 +38,8 @@ import DBOS.Transact.StepCases
     scenarioNestedEnclosing,
     scenarioNestedPlain,
     scenarioNestedStepView,
+    scenarioNestedWorkflowId,
+    scenarioSmuggledPlain,
     scenarioPendingScoped,
     scenarioRecordReplay,
     scenarioScopedView,
@@ -87,6 +91,14 @@ tests =
           fixture <- mkStepFixture getBackend
           out <- scenarioNestedStepView fixture
           either fail pure (checkNestedStepView out),
+      testCase "a nested step returns its workflow's id and records only the outer step" $ do
+          fixture <- mkStepFixture getBackend
+          out <- scenarioNestedWorkflowId fixture
+          either fail pure (checkNestedWorkflowId out),
+      testCase "a recorded step through a captured parent goes plain and takes no id" $ do
+          fixture <- mkStepFixture getBackend
+          out <- scenarioSmuggledPlain fixture
+          either fail pure (checkSmuggledPlain out),
       testCase "a pending scoped step claims its id at build and replays" $ do
           fixture <- mkStepFixture getBackend
           out <- scenarioPendingScoped fixture

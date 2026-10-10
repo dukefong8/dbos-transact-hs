@@ -56,6 +56,7 @@ Only the implemented subset is present. TS-only topics (`lifecycle-express`, `pa
 
 **Step** (`step-`):
 - `references/step-basics.md`
+- `references/step-nesting.md`
 - `references/step-retries.md`
 - `references/step-timeouts.md`
 - `references/step-transactions.md`

@@ -21,6 +21,7 @@ import DBOS.Transact
   )
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Datasource (TransactionEvent (..))
+import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.DatasourceCases
   ( DsFixture (..),
@@ -33,6 +34,8 @@ import DBOS.Transact.DatasourceCases
     checkDefaultConfig,
     checkDeleteCheckpoints,
     checkErrorReplays,
+    checkNestedInTx,
+    checkOutsideReexecutes,
     checkOwnershipMoved,
     checkPrecheckRetry,
     checkRegistryLifecycle,
@@ -47,6 +50,8 @@ import DBOS.Transact.DatasourceCases
     scenarioDefaultConfig,
     scenarioDeleteCheckpoints,
     scenarioErrorReplays,
+    scenarioNestedInTx,
+    scenarioOutsideReexecutes,
     scenarioOwnershipMoved,
     scenarioPrecheckRetry,
     scenarioRegistryLifecycle,
@@ -101,10 +106,12 @@ tests =
       simCase (pure simDsFixture) "retriable failures are retried, then the body runs" scenarioRetryThenSuccess checkRetryThenSuccess traceRetryThenSuccess,
       simCase (pure simDsFixture) "a duplicate execution that won is adopted" scenarioConflictAdopts checkConflictAdopts traceConflictAdopts,
       simCase (pure simDsFixture) "a call through a captured parent is refused and records nothing" scenarioCaptureRefused checkCaptureRefused traceCaptureRefused,
+      simCase (pure simDsFixture) "a nested step inside a transaction runs plainly and records once" scenarioNestedInTx checkNestedInTx traceNestedInTx,
       testCase "beginSql names every isolation level" (either fail pure (checkBeginSql scenarioBeginSql)),
       simCase (memDsFixture <$> newMemDB) "an ownership move stops the execution instead of adopting" (\fx -> scenarioOwnershipMoved fx "ds-own-sim") checkOwnershipMoved traceOwnershipMoved,
       simCase (pure simDsFixture) "a transient pre-check read is retried, then the transaction runs" scenarioPrecheckRetry checkPrecheckRetry tracePrecheckRetry,
       simCase (pure simDsFixture) "outside a workflow the body runs transactionally and checkpoints nothing" (\_ -> scenarioRunsOutside mkFakeDs) checkRunsOutside traceRunsOutside,
+      simCase (pure simDsFixture) "an unrecorded transaction re-runs on every execution" scenarioOutsideReexecutes checkOutsideReexecutes traceOutsideReexecutes,
       simCase (pure simDsFixture) "deleting from a step drops later checkpoints and re-runs" scenarioDeleteCheckpoints checkDeleteCheckpoints traceDeleteCheckpoints,
       simCase (RegistryFixture <$> simInstance <*> (memDsFixture <$> newMemDB)) "the datasource registry refuses duplicates and clears checkpoints" (\(RegistryFixture dbos fx) -> scenarioRegistryLifecycle dbos fx "ds-wf-registry") checkRegistryLifecycle traceRegistryLifecycle
     ]
@@ -157,6 +164,16 @@ traceCaptureRefused :: SimTrace a -> IO ()
 traceCaptureRefused tr =
   (selectTraceEventsDynamic tr :: [TransactionEvent]) @?= []
 
+-- The tx checkpoints once; the inner call announces its plain run beside
+-- it — the cross-domain trace both halves of the case own.
+traceNestedInTx :: SimTrace a -> IO ()
+traceNestedInTx tr = do
+  (selectTraceEventsDynamic tr :: [TransactionEvent])
+    @?= [ TransactionRunning "ds-wf-nested-tx" "proto_step" 0,
+          TransactionOutputRecorded "ds-wf-nested-tx" "proto_step" 0
+        ]
+  (selectTraceEventsDynamic tr :: [WorkflowEvent]) @?= [StepPlain "inner"]
+
 tracePrecheckRetry :: SimTrace a -> IO ()
 tracePrecheckRetry tr =
   (selectTraceEventsDynamic tr :: [TransactionEvent])
@@ -167,6 +184,11 @@ tracePrecheckRetry tr =
 
 traceRunsOutside :: SimTrace a -> IO ()
 traceRunsOutside tr =
+  (selectTraceEventsDynamic tr :: [TransactionEvent]) @?= []
+
+-- Neither execution announces: unrecorded runs leave no trace either.
+traceOutsideReexecutes :: SimTrace a -> IO ()
+traceOutsideReexecutes tr =
   (selectTraceEventsDynamic tr :: [TransactionEvent]) @?= []
 
 traceDeleteCheckpoints :: SimTrace a -> IO ()

@@ -18,6 +18,8 @@ module DBOS.Transact.StepCases
   ( StepFixture (..),
     scenarioRecordReplay,
     scenarioNestedPlain,
+    scenarioNestedWorkflowId,
+    scenarioSmuggledPlain,
     scenarioScopedView,
     scenarioNestedStepView,
     scenarioPendingScoped,
@@ -26,6 +28,8 @@ module DBOS.Transact.StepCases
     scenarioTokenQuiet,
     checkRecordReplay,
     checkNestedPlain,
+    checkNestedWorkflowId,
+    checkSmuggledPlain,
     checkScopedView,
     checkNestedStepView,
     checkPendingScoped,
@@ -42,6 +46,7 @@ import DBOS.Transact
     Error (..),
     StepCtx,
     StepOptions (..),
+    WorkflowCtx,
     millisDuration,
     pendingStep,
     runNestedStep,
@@ -55,6 +60,7 @@ import DBOS.Transact.Checkpoint (pendingStepId)
 import DBOS.Transact.Connection (Connection)
 import DBOS.Transact.Context
   ( StepStatus,
+    StepCtx (stepCtxWorkflow),
     firstStepStatus,
     stepCtxStatus,
     stepId,
@@ -63,6 +69,7 @@ import DBOS.Transact.Context
     stepStatusId,
     stepStatusMaxAttempts,
     withWorkflow,
+    workflowId,
   )
 
 -- | How a tree instantiates its world: a fresh connection per run over a
@@ -138,6 +145,72 @@ nestingBody :: forall exec m. (MonadThrow m)
 nestingBody s = do
   inner <- runNestedStep s "inner" (\_ -> pure (7 :: Int))
   case inner of
+    Right n -> pure (n + 1)
+    Left err -> throwIO (userError (show (err :: Error EngineOnly)))
+
+-- | A nested step reads its workflow's id and returns it: the Python
+-- @test_nested_steps@ oracle at the step level. The outer step calls the
+-- inner step for the workflow id; only the outer call checkpoints, so the
+-- result is the id itself, the outer step checkpointed, and the inner call
+-- took no id. Returns the result, the id, and whether each level
+-- checkpointed.
+scenarioNestedWorkflowId :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+                         => StepFixture m ->
+                            m (Text, Text, Bool, Bool)
+scenarioNestedWorkflowId fx = do
+  wid <- fx.sfFreshId "nested-id"
+  let WorkflowId widText = wid
+  fx.sfInitRow wid
+  conn <- fx.sfConnection
+  outer <-
+    withWorkflow conn fx.sfIdentity wid Nothing $ \wctx ->
+      runStep wctx "outer" nestingIdBody
+  result <- orThrow outer
+  placed <- fx.sfCheckStep wid 0 "outer"
+  free <- fx.sfCheckStep wid 1 "inner"
+  pure (result, widText, placed, free)
+
+-- | The nesting body that returns its workflow's id: the inner call reads
+-- the enclosing context's id, proving it ran inside the outer step rather
+-- than through a fresh checkpoint.
+nestingIdBody :: forall exec m. (MonadThrow m)
+              => StepCtx exec m ->
+                 m Text
+nestingIdBody s = do
+  inner <- runNestedStep s "inner" (\innerS -> pure (workflowId innerS.stepCtxWorkflow))
+  case inner of
+    Right widText -> pure widText
+    Left err -> throwIO (userError (show (err :: Error EngineOnly)))
+
+-- | A recorded step reached through a captured parent while a step body
+-- runs goes plain: the smuggled workflow view sees the shared depth and
+-- degrades to the leaf rule instead of checkpointing. Returns the outer
+-- result with whether each level checkpointed.
+scenarioSmuggledPlain :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+                      => StepFixture m ->
+                         m (Int, Bool, Bool)
+scenarioSmuggledPlain fx = do
+  wid <- fx.sfFreshId "smuggled"
+  fx.sfInitRow wid
+  conn <- fx.sfConnection
+  outer <-
+    withWorkflow conn fx.sfIdentity wid Nothing $ \wctx ->
+      runStep wctx "outer" (smuggledBody wctx)
+  result <- orThrow outer
+  placed <- fx.sfCheckStep wid 0 "outer"
+  free <- fx.sfCheckStep wid 1 "smuggled"
+  pure (result, placed, free)
+
+-- | The smuggling body: reaches the recorded entry through the captured
+-- parent instead of the step view, proving the runtime backstop degrades
+-- to plain when the type gate is bypassed.
+smuggledBody :: forall exec m. (MonadSTM m, MonadTime m, MonadCatch m)
+             => WorkflowCtx exec m ->
+                StepCtx exec m ->
+                m Int
+smuggledBody wctx _ = do
+  smuggled <- runStep wctx "smuggled" (\_ -> pure (7 :: Int))
+  case smuggled of
     Right n -> pure (n + 1)
     Left err -> throwIO (userError (show (err :: Error EngineOnly)))
 
@@ -314,6 +387,16 @@ checkRecordReplay = checkEq (42, 42, 1, Just 0)
 -- the inner call took no id.
 checkNestedPlain :: (Int, Bool, Bool) -> Either String ()
 checkNestedPlain = checkEq (8, True, False)
+
+-- | The outer body sees its workflow's id back, the outer step
+-- checkpointed, and the inner call took no id.
+checkNestedWorkflowId :: (Text, Text, Bool, Bool) -> Either String ()
+checkNestedWorkflowId (result, widText, placed, free) = checkEq (widText, True, False) (result, placed, free)
+
+-- | The outer body sees the smuggled result, the outer step checkpointed,
+-- and the smuggled call took no id.
+checkSmuggledPlain :: (Int, Bool, Bool) -> Either String ()
+checkSmuggledPlain = checkEq (8, True, False)
 
 -- | The scoped runner returns the body's result inside step zero, and the
 -- replay adopts it without re-running.

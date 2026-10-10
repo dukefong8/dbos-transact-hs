@@ -29,5 +29,5 @@ myBody () wctx = runExceptT $ do
 Rules:
 
 - Inputs and outputs must be JSON-serializable (the durable value codec).
-- Do not call, start, or enqueue workflows from within step bodies. Calling a step from another step folds it into the caller's execution (`runStep` degrades to a plain run; `runTxStep` refuses).
+- Do not call, start, or enqueue workflows from within step bodies. Calling a step from another step folds it into the caller's execution (`runStep` degrades to a plain run; `runTxStep` refuses). See `step-nesting.md` for the full caller-by-callee matrix.
 - DBOS must be launched before a step is called. Steps are only checkpointed when called from a workflow.

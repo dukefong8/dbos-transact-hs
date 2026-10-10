@@ -36,7 +36,8 @@ test:
 neg: build
 	for f in negative/neg_*.hs; do \
 		echo "== $$f (must fail)"; \
-		cabal exec -- ghc -fno-code $$f 2>&1 | grep -q "Couldn't match\|does not export" || { echo "GATE RED: $$f built or wrong error class"; exit 1; }; \
+		out=$$(cabal exec -- ghc -fno-code $$f 2>&1) || true; \
+		[ "$$(printf '%s\n' "$$out" | grep -c "Couldn't match\|does not export" || true)" -gt 0 ] || { echo "GATE RED: $$f built or wrong error class"; exit 1; }; \
 	done; \
 	for f in negative/w_*.hs; do \
 		echo "== $$f (must build)"; \

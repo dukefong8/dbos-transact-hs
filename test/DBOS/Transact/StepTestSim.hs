@@ -24,6 +24,8 @@ import DBOS.Transact.StepCases
     checkNestedEnclosing,
     checkNestedPlain,
     checkNestedStepView,
+    checkNestedWorkflowId,
+    checkSmuggledPlain,
     checkPendingScoped,
     checkRecordReplay,
     checkScopedView,
@@ -32,6 +34,8 @@ import DBOS.Transact.StepCases
     scenarioNestedEnclosing,
     scenarioNestedPlain,
     scenarioNestedStepView,
+    scenarioNestedWorkflowId,
+    scenarioSmuggledPlain,
     scenarioPendingScoped,
     scenarioRecordReplay,
     scenarioScopedView,
@@ -121,6 +125,16 @@ tests =
         printSimTrace tr
         either fail pure (checkNestedStepView outcome)
         traceEvents tr @?= [StepRunning "outer" 0, StepPlain "inner", StepOutputRecorded "outer" 0],
+      testCase "a nested step returns its workflow's id and records only the outer step" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioNestedWorkflowId)
+        printSimTrace tr
+        either fail pure (checkNestedWorkflowId outcome)
+        traceEvents tr @?= [StepRunning "outer" 0, StepPlain "inner", StepOutputRecorded "outer" 0],
+      testCase "a recorded step through a captured parent goes plain and takes no id" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioSmuggledPlain)
+        printSimTrace tr
+        either fail pure (checkSmuggledPlain outcome)
+        traceEvents tr @?= [StepRunning "outer" 0, StepPlain "smuggled", StepOutputRecorded "outer" 0],
       testCase "a pending scoped step claims its id at build and replays" $ do
         (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioPendingScoped)
         printSimTrace tr

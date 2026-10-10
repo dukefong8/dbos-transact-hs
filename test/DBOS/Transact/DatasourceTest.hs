@@ -37,6 +37,7 @@ import DBOS.Transact
     newDBOS,
     releaseAppDataSource,
     runAppSession,
+    runTxOutside,
     runTxStep,
     secondsDuration,
     toDataSource,
@@ -66,6 +67,8 @@ import DBOS.Transact.DatasourceCases
     checkDefaultConfig,
     checkDeleteCheckpoints,
     checkErrorReplays,
+    checkNestedInTx,
+    checkOutsideReexecutes,
     checkOwnershipMoved,
     checkPrecheckRetry,
     checkRegistryLifecycle,
@@ -81,6 +84,8 @@ import DBOS.Transact.DatasourceCases
     scenarioDefaultConfig,
     scenarioDeleteCheckpoints,
     scenarioErrorReplays,
+    scenarioNestedInTx,
+    scenarioOutsideReexecutes,
     scenarioOwnershipMoved,
     scenarioPrecheckRetry,
     scenarioRegistryLifecycle,
@@ -217,6 +222,7 @@ tests =
             leaf "retriable failures are retried, then the body runs" scenarioRetryThenSuccess checkRetryThenSuccess,
             leaf "a duplicate execution that won is adopted" scenarioConflictAdopts checkConflictAdopts,
             leaf "a call through a captured parent is refused and records nothing" scenarioCaptureRefused checkCaptureRefused,
+            leaf "a nested step inside a transaction runs plainly and records once" scenarioNestedInTx checkNestedInTx,
             testCase "beginSql names every isolation level" (either fail pure (checkBeginSql scenarioBeginSql)),
             -- IO only: needs a live pool; the sim has no SQL layer. No
             -- migration ever creates the table, so absence is the assertion.
@@ -256,9 +262,40 @@ tests =
                     Right _ -> assertFailure "expected the body failure to escape"
                   count <- countProbe app table
                   count @?= 0,
+            -- IO only: needs a live pool with two connections (the inner
+            -- transaction holds its own while the outer stays open) and
+            -- scratch DDL; the sim/fake has no SQL layer. The inner commit
+            -- lands while the outer is open, then the outer throws: the
+            -- inner row survives the outer rollback, proving the inner run
+            -- is a separate transaction rather than a savepoint.
+            testCase "a transaction inside a transaction commits independently" $ do
+              withProbeApp $ \app -> do
+                withProbeTable app $ \table -> do
+                  let ds = toDataSource app
+                      cfg name = TransactionConfig {txName = Just name, txIsolation = Nothing}
+                      insert wid_ = Statement.preparable ("INSERT INTO " <> table <> " (wid, bal) VALUES ('" <> wid_ <> "', 1)") Encoders.noParams Decoders.noResult
+                      countWid wid_ = do
+                        result <- runAppSession app (Session.statement () (Statement.preparable ("SELECT COUNT(*) FROM " <> table <> " WHERE wid = '" <> wid_ <> "'") Encoders.noParams (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8)))))
+                        case result of
+                          Left err -> assertFailure ("probe read failed: " <> show err) >> pure 0
+                          Right n -> pure n
+                  outer <- try (runTxOutside ds (cfg "outer-tx") $ \outerTx -> do
+                    inner <- runTxOutside ds (cfg "inner-tx") $ \(Tx runInner) -> runInner (insert "inner") ()
+                    case inner of
+                      Left _ -> throwIO (userError "inner failed")
+                      Right () -> case outerTx of
+                        Tx runOuter -> runOuter (insert "outer") () >> throwIO (userError "boom")) :: IO (Either IOError (Either BackendError ()))
+                  case outer of
+                    Left _ -> pure ()
+                    Right _ -> assertFailure "expected the outer failure to escape"
+                  innerRows <- countWid "inner"
+                  outerRows <- countWid "outer"
+                  innerRows @?= 1
+                  outerRows @?= 0,
             leaf "an ownership move stops the execution instead of adopting" (\fx -> (("ds-own-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId >>= scenarioOwnershipMoved fx) checkOwnershipMoved,
             leaf "a transient pre-check read is retried, then the transaction runs" scenarioPrecheckRetry checkPrecheckRetry,
             leaf "outside a workflow the body runs transactionally and checkpoints nothing" (\_ -> scenarioRunsOutside mkFakeDs) checkRunsOutside,
+            leaf "an unrecorded transaction re-runs on every execution" scenarioOutsideReexecutes checkOutsideReexecutes,
             leaf "deleting from a step drops later checkpoints and re-runs" scenarioDeleteCheckpoints checkDeleteCheckpoints,
             -- IO only: the live binding's delete path, over a scratch schema so
             -- the case owns its checkpoint table.

@@ -21,8 +21,10 @@ module DBOS.Transact.DatasourceCases
     scenarioRetryThenSuccess,
     scenarioConflictAdopts,
     scenarioCaptureRefused,
+    scenarioNestedInTx,
     scenarioPrecheckRetry,
     scenarioRunsOutside,
+    scenarioOutsideReexecutes,
     scenarioDeleteCheckpoints,
     scenarioOwnershipMoved,
     scenarioRegistryLifecycle,
@@ -34,8 +36,10 @@ module DBOS.Transact.DatasourceCases
     checkRetryThenSuccess,
     checkConflictAdopts,
     checkCaptureRefused,
+    checkNestedInTx,
     checkPrecheckRetry,
     checkRunsOutside,
+    checkOutsideReexecutes,
     checkDeleteCheckpoints,
     checkOwnershipMoved,
     checkRegistryLifecycle,
@@ -65,6 +69,7 @@ import DBOS.Transact
   WorkflowId (..),
   encodeWorkflowValue,
   registerDataSource,
+  runNestedStep,
   runTxOutside,
   runTxStep,
   transactionConfigDefault,
@@ -233,6 +238,22 @@ scenarioCaptureRefused fx = do
   rows <- readTVarIO fake.fakeRows
   pure (result, Map.size rows)
 
+-- | A nested step inside a transaction runs plainly: the tx body calls
+-- 'runNestedStep' with its handed step view; the inner call checkpoints
+-- nothing, the tx records exactly its row, and the result carries the
+-- inner value.
+scenarioNestedInTx :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                   => DsFixture m -> m (Either (Error EngineOnly) Text, Int, Int)
+scenarioNestedInTx fx = do
+  fake <- fx.dsFixtureMkDs
+  result <- runFixture fx "ds-wf-nested-tx" $ \wctx ->
+    runTxStep fake.fakeSource protoConfig wctx $ \sctx _tx -> do
+      atomically (modifyTVar fake.fakeRuns (+ 1))
+      runNestedStep sctx "inner" (\_ -> pure ("nested" :: Text))
+  runs <- readTVarIO fake.fakeRuns
+  rows <- readTVarIO fake.fakeRows
+  pure (result, runs, Map.size rows)
+
 -- | The record half: a body failure records, and replay returns it
 -- without re-running the body.
 scenarioBodyFailureRecorded :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
@@ -268,6 +289,22 @@ scenarioRunsOutside mkDs = do
   rows <- readTVarIO fake.fakeRows
   runs <- readTVarIO fake.fakeRuns
   pure (result, Map.size rows, runs)
+
+-- | An unrecorded transaction re-runs on every execution: two executions
+-- over one id (as a recovery replay would stage them) both run the body
+-- instead of the second adopting — the ALO half of the matrix's
+-- 'runTxOutside'-in-workflow cell. The recorded counterpart
+-- ('scenarioCommitReplay') adopts after one run.
+scenarioOutsideReexecutes :: (MonadSTM m, MonadDelay m, MonadCatch m)
+                           => DsFixture m -> m (Either BackendError Text, Either BackendError Text, Int, Int)
+scenarioOutsideReexecutes fx = do
+  fake <- fx.dsFixtureMkDs
+  let counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure ("v" :: Text)
+  first <- runFixture fx "ds-wf-outside-dup" $ \_ -> runTxOutside fake.fakeSource protoConfig counted
+  second <- runFixture fx "ds-wf-outside-dup" $ \_ -> runTxOutside fake.fakeSource protoConfig counted
+  runs <- readTVarIO fake.fakeRuns
+  rows <- readTVarIO fake.fakeRows
+  pure (first, second, runs, Map.size rows)
 
 -- | Python completion clearing (`delete_checkpoints` shape): deleting
 -- from a step drops later checkpoints (earlier ones stay, replaying),
@@ -382,6 +419,14 @@ checkCaptureRefused (result, rowCount) = do
   unless (result == Left (InsideStep "transaction")) $ Left ("expected the InsideStep refusal, got: " <> show result)
   unless (rowCount == 0) $ Left ("expected no checkpoint rows, got: " <> show rowCount)
 
+-- | The inner call ran plainly once, the tx recorded exactly its row, and
+-- the result carries the inner value.
+checkNestedInTx :: (Either (Error EngineOnly) Text, Int, Int) -> Either String ()
+checkNestedInTx (result, runs, rowCount) = do
+  unless (result == Right "nested") $ Left ("expected the inner value, got: " <> show result)
+  unless (runs == 1) $ Left ("expected the tx body to run once, got: " <> show runs)
+  unless (rowCount == 1) $ Left ("expected exactly the tx row, got: " <> show rowCount)
+
 -- | The transient pre-check is consumed and the transaction runs.
 checkPrecheckRetry :: (Either (Error EngineOnly) Text, Int) -> Either String ()
 checkPrecheckRetry (result, left) = do
@@ -395,6 +440,14 @@ checkRunsOutside (result, rowCount, runs) = do
   unless (result == Right "v") $ Left ("expected the outside body to succeed, got: " <> show result)
   unless (rowCount == 0) $ Left ("expected no checkpoint rows, got: " <> show rowCount)
   unless (runs == 1) $ Left ("expected the body to run once, got: " <> show runs)
+
+-- | Both executions ran the body: nothing recorded, nothing adopted.
+checkOutsideReexecutes :: (Either BackendError Text, Either BackendError Text, Int, Int) -> Either String ()
+checkOutsideReexecutes (first, second, runs, rowCount) = do
+  unless (first == Right "v") $ Left ("expected the first execution to succeed, got: " <> show first)
+  unless (second == Right "v") $ Left ("expected the second execution to succeed, got: " <> show second)
+  unless (runs == 2) $ Left ("expected both executions to run, got: " <> show runs)
+  unless (rowCount == 0) $ Left ("expected no checkpoint rows, got: " <> show rowCount)
 
 -- | Partial clearing replays the survivors; full clearing re-runs.
 checkDeleteCheckpoints :: (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int) -> Either String ()
