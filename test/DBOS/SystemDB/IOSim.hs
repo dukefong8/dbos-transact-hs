@@ -52,7 +52,6 @@ import DBOS.SystemDB
     ForkPoint (..),
     GetEventCaller (..),
     InitWorkflowCaller (..),
-    MessageUUID (..),
     NewQueue (..),
     NewSchedule (..),
     NewWorkflow (..),
@@ -94,6 +93,7 @@ import DBOS.SystemDB
     getEventStepName,
     invalidInput,
     getResultStepName,
+    IdempotencyKey (..),
     initialStatus,
     internalQueueName,
     isQueueUpdateEmpty,
@@ -104,6 +104,7 @@ import DBOS.SystemDB
     sendBulkStepName,
     sleepStepName,
     sendStepName,
+    validateSendKeys,
     writeStreamStepName,
     closeStreamStepName,
     streamClosedSentinel,
@@ -340,10 +341,14 @@ data MemSystemDB s = MemSystemDB
     memDedup :: StrictTVar (IOSim s) (Map (Text, Text) Text),
     -- | Registered queues by name.
     memQueues :: StrictTVar (IOSim s) (Map Text QueueRecord),
-    -- | Parked messages by topic (the null-topic sentinel when absent);
-    -- 'recv' blocks on this TVar, so a 'sendMessage' genuinely wakes a
-    -- parked reader.
-    memMessages :: StrictTVar (IOSim s) (Map Text [EncodedValue]),
+    -- | Parked messages by (destination, topic); 'recv' blocks on this TVar,
+    -- so a 'sendMessage' genuinely wakes a parked reader. A workflow never
+    -- reads another's queue, as live addresses rows per recipient.
+    memMessages :: StrictTVar (IOSim s) (Map (Text, Text) [EncodedValue]),
+    -- | Message ids already stored, never removed: the in-memory
+    -- @ON CONFLICT (message_uuid) DO NOTHING@. Consumed rows keep
+    -- occupying the key live, so a resend stays a no-op after a receive.
+    memMessageIds :: StrictTVar (IOSim s) (Set.Set Text),
     -- | Delivered notifications by destination, for
     -- 'getAllNotifications'.
     memNotifications :: StrictTVar (IOSim s) (Map Text [NotificationRecord]),
@@ -381,6 +386,7 @@ newMemDBWithApplication application =
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
+    <*> newTVarIO Set.empty
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
@@ -813,7 +819,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     case replayed of
       Just record -> pure (Right (memEncodedFromStep record))
       Nothing -> do
-        waited <- memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memTakeMessage db storedTopic))
+        waited <- memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memTakeMessage db widText storedTopic))
         case waited of
           Just value -> do
             memRecordRecvStep db wid stepId recvStepName (Just value)
@@ -1375,13 +1381,14 @@ memRecordRecvStep db wid stepId name value = do
   now <- timestampNow
   atomically (memInsertStep db wid stepId name ((.encodedValue) <$> value) (value >>= (.encodedSerialization)) now)
 
--- | Take the first parked message on a topic, blocking until one lands.
-memTakeMessage :: MemSystemDB s -> Text -> STM (IOSim s) EncodedValue
-memTakeMessage db topic = do
+-- | Take the first parked message for a destination on a topic, blocking
+-- until one lands.
+memTakeMessage :: MemSystemDB s -> Text -> Text -> STM (IOSim s) EncodedValue
+memTakeMessage db wid topic = do
   stored <- readTVar db.memMessages
-  case Map.lookup topic stored of
+  case Map.lookup (wid, topic) stored of
     Just (value : _) -> do
-      writeTVar db.memMessages (Map.adjust (drop 1) topic stored)
+      writeTVar db.memMessages (Map.adjust (drop 1) (wid, topic) stored)
       pure value
     _ -> retry
 
@@ -1530,33 +1537,71 @@ memReplayDebounce (WorkflowId widText) stepId stored = case stored.stepRecordOut
 memSend :: MemSystemDB s -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> IOSim s (Either Error ())
 memSend db stepName messages serialization caller sendToForks = do
   now <- timestampNow
-  atomically $ do
-    rows <- readTVar db.memRows
-    stored <- readTVar db.memMessages
-    notifications <- readTVar db.memNotifications
-    steps <- readTVar db.memSteps
-    -- A replay must not send again: like the live insert, a caller step
-    -- that already stands means this batch went out before.
-    case caller of
-      Just (callerWid, callerStep)
-        | Map.member (widTextOf callerWid, callerStep) steps -> pure (Right ())
-      _ -> do
-        let topicOf m = maybe nullTopicSentinel (\(Topic topic) -> topic) m.sendTopic
-            bodyOf m = EncodedValue m.sendMessageBody.serializedText serialization
+  -- The duplicate-key refusal applies to the caller's list, before fan-out,
+  -- exactly as live checks: one key fanning out is legal.
+  case validateSendKeys messages of
+    Left err -> pure (Left err)
+    Right () -> atomically $ do
+      rows <- readTVar db.memRows
+      stored <- readTVar db.memMessages
+      seen <- readTVar db.memMessageIds
+      notifications <- readTVar db.memNotifications
+      steps <- readTVar db.memSteps
+      -- A replay must not send again: like the live insert, a caller step
+      -- that already stands means this batch went out before.
+      case caller of
+        Just (callerWid, callerStep)
+          | Map.member (widTextOf callerWid, callerStep) steps -> pure (Right ())
+        _ -> do
+          let topicOf m = maybe nullTopicSentinel (\(Topic topic) -> topic) m.sendTopic
+              bodyOf m = EncodedValue m.sendMessageBody.serializedText serialization
             -- Mirror the live fan-out: the destination itself plus every
             -- workflow forked from it, transitively, sorted and deduplicated.
-            expand m =
-              let destination = widTextOf m.sendDestinationId
-               in destination : if sendToForks then sort (nub (memDescendants rows destination)) else []
-            deliveries =
-              [ (topicOf m, bodyOf m, m {sendDestinationId = WorkflowId recipient})
+              expand m =
+                let destination = widTextOf m.sendDestinationId
+                 in destination : if sendToForks then sort (nub (memDescendants rows destination)) else []
+              -- The stored id, scoped exactly as live scopes row ids (see
+              -- 'messageUUIDForSend'): a resend finds its id taken and lands
+              -- nowhere, like @ON CONFLICT (message_uuid) DO NOTHING@.
+              uuidOf m recipient = case m.sendIdempotencyKey of
+                Nothing -> Nothing
+                Just (IdempotencyKey key) -> Just (key <> "::" <> recipient)
+              deliveries =
+                [ (recipient, topicOf m, bodyOf m, uuidOf m recipient)
                 | m <- messages,
                   recipient <- expand m
-              ]
-            stored' = foldr (\(topic, value, _) acc -> Map.insertWith (<>) topic [value] acc) stored deliveries
-            notificationFor topic value =
-              let MessageUUID uuid = MessageUUID (topic <> ":" <> Text.pack (show (length (fromMaybe [] (Map.lookup topic stored)) + 1)))
-               in NotificationRecord
+                ]
+              -- Notification ids stay unique per row, as live stores the
+              -- message uuid: keyed deliveries reuse their scoped id (the
+              -- seen-set admits each id once), unkeyed ones take the next
+              -- per-destination-topic counter, seeded from the rows already
+              -- stored so a later batch never reuses an earlier number.
+              seedCounts =
+                Map.fromListWith
+                  (+)
+                  [ ((wid, fromMaybe nullTopicSentinel notification.notificationRecordTopic), 1)
+                  | (wid, priorNotifications) <- Map.toList notifications,
+                    notification <- priorNotifications
+                  ]
+              insertOne (wid, topic, value, maybeUuid) (st, no, sn, counters) = case maybeUuid of
+                Just uuid | Set.member uuid sn -> (st, no, sn, counters)
+                Just uuid ->
+                  ( Map.insertWith (<>) (wid, topic) [value] st,
+                    Map.insertWith (<>) wid [notificationFor uuid topic value] no,
+                    Set.insert uuid sn,
+                    counters
+                  )
+                Nothing ->
+                  let next = Map.findWithDefault 0 (wid, topic) counters + 1
+                      uuid = topic <> ":" <> Text.pack (show next)
+                   in ( Map.insertWith (<>) (wid, topic) [value] st,
+                        Map.insertWith (<>) wid [notificationFor uuid topic value] no,
+                        sn,
+                        Map.insert (wid, topic) next counters
+                      )
+              (stored', notifications', seen', _) = foldr insertOne (stored, notifications, seen, seedCounts) deliveries
+              notificationFor uuid topic value =
+                NotificationRecord
                     { notificationRecordMessageUuid = uuid,
                       notificationRecordTopic = Just topic,
                       notificationRecordMessage = value.encodedValue,
@@ -1564,18 +1609,14 @@ memSend db stepName messages serialization caller sendToForks = do
                       notificationRecordCreatedAt = now,
                       notificationRecordConsumed = False
                     }
-            notifications' =
-              foldr
-                (\(topic, value, m) acc -> Map.insertWith (<>) (widTextOf m.sendDestinationId) [notificationFor topic value] acc)
-                notifications
-                deliveries
-        writeTVar db.memMessages stored'
-        writeTVar db.memNotifications notifications'
-        case caller of
-          Nothing -> pure (Right ())
-          Just (callerWid, callerStep) -> do
-            let entry =
-                  StepRecord
+          writeTVar db.memMessages stored'
+          writeTVar db.memMessageIds seen'
+          writeTVar db.memNotifications notifications'
+          case caller of
+            Nothing -> pure (Right ())
+            Just (callerWid, callerStep) -> do
+              let entry =
+                    StepRecord
                     { stepRecordWorkflowId = callerWid,
                       stepRecordStepId = callerStep,
                       stepRecordStepName = stepName,
@@ -1586,8 +1627,8 @@ memSend db stepName messages serialization caller sendToForks = do
                       stepRecordStartedAt = Just now,
                       stepRecordCompletedAt = Just now
                     }
-            writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) entry steps)
-            pure (Right ())
+              writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) entry steps)
+              pure (Right ())
 
 memQueueRecord :: NewQueue -> QueueRecord
 memQueueRecord queue =

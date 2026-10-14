@@ -66,6 +66,7 @@ import Control.Monad.Class.MonadThrow as Monad
 import Control.Monad.Class.MonadTime as Monad
 import Control.Monad.Class.MonadTimer as Monad
 import Control.Monad.Except as Monad (Except, ExceptT (ExceptT), mapExcept, mapExceptT, runExcept, runExceptT, throwError, withExcept, withExceptT)
+import Control.Monad.Trans.Class as Monad (MonadTrans (lift))
 
 -- | Render any 'Show' value as 'Text'. Shared here so every domain-event
 -- renderer uses one spelling.

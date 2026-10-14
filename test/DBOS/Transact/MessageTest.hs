@@ -13,7 +13,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), Outcome (..), Submission (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), Submission (..), WorkflowId (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Identity (Identity (..))
@@ -24,20 +24,28 @@ import DBOS.Transact.ContextTest (connOver)
 import DBOS.Transact.MessageCases
   ( MessageFixture (..),
     checkBulkEmpty,
+    checkBatchNotifyUnique,
     checkBulkSend,
     checkCapturedRecv,
     checkCapturedSend,
     checkFanOut,
+    checkKeyedFanOut,
+    checkResendDeduped,
+    checkScopedReceive,
     checkReplayTakes,
     checkSendDeliveredOnce,
     checkStepSend,
     checkThirdParty,
     checkTopics,
     scenarioBulkEmpty,
+    scenarioBatchNotifyUnique,
     scenarioBulkSend,
     scenarioCapturedRecv,
     scenarioCapturedSend,
     scenarioFanOut,
+    scenarioKeyedFanOut,
+    scenarioResendDeduped,
+    scenarioScopedReceive,
     scenarioReplayTakes,
     scenarioSendDeliveredOnce,
     scenarioStepSend,
@@ -135,7 +143,10 @@ mkMessageFixture backend = do
         mfSettle = \wid ->
           SystemDB.recordWorkflowOutcome backend wid (OutcomeOutput (Just "null")) >>= either (fail . show) (const (pure ())),
         mfCheckStep = \wid name step ->
-          SystemDB.checkStep backend wid step name >>= either (fail . show) pure
+          SystemDB.checkStep backend wid step name >>= either (fail . show) pure,
+        mfNotifyIds = \wid -> do
+          found <- SystemDB.getAllNotifications backend wid
+          pure (either (const []) (map (.notificationRecordMessageUuid)) found)
       }
 
 tests :: TestTree
@@ -147,6 +158,9 @@ tests =
           "Workflow messages"
           [ leaf "a workflow send is delivered once and recv replays" scenarioSendDeliveredOnce checkSendDeliveredOnce,
             leaf "a send may fan out to the destination's forks" scenarioFanOut checkFanOut,
+            leaf "a keyed send fans out like an unkeyed one" scenarioKeyedFanOut checkKeyedFanOut,
+            leaf "a resend under one key delivers once" scenarioResendDeduped checkResendDeduped,
+            leaf "a message addressed elsewhere stays unreadable" scenarioScopedReceive checkScopedReceive,
             leaf "a message from another workflow reaches its destination" scenarioThirdParty checkThirdParty,
             leaf "topics do not cross and absence is a value" scenarioTopics checkTopics,
             leaf "a replay takes the recorded message and sends once" scenarioReplayTakes checkReplayTakes,
@@ -154,5 +168,6 @@ tests =
             leaf "a send through a captured parent is plain and moves no id" scenarioCapturedSend checkCapturedSend,
             leaf "a recv through a captured parent is refused" scenarioCapturedRecv checkCapturedRecv,
             leaf "a batch delivers every message and checkpoints once" scenarioBulkSend checkBulkSend,
-            leaf "an empty bulk send still takes its step" scenarioBulkEmpty checkBulkEmpty
+            leaf "an empty bulk send still takes its step" scenarioBulkEmpty checkBulkEmpty,
+            leaf "one batch mints a distinct notification id per delivery" scenarioBatchNotifyUnique checkBatchNotifyUnique
           ]

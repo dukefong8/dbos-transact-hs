@@ -215,10 +215,13 @@ module DBOS.Transact
     clientOutcomePollInterval,
     connectClient,
     closeClient,
+    withClientTransaction,
     retrieveClientWorkflow,
     workflowStatusClient,
     clientSendMessage,
     clientSendMessages,
+    clientSendMessageInTx,
+    clientSendMessagesInTx,
     clientGetEvent,
     clientCancelWorkflows,
     clientResumeWorkflows,
@@ -255,7 +258,7 @@ module DBOS.Transact
 where
 
 import DBOS.Transact.Checkpoint (PendingStep)
-import DBOS.Transact.Client (Client (..), ClientConfig (..), EnqueueOptions (..), clientCancelWorkflows, clientConfigFromEnv, clientConfigNew, clientDeleteWorkflows, clientForkWorkflows, clientGetEvent, clientLatestApplicationVersion, clientListApplicationVersions, clientListWorkflowSteps, clientListWorkflows, clientOutcomePollInterval, clientPromoteVersion, clientResumeWorkflows, clientSendMessage, clientSendMessages, closeClient, connectClient, enqueueClientWorkflow, enqueueClientWorkflowWith, enqueueOptionsNew, enqueueOptionsOn, retrieveClientWorkflow, validateClientConfig, workflowStatusClient)
+import DBOS.Transact.Client (Client (..), ClientConfig (..), EnqueueOptions (..), clientCancelWorkflows, clientConfigFromEnv, clientConfigNew, clientDeleteWorkflows, clientForkWorkflows, clientGetEvent, clientLatestApplicationVersion, clientListApplicationVersions, clientListWorkflowSteps, clientListWorkflows, clientOutcomePollInterval, clientPromoteVersion, clientResumeWorkflows, clientSendMessage, clientSendMessageInTx, clientSendMessages, clientSendMessagesInTx, closeClient, connectClient, enqueueClientWorkflow, enqueueClientWorkflowWith, enqueueOptionsNew, enqueueOptionsOn, retrieveClientWorkflow, validateClientConfig, withClientTransaction, workflowStatusClient)
 import DBOS.Transact.Config (Config (..), Serializer (..), configFromEnv, configNew, serializerName, validateConfig)
 import DBOS.Transact.Connection ()
 import DBOS.Transact.Context (StepCtx, WorkflowCtx, stepCtxCancellationToken, workflowId)

@@ -19,6 +19,7 @@ module DBOS.Transact.DatasourceCases
     scenarioErrorReplays,
     scenarioBodyFailureRecorded,
     scenarioRetryThenSuccess,
+    scenarioConnectionRetry,
     scenarioConflictAdopts,
     scenarioCaptureRefused,
     scenarioNestedInTx,
@@ -34,6 +35,7 @@ module DBOS.Transact.DatasourceCases
     checkErrorReplays,
     checkBodyFailureRecorded,
     checkRetryThenSuccess,
+    checkConnectionRetry,
     checkConflictAdopts,
     checkCaptureRefused,
     checkNestedInTx,
@@ -109,6 +111,7 @@ data FakeDs m = FakeDs
     fakeNames :: StrictTVar m (Map (Text, Int) Text),
     fakeRuns :: StrictTVar m Int,
     fakeTransients :: StrictTVar m Int,
+    fakeConnectionErrors :: StrictTVar m Int,
     fakeConflictOnce :: StrictTVar m Bool
   }
 
@@ -123,12 +126,23 @@ transientError =
       backendKind = Transient
     }
 
+-- | A dropped connection: no SQLSTATE to classify by, only the connection
+-- kind. The runner must retry it like a serialization failure.
+connectionError :: BackendError
+connectionError =
+  BackendError
+    { backendMessage = "connection closed",
+      backendSqlState = Nothing,
+      backendKind = Connection
+    }
+
 mkFakeDs :: MonadSTM m => m (FakeDs m)
 mkFakeDs = do
   rows <- newTVarIO Map.empty
   names <- newTVarIO Map.empty
   runs <- newTVarIO 0
   transients <- newTVarIO 0
+  drops <- newTVarIO 0
   conflict <- newTVarIO False
   let fakeTx = Tx (\_ _ -> error "FakeDs: statements unsupported in this fake")
       source =
@@ -142,9 +156,11 @@ mkFakeDs = do
                 else Right . Map.lookup (widText wid, step) <$> readTVarIO rows,
             dsWithTransaction = \_isolation action -> do
               pending <- readTVarIO transients
-              if pending > 0
-                then atomically (modifyTVar transients (subtract 1)) >> pure (Left transientError)
-                else Right <$> action fakeTx,
+              dropped <- readTVarIO drops
+              case (pending > 0, dropped > 0) of
+                (True, _) -> atomically (modifyTVar transients (subtract 1)) >> pure (Left transientError)
+                (_, True) -> atomically (modifyTVar drops (subtract 1)) >> pure (Left connectionError)
+                _ -> Right <$> action fakeTx,
             dsRecordOutput = \_tx wid name step output -> atomically $ do
               existing <- readTVar rows
               priorNames <- readTVar names
@@ -176,7 +192,7 @@ mkFakeDs = do
               writeTVar rows (Map.filterWithKey (\(w, s) _ -> not (w == widText wid && s >= step)) existing)
               pure (Right ())
           }
-  pure (FakeDs source rows names runs transients conflict)
+  pure (FakeDs source rows names runs transients drops conflict)
 
 protoConfig :: TransactionConfig
 protoConfig = TransactionConfig {txName = Just "proto_step", txIsolation = Just ReadCommitted}
@@ -408,6 +424,23 @@ checkRetryThenSuccess (result, left) = do
   unless (result == Right "v") $ Left ("expected the retried transaction to succeed, got: " <> show result)
   unless (left == 0) $ Left ("expected the injections to be consumed, got: " <> show left)
 
+-- | A connection-class failure retries like a serialization failure: the
+-- runner retries on the error kind, not just the SQLSTATE class.
+scenarioConnectionRetry :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                        => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
+scenarioConnectionRetry fx = do
+  fake <- fx.dsFixtureMkDs
+  atomically (writeTVar fake.fakeConnectionErrors 1)
+  result <- runFixture fx "ds-wf-conn-retry" $ \wctx -> runTxStep fake.fakeSource protoConfig wctx (\_ _ -> atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right ("v" :: Text)))
+  left <- readTVarIO fake.fakeConnectionErrors
+  pure (result, left)
+
+-- | The dropped connection is consumed and the body runs once.
+checkConnectionRetry :: (Either (Error EngineOnly) Text, Int) -> Either String ()
+checkConnectionRetry (result, left) = do
+  unless (result == Right "v") $ Left ("expected the retried transaction to succeed, got: " <> show result)
+  unless (left == 0) $ Left ("expected the injection to be consumed, got: " <> show left)
+
 -- | The concurrent winner's value is adopted.
 checkConflictAdopts :: Either (Error EngineOnly) Text -> Either String ()
 checkConflictAdopts result =
@@ -480,7 +513,7 @@ checkRegistryLifecycle (first, duplicate, rowsBefore, rowsAfter) = do
 -- | The default config names nothing and takes the database default.
 checkDefaultConfig :: TransactionConfig -> Either String ()
 checkDefaultConfig config =
-  unless (config == TransactionConfig {txName = Nothing, txIsolation = Nothing}) $
+  unless (config == TransactionConfig {txName = Nothing, txIsolation = Just Serializable}) $
     Left ("expected the empty default config, got: " <> show config)
 
 -- | Every isolation level renders its SQL.

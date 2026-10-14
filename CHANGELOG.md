@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Client sends join caller-owned system transactions (`withClientTransaction` runner plus `clientSendMessagesInTx`/`clientSendMessageInTx` wrappers): caller writes and sends commit together or not at all, validated up front, fork-expanded inside the transaction. The client carries its transaction runner from connect time; raw batch pieces stay Backend-internal, as Python keeps its connection-level send private.
+
+- `transactionConfigDefault` runs `Serializable` like the Python datasource default; an explicit level still reaches the database verbatim. Bare `BEGIN` is gone from the runner (callers wanting the database default say `ReadCommitted`).
+- Transactional steps retry connection-class failures as well as the SQLSTATE serialization class; the checkpoint dedup converges a retried ambiguous commit to adoption.
+
 - Stream pulls page (100 values per blocking read, each still recorded and delivered one pull at a time) and own one step id across wait slices, so a replay finds the row where the pull recorded it; the sim backend takes the same final look after a terminal producer as Postgres.
 - The stream close sentinel is stored JSON-encoded (`"__DBOS_STREAM_CLOSED__"` quoted, `portable_json`), matching what Rust and Python write and detect — the old build stored it bare. Rows written by the old build keep the bare form.
 - Stream write offset races retry 16 times (`STREAM_OFFSET_ATTEMPTS`), not 8.

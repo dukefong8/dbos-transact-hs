@@ -40,6 +40,7 @@ import DBOS.Transact.DatasourceCases
     checkPrecheckRetry,
     checkRegistryLifecycle,
     checkRetryThenSuccess,
+    checkConnectionRetry,
     checkRunsOutside,
     mkFakeDs,
     scenarioBeginSql,
@@ -56,6 +57,7 @@ import DBOS.Transact.DatasourceCases
     scenarioPrecheckRetry,
     scenarioRegistryLifecycle,
     scenarioRetryThenSuccess,
+    scenarioConnectionRetry,
     scenarioRunsOutside,
   )
 import Test.Tasty (TestTree, testGroup)
@@ -99,11 +101,12 @@ tests :: TestTree
 tests =
   testGroup
     "Datasource (IOSim)"
-    [ testCase "a default config names nothing and takes the database default isolation" (either fail pure (checkDefaultConfig scenarioDefaultConfig)),
+    [ testCase "a default config names nothing and defaults isolation to serializable" (either fail pure (checkDefaultConfig scenarioDefaultConfig)),
       simCase (pure simDsFixture) "a transaction commits once and replays without re-running" scenarioCommitReplay checkCommitReplay traceCommitReplay,
       simCase (pure simDsFixture) "a recorded failure decodes back to itself" scenarioErrorReplays checkErrorReplays traceErrorReplays,
       simCase (pure simDsFixture) "a body failure records, and replay returns it without re-running" scenarioBodyFailureRecorded checkBodyFailureRecorded traceBodyFailureRecorded,
       simCase (pure simDsFixture) "retriable failures are retried, then the body runs" scenarioRetryThenSuccess checkRetryThenSuccess traceRetryThenSuccess,
+      simCase (pure simDsFixture) "a connection-class failure is retried, then the body runs" scenarioConnectionRetry checkConnectionRetry traceConnectionRetry,
       simCase (pure simDsFixture) "a duplicate execution that won is adopted" scenarioConflictAdopts checkConflictAdopts traceConflictAdopts,
       simCase (pure simDsFixture) "a call through a captured parent is refused and records nothing" scenarioCaptureRefused checkCaptureRefused traceCaptureRefused,
       simCase (pure simDsFixture) "a nested step inside a transaction runs plainly and records once" scenarioNestedInTx checkNestedInTx traceNestedInTx,
@@ -151,6 +154,14 @@ traceRetryThenSuccess tr =
           TransactionSerializationRetry "ds-wf-3" "proto_step" 0 1 1 "serialization failure",
           TransactionSerializationRetry "ds-wf-3" "proto_step" 0 2 2 "serialization failure",
           TransactionOutputRecorded "ds-wf-3" "proto_step" 0
+        ]
+
+traceConnectionRetry :: SimTrace a -> IO ()
+traceConnectionRetry tr =
+  (selectTraceEventsDynamic tr :: [TransactionEvent])
+    @?= [ TransactionRunning "ds-wf-conn-retry" "proto_step" 0,
+          TransactionSerializationRetry "ds-wf-conn-retry" "proto_step" 0 1 1 "connection closed",
+          TransactionOutputRecorded "ds-wf-conn-retry" "proto_step" 0
         ]
 
 traceConflictAdopts :: SimTrace a -> IO ()

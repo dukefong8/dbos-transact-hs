@@ -25,6 +25,7 @@ module DBOS.SystemDB.Types
     message,
     messageTo,
     messageUUIDForSend,
+    validateSendKeys,
     notificationRowForMessage,
     nullTopicSentinel,
     timestampFromEpochMs,
@@ -161,6 +162,7 @@ import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, withObject, withScientific, withText, (.:), (.=))
 import Data.Aeson.Types (Parser)
+import Data.Set qualified as Set
 import DBOS.SystemDB.Error (Error, invalidInput)
 import Data.Time.Clock (nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
@@ -242,6 +244,23 @@ messageUUIDForSend (MessageUUID fallback) send =
    in case send.sendIdempotencyKey of
         Nothing                   -> MessageUUID (fallback <> "::" <> destination)
         Just (IdempotencyKey key) -> MessageUUID (key <> "::" <> destination)
+
+-- | The keys a batch may carry, checked once for both backends: an empty key
+-- is a caller error, and two messages under one key would give two rows the
+-- same primary key, so the second would be silently discarded as a duplicate
+-- of the first. Checked on the caller's list, before fork fan-out — one key
+-- fanning out to many recipients is legal, each recipient scoping its own
+-- row id. Mirrors the oracle's check.
+validateSendKeys :: [SendMessage] -> Either Error ()
+validateSendKeys messages = go Set.empty messages
+  where
+    go _ [] = Right ()
+    go seen (message : rest) = case message.sendIdempotencyKey of
+      Nothing -> go seen rest
+      Just (IdempotencyKey key)
+        | Text.null key -> Left (invalidInput "idempotency_key" "must be absent rather than empty")
+        | Set.member key seen -> Left (invalidInput "idempotency_key" (key <> " is used by more than one message"))
+        | otherwise -> go (Set.insert key seen) rest
 
 
 -- | A workflow being created, as opposed to one being read back. Mirrors

@@ -54,6 +54,8 @@ module DBOS.SystemDB.Postgres.Backend
     legacySendMessage,
     legacySendMessages,
     sendMessagesSession,
+    sendBatchInTx,
+    sendMessageInTx,
     legacySetEvent,
     setEventSession,
     takeNotificationSession,
@@ -74,6 +76,7 @@ module DBOS.SystemDB.Postgres.Backend
     verifySystemDatabase,
     migrationCeiling,
     runSession,
+    runTransaction,
     isTransportFailure,
     pollingLimit,
     classifyUsageError,
@@ -101,7 +104,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdempotencyKey (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, workflowStatusText, writeStreamStepName)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdempotencyKey (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -2140,10 +2143,15 @@ runFork env sources forkedIds steps options =
 sendInternal :: PostgresSystemDB -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> IO (Either Error ())
 sendInternal _ _ messages _ Nothing _ | null messages = pure (Right ())
 sendInternal env stepName messages serialization caller sendToForks = do
-  expanded <- if sendToForks then expandForks env messages else pure (Right messages)
-  case expanded of
-    Left err         -> pure (Left err)
-    Right recipients -> deliverTo env stepName recipients serialization caller
+  -- The duplicate-key refusal applies to the caller's list, before fan-out:
+  -- one key fanning out to many recipients is legal. Mirrors the oracle.
+  case validateSendKeys messages of
+    Left err -> pure (Left err)
+    Right () -> do
+      expanded <- if sendToForks then expandForks env messages else pure (Right messages)
+      case expanded of
+        Left err         -> pure (Left err)
+        Right recipients -> deliverTo env stepName recipients serialization caller
 
 -- | Every message copied once per recipient: the destination itself and
 -- every workflow forked from it, transitively. One send fans out to a whole
@@ -2183,66 +2191,133 @@ descendantForks env roots = go Map.empty Set.empty roots
 
 -- | Delivers a batch once the recipient set is settled.
 deliverTo :: PostgresSystemDB -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> IO (Either Error ())
-deliverTo env stepName messages serialization caller =
-  case validateSendKeys messages of
-    Left err -> pure (Left err)
-    Right () -> do
-      fallbacks <- traverse (const (MessageUUID . UUID.toText <$> UUID.V4.nextRandom)) messages
-      timing <- StepTiming <$> timestampNow <*> timestampNow
-      let destinations = [destination | message <- messages, let Types.WorkflowId destination = message.sendDestinationId]
-          topics = [maybe nullTopicSentinel (\(Topic stored) -> stored) message.sendTopic | message <- messages]
-          payloads = [(.serializedText) message.sendMessageBody | message <- messages]
-          messageIds =
-            [ let MessageUUID scoped = messageUUIDForSend fallback message in scoped
-              | (message, fallback) <- zip messages fallbacks
+deliverTo env stepName messages serialization caller = do
+  fallbacks <- traverse (const (MessageUUID . UUID.toText <$> UUID.V4.nextRandom)) messages
+  timing <- StepTiming <$> timestampNow <*> timestampNow
+  let destinations = [destination | message <- messages, let Types.WorkflowId destination = message.sendDestinationId]
+      topics = [maybe nullTopicSentinel (\(Topic stored) -> stored) message.sendTopic | message <- messages]
+      payloads = [(.serializedText) message.sendMessageBody | message <- messages]
+      messageIds =
+        [ let MessageUUID scoped = messageUUIDForSend fallback message in scoped
+          | (message, fallback) <- zip messages fallbacks
+        ]
+      sendStep = do
+        (Types.WorkflowId widText, stepId) <- caller
+        pure
+          Statements.SendStep
+            { sendStepWorkflowId = widText,
+              sendStepStepId = stepId,
+              sendStepName = stepName,
+              sendStepStartedAt = timestampToEpochMs timing.stepTimingStartedAt,
+              sendStepCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt
+            }
+      params =
+        Statements.SendMessagesParams
+          { sendParamsDestinations = destinations,
+            sendParamsTopics = topics,
+            sendParamsPayloads = payloads,
+            sendParamsMessageIds = messageIds,
+            sendParamsSerialization = serialization,
+            sendParamsStep = sendStep
+          }
+  result <- runTransaction env "send_messages" (Statements.sendMessagesTx params)
+  pure $ case result of
+    Left err
+      | foreignKeyError err ->
+          Left (NonExistentWorkflow {workflowIds = List.sort (List.nub destinations)})
+      | otherwise -> Left err
+    Right () -> Right ()
+
+-- | Every descendant of every root inside the caller's transaction, level by
+-- level like 'descendantForks': the recipient set cannot go stale before
+-- the insert. Statement failures propagate and abort the caller's
+-- transaction, as every 'Tx'-composed piece behaves.
+descendantForksTx :: [Text] -> Tx.Transaction (Map.Map Text [Text])
+descendantForksTx roots = go Map.empty Set.empty roots
+  where
+    go children seen frontier = do
+      pairs <- Tx.statement () (Statements.directForksTxStatement frontier)
+      let fresh = [forkedId | (forkedId, _) <- pairs, Set.notMember forkedId seen]
+          children' = foldr (\(forkedId, source) acc -> Map.insertWith (++) source [forkedId] acc) children pairs
+          seen' = foldr Set.insert seen fresh
+      if null fresh
+        then pure (Map.map (List.sort . List.nub) children')
+        else go children' seen' fresh
+
+-- | Send one message inside the caller's transaction: no step is recorded,
+-- like every client send. A validation refusal rolls the caller's
+-- transaction back (as Python raises before touching the connection); a
+-- foreign-key failure aborts the caller's transaction through the statement.
+sendMessageInTx :: SendMessage -> Maybe Text -> Text -> Bool -> Tx.Transaction (Either Error ())
+sendMessageInTx message serialization fallback sendToForks =
+  sendBatchInTx [message] serialization [fallback] sendToForks
+
+-- | Send a batch inside the caller's transaction: all rows land with the
+-- caller's own writes or none do. Fallbacks are one per message, fixed by
+-- the caller before composing (as 'deliverTo' fixes them before its
+-- transaction); a length mismatch is refused rather than zipped silently.
+-- Checked failures (validation) return 'Left' and condemn the caller's
+-- transaction, so composed caller writes roll back with the refusal;
+-- statement failures propagate unchecked through the session channel and
+-- abort the same way. Backend-internal: applications compose through
+-- 'withClientTransaction' and the 'clientSendMessagesInTx' wrappers, which
+-- pre-validate so nothing runs on a refusal.
+sendBatchInTx :: [SendMessage] -> Maybe Text -> [Text] -> Bool -> Tx.Transaction (Either Error ())
+sendBatchInTx messages serialization fallbacks sendToForks = do
+  outcome <- runExceptT $ do
+    paired <- ExceptT (pure (pairMessages messages fallbacks))
+    expanded <- lift (expandPaired paired)
+    lift (insertExpanded expanded)
+  case outcome of
+    Left err -> Tx.condemn >> pure (Left err)
+    Right () -> pure (Right ())
+  where
+    -- | The checked scope, pure: duplicate keys are refused on the caller's
+    -- list before fan-out (one key fanning out is legal), and fallbacks
+    -- stay one per message.
+    pairMessages :: [SendMessage] -> [Text] -> Either Error [(SendMessage, Text)]
+    pairMessages pairedMessages pairedFallbacks = do
+      validateSendKeys pairedMessages
+      if length pairedFallbacks /= length pairedMessages
+        then Left (invalidInput "fallbacks" "one fallback id per message")
+        else Right (zip pairedMessages pairedFallbacks)
+    -- | The recipient set, settled inside the transaction so it cannot go
+    -- stale before the insert. Statement failures propagate unchecked.
+    expandPaired :: [(SendMessage, Text)] -> Tx.Transaction [(SendMessage, Text)]
+    expandPaired paired
+      | not sendToForks = pure paired
+      | otherwise = do
+          byRoot <- descendantForksTx [destination | (message, _) <- paired, let Types.WorkflowId destination = message.sendDestinationId]
+          pure
+            [ (message {sendDestinationId = Types.WorkflowId recipient}, fallback)
+            | (message, fallback) <- paired,
+              let Types.WorkflowId destination = message.sendDestinationId,
+              recipient <- destination : Map.findWithDefault [] destination byRoot
             ]
-          sendStep = do
-            (Types.WorkflowId widText, stepId) <- caller
-            pure
-              Statements.SendStep
-                { sendStepWorkflowId = widText,
-                  sendStepStepId = stepId,
-                  sendStepName = stepName,
-                  sendStepStartedAt = timestampToEpochMs timing.stepTimingStartedAt,
-                  sendStepCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt
-                }
-          params =
+    -- | The batched insert, recording no step like every client send.
+    -- A foreign-key failure aborts the caller's transaction here.
+    insertExpanded :: [(SendMessage, Text)] -> Tx.Transaction ()
+    insertExpanded expanded =
+      void
+        ( Statements.sendMessagesTx
             Statements.SendMessagesParams
-              { sendParamsDestinations = destinations,
-                sendParamsTopics = topics,
-                sendParamsPayloads = payloads,
-                sendParamsMessageIds = messageIds,
+              { sendParamsDestinations = [destination | (message, _) <- expanded, let Types.WorkflowId destination = message.sendDestinationId],
+                sendParamsTopics = [maybe nullTopicSentinel (\(Topic stored) -> stored) message.sendTopic | (message, _) <- expanded],
+                sendParamsPayloads = [(.serializedText) message.sendMessageBody | (message, _) <- expanded],
+                sendParamsMessageIds =
+                  [ let MessageUUID scoped = messageUUIDForSend (MessageUUID fallback) message in scoped
+                    | (message, fallback) <- expanded
+                  ],
                 sendParamsSerialization = serialization,
-                sendParamsStep = sendStep
+                sendParamsStep = Nothing
               }
-      result <- runTransaction env "send_messages" (Statements.sendMessagesTx params)
-      pure $ case result of
-        Left err
-          | foreignKeyError err ->
-              Left (NonExistentWorkflow {workflowIds = List.sort (List.nub destinations)})
-          | otherwise -> Left err
-        Right () -> Right ()
+        )
 
 -- | The foreign key on the destination is what catches an address that does
 -- not exist, so a message can never be left pointing at nothing.
 foreignKeyError :: Error -> Bool
 foreignKeyError (Backend backend) = backend.backendSqlState == Just "23503"
 foreignKeyError _                 = False
-
--- | The keys a batch may carry: an empty key is a caller error, and two
--- messages under one key would give two rows the same primary key, so the
--- second would be silently discarded as a duplicate of the first. Mirrors
--- the oracle's check.
-validateSendKeys :: [SendMessage] -> Either Error ()
-validateSendKeys messages = go Set.empty messages
-  where
-    go _ [] = Right ()
-    go seen (message : rest) = case message.sendIdempotencyKey of
-      Nothing -> go seen rest
-      Just (IdempotencyKey key)
-        | Text.null key -> Left (invalidInput "idempotency_key" "must be absent rather than empty")
-        | Set.member key seen -> Left (invalidInput "idempotency_key" (key <> " is used by more than one message"))
-        | otherwise -> go (Set.insert key seen) rest
 
 -- | Waits until a message is waiting or the deadline passes, woken by the
 -- exclusive subscription the caller holds. Absence at the deadline is not an

@@ -48,6 +48,7 @@ module DBOS.SystemDB.Postgres.Statements
     latestApplicationVersionSession,
     updateVersionTimestampSession,
     directForksSession,
+    directForksTxStatement,
     renameRowsStatement,
     renameBatchBoundStatement,
     renameBatchRangeStatement,
@@ -910,6 +911,17 @@ directForksSession :: [Text] -> Session.Session [(Text, Text)]
 directForksSession roots =
   fmap (map (\(row :: SqlRow '[ '("workflow_uuid", Id' "workflow_status"), '("forked_from", Maybe Text) ]) -> (unwrapId row.workflow_uuid, fromMaybe "" row.forked_from)))
     (sqlQueryTypedSession [typedSql|
+      select workflow_uuid, forked_from
+      from dbos.workflow_status
+      where forked_from = any(${roots}) and forked_from is not null
+    |])
+
+-- | The same level as a composable statement, for fork walks inside a
+-- caller's transaction: identical SQL through the transaction runner.
+directForksTxStatement :: [Text] -> Statement.Statement () [(Text, Text)]
+directForksTxStatement roots =
+  fmap (map (\(row :: SqlRow '[ '("workflow_uuid", Id' "workflow_status"), '("forked_from", Maybe Text) ]) -> (unwrapId row.workflow_uuid, fromMaybe "" row.forked_from)))
+    (sqlQueryTypedStatement [typedSql|
       select workflow_uuid, forked_from
       from dbos.workflow_status
       where forked_from = any(${roots}) and forked_from is not null

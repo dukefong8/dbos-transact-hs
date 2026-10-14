@@ -80,9 +80,9 @@ import GHC.Stack (HasCallStack)
 import Hasql.Statement qualified as Statement
 import System.Log.FastLogger (ToLogStr (..))
 
--- | The isolation of the application transaction. Mirrors the Postgres
--- levels both oracles expose; the runner defaults to 'ReadCommitted' and
--- only a shared-budget claim would climb the sweep ladder (see ADR-0011).
+-- | The isolation of the application transaction. Mirrors the levels both
+-- oracles expose; an unspecified level runs 'Serializable', the Python
+-- default, so callers opt into weaker levels explicitly.
 data IsolationLevel
   = ReadUncommitted
   | ReadCommitted
@@ -100,12 +100,12 @@ data TransactionConfig = TransactionConfig
   deriving stock (Eq, Show)
 
 -- | A transaction that names nothing: the step name falls back to the
--- function name at the call site, isolation to the database default.
+-- function name at the call site, isolation to 'Serializable' like Python.
 transactionConfigDefault :: TransactionConfig
 transactionConfigDefault =
   TransactionConfig
     { txName = Nothing,
-      txIsolation = Nothing
+      txIsolation = Just Serializable
     }
 
 -- | A recorded checkpoint. Mirrors the oracles' @{output}|{error}@ row,
@@ -403,12 +403,19 @@ replayRecorded stepName = \case
 controlErr :: BackendError -> Error e
 controlErr err = SystemDatabase (SystemDBError.Backend err)
 
--- | Retriable serialization-class failures, by SQLSTATE class. Mirrors the
--- backend's @"40" -> Transient@ verdict without importing its classifier.
+-- | Failures worth another attempt: the connection and transient kinds by
+-- name, plus the SQLSTATE serialization class for rows that carry no kind.
+-- Matches the primary oracle's retry set (Rust retries conflict and
+-- connection kinds; Python additionally retries idle-in-transaction
+-- disconnects, which stay permanent here like Rust); the checkpoint dedup
+-- converges a retried ambiguous commit to adoption, so retrying a dropped
+-- connection is safe.
 isRetriable :: BackendError -> Bool
-isRetriable err = case err.backendSqlState of
-  Just code -> "40" `Text.isPrefixOf` code
-  Nothing   -> False
+isRetriable err = err.backendKind `elem` [Connection, Transient] || isSerializationClass
+  where
+    isSerializationClass = case err.backendSqlState of
+      Just code -> "40" `Text.isPrefixOf` code
+      Nothing   -> False
 
 -- | A conflict with no recorded row to adopt: unreachable by construction
 -- (the signal means a row was written), so control rather than data.

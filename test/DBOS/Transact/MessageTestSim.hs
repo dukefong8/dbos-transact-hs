@@ -17,7 +17,7 @@ import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import Data.Map.Strict qualified as Map
-import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), Outcome (..), Submission (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), Submission (..), WorkflowId (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact.Connection (nextExecutionIdentity)
@@ -25,20 +25,28 @@ import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState)
 import DBOS.Transact.MessageCases
   ( MessageFixture (..),
     checkBulkEmpty,
+    checkBatchNotifyUnique,
     checkBulkSend,
     checkCapturedRecv,
     checkCapturedSend,
     checkFanOut,
+    checkKeyedFanOut,
+    checkResendDeduped,
+    checkScopedReceive,
     checkReplayTakes,
     checkSendDeliveredOnce,
     checkStepSend,
     checkThirdParty,
     checkTopics,
     scenarioBulkEmpty,
+    scenarioBatchNotifyUnique,
     scenarioBulkSend,
     scenarioCapturedRecv,
     scenarioCapturedSend,
     scenarioFanOut,
+    scenarioKeyedFanOut,
+    scenarioResendDeduped,
+    scenarioScopedReceive,
     scenarioReplayTakes,
     scenarioSendDeliveredOnce,
     scenarioStepSend,
@@ -116,7 +124,10 @@ simMessageFixture = do
         mfSettle = \wid ->
           SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) >>= either (error . show) (const (pure ())),
         mfCheckStep = \wid name step ->
-          SystemDB.checkStep mem wid step name >>= either (error . show) pure
+          SystemDB.checkStep mem wid step name >>= either (error . show) pure,
+        mfNotifyIds = \wid -> do
+          found <- SystemDB.getAllNotifications mem wid
+          pure (either (const []) (map (.notificationRecordMessageUuid)) found)
       }
 
 tests :: TestTree
@@ -125,6 +136,9 @@ tests =
     "Workflow messages (Sim)"
     [ simCase simMessageFixture "a workflow send is delivered once and recv replays" scenarioSendDeliveredOnce checkSendDeliveredOnce traceMessageSilent,
       simCase simMessageFixture "a send may fan out to the destination's forks" scenarioFanOut checkFanOut traceMessageSilent,
+      simCase simMessageFixture "a keyed send fans out like an unkeyed one" scenarioKeyedFanOut checkKeyedFanOut traceMessageSilent,
+      simCase simMessageFixture "a resend under one key delivers once" scenarioResendDeduped checkResendDeduped traceMessageSilent,
+      simCase simMessageFixture "a message addressed elsewhere stays unreadable" scenarioScopedReceive checkScopedReceive traceMessageSilent,
       simCase simMessageFixture "a message from another workflow reaches its destination" scenarioThirdParty checkThirdParty traceMessageSilent,
       simCase simMessageFixture "topics do not cross and absence is a value" scenarioTopics checkTopics traceMessageSilent,
       simCase simMessageFixture "a replay takes the recorded message and sends once" scenarioReplayTakes checkReplayTakes traceMessageSilent,
@@ -132,7 +146,8 @@ tests =
       simCase simMessageFixture "a send through a captured parent is plain and moves no id" scenarioCapturedSend checkCapturedSend traceMessageSilent,
       simCase simMessageFixture "a recv through a captured parent is refused" scenarioCapturedRecv checkCapturedRecv traceMessageSilent,
       simCase simMessageFixture "a batch delivers every message and checkpoints once" scenarioBulkSend checkBulkSend traceBulkSend,
-      simCase simMessageFixture "an empty bulk send still takes its step" scenarioBulkEmpty checkBulkEmpty traceBulkEmpty
+      simCase simMessageFixture "an empty bulk send still takes its step" scenarioBulkEmpty checkBulkEmpty traceBulkEmpty,
+      simCase simMessageFixture "one batch mints a distinct notification id per delivery" scenarioBatchNotifyUnique checkBatchNotifyUnique traceBulkSend
     ]
 
 -- * Typed-event assertions (sim-only)

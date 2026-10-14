@@ -6,12 +6,19 @@ module DBOS.Transact.ClientTest (tests) where
 
 import DBOS.Prelude
 import Data.Aeson (Value (..))
+import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
+import Hasql.Decoders qualified as Decoders
+import Hasql.Encoders qualified as Encoders
+import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
+import Hasql.Transaction qualified as Tx
 import DBOS.SystemDB (Applications (..), QueueRecord (..), VersionInfo (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
 import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
   (
@@ -26,6 +33,7 @@ import DBOS.Transact
     EnqueueOptions (..),
     Environment (..),
     Error (..),
+    IdempotencyKey (..),
     QueueConflict (..),
     WorkflowCtx,
     SerializedWorkflowValue (..),
@@ -43,6 +51,8 @@ import DBOS.Transact
     clientResumeWorkflows,
     clientSendMessage,
     clientSendMessages,
+    clientSendMessageInTx,
+    clientSendMessagesInTx,
     clientConfigFromEnv,
     clientConfigNew,
     closeClient,
@@ -70,6 +80,7 @@ import DBOS.Transact
     shutdown,
     validateClientConfig,
     WorkflowKey,
+    withClientTransaction,
     workflowStatusClient,
     WorkflowHandle (workflowId),
     recv,
@@ -440,6 +451,165 @@ tests =
                 let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Text
                 assertEqual "the batch lands together" (Right "one+two") decoded
               other -> fail (show other),
+      testCase "a client send joins the caller's transaction atomically" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-tx-" <> Text.take 12 suffix
+            appVersion = "hs-l2-client-tx-version-" <> suffix
+            executorId = "hs-l2-client-tx-executor-" <> suffix
+            queueName = "hs-l2-client-tx-q-" <> Text.take 12 suffix
+            table = "client_tx_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
+            topic = Topic ("client-tx-" <> Text.take 12 suffix)
+            key = newWorkflowKey "txreceiver"
+            body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+            body () wctx = do
+              found <- recv wctx (Just topic) (millisDuration 5000)
+              pure $ case found of
+                Right (Just value) -> Right value
+                Right Nothing -> Left (StepFailed "recv" "a message never arrived")
+                Left err -> Left err
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [queueName]}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
+          case queueRegistered of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
+            enqueued <- enqueueClientWorkflowWith client "txreceiver" options Nothing
+            receiver <- case enqueued of
+              Left err -> fail (show err)
+              Right handle -> pure handle
+            backend <- getBackend
+            bracket
+              (Postgres.runSession backend "client-tx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
+              (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
+              (\_ -> do
+                fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
+                composed <- clientSendMessagesInTx client "probe-commit" (do _ <- Tx.statement "row-1" (insertProbe table); Tx.statement "row-2" (insertProbe table)) [SendMessage (WorkflowId receiver.workflowId) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "rust_serde") [fallback] False
+                composed @?= Right ()
+                counted <- Postgres.runSession backend "client-tx-probe" (Session.statement () (countProbe table))
+                counted @?= Right 2
+                _ <- dequeueWorkflows dbos
+                result <- resultWf receiver
+                case result of
+                  Right (Just stored) -> do
+                    let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Text
+                    assertEqual "the committed send reaches the waiter" (Right "hello") decoded
+                  other -> fail (show other)),
+      testCase "a failing caller write aborts before any send lands" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-txrb-" <> Text.take 12 suffix
+            table = "client_tx_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
+            topicName = "client-txrb-" <> Text.take 12 suffix
+            missingTable = "client_tx_missing_" <> Text.take 12 suffix
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          backend <- getBackend
+          bracket
+            (Postgres.runSession backend "client-tx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
+            (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
+            (\_ -> do
+              aborted <- clientSendMessagesInTx client "probe-rollback" (Tx.statement () (Statement.preparable ("SELECT * FROM " <> missingTable) Encoders.noParams Decoders.noResult)) [] Nothing [] False
+              case aborted of
+                Left _ -> pure ()
+                Right _ -> fail "expected the failing statement to abort the transaction"
+              counted <- Postgres.runSession backend "client-tx-probe" (Session.statement () (countProbe table))
+              counted @?= Right 0
+              notified <- Postgres.runSession backend "client-tx-probe" (Session.statement topicName countTopic)
+              notified @?= Right 0),
+      testCase "a duplicate key in one batch is refused before anything runs" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-txkey-" <> Text.take 12 suffix
+            table = "client_tx_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
+            topic = Topic ("client-txkey-" <> Text.take 12 suffix)
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          backend <- getBackend
+          bracket
+            (Postgres.runSession backend "client-tx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
+            (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
+            (\_ -> do
+              fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
+              let keyed destination = SendMessage destination (encodeWorkflowValue ("hello" :: Text)) (Just topic) (Just (IdempotencyKey "dup-key"))
+              refused <- clientSendMessagesInTx client "probe-validation" (Tx.statement "row-1" (insertProbe table)) [keyed (WorkflowId ("client-tx-a-" <> suffix)), keyed (WorkflowId ("client-tx-b-" <> suffix))] (Just "rust_serde") [fallback, fallback] False
+              refused @?= Left (SystemDatabase (SystemDBError.InvalidInput {field = "idempotency_key", detail = "dup-key is used by more than one message"}))
+              counted <- Postgres.runSession backend "client-tx-probe" (Session.statement () (countProbe table))
+              counted @?= Right 0),
+      testCase "a send to a missing workflow aborts the caller's writes" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-txfk-" <> Text.take 12 suffix
+            table = "client_tx_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
+            topic = Topic ("client-txfk-" <> Text.take 12 suffix)
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          backend <- getBackend
+          bracket
+            (Postgres.runSession backend "client-tx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
+            (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
+            (\_ -> do
+              fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
+              aborted <- clientSendMessagesInTx client "probe-fk" (Tx.statement "row-1" (insertProbe table)) [SendMessage (WorkflowId ("client-tx-nowhere-" <> suffix)) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "rust_serde") [fallback] False
+              case aborted of
+                Left _ -> pure ()
+                Right _ -> fail "expected the foreign key to abort the transaction"
+              counted <- Postgres.runSession backend "client-tx-probe" (Session.statement () (countProbe table))
+              counted @?= Right 0),
+      testCase "a keyed send fans out inside the caller's transaction" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-txfork-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-txfork-id-" <> suffix
+            table = "client_tx_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
+            topicName = "client-txfork-" <> Text.take 12 suffix
+            topic = Topic topicName
+            key = newWorkflowKey "forked"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "noop" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          case ran of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            forked <- clientForkWorkflows client [forkNew workflowText] defaultForkOptions
+            case forked of
+              Left err -> fail (show err)
+              Right [forkedId] -> assertBool "the fork restarts under a new id" (forkedId /= WorkflowId workflowText)
+              other -> fail ("expected exactly one fork, got: " <> show other)
+            backend <- getBackend
+            bracket
+              (Postgres.runSession backend "client-tx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
+              (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
+              (\_ -> do
+                fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
+                composed <- clientSendMessageInTx client "probe-forks" (Tx.statement "row-1" (insertProbe table)) (SendMessage (WorkflowId workflowText) (encodeWorkflowValue ("hello" :: Text)) (Just topic) (Just (IdempotencyKey "fork-key"))) (Just "rust_serde") fallback True
+                composed @?= Right ()
+                notified <- Postgres.runSession backend "client-tx-probe" (Session.statement topicName countTopic)
+                notified @?= Right 2),
       testCase "a client reads a workflow's events" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -703,6 +873,45 @@ connectOrFail config = do
   case connected of
     Left err -> fail (show err)
     Right client -> pure client
+
+-- | Scratch-table statements for transaction-atomicity probes: test-owned
+-- DDL on the system database, created and dropped around each case.
+createProbeTable :: Text -> Statement.Statement () ()
+createProbeTable table =
+  Statement.preparable
+    ("CREATE TABLE " <> table <> " (v text NOT NULL)")
+    Encoders.noParams
+    Decoders.noResult
+
+dropProbeTable :: Text -> Statement.Statement () ()
+dropProbeTable table =
+  Statement.preparable
+    ("DROP TABLE " <> table)
+    Encoders.noParams
+    Decoders.noResult
+
+insertProbe :: Text -> Statement.Statement Text ()
+insertProbe table =
+  Statement.preparable
+    ("INSERT INTO " <> table <> " (v) VALUES ($1)")
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    Decoders.noResult
+
+countProbe :: Text -> Statement.Statement () Int64
+countProbe table =
+  Statement.preparable
+    ("SELECT COUNT(*) FROM " <> table)
+    Encoders.noParams
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8)))
+
+-- | Rows addressed to one topic. The suite runs the default schema, which
+-- is also where the send insert writes.
+countTopic :: Statement.Statement Text Int64
+countTopic =
+  Statement.preparable
+    "SELECT COUNT(*) FROM dbos.notifications WHERE topic = $1"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8)))
 
 -- | One backend for the whole group: pools are per-backend, so sharing
 -- bounds connections no matter how many tests run or are interrupted. The

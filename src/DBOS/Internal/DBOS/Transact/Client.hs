@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RankNTypes          #-}
 
 -- | The client: reaching a DBOS application from outside it. Mirrors Rust
 -- @client.rs@: a client talks only to the system database — it enqueues
@@ -21,6 +22,7 @@ module DBOS.Transact.Client
     Client (..),
     connectClient,
     closeClient,
+    withClientTransaction,
     -- * Workflows from outside
     EnqueueOptions (..),
     enqueueOptionsNew,
@@ -32,6 +34,8 @@ module DBOS.Transact.Client
     -- * Messages from outside
     clientSendMessage,
     clientSendMessages,
+    clientSendMessageInTx,
+    clientSendMessagesInTx,
     clientGetEvent,
     -- * Lifecycle from outside
     clientCancelWorkflows,
@@ -52,13 +56,14 @@ import Data.Map.Strict (Map)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
+import Hasql.Transaction qualified as Tx
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewWorkflow (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, timestampNow)
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewWorkflow (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, timestampNow, validateSendKeys)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, runSystemDB, withConnection)
 import DBOS.Transact.Error qualified as TransactError
@@ -135,12 +140,21 @@ clientOutcomePollInterval :: ClientConfig -> Duration
 clientOutcomePollInterval config =
   maybe defaultOutcomePollInterval id config.outcomePollInterval
 
--- | A connection to an application's system database, from outside it. It
--- holds a connection and nothing else — not an executor. Mirrors the
--- oracle's @Client(Arc<Connection>)@.
-newtype Client m = Client
-  { conn :: Connection m
+-- | A connection to an application's system database, from outside it,
+-- plus the transaction runner where the backend hosts caller transactions.
+-- Mirrors the oracle's @Client(Arc<Connection>)@.
+data Client m = Client
+  { conn :: Connection m,
+    -- | Run caller-composed statements on the system database, when the
+    -- backend can host them: set from the concrete backend at connect, so
+    -- only live Postgres clients run transactions and anything else is a
+    -- clean refusal instead of a missing method.
+    clientTxRunner :: Maybe ClientTxRunner
   }
+
+-- | A system-database transaction runner, ranked so one runner serves any
+-- composed block. Built from the concrete backend at connect.
+newtype ClientTxRunner = ClientTxRunner (forall a. Text -> Tx.Transaction a -> IO (Either SystemDBError.Error a))
 
 -- | Connects to the system database. Eager: an unreachable database is
 -- reported here rather than on the first call. Migrates nothing, verifies
@@ -172,7 +186,7 @@ connectClient config =
                 uuidWorkflowId
                 uuidEntropy
                 nullTracer
-            pure (Right (Client conn))
+            pure (Right (Client conn (Just (ClientTxRunner (Postgres.runTransaction systemDB)))))
   where
     backendConfig =
       Postgres.Config
@@ -193,6 +207,43 @@ connectClient config =
 -- nothing queued is lost to a closed pool.
 closeClient ::  Client m -> m ()
 closeClient client = releaseConnection client.conn
+
+-- | Run caller-composed statements on the system database in one
+-- transaction: the caller's own writes and sends commit together or not at
+-- all, mirroring Python @send_in_transaction@'s caller-owned transaction.
+-- Statement failures escape and abort the transaction; backend failures
+-- return 'Left'. A client whose backend cannot host transactions is refused
+-- rather than run partially.
+withClientTransaction :: Client IO -> Text -> Tx.Transaction a -> IO (Either (TransactError.Error TransactError.EngineOnly) a)
+withClientTransaction client operation action = case client.clientTxRunner of
+  Nothing -> pure (Left (TransactError.InvalidArgument "client transaction" "the client backend cannot run caller transactions"))
+  Just (ClientTxRunner run) -> do
+    result <- run operation action
+    pure (either (Left . TransactError.SystemDatabase) Right result)
+
+-- | Send a batch with the caller's writes in one transaction: the writes run
+-- first, then the sends, all in the caller's commit. The batch is validated
+-- up front — nothing runs on a refusal — while foreign-key failures abort
+-- through the insert, as Python's raise aborts the caller's transaction.
+-- No step is recorded, like every client send.
+clientSendMessagesInTx :: Client IO -> Text -> Tx.Transaction () -> [SendMessage] -> Maybe Text -> [Text] -> Bool -> IO (Either (TransactError.Error TransactError.EngineOnly) ())
+clientSendMessagesInTx client operation callerWrites messages serialization fallbacks sendToForks =
+  case validateSendKeys messages of
+    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Right ()
+      | length fallbacks /= length messages ->
+          pure (Left (TransactError.SystemDatabase (SystemDBError.invalidInput "fallbacks" "one fallback id per message")))
+      | otherwise -> runExceptT $ do
+          composed <- ExceptT (withClientTransaction client operation (callerWrites >> Postgres.sendBatchInTx messages serialization fallbacks sendToForks))
+          -- The piece condemns on its own refusal, so a 'Left' here already
+          -- rolled the caller writes back; map it out rather than swallowing it.
+          ExceptT (pure (first TransactError.SystemDatabase composed))
+
+-- | Send one message with the caller's writes in one transaction, as
+-- 'clientSendMessagesInTx' sends a batch.
+clientSendMessageInTx :: Client IO -> Text -> Tx.Transaction () -> SendMessage -> Maybe Text -> Text -> Bool -> IO (Either (TransactError.Error TransactError.EngineOnly) ())
+clientSendMessageInTx client operation callerWrites message serialization fallback sendToForks =
+  clientSendMessagesInTx client operation callerWrites [message] serialization [fallback] sendToForks
 
 -- | What an enqueue may say about how, beside the workflow and its input.
 -- Mirrors Rust @EnqueueOptions@: the queue-shaped asks live on 'Enqueue',

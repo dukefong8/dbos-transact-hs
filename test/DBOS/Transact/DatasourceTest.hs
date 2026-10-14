@@ -41,6 +41,7 @@ import DBOS.Transact
     runTxStep,
     secondsDuration,
     toDataSource,
+    transactionConfigDefault,
     verifyAppDataSource,
   )
 import DBOS.Transact.Logger (nullTracer)
@@ -73,6 +74,7 @@ import DBOS.Transact.DatasourceCases
     checkPrecheckRetry,
     checkRegistryLifecycle,
     checkRetryThenSuccess,
+    checkConnectionRetry,
     checkRunsOutside,
     mkFakeDs,
     protoConfig,
@@ -90,6 +92,7 @@ import DBOS.Transact.DatasourceCases
     scenarioPrecheckRetry,
     scenarioRegistryLifecycle,
     scenarioRetryThenSuccess,
+    scenarioConnectionRetry,
     scenarioRunsOutside,
   )
 import Hasql.Decoders qualified as Decoders
@@ -215,11 +218,12 @@ tests =
         mkLiveFixture backend = pure (DsFixture (dsRunOver backend) mkFakeDs)
      in testGroup
           "Datasource"
-          [ testCase "a default config names nothing and takes the database default isolation" (either fail pure (checkDefaultConfig scenarioDefaultConfig)),
+          [ testCase "a default config names nothing and defaults isolation to serializable" (either fail pure (checkDefaultConfig scenarioDefaultConfig)),
             leaf "a transaction commits once and replays without re-running" scenarioCommitReplay checkCommitReplay,
             leaf "a recorded failure decodes back to itself" scenarioErrorReplays checkErrorReplays,
             leaf "a body failure records, and replay returns it without re-running" scenarioBodyFailureRecorded checkBodyFailureRecorded,
             leaf "retriable failures are retried, then the body runs" scenarioRetryThenSuccess checkRetryThenSuccess,
+            leaf "a connection-class failure is retried, then the body runs" scenarioConnectionRetry checkConnectionRetry,
             leaf "a duplicate execution that won is adopted" scenarioConflictAdopts checkConflictAdopts,
             leaf "a call through a captured parent is refused and records nothing" scenarioCaptureRefused checkCaptureRefused,
             leaf "a nested step inside a transaction runs plainly and records once" scenarioNestedInTx checkNestedInTx,
@@ -292,6 +296,18 @@ tests =
                   outerRows <- countWid "outer"
                   innerRows @?= 1
                   outerRows @?= 0,
+            -- IO only: asserts the live BEGIN default, which no fake can
+            -- observe. Matches the Python datasource default.
+            testCase "an unspecified isolation runs serializable" $ do
+              withProbeApp $ \app -> do
+                found <- runTxOutside (toDataSource app) transactionConfigDefault $ \(Tx run) ->
+                  run (Statement.preparable "SHOW transaction_isolation" Encoders.noParams (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))) ()
+                found @?= Right "serializable",
+            testCase "an explicit isolation reaches the database" $ do
+              withProbeApp $ \app -> do
+                found <- runTxOutside (toDataSource app) (TransactionConfig {txName = Just "probe-isolation", txIsolation = Just ReadCommitted}) $ \(Tx run) ->
+                  run (Statement.preparable "SHOW transaction_isolation" Encoders.noParams (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))) ()
+                found @?= Right "read committed",
             leaf "an ownership move stops the execution instead of adopting" (\fx -> (("ds-own-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId >>= scenarioOwnershipMoved fx) checkOwnershipMoved,
             leaf "a transient pre-check read is retried, then the transaction runs" scenarioPrecheckRetry checkPrecheckRetry,
             leaf "outside a workflow the body runs transactionally and checkpoints nothing" (\_ -> scenarioRunsOutside mkFakeDs) checkRunsOutside,

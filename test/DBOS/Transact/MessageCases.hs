@@ -18,6 +18,9 @@ module DBOS.Transact.MessageCases
     probeSendRecv,
     scenarioSendDeliveredOnce,
     scenarioFanOut,
+    scenarioKeyedFanOut,
+    scenarioResendDeduped,
+    scenarioScopedReceive,
     scenarioThirdParty,
     scenarioTopics,
     scenarioReplayTakes,
@@ -26,8 +29,12 @@ module DBOS.Transact.MessageCases
     scenarioCapturedRecv,
     scenarioBulkSend,
     scenarioBulkEmpty,
+    scenarioBatchNotifyUnique,
     checkSendDeliveredOnce,
     checkFanOut,
+    checkKeyedFanOut,
+    checkResendDeduped,
+    checkScopedReceive,
     checkThirdParty,
     checkTopics,
     checkReplayTakes,
@@ -36,15 +43,18 @@ module DBOS.Transact.MessageCases
     checkCapturedRecv,
     checkBulkSend,
     checkBulkEmpty,
+    checkBatchNotifyUnique,
   )
 where
 
 import DBOS.Prelude
+import Data.List (nub)
 import DBOS.SystemDB (StepRecord (..), WorkflowId (..), sendBulkStepName)
 import DBOS.Transact
   ( EngineOnly,
     Error (..),
     Forks (..),
+    IdempotencyKey (..),
     Message (..),
     SendOptions (..),
     Topic (..),
@@ -71,7 +81,8 @@ data MessageFixture m = MessageFixture
     mfNotifyCount :: WorkflowId -> m Int,
     mfForkFrom :: WorkflowId -> m WorkflowId,
     mfSettle :: WorkflowId -> m (),
-    mfCheckStep :: WorkflowId -> Text -> Int -> m (Maybe StepRecord)
+    mfCheckStep :: WorkflowId -> Text -> Int -> m (Maybe StepRecord),
+    mfNotifyIds :: WorkflowId -> m [Text]
   }
 
 -- | Run with a fresh scope: the rank-2 field is read by pattern match
@@ -81,12 +92,12 @@ data MessageFixture m = MessageFixture
 -- The rank-2 field is read by pattern match because record-dot has no
 -- 'HasField' instance for polymorphic fields.
 mfRun :: MessageFixture m -> WorkflowId -> (forall exec. WorkflowCtx exec m -> m a) -> m a
-mfRun (MessageFixture _ run _ _ _ _ _) = run
+mfRun (MessageFixture _ run _ _ _ _ _ _) = run
 
 -- | Run in a fresh scope for the same workflow: the step counter restarts,
 -- so a replay reads its recorded step back instead of advancing.
 mfFreshRun :: MessageFixture m -> WorkflowId -> (forall exec. WorkflowCtx exec m -> m a) -> m a
-mfFreshRun (MessageFixture _ _ fresh _ _ _ _) = fresh
+mfFreshRun (MessageFixture _ _ fresh _ _ _ _ _) = fresh
 
 -- | Inside a step body a send succeeds and a receive is refused: the
 -- oracle's leaf rule for messages, observed as one Text line.
@@ -248,6 +259,61 @@ checkFanOut (skipped, originalOnce, forkOnce, included, originalTwice, forkTwice
   unless (included == Right ()) $ Left ("expected the fan-out send to succeed, got: " <> show included)
   unless ((originalTwice, forkTwice) == (2, 1)) $ Left ("expected both to hold the fan-out, got: " <> show (originalTwice, forkTwice))
 
+-- | A keyed send fans out like an unkeyed one: the duplicate-key refusal
+-- applies to the caller's list, before fan-out, as both oracles check.
+scenarioKeyedFanOut :: forall m. (MonadSTM m)
+                    => MessageFixture m -> m (Either (Error EngineOnly) (), Int, Int)
+scenarioKeyedFanOut fx = do
+  (original, sender) <- fx.mfFreshPair "keyed-fanout"
+  fx.mfSettle original
+  forkId <- fx.mfForkFrom original
+  included <-
+    mfRun fx sender $ \senderContext ->
+      sendWith senderContext original ("included" :: Text) (sendOptionsDefault {forks = ForksInclude, idempotencyKey = Just (IdempotencyKey "fanout-key")})
+  originalTwice <- fx.mfNotifyCount original
+  forkTwice <- fx.mfNotifyCount forkId
+  pure (included, originalTwice, forkTwice)
+
+checkKeyedFanOut :: (Either (Error EngineOnly) (), Int, Int) -> Either String ()
+checkKeyedFanOut (included, originalTwice, forkTwice) = do
+  unless (included == Right ()) $ Left ("expected the keyed fan-out send to succeed, got: " <> show included)
+  unless ((originalTwice, forkTwice) == (1, 1)) $ Left ("expected both to hold the fan-out, got: " <> show (originalTwice, forkTwice))
+
+-- | A resend under one key delivers once: the second send succeeds but moves
+-- no new message, so the second receive times out.
+scenarioResendDeduped :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+                      => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text))
+scenarioResendDeduped fx = do
+  (source, destination) <- fx.mfFreshPair "resend-dedup"
+  firstSend <- mfRun fx source $ \wctx -> send wctx destination (Just (Topic "approval")) (Just (IdempotencyKey "webhook-1")) ("approved" :: Text)
+  secondSend <- mfRun fx source $ \wctx -> send wctx destination (Just (Topic "approval")) (Just (IdempotencyKey "webhook-1")) ("approved" :: Text)
+  firstReceive <- mfRun fx destination $ \wctx -> recv wctx (Just (Topic "approval")) (millisDuration 100)
+  secondReceive <- mfRun fx destination $ \wctx -> recv wctx (Just (Topic "approval")) (millisDuration 100)
+  pure (firstSend, secondSend, firstReceive, secondReceive)
+
+checkResendDeduped :: (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text)) -> Either String ()
+checkResendDeduped (firstSend, secondSend, firstReceive, secondReceive) = do
+  unless (firstSend == Right ()) $ Left ("expected the first send to succeed, got: " <> show firstSend)
+  unless (secondSend == Right ()) $ Left ("expected the resend to succeed without delivering, got: " <> show secondSend)
+  unless (firstReceive == Right (Just "approved")) $ Left ("expected the one delivery, got: " <> show firstReceive)
+  unless (secondReceive == Right Nothing) $ Left ("expected the resend to leave nothing queued, got: " <> show secondReceive)
+
+-- | Topics do not cross workflows: a message addressed elsewhere is not
+-- readable here, even on a shared topic.
+scenarioScopedReceive :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+                      => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text))
+scenarioScopedReceive fx = do
+  (sourceA, destA) <- fx.mfFreshPair "scope-a"
+  (_sourceB, destB) <- fx.mfFreshPair "scope-b"
+  sent <- mfRun fx sourceA $ \wctx -> send wctx destA (Just (Topic "shared")) Nothing ("for-a" :: Text)
+  missed <- mfRun fx destB $ \wctx -> recv wctx (Just (Topic "shared")) (millisDuration 100)
+  pure (sent, missed)
+
+checkScopedReceive :: (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text)) -> Either String ()
+checkScopedReceive (sent, missed) = do
+  unless (sent == Right ()) $ Left ("expected the send to succeed, got: " <> show sent)
+  unless (missed == Right Nothing) $ Left ("expected another workflow's message to stay unreadable, got: " <> show missed)
+
 -- | A third party's send is delivered.
 checkThirdParty :: (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text)) -> Either String ()
 checkThirdParty (sent, received) = do
@@ -308,3 +374,26 @@ checkBulkEmpty (sent, checkpoint) = do
   case checkpoint of
     Just _ -> pure ()
     Nothing -> Left "expected the empty batch to take its step"
+
+-- | Two deliveries in one batch carry distinct notification ids: the stored
+-- id is unique per row live (the message uuid), so the sim must not mint
+-- one counter value twice.
+scenarioBatchNotifyUnique :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m)
+                          => MessageFixture m -> m (Either (Error EngineOnly) (), [Text])
+scenarioBatchNotifyUnique fx = do
+  (source, destination) <- fx.mfFreshPair "batch-notify-unique"
+  sent <-
+    mfRun fx source $ \sender ->
+      sendBulk
+        sender
+        [ Message destination ("one" :: Text) (Just (Topic "approval")) Nothing,
+          Message destination ("two" :: Text) (Just (Topic "approval")) Nothing
+        ]
+  ids <- fx.mfNotifyIds destination
+  pure (sent, ids)
+
+checkBatchNotifyUnique :: (Either (Error EngineOnly) (), [Text]) -> Either String ()
+checkBatchNotifyUnique (sent, ids) = do
+  unless (sent == Right ()) $ Left ("expected the batch to send, got: " <> show sent)
+  unless (length ids == 2) $ Left ("expected two notification rows, got: " <> show ids)
+  unless (nub ids == ids) $ Left ("expected distinct notification ids, got: " <> show ids)
