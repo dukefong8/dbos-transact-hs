@@ -99,12 +99,12 @@ import Data.Text.Encoding (decodeUtf8)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB.Class (SystemDB (..))
-import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput)
+import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput, shouldRecord)
 import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, messageKey, newRegistry, notified, streamKey, streamsChannel, subscribe, subscribeExclusive, unsubscribe)
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdempotencyKey (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -168,8 +168,8 @@ fetchNotificationSession (MessageUUID messageUUID) =
     limit 1
   |]
 
--- | Highest applied migration version. The ceiling this port tracks is 114
--- (ranges 1–47 + 100–114); a higher value means the Rust corpus moved and the
+-- | Highest applied migration version. The ceiling this port tracks is 121
+-- (ranges 1–47 + 100–121); a higher value means the Rust corpus moved and the
 -- pinned queries must be re-verified. The single-column table selects as a
 -- full-table model, decoded by the instance below.
 newtype DbosMigration = DbosMigration Int64
@@ -1029,7 +1029,7 @@ fromPool pool poolSize settings tracer = do
         psdbLog = tracer
       }
 
--- | Connects and verifies the schema is at the migration ceiling (114).
+-- | Connects and verifies the schema is at the migration ceiling (121).
 -- Verify-only: Haskell never migrates (ADR-0004) and never creates the
 -- database; a missing or drifted schema is a 'Backend' 'Permanent' error,
 -- not a build step.
@@ -1104,11 +1104,11 @@ verifySystemDatabase env = do
                 )
             )
 
--- | The migration ceiling this port tracks (ranges 1–47 + 100–114). A
+-- | The migration ceiling this port tracks (ranges 1–47 + 100–121). A
 -- higher value means the Rust corpus moved and the pinned queries must be
 -- re-verified.
 migrationCeiling :: Int64
-migrationCeiling = 114
+migrationCeiling = 121
 
 -- | Runs one session through the pool, classifying failures into the shared
 -- 'Error' channel and retrying through 'withRetry' under the operation's
@@ -2221,7 +2221,7 @@ deliverTo env stepName messages serialization caller = do
             sendParamsStep = sendStep
           }
   result <- runTransaction env "send_messages" (Statements.sendMessagesTx params)
-  pure $ case result of
+  pure $ case join result of
     Left err
       | foreignKeyError err ->
           Left (NonExistentWorkflow {workflowIds = List.sort (List.nub destinations)})
@@ -2774,6 +2774,53 @@ instance SystemDB PostgresSystemDB IO where
     sendInternal env sendStepName [message] serialization caller sendToForks
   sendMessages env messages serialization caller sendToForks =
     sendInternal env sendBulkStepName messages serialization caller sendToForks
+  rewindWorkflow env (Types.WorkflowId widText) cut sysOpts caller =
+    case sysRewindValidate cut sysOpts of
+      Left err -> pure (Left err)
+      Right () -> do
+        timing <- StepTiming <$> timestampNow <*> timestampNow
+        let QueueName queue = fromMaybe internalQueueName (QueueName <$> sysOpts.sysRewindQueueName)
+            params =
+              Statements.RewindParams
+                { rewindWorkflowId = widText,
+                  rewindStartStep = cut,
+                  rewindQueueName = queue,
+                  rewindPartitionKey = sysOpts.sysRewindQueuePartitionKey,
+                  rewindAppVersion = sysOpts.sysRewindApplicationVersion,
+                  rewindCaller = (\(Types.WorkflowId callerWid, step) -> (callerWid, step)) <$> caller,
+                  rewindStartedAt = timestampToEpochMs timing.stepTimingStartedAt,
+                  rewindCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt
+                }
+        runTransaction env "rewind_workflow" (Statements.rewindTx params) >>= \result ->
+          case join result of
+            Left err@(RewindInterrupted {}) -> case caller of
+              Just (Types.WorkflowId callerWid, callerStep) | shouldRecord err -> do
+                -- The one refusal whose work transaction condemned after its
+                -- deletes ran, so the failure cannot ride it and is recorded
+                -- through a separate session instead, as @record_step_failure@
+                -- records through its own connection. Every other refusal
+                -- settles through the transaction's own record or condemn.
+                -- Best effort — a recording failure still returns the
+                -- original refusal.
+                completedAt <- timestampNow
+                _ <-
+                  runSession env "rewind_workflow" $
+                    Statements.recordStepSession
+                      Statements.RecordStepParams
+                        { recordStepWorkflowId = callerWid,
+                          recordStepStepId = callerStep,
+                          recordStepStepName = rewindStepName,
+                          recordStepOutput = Nothing,
+                          recordStepError = Just (decodeUtf8 (LBS.toStrict (Aeson.encode err))),
+                          recordStepSerialization = Nothing,
+                          recordStepStartedAt = Just (timestampToEpochMs timing.stepTimingStartedAt),
+                          recordStepCompletedAt = Just (timestampToEpochMs completedAt),
+                          recordStepApplicationName = Nothing,
+                          recordStepChildWorkflowId = Nothing
+                        }
+                pure (Left err)
+              _ -> pure (Left err)
+            other -> pure other
   recv env wid stepId timeoutStepId topic timeout = do
     let storedTopic = fromMaybe nullTopicSentinel topic
         widText = unwrap wid
@@ -2871,6 +2918,7 @@ instance SystemDB PostgresSystemDB IO where
         -- another writer took the offset this one computed, and the retry
         -- recomputes it — so each attempt is lost to a *different* rival, and
         -- the loop converges as long as writers are finite.
+        go :: Int -> IO (Either Error ())
         go attempts
           | attempts >= 16 = pure (Left (Backend (BackendError {backendMessage = "stream offset was repeatedly claimed by concurrent writers", backendSqlState = Nothing, backendKind = Transient})))
           | otherwise = do

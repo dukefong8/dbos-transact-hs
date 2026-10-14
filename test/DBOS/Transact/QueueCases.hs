@@ -87,8 +87,6 @@ module DBOS.Transact.QueueCases
     checkCountedPartitioned,
     scenarioPeerQueue,
     checkPeerQueue,
-    scenarioWorkerConcurrency,
-    checkWorkerConcurrency,
     scenarioWorkerBudgetExhausted,
     checkWorkerBudgetExhausted,
   )

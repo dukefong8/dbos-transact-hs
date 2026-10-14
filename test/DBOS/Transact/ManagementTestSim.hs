@@ -61,6 +61,19 @@ import DBOS.Transact.ManagementCases
     checkForkPartitioned,
     checkAttributes,
     checkDelayRelease,
+    checkRewindRunsAgain,
+    checkRewindRefusals,
+    checkRewindUndoCut,
+    checkRewindKeepBelowCut,
+    checkRewindQueueVersion,
+    checkRewindInWorkflow,
+    checkRewindCallerStep,
+    checkRewindAdoptsChild,
+    checkRewindRefusedTakesNoStep,
+    checkRewindDropsDatasourceCheckpoints,
+    checkCompletionClearsCheckpoints,
+    checkChildClearsCheckpoints,
+    checkCompletionClearsCheckpoints,
     checkResumeMissing,
     checkResumeOntoQueue,
     checkRetrieve,
@@ -82,6 +95,19 @@ import DBOS.Transact.ManagementCases
     scenarioForkPartitioned,
     scenarioAttributes,
     scenarioDelayRelease,
+    scenarioRewindRunsAgain,
+    scenarioRewindRefusals,
+    scenarioRewindUndoCut,
+    scenarioRewindKeepBelowCut,
+    scenarioRewindQueueVersion,
+    scenarioRewindInWorkflow,
+    scenarioRewindCallerStep,
+    scenarioRewindAdoptsChild,
+    scenarioRewindRefusedTakesNoStep,
+    scenarioRewindDropsDatasourceCheckpoints,
+    scenarioCompletionClearsCheckpoints,
+    scenarioChildClearsCheckpoints,
+    scenarioCompletionClearsCheckpoints,
     scenarioResumeMissing,
     scenarioResumeOntoQueue,
     scenarioRetrieve,
@@ -140,6 +166,18 @@ tests =
       simCase simMgmtFixture "a fork onto a partitioned queue carries the key it is given" scenarioForkPartitioned checkForkPartitioned traceForkPartitioned,
       simCase simMgmtFixture "attributes are replaced and can be searched" scenarioAttributes checkAttributes traceAttributes,
       simCase simMgmtFixture "a delayed workflow can be released sooner" scenarioDelayRelease checkDelayRelease traceDelayRelease,
+      simCase simMgmtFixture "a finished workflow rewound to its second step runs again under the same id" scenarioRewindRunsAgain checkRewindRunsAgain traceRewindRunsAgain,
+      simCase simMgmtFixture "rewind refusals name their cause and write nothing" scenarioRewindRefusals checkRewindRefusals traceRewindRefusals,
+      simCase simMgmtFixture "a rewind at the first step undoes the run" scenarioRewindUndoCut checkRewindUndoCut traceRewindUndoCut,
+      simCase simMgmtFixture "a rewind keeps what fell below the cut" scenarioRewindKeepBelowCut checkRewindKeepBelowCut traceRewindKeepBelowCut,
+      simCase simMgmtFixture "a rewind names the queue and version the re-run gets" scenarioRewindQueueVersion checkRewindQueueVersion traceRewindQueueVersion,
+      simCase simMgmtFixture "a workflow rewinding another as its step runs once" scenarioRewindInWorkflow checkRewindInWorkflow traceRewindInWorkflow,
+      simCase simMgmtFixture "a direct rewind naming its caller records the call" scenarioRewindCallerStep checkRewindCallerStep traceRewindCallerStep,
+      simCase simMgmtFixture "a rewound parent replays to its child and adopts it" scenarioRewindAdoptsChild checkRewindAdoptsChild traceRewindAdoptsChild,
+      simCase simMgmtFixture "a refused rewind inside a workflow spends no step" scenarioRewindRefusedTakesNoStep checkRewindRefusedTakesNoStep traceRewindRefusedTakesNoStep,
+      simCase simMgmtFixture "an executor rewind drops the datasource checkpoints" scenarioRewindDropsDatasourceCheckpoints checkRewindDropsDatasourceCheckpoints traceRewindDropsDatasourceCheckpoints,
+      simCase simMgmtFixture "every completion clears the run's datasource checkpoints" scenarioCompletionClearsCheckpoints checkCompletionClearsCheckpoints traceCompletionClearsCheckpoints,
+      simCase simMgmtFixture "an inline child clears its own datasource checkpoints on completion" scenarioChildClearsCheckpoints checkChildClearsCheckpoints traceChildClearsCheckpoints,
       testCase "management announces through its tracer" $ do
         (_, tr) <- runSimCase demoTrace
         printSimTrace tr
@@ -150,7 +188,8 @@ tests =
                 WorkflowsForked 0,
                 WorkflowsDeleted 1,
                 WorkflowDelayMoveAsked "sim-mgmt-delayed",
-                WorkflowAttributesReplaceAsked "sim-mgmt-attributed"
+                WorkflowAttributesReplaceAsked "sim-mgmt-attributed",
+                WorkflowRewound "sim-mgmt-rewound" 2 "_dbos_internal_queue"
               ]
     ]
 
@@ -161,6 +200,81 @@ traceMgmtSilent tr = do
   selectTraceEventsDynamic tr @?= ([] :: [WorkflowEvent])
   selectTraceEventsDynamic tr @?= ([] :: [EngineEvent])
   selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+
+-- | Rewind announcements name the rewound id; the re-run's own steps and
+-- completions are judged by the shared checks, not the trace.
+traceRewindRunsAgain :: forall a. SimTrace a -> IO ()
+traceRewindRunsAgain tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowRewound "hs-l2-mgmt-rewind-runs-sim" 1 "_dbos_internal_queue"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | Every refusal is silent; the run and the parked start still announce.
+traceRewindRefusals :: forall a. SimTrace a -> IO ()
+traceRewindRefusals tr = do
+  selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | One rewind onto the queue, however deep the cut.
+traceRewindUndoCut :: forall a. SimTrace a -> IO ()
+traceRewindUndoCut tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowRewound "hs-l2-mgmt-rewind-undo-sim" 1 "_dbos_internal_queue"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The deeper cut rides the announcement.
+traceRewindKeepBelowCut :: forall a. SimTrace a -> IO ()
+traceRewindKeepBelowCut tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowRewound "hs-l2-mgmt-rewind-undo-sim" 5 "_dbos_internal_queue"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The chosen queue and version ride the rewind announcement's row.
+traceRewindQueueVersion :: forall a. SimTrace a -> IO ()
+traceRewindQueueVersion tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowRewound "hs-l2-mgmt-rewind-qv-sim" 0 "custom-q"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The in-workflow rewind announces once, under the caller's checkpoint.
+traceRewindInWorkflow :: forall a. SimTrace a -> IO ()
+traceRewindInWorkflow tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowRewound "hs-l2-mgmt-rewind-target-sim" 0 "_dbos_internal_queue"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The direct caller step announces nothing: announcements live in the
+-- management layer, and this call runs below it.
+traceRewindCallerStep :: forall a. SimTrace a -> IO ()
+traceRewindCallerStep tr = do
+  selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The rewind announces once; the adoption itself is silent.
+traceRewindAdoptsChild :: forall a. SimTrace a -> IO ()
+traceRewindAdoptsChild tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowRewound "hs-l2-mgmt-rewind-adopt-sim" 0 "_dbos_internal_queue"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The refusal spends no step and announces nothing.
+traceRewindRefusedTakesNoStep :: forall a. SimTrace a -> IO ()
+traceRewindRefusedTakesNoStep tr = do
+  selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The datasource drop is silent; the rewind announces.
+traceRewindDropsDatasourceCheckpoints :: forall a. SimTrace a -> IO ()
+traceRewindDropsDatasourceCheckpoints tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowRewound "hs-l2-mgmt-rewind-tx-sim" 0 "_dbos_internal_queue"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | Completions announce nothing new; the shutdown ends the run.
+traceCompletionClearsCheckpoints :: forall a. SimTrace a -> IO ()
+traceCompletionClearsCheckpoints tr = do
+  selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The child completion announces nothing new either; the shutdown ends
+-- the run.
+traceChildClearsCheckpoints :: forall a. SimTrace a -> IO ()
+traceChildClearsCheckpoints tr = do
+  selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | A launched leaf with no announcements of its own still shuts down.
 traceMgmtShutdown :: SimTrace a -> IO ()
@@ -354,6 +468,7 @@ demoTrace = do
   runTracer simTracer (WorkflowsDeleted 1)
   runTracer simTracer (WorkflowDelayMoveAsked "sim-mgmt-delayed")
   runTracer simTracer (WorkflowAttributesReplaceAsked "sim-mgmt-attributed")
+  runTracer simTracer (WorkflowRewound "sim-mgmt-rewound" 2 "_dbos_internal_queue")
 
 -- | The sim case bodies, top-level so their rank-2 signatures can name
 -- the simulation: captured state and refs arrive as parameters.

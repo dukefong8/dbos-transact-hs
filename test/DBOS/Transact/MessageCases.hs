@@ -25,6 +25,7 @@ module DBOS.Transact.MessageCases
     scenarioTopics,
     scenarioReplayTakes,
     scenarioStepSend,
+    scenarioSendNameMismatch,
     scenarioCapturedSend,
     scenarioCapturedRecv,
     scenarioBulkSend,
@@ -39,6 +40,7 @@ module DBOS.Transact.MessageCases
     checkTopics,
     checkReplayTakes,
     checkStepSend,
+    checkSendNameMismatch,
     checkCapturedSend,
     checkCapturedRecv,
     checkBulkSend,
@@ -49,7 +51,8 @@ where
 
 import DBOS.Prelude
 import Data.List (nub)
-import DBOS.SystemDB (StepRecord (..), WorkflowId (..), sendBulkStepName)
+import DBOS.SystemDB (StepRecord (..), WorkflowId (..), sendBulkStepName, sendStepName)
+import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact
   ( EngineOnly,
     Error (..),
@@ -185,6 +188,21 @@ scenarioStepSend :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch
 scenarioStepSend fx = do
   (source, destination) <- fx.mfFreshPair "step-send"
   mfRun fx source $ \sender -> runStep sender "probe" (\sctx -> probeSendRecv destination sctx)
+
+-- | A send from a position that holds a step recorded under another name is
+-- refused: the workflow's code changed at this position since the row was
+-- written, so delivering would be a send the first run never made. Returns
+-- the refusal and the messages the destination holds.
+scenarioSendNameMismatch :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+                         => MessageFixture m -> m (Either (Error EngineOnly) (), Int)
+scenarioSendNameMismatch fx = do
+  (source, destination) <- fx.mfFreshPair "send-name-mismatch"
+  -- The earlier run recorded a plain step at this position.
+  _ <- mfFreshRun fx source $ \sender -> runStep sender "probe" (\_ -> pure ())
+  -- The changed body sends from the same position.
+  refused <- mfFreshRun fx source $ \sender -> send sender destination (Just (Topic "approval")) Nothing ("ping" :: Text)
+  count <- fx.mfNotifyCount destination
+  pure (refused, count)
 
 -- | A send through a captured parent is plain and moves no id.
 scenarioCapturedSend :: forall m. (MonadSTM m, MonadCatch m)
@@ -343,6 +361,17 @@ checkReplayTakes (firstSend, firstReceive, secondSend, replayed, secondReceive, 
 checkStepSend :: Either (Error EngineOnly) Text -> Either String ()
 checkStepSend outcome =
   unless (outcome == Right "sent recv") $ Left ("expected the probe line, got: " <> show outcome)
+
+-- | The refusal names the recorded step, and nothing was delivered.
+checkSendNameMismatch :: (Either (Error EngineOnly) (), Int) -> Either String ()
+checkSendNameMismatch (refused, count) = do
+  case refused of
+    Left (SystemDatabase (SysDB.UnexpectedStep {stepId, expected, recorded})) -> do
+      unless (stepId == 0) $ Left ("expected the first position, got: " <> show stepId)
+      unless (expected == sendStepName) $ Left ("expected the send's name, got: " <> show expected)
+      unless (recorded == "probe") $ Left ("expected the recorded name to be the plain step, got: " <> show recorded)
+    other -> Left ("expected an UnexpectedStep refusal, got: " <> show other)
+  unless (count == 0) $ Left ("expected nothing delivered, got: " <> show count)
 
 -- | The captured send succeeds and moves no id.
 checkCapturedSend :: (Either (Error EngineOnly) (), Int) -> Either String ()

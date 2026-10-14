@@ -407,9 +407,11 @@ controlErr err = SystemDatabase (SystemDBError.Backend err)
 -- name, plus the SQLSTATE serialization class for rows that carry no kind.
 -- Matches the primary oracle's retry set (Rust retries conflict and
 -- connection kinds; Python additionally retries idle-in-transaction
--- disconnects, which stay permanent here like Rust); the checkpoint dedup
--- converges a retried ambiguous commit to adoption, so retrying a dropped
--- connection is safe.
+-- disconnects, which stay permanent here like Rust — decided 2026-10-14
+-- under the oracle rule: Rust wins where both speak, and its classifier
+-- leaves the 25 class permanent); the checkpoint dedup converges a
+-- retried ambiguous commit to adoption, so retrying a dropped connection
+-- is safe.
 isRetriable :: BackendError -> Bool
 isRetriable err = err.backendKind `elem` [Connection, Transient] || isSerializationClass
   where

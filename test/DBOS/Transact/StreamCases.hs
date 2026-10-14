@@ -269,7 +269,7 @@ checkTimeoutAfterValue = checkEq (Just "a", True)
 
 -- | Pulling at individual offsets yields values in order, then the close
 -- marker and any later offset both appear as end-of-stream.
-scenarioSingleStreamValue :: forall m. (MonadAsync m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m, MonadCatch m)
+scenarioSingleStreamValue :: forall m. (MonadAsync m, MonadMVar m, MonadTime m, MonadDelay m, MonadCatch m)
                           => EventFixture m -> m (Maybe Text, Maybe Text, Bool, Bool)
 scenarioSingleStreamValue fx = do
   producer <- fx.efFreshId "stream-single-value"
@@ -441,7 +441,7 @@ checkJoinedReaders = checkEq (Just "a", Just "a")
 
 -- | Dropping a reader after a completed pull loses no later values; a new
 -- reader at the next offset continues the stream whole.
-scenarioDroppedRead :: (MonadAsync m, MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioDroppedRead :: (MonadAsync m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
                     => EventFixture m -> m ([Text], [Text])
 scenarioDroppedRead fx = do
   producer <- fx.efFreshId "stream-dropped-producer"
@@ -541,7 +541,7 @@ checkInvalidStreamRead = checkEq (True, True)
 
 -- | A reader waiting on a pending producer notices cancellation of its own
 -- workflow during the bounded polling interval.
-scenarioCancelledReader :: forall m. (MonadAsync m, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioCancelledReader :: forall m. (MonadAsync m, MonadMVar m, MonadTime m, MonadDelay m)
                         => EventFixture m -> m Bool
 scenarioCancelledReader fx = do
   producer <- fx.efFreshId "stream-cancelled-reader-producer"

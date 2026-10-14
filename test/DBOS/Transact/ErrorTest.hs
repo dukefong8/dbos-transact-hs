@@ -52,7 +52,7 @@ tests =
       testCase "re-targeting recurses into the nested retry errors" $ do
         let err = MaxStepRetriesExceeded {step = "s", attempts = 2, errors = [ErrorApplication (CardDeclined {attempts = 1})]} :: Error CardDeclined
         mapApplication (const "boom") err
-          @?= MaxStepRetriesExceeded {step = "s", attempts = 2, errors = [ErrorApplication "boom"]},
+          @?= (MaxStepRetriesExceeded {step = "s", attempts = 2, errors = [ErrorApplication "boom"]} :: Error String),
       testCase "the renamed constructors record under their bare tags" $ do
         -- Engine-only variants that never reach a recorded row (the
         -- system-database failure is control) are refused by decode, so

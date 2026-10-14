@@ -11,6 +11,7 @@ module DBOS.SystemDB.Error
     invalidInput,
     renderError,
     renderBackendError,
+    shouldRecord,
   )
 where
 
@@ -38,6 +39,8 @@ data Error
   | StepAlreadyRecorded {workflowId :: Text, stepId :: Int}
   | NoForkPoint {workflowIds :: [Text], stepName :: Maybe Text}
   | NonExistentWorkflow {workflowIds :: [Text]}
+  | WorkflowNotRewindable {workflowId :: Text, status :: Text}
+  | RewindInterrupted {workflowId :: Text, status :: Text}
   | ErrorMaxRecoveryAttemptsExceeded {workflowId :: Text, limit :: Int64}
   | AlreadyRegistered {kind :: Text, name :: Text}
   | NotRegistered {kind :: Text, name :: Text}
@@ -82,6 +85,8 @@ instance ToJSON Error where
     StepAlreadyRecorded {workflowId, stepId} -> tagged "StepAlreadyRecorded" (object ["workflow_id" .= workflowId, "step_id" .= stepId])
     NoForkPoint {workflowIds, stepName} -> tagged "NoForkPoint" (object ["workflow_ids" .= workflowIds, "step_name" .= stepName])
     NonExistentWorkflow {workflowIds} -> tagged "NonExistentWorkflow" (object ["workflow_ids" .= workflowIds])
+    WorkflowNotRewindable {workflowId, status} -> tagged "WorkflowNotRewindable" (object ["workflow_id" .= workflowId, "status" .= status])
+    RewindInterrupted {workflowId, status} -> tagged "RewindInterrupted" (object ["workflow_id" .= workflowId, "status" .= status])
     -- Tag keeps the Rust spelling; see the decode side.
     ErrorMaxRecoveryAttemptsExceeded {workflowId, limit} -> tagged "MaxRecoveryAttemptsExceeded" (object ["workflow_id" .= workflowId, "limit" .= limit])
     AlreadyRegistered {kind, name} -> tagged "AlreadyRegistered" (object ["kind" .= kind, "name" .= name])
@@ -104,6 +109,8 @@ instance FromJSON Error where
       "StepAlreadyRecorded" -> withObject "StepAlreadyRecorded" (\o -> StepAlreadyRecorded <$> o .: "workflow_id" <*> o .: "step_id") payload
       "NoForkPoint" -> withObject "NoForkPoint" (\o -> NoForkPoint <$> o .: "workflow_ids" <*> o .: "step_name") payload
       "NonExistentWorkflow" -> withObject "NonExistentWorkflow" (\o -> NonExistentWorkflow <$> o .: "workflow_ids") payload
+      "WorkflowNotRewindable" -> withObject "WorkflowNotRewindable" (\o -> WorkflowNotRewindable <$> o .: "workflow_id" <*> o .: "status") payload
+      "RewindInterrupted" -> withObject "RewindInterrupted" (\o -> RewindInterrupted <$> o .: "workflow_id" <*> o .: "status") payload
       -- Tag keeps the Rust spelling: the oracle names this variant
       -- @MaxRecoveryAttemptsExceeded@, and the port's @Error@ prefix is
       -- collision avoidance only (constructors, never wire names).
@@ -173,6 +180,10 @@ renderError err =
       "no step named " <> name <> " in workflows " <> Text.intercalate ", " ids
     NonExistentWorkflow {workflowIds = ids} ->
       "no such workflow: " <> Text.intercalate ", " ids
+    WorkflowNotRewindable {workflowId = wid, status = current} ->
+      "cannot rewind workflow " <> wid <> " (" <> current <> "): it is running or waiting to run, so cancel it first"
+    RewindInterrupted {workflowId = wid, status = before} ->
+      "workflow " <> wid <> " changed status from " <> before <> " while being rewound; retry the rewind"
     ErrorMaxRecoveryAttemptsExceeded {workflowId = wid, limit = count} ->
       "workflow " <> wid <> " exceeded " <> Text.pack (show count) <> " recovery attempts"
     AlreadyRegistered {kind = what, name = taken} ->
@@ -192,3 +203,31 @@ renderBackendError backend =
   case backend.backendSqlState of
     Just code -> backend.backendMessage <> " (" <> code <> ")"
     Nothing   -> backend.backendMessage
+
+-- | Whether a failure is an answer worth recording against a caller's
+-- step: re-asking in the same state gets the same reply, so a replay
+-- stays on the branch the original run took. Control failures —
+-- transport, values this build cannot read, signals about the calling
+-- execution — end the run rather than answer the call, and are never
+-- recorded. Exhaustive by construction (no wildcard arm), so a new
+-- variant must be placed on one side or the other. Mirrors Rust
+-- @Error::should_record@.
+shouldRecord :: Error -> Bool
+shouldRecord err = case err of
+  Backend _ -> False
+  Malformed _ -> False
+  ConflictingWorkflow {} -> True
+  ConcurrentRecv {} -> False
+  InvalidInput {} -> True
+  QueueDeduplicated {} -> True
+  WorkflowCancelled {} -> False
+  UnexpectedStep {} -> False
+  StepAlreadyRecorded {} -> False
+  NoForkPoint {} -> True
+  NonExistentWorkflow {} -> True
+  WorkflowNotRewindable {} -> True
+  RewindInterrupted {} -> True
+  ErrorMaxRecoveryAttemptsExceeded {} -> True
+  AlreadyRegistered {} -> True
+  NotRegistered {} -> True
+  RegisteredByAnother {} -> True

@@ -49,7 +49,7 @@ import DBOS.SystemDB.Types
     durationAsMillis,
     durationIsZero,
   )
-import DBOS.Transact.Connection (Connection (..), withConnection)
+import DBOS.Transact.Connection (withConnection)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor)

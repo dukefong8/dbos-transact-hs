@@ -35,6 +35,7 @@ import DBOS.Transact.MessageCases
     checkReplayTakes,
     checkSendDeliveredOnce,
     checkStepSend,
+    checkSendNameMismatch,
     checkThirdParty,
     checkTopics,
     scenarioBulkEmpty,
@@ -49,6 +50,7 @@ import DBOS.Transact.MessageCases
     scenarioReplayTakes,
     scenarioSendDeliveredOnce,
     scenarioStepSend,
+    scenarioSendNameMismatch,
     scenarioThirdParty,
     scenarioTopics,
   )
@@ -165,6 +167,7 @@ tests =
             leaf "topics do not cross and absence is a value" scenarioTopics checkTopics,
             leaf "a replay takes the recorded message and sends once" scenarioReplayTakes checkReplayTakes,
             leaf "a step may send but may not receive" scenarioStepSend checkStepSend,
+            leaf "a send from a renamed position is refused" scenarioSendNameMismatch checkSendNameMismatch,
             leaf "a send through a captured parent is plain and moves no id" scenarioCapturedSend checkCapturedSend,
             leaf "a recv through a captured parent is refused" scenarioCapturedRecv checkCapturedRecv,
             leaf "a batch delivers every message and checkpoints once" scenarioBulkSend checkBulkSend,

@@ -569,7 +569,7 @@ lifecycleTests getBackend =
       testCase "runs a session through the pool" $
         withBackend getBackend $ \env -> do
           result <- runSession env "probe" migrationVersionSession
-          result @?= Right (Just (DbosMigration 114)),
+          result @?= Right (Just (DbosMigration 121)),
       testCase "rejects a non-dbos schema" $
         withBackend getBackend $ \env -> do
           outcome <- try (fromPool env.psdbPool 8 (defaultSettings {settingsSchema = "other"}) nullTracer)
@@ -719,7 +719,8 @@ requiredNotificationsColumns =
     "message",
     "message_uuid",
     "serialization",
-    "consumed"
+    "consumed",
+    "consumed_by_function_id"
   ]
 
 -- | Reads against rows the tests own: each case inserts a fresh workflow id

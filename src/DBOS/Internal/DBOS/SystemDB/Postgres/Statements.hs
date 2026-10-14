@@ -70,6 +70,10 @@ module DBOS.SystemDB.Postgres.Statements
     SendMessagesParams (..),
     SendStep (..),
     sendMessagesTx,
+    RewindParams (..),
+    rewindTx,
+    CallerStep (..),
+    checkCallerStep,
     SetEventParams (..),
     setEventTx,
     EventValueRaw (..),
@@ -143,11 +147,15 @@ module DBOS.SystemDB.Postgres.Statements
   )
 where
 
+import Data.Aeson (eitherDecodeStrict, encode)
+import Data.ByteString.Lazy qualified as LBS
 import Data.Int (Int32, Int64)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
+import Data.Text.Encoding (decodeUtf8)
 import DBOS.Prelude
-import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..))
+import DBOS.SystemDB.Error (Error (..), shouldRecord)
+import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..), WorkflowStatus (Cancelled), isActiveStatus, parseWorkflowStatus, rewindStepName, streamClosedSentinel, streamClosedSerialization)
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
@@ -1070,6 +1078,281 @@ forkTx params = do
         else pure ()
       pure Nothing
 
+-- | Everything a rewind binds: the target and the cut step, the resolved
+-- re-enqueue queue (the internal queue when the options name none) with its
+-- partition and version, the caller's step when a workflow is doing it, and
+-- the timing fixed outside the retry. Mirrors the oracle's
+-- @rewind_workflow@: options are validated before the transaction, the
+-- fallback queue before it too.
+data RewindParams = RewindParams
+  { rewindWorkflowId    :: Text,
+    rewindStartStep     :: Int,
+    rewindQueueName     :: Text,
+    rewindPartitionKey  :: Maybe Text,
+    rewindAppVersion    :: Maybe Text,
+    rewindCaller        :: Maybe (Text, Int),
+    rewindStartedAt     :: Int64,
+    rewindCompletedAt   :: Int64
+  }
+  deriving stock (Eq, Show)
+
+-- | Discards a finished workflow's history from the cut on and re-enqueues
+-- it under the same id, in one transaction. Checked refusals settle
+-- through 'refuseIfNeeded': a recordable failure commits a failure step
+-- for the caller (nothing else has run, so the commit is safe) exactly as
+-- @record_step_failure@ does through its own connection; anything else
+-- condemns, rolling back with nothing written, as the in-transaction
+-- sends behave. Statement failures propagate unchecked and abort the same
+-- way. 'RewindInterrupted' is the one refusal raised after its deletes
+-- ran, so it always condemns — the caller's failure step is recorded
+-- through a separate session by the backend's rewind (see the rewind in
+-- @DBOS.SystemDB.Postgres.Backend@), which is where the oracle's
+-- separate-connection @record_step_failure@ lands too.
+rewindTx :: RewindParams -> Tx.Transaction (Either Error ())
+rewindTx params = do
+  outcome <- runExceptT $ do
+    verified <- lift (checkCallerStep rewindStepName params.rewindCaller)
+    case verified of
+      CallerReplayed replayed -> ExceptT (pure replayed)
+      CallerRefused err -> ExceptT (refuseIfNeeded (Left err))
+      _ -> do
+        stored <- lift (Tx.statement params.rewindWorkflowId rewindStatusStatement)
+        status <- ExceptT (refuseIfNeeded (rewindStatus stored))
+        affected <- lift (rewindDeletes status)
+        if affected /= 1
+          then do
+            lift Tx.condemn
+            throwError (RewindInterrupted {workflowId = params.rewindWorkflowId, status = status})
+          else do
+            case params.rewindCaller of
+              Just _ -> lift (recordCallerOutcome params (Right ()))
+              Nothing -> pure ()
+            pure ()
+  pure outcome
+  where
+    -- | The guarded status read: missing rows, unknown spellings, and
+    -- running workflows are refused before anything is written. A status
+    -- this build does not know is refused rather than guessed at; a
+    -- workflow that may be running is refused too, since its own execution
+    -- replays from the history this would delete.
+    rewindStatus :: Maybe Text -> Either Error Text
+    rewindStatus stored = case stored of
+      Nothing -> Left (NonExistentWorkflow {workflowIds = [params.rewindWorkflowId]})
+      Just raw -> case parseWorkflowStatus raw of
+        Left _ -> Left (Malformed ("unknown workflow status \"" <> raw <> "\""))
+        Right status
+          | isActiveStatus status -> Left (WorkflowNotRewindable {workflowId = params.rewindWorkflowId, status = raw})
+          | otherwise -> Right raw
+    -- | Settles a pre-write refusal through the should-record gate: with a
+    -- caller to record to, a recordable failure commits its failure step;
+    -- otherwise the transaction condemns. Nothing has run at any call
+    -- site, so committing is safe.
+    refuseIfNeeded :: Either Error a -> Tx.Transaction (Either Error a)
+    refuseIfNeeded (Left err) = case params.rewindCaller of
+      Just _ | shouldRecord err -> recordCallerOutcome params (Left err) >> pure (Left err)
+      _ -> Tx.condemn >> pure (Left err)
+    refuseIfNeeded ok = pure ok
+    rewindDeletes :: Text -> Tx.Transaction Int64
+    rewindDeletes status = do
+      void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindDeleteEventsStatement)
+      void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindRestoreEventsStatement)
+      void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep, streamClosedSentinel, streamClosedSerialization) rewindDeleteStreamCloseStatement)
+      void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindDeleteStepsStatement)
+      void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindDeleteHistoryStatement)
+      void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindDeleteNotificationsStatement)
+      void (Tx.statement params.rewindWorkflowId rewindDeleteOutputStatement)
+      Tx.statement
+        ( params.rewindWorkflowId,
+          status,
+          params.rewindQueueName,
+          params.rewindPartitionKey,
+          params.rewindAppVersion
+        )
+        rewindUpdateStatement
+
+-- | What a named caller step allows, verified in one snapshot before
+-- anything runs. Shared by both backends so the live transaction and the
+-- sim mirror judge the same verdicts; only 'checkCallerStep' (live) and
+-- the sim's inline mirror build one, so skipping work, recording
+-- outcomes, and refusing calls cannot bypass the existence,
+-- cancellation, and name checks. Mirrors the guarantees around Rust's
+-- @check_step_on@.
+data CallerStep
+  = CallerAbsent
+  | CallerFresh
+  | CallerReplayed (Either Error ())
+  | CallerRefused Error
+
+-- | Verifies the caller's step for a named call. A missing caller row, a
+-- cancelled caller, and a step recorded under another name are refused; a
+-- step recorded under our name replays its outcome (the recorded failure,
+-- decoded, or success); anything else runs fresh. 'Nothing' — no caller —
+-- carries no obligation.
+checkCallerStep :: Text -> Maybe (Text, Int) -> Tx.Transaction CallerStep
+checkCallerStep _ Nothing = pure CallerAbsent
+checkCallerStep stepName (Just (callerWid, callerStep)) = do
+  found <- Tx.statement (callerWid, callerStep) checkStepStatement
+  pure $ case found of
+    Nothing -> CallerRefused (NonExistentWorkflow {workflowIds = [callerWid]})
+    Just row -> case parseWorkflowStatus (fromMaybe "" row.stepCheckStatus) of
+      Left _ -> CallerRefused (Malformed ("unknown workflow status \"" <> fromMaybe "" row.stepCheckStatus <> "\""))
+      Right Cancelled -> CallerRefused (WorkflowCancelled {workflowId = callerWid})
+      Right _ -> case row.stepCheckStepId of
+        Nothing -> CallerFresh
+        Just _ -> case row.stepCheckStepName of
+          Just recorded | recorded /= stepName ->
+            CallerRefused (UnexpectedStep {workflowId = callerWid, stepId = callerStep, expected = stepName, recorded = recorded})
+          _ -> CallerReplayed (replayStep row)
+  where
+    replayStep row = case row.stepCheckError of
+      Just text -> case eitherDecodeStrict (encodeUtf8 text) of
+        Right err -> Left err
+        Left _ -> Left (Malformed "unreadable recorded step error")
+      Nothing -> Right ()
+
+-- | Records the caller's step with the call's outcome: the unit output on
+-- success, the structured error on a recordable refusal. The unit repeats
+-- @record_step_output@'s shape (@\"null\"@ under @portable_json@) so any
+-- SDK reads the row back; the error keeps our tagged wire format, which
+-- the replay decodes. With no caller there is nothing to record.
+recordCallerOutcome :: RewindParams -> Either Error () -> Tx.Transaction ()
+recordCallerOutcome params outcome = case params.rewindCaller of
+  Nothing -> pure ()
+  Just (callerWid, callerStep) ->
+    void
+      ( Tx.statement
+          ()
+          ( recordStepStatement
+              RecordStepParams
+                { recordStepWorkflowId = callerWid,
+                  recordStepStepId = callerStep,
+                  recordStepStepName = rewindStepName,
+                  recordStepOutput = either (const Nothing) (const (Just "null")) outcome,
+                  recordStepError = either (Just . errorJson) (const Nothing) outcome,
+                  recordStepSerialization = either (const Nothing) (const (Just "portable_json")) outcome,
+                  recordStepStartedAt = Just params.rewindStartedAt,
+                  recordStepCompletedAt = Just params.rewindCompletedAt,
+                  recordStepApplicationName = Nothing,
+                  recordStepChildWorkflowId = Nothing
+                }
+          )
+      )
+  where
+    errorJson err = decodeUtf8 (LBS.toStrict (encode err))
+
+-- | The target's stored status, if it has a row.
+rewindStatusStatement :: Statement.Statement Text (Maybe Text)
+rewindStatusStatement =
+  Statement.preparable
+    "select status from dbos.workflow_status where workflow_uuid = $1"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.text)))
+
+-- | A workflow id with its cut step.
+widCutEncoder :: Encoders.Params (Text, Int)
+widCutEncoder =
+  contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
+    <> contramap (fromIntegral . snd) (Encoders.param (Encoders.nonNullable Encoders.int4))
+
+-- | A key published at or past the cut is deleted, to be restored below.
+rewindDeleteEventsStatement :: Statement.Statement (Text, Int) Int64
+rewindDeleteEventsStatement =
+  Statement.preparable sql widCutEncoder (Decoders.rowsAffected)
+  where
+    sql =
+      "delete from dbos.workflow_events where workflow_uuid = $1 and key in \
+      \(select key from dbos.workflow_events_history where workflow_uuid = $1 and function_id >= $2)"
+
+-- | ...then restored from its last value below the cut, if it had one. A
+-- key the discarded steps never published is left alone.
+rewindRestoreEventsStatement :: Statement.Statement (Text, Int) Int64
+rewindRestoreEventsStatement =
+  Statement.preparable sql widCutEncoder (Decoders.rowsAffected)
+  where
+    sql =
+      "insert into dbos.workflow_events (workflow_uuid, key, value, serialization) \
+      \select workflow_uuid, key, value, serialization from ( \
+      \  select h.workflow_uuid, h.key, h.value, h.serialization, \
+      \         row_number() over (partition by h.key order by h.function_id desc) as rn \
+      \  from dbos.workflow_events_history h \
+      \  where h.workflow_uuid = $1 and h.function_id < $2 \
+      \    and h.key in (select key from dbos.workflow_events_history where workflow_uuid = $1 and function_id >= $2) \
+      \) latest where rn = 1"
+
+-- | Only the close: every other entry stays where a reader may already
+-- have found it, and the replay appends after it.
+rewindDeleteStreamCloseStatement :: Statement.Statement (Text, Int, Text, Text) Int64
+rewindDeleteStreamCloseStatement =
+  Statement.preparable sql encoder (Decoders.rowsAffected)
+  where
+    sql =
+      "delete from dbos.streams where workflow_uuid = $1 and function_id >= $2 \
+      \and value = $3 and serialization = $4"
+    encoder =
+      contramap (\(wid, _, _, _) -> wid) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, cut, _, _) -> fromIntegral cut) (Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> contramap (\(_, _, value, _) -> value) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, _, serialization) -> serialization) (Encoders.param (Encoders.nonNullable Encoders.text))
+
+-- | The discarded steps and their event history go together.
+rewindDeleteStepsStatement :: Statement.Statement (Text, Int) Int64
+rewindDeleteStepsStatement =
+  Statement.preparable
+    "delete from dbos.operation_outputs where workflow_uuid = $1 and function_id >= $2"
+    widCutEncoder
+    (Decoders.rowsAffected)
+
+-- | See 'rewindDeleteStepsStatement'.
+rewindDeleteHistoryStatement :: Statement.Statement (Text, Int) Int64
+rewindDeleteHistoryStatement =
+  Statement.preparable
+    "delete from dbos.workflow_events_history where workflow_uuid = $1 and function_id >= $2"
+    widCutEncoder
+    (Decoders.rowsAffected)
+
+-- | A message consumed below the cut stays consumed, since its recv
+-- replays. One still unconsumed goes whenever it was sent, so the replayed
+-- recv cannot take a message meant for the run being discarded.
+rewindDeleteNotificationsStatement :: Statement.Statement (Text, Int) Int64
+rewindDeleteNotificationsStatement =
+  Statement.preparable sql widCutEncoder (Decoders.rowsAffected)
+  where
+    sql =
+      "delete from dbos.notifications where destination_uuid = $1 \
+      \and (consumed_by_function_id >= $2 or consumed = false)"
+
+-- | The completed payload goes with the run.
+rewindDeleteOutputStatement :: Statement.Statement Text Int64
+rewindDeleteOutputStatement =
+  Statement.preparable
+    "delete from dbos.workflow_output where workflow_uuid = $1"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowsAffected)
+
+-- | Re-enqueues under the same id, guarded on the status read above: if
+-- anything moved the row since, the rewind would re-enqueue a workflow in
+-- a state it never checked. The timeout is kept so the dequeue derives a
+-- fresh deadline.
+rewindUpdateStatement :: Statement.Statement (Text, Text, Text, Maybe Text, Maybe Text) Int64
+rewindUpdateStatement =
+  Statement.preparable sql encoder (Decoders.rowsAffected)
+  where
+    sql =
+      "update dbos.workflow_status set status = 'ENQUEUED', queue_name = $3, \
+      \queue_partition_key = $4, \
+      \application_version = coalesce($5, application_version), \
+      \recovery_attempts = 0, owner_xid = null, \
+      \workflow_deadline_epoch_ms = null, deduplication_id = null, \
+      \started_at_epoch_ms = null, completed_at = null, \
+      \output = null, error = null, updated_at = (extract(epoch from now()) * 1000)::bigint \
+      \where workflow_uuid = $1 and status = $2"
+    encoder =
+      contramap (\(wid, _, _, _, _) -> wid) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, status, _, _, _) -> status) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, queue, _, _) -> queue) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, _, partitionKey, _) -> partitionKey) (Encoders.param (Encoders.nullable Encoders.text))
+        <> contramap (\(_, _, _, _, version) -> version) (Encoders.param (Encoders.nullable Encoders.text))
+
 -- | The sources that exist, so a fork can report the rest.
 existingSourcesStatement :: Statement.Statement [Text] [Text]
 existingSourcesStatement =
@@ -1400,7 +1683,7 @@ recvTx params = do
   case existing of
     Just row | row.stepCheckStepId /= Nothing -> pure (RecvAdopted row)
     _ -> do
-      taken <- Tx.statement (params.recvWorkflowId, params.recvTopic) consumeStatement
+      taken <- Tx.statement (params.recvWorkflowId, params.recvTopic, params.recvStepId) consumeStatement
       Tx.statement () (recordStepStatement (recvStepRecord params taken))
       pure (RecvTook taken)
 
@@ -1426,20 +1709,21 @@ recvStepRecord params taken =
 -- committed two receivers resolve the same message, and the loser
 -- re-evaluates this predicate against the winner's committed row and
 -- matches nothing. Mirrors the oracle's consume.
-consumeStatement :: Statement.Statement (Text, Text) (Maybe EncodedValueRaw)
+consumeStatement :: Statement.Statement (Text, Text, Int) (Maybe EncodedValueRaw)
 consumeStatement =
   Statement.preparable sql encoder decoder
   where
     sql =
-      "update dbos.notifications set consumed = true \
+      "update dbos.notifications set consumed = true, consumed_by_function_id = $3 \
       \where message_uuid = ( \
       \    select message_uuid from dbos.notifications \
       \    where destination_uuid = $1 and topic = $2 and consumed = false \
       \    order by created_at_epoch_ms asc limit 1 \
       \) and consumed = false \
       \returning message, serialization"
-    encoder = contramap fst textParam <> contramap snd textParam
+    encoder = contramap (\(wid, _, _) -> wid) textParam <> contramap (\(_, topic, _) -> topic) textParam <> contramap (\(_, _, step) -> fromIntegral step) stepParam
     textParam = Encoders.param (Encoders.nonNullable Encoders.text)
+    stepParam = Encoders.param (Encoders.nonNullable Encoders.int4)
     decoder =
       Decoders.rowMaybe
         ( EncodedValueRaw
@@ -1477,22 +1761,29 @@ data SendStep = SendStep
 -- discarded (@DO NOTHING@), which is what makes a re-send idempotent.
 -- Mirrors @deliver@ (the fork fan-out is deferred: @send_to_forks@ is
 -- refused until @descendant_forks@ lands).
-sendMessagesTx :: SendMessagesParams -> Tx.Transaction ()
+--
+-- A named caller is verified first, through the shared 'checkCallerStep':
+-- a step already recorded under the send's own name is the replay, while a
+-- position holding another name (the workflow's code changed between runs)
+-- is refused with 'UnexpectedStep' rather than delivered. 'CallerRefused'
+-- condemns, rolling the transaction back — the caller may have written in
+-- the same transaction, as the client's own send does.
+sendMessagesTx :: SendMessagesParams -> Tx.Transaction (Either Error ())
 sendMessagesTx params = do
-  replay <- case params.sendParamsStep of
-    Nothing -> pure False
-    Just step -> do
-      existing <- Tx.statement (step.sendStepWorkflowId, step.sendStepStepId) checkStepStatement
-      pure (maybe False (\row -> row.stepCheckStepId /= Nothing) existing)
-  if replay
-    then pure ()
-    else do
+  verdict <- case params.sendParamsStep of
+    Nothing -> pure CallerAbsent
+    Just step -> checkCallerStep step.sendStepName (Just (step.sendStepWorkflowId, step.sendStepStepId))
+  case verdict of
+    CallerRefused err -> Tx.condemn >> pure (Left err)
+    CallerReplayed _ -> pure (Right ())
+    _ -> do
       if null params.sendParamsDestinations
         then pure ()
         else void (Tx.statement (params.sendParamsDestinations, params.sendParamsTopics, params.sendParamsPayloads, params.sendParamsMessageIds, params.sendParamsSerialization) sendInsertStatement)
       case params.sendParamsStep of
         Nothing   -> pure ()
         Just step -> void (Tx.statement () (recordStepStatement (sendStepRecord step)))
+      pure (Right ())
 
 -- | The step a send records: a void success under the send's own name.
 sendStepRecord :: SendStep -> RecordStepParams

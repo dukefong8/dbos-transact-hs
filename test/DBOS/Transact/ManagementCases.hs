@@ -42,6 +42,18 @@ module DBOS.Transact.ManagementCases
     scenarioForkPartitioned,
     scenarioAttributes,
     scenarioDelayRelease,
+    scenarioRewindRunsAgain,
+    scenarioRewindRefusals,
+    scenarioRewindUndoCut,
+    scenarioRewindKeepBelowCut,
+    scenarioRewindQueueVersion,
+    scenarioRewindInWorkflow,
+    scenarioRewindCallerStep,
+    scenarioRewindAdoptsChild,
+    scenarioRewindRefusedTakesNoStep,
+    scenarioRewindDropsDatasourceCheckpoints,
+    scenarioCompletionClearsCheckpoints,
+    scenarioChildClearsCheckpoints,
     checkUnlaunched,
     checkCancelMissing,
     checkResumeMissing,
@@ -62,12 +74,27 @@ module DBOS.Transact.ManagementCases
     checkForkPartitioned,
     checkAttributes,
     checkDelayRelease,
+    checkRewindRunsAgain,
+    checkRewindRefusals,
+    checkRewindUndoCut,
+    checkRewindKeepBelowCut,
+    checkRewindQueueVersion,
+    checkRewindInWorkflow,
+    checkRewindCallerStep,
+    checkRewindAdoptsChild,
+    checkRewindRefusedTakesNoStep,
+    checkRewindDropsDatasourceCheckpoints,
+    checkCompletionClearsCheckpoints,
+    checkChildClearsCheckpoints,
   )
 where
 
 import DBOS.Prelude
+import Data.Int (Int64)
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.SystemDB (Fork (..), ForkOptions (..), ForkPoint (..), QueueName (..), SerializedWorkflowValue (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, internalQueueName)
+import GHC.Stack (HasCallStack)
+import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NotificationRecord (..), QueueName (..), SerializedWorkflowValue (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, internalQueueName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
   ( CodecError,
@@ -86,7 +113,9 @@ import DBOS.Transact
     WorkflowRef,
     cancelWorkflow,
     cancelWorkflows,
+    closeStream,
     decodeWorkflowValue,
+    defaultRewindOptions,
     deleteWorkflow,
     deleteWorkflows,
     encodeWorkflowValue,
@@ -98,16 +127,27 @@ import DBOS.Transact
     getWorkflowStatus,
     handleResult,
     handleStatus,
+    millisDuration,
     newDBOS,
     newWorkflowKey,
+    recv,
+    registerDataSource,
     registerWorkflow,
     registerWorkflowRef,
     resumeWorkflow,
     resumeWorkflows,
     retrieveWorkflow,
+    rewindWorkflow,
+    rewindWorkflows,
+    rewindWorkflowsInWorkflow,
+    RewindOptions (..),
+    runTxStep,
     runWorkflow,
     runStep,
+    send,
+    setEvent,
     setWorkflowDelay,
+    Topic (..),
     updateWorkflowAttributes,
     listWorkflowStepsInWorkflow,
     listWorkflowSteps,
@@ -118,7 +158,10 @@ import DBOS.Transact
     startWorkflow,
     startOptionsDefault,
     waitForWorkflow,
+    writeStream,
   )
+import DBOS.Transact.DatasourceCases (FakeDs (..), mkFakeDs, protoConfig)
+import DBOS.Transact.Datasource (DataSource (..), Tx (..))
 import DBOS.Transact.Logger (SomeTracer (..))
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Instance (dequeueWorkflows, launchOnWithQueues)
@@ -618,6 +661,7 @@ scenarioSingular fx = do
     let key = newWorkflowKey "singular"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body input _ = pure (Right input)
+        wid :: Int -> WorkflowId
         wid n = WorkflowId ("hs-l2-mgmt-singular-" <> Text.pack (show n) <> "-" <> suffix)
     refE <- registerWorkflowRef dbos key body
     ref <- case refE of
@@ -1161,6 +1205,209 @@ checkAttributes (widText, found, after, cleared) = do
 checkDelayRelease :: (Maybe WorkflowStatus, Int) -> Either String ()
 checkDelayRelease = checkEq (Just Delayed, 0)
 
+-- * Rewind
+
+-- | Two steps and a run counter: the rewind target that proves steps at
+-- and past the cut run again.
+rewindCountBody :: forall exec m. (MonadSTM m, MonadTime m, MonadCatch m)
+                => StrictTVar m Int ->
+                   Int ->
+                   WorkflowCtx exec m ->
+                   m (Either (Error EngineOnly) Int)
+rewindCountBody ran input wctx = do
+  first <- runStep wctx "first" (const (pure input))
+  case first of
+    Left err -> pure (Left err)
+    Right value -> do
+      second <- runStep wctx "second" (const (pure (value + 1)))
+      case second of
+        Left err -> pure (Left err)
+        Right done -> atomically (modifyTVar ran (+ 1)) >> pure (Right done)
+
+-- | Sends, receives, publishes, and streams across three steps, addressed
+-- to its own id (the input): the rewind target that proves every undo
+-- branch. Step ids are fixed by the calls: send at 0, recv at 1 (timeout
+-- at 2), publish at 3, send at 4, recv at 5 (timeout at 6), publish at 7,
+-- stream writes at 8 and 9, a parked send at 10, the close at 11.
+rewindUndoBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m)
+               => Text ->
+                  WorkflowCtx exec m ->
+                  m (Either (Error EngineOnly) Text)
+rewindUndoBody widText wctx = do
+  let wid = WorkflowId widText
+      topic = Topic "undo"
+      expect step expected actual = pure $ case actual of
+        Right (Just value) | value == expected -> Right ()
+        _ -> Left (StepFailed ("expect-" <> Text.pack (show step)) ("took " <> Text.pack (show actual)))
+  sent0 <- send wctx wid (Just topic) Nothing ("m0" :: Text)
+  case sent0 of
+    Left err -> pure (Left err)
+    Right () -> do
+      took0 <- recv wctx (Just topic) (millisDuration 5000) :: m (Either (Error EngineOnly) (Maybe Text))
+      outcome0 <- expect (0 :: Int) "m0" took0
+      case outcome0 of
+        Left err -> pure (Left err)
+        Right () -> do
+          published0 <- setEvent wctx "k" ("v0" :: Text)
+          case published0 of
+            Left err -> pure (Left err)
+            Right () -> do
+              sent1 <- send wctx wid (Just topic) Nothing ("m1" :: Text)
+              case sent1 of
+                Left err -> pure (Left err)
+                Right () -> do
+                  took1 <- recv wctx (Just topic) (millisDuration 5000) :: m (Either (Error EngineOnly) (Maybe Text))
+                  outcome1 <- expect (1 :: Int) "m1" took1
+                  case outcome1 of
+                    Left err -> pure (Left err)
+                    Right () -> do
+                      published1 <- setEvent wctx "k" ("v1" :: Text)
+                      case published1 of
+                        Left err -> pure (Left err)
+                        Right () -> do
+                          wroteA <- writeStream wctx "s" ("a" :: Text)
+                          case wroteA of
+                            Left err -> pure (Left err)
+                            Right () -> do
+                              wroteB <- writeStream wctx "s" ("b" :: Text)
+                              case wroteB of
+                                Left err -> pure (Left err)
+                                Right () -> do
+                                  sent2 <- send wctx wid (Just topic) Nothing ("m2" :: Text)
+                                  case sent2 of
+                                    Left err -> pure (Left err)
+                                    Right () -> do
+                                      closed <- closeStream wctx "s"
+                                      case closed of
+                                        Left err -> pure (Left err)
+                                        Right () -> pure (Right "done")
+
+-- | The datasource transaction a rewind drops checkpoints for.
+rewindTxBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+             => FakeDs m ->
+                () ->
+                WorkflowCtx exec m ->
+                m (Either (Error EngineOnly) Text)
+rewindTxBody fake () wctx = do
+  outcome <- runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("v" :: Text)))
+  case outcome of
+    Left err -> pure (Left err)
+    Right _ -> pure (Right "done")
+
+-- | A transaction that reports its checkpoint count mid-run: the count
+-- the completion clearing must later remove.
+txCountBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+            => FakeDs m ->
+               StrictTVar m Int ->
+               () ->
+               WorkflowCtx exec m ->
+               m (Either (Error EngineOnly) Text)
+txCountBody fake countVar () wctx = do
+  outcome <- runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("v" :: Text)))
+  case outcome of
+    Left err -> pure (Left err)
+    Right _ -> do
+      n <- Map.size <$> readTVarIO fake.fakeRows
+      atomically (writeTVar countVar n)
+      pure (Right "done")
+
+-- | The adoption child: counts its runs and doubles its input.
+adoptChildBody :: forall exec m. (MonadSTM m)
+               => StrictTVar m Int ->
+                  Int ->
+                  WorkflowCtx exec m ->
+                  m (Either (Error EngineOnly) Int)
+adoptChildBody ran input _ = atomically (modifyTVar ran (+ 1)) >> pure (Right (input * 2))
+
+-- | The adoption parent: counts its runs, starts the child, and awaits
+-- its result.
+adoptParentBody :: forall exec m. (MonadTime m, MonadMVar m, MonadCatch m, MonadTimer m)
+                => WorkflowRef m EngineOnly ->
+                   StrictTVar m Int ->
+                   () ->
+                   WorkflowCtx exec m ->
+                   m (Either (Error EngineOnly) Int)
+adoptParentBody childRef ran () wctx = do
+  atomically (modifyTVar ran (+ 1))
+  started <- startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
+  case started of
+    Left err -> pure (Left err)
+    Right child -> do
+      awaited <- handleResult child
+      case awaited of
+        Left err -> pure (Left err)
+        Right (Just stored) ->
+          pure $ case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+            Right value -> Right value
+            Left err -> Left (StepFailed "parent" (Text.pack (show err)))
+        Right Nothing -> pure (Left (StepFailed "parent" "no child output"))
+
+-- | A refused rewind inside a workflow records nothing: the body hands
+-- back the refusal's field.
+rewindRefusedBody :: forall exec m. (MonadAsync m, MonadDelay m, MonadTime m, MonadCatch m)
+                  => Text ->
+                     WorkflowCtx exec m ->
+                     m (Either (Error EngineOnly) Text)
+rewindRefusedBody target wctx = do
+  rewound <- rewindWorkflowsInWorkflow wctx (WorkflowId target) (defaultRewindOptions {rewindStartStep = -3})
+  case rewound of
+    Left (InvalidArgument _ detail) -> pure (Right detail)
+    other -> pure (Left (StepFailed "rewind" (Text.pack (show other))))
+
+-- | A finished workflow rewound to its second step runs again under the
+-- same id: the row is re-enqueued with its counters cleared, the later
+-- step is gone, and the driven pass re-executes it. Returns the row
+-- status, queue, attempts, output, remaining step ids, the re-run output,
+-- and the run count.
+scenarioRewindRunsAgain :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                        => MgmtFixture m ->
+                           m (WorkflowStatus, Maybe Text, Int64, Maybe Text, [Int], Int, Int)
+scenarioRewindRunsAgain fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    ran <- newTVarIO (0 :: Int)
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "rewindable"
+        wid = WorkflowId ("hs-l2-mgmt-rewind-runs-" <> suffix)
+    registered <- registerWorkflow dbos key (rewindCountBody ran)
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    first <- runWf exec key wid (Just (encodeWorkflowValue (0 :: Int)))
+    case first of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    rewound <- rewindWorkflows dbos wid (defaultRewindOptions {rewindStartStep = 1})
+    case rewound of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    row <- fx.mfReadRow wid
+    listed <- listStepsWf dbos wid
+    stepIds <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepId | record <- records]
+    drove <- dequeueWorkflows dbos
+    case drove of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    waited <- waitForWorkflow dbos wid
+    decoded <- case waited of
+      Right (SystemDB.AwaitedSucceeded (Just output) _) ->
+        case decodeWorkflowValue "result" (Just (SystemDB.SerializedWorkflowValue output Nothing)) :: Either CodecError Int of
+          Right n -> pure n
+          Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the rewound run to finish, got: " <> show other))
+    after <- readTVarIO ran
+    pure
+      ( row.workflowRecordStatus,
+        row.workflowRecordQueueName,
+        row.workflowRecordRecoveryAttempts,
+        row.workflowRecordOutput,
+        stepIds,
+        decoded,
+        after
+      )
+
 -- | A delayed workflow can be released sooner: started an hour out it waits
 -- as delayed; brought forward to now, the driven pass transitions and runs
 -- it. Returns the waiting status and the decoded result.
@@ -1227,3 +1474,609 @@ checkEq :: (Eq a, Show a) => a -> a -> Either String ()
 checkEq expected actual
   | expected == actual = Right ()
   | otherwise = Left ("expected " <> show expected <> ", got " <> show actual)
+
+-- | The finished run rewound to its second step runs again: the check
+-- judges the reset row, the surviving step, and the re-run.
+checkRewindRunsAgain :: (WorkflowStatus, Maybe Text, Int64, Maybe Text, [Int], Int, Int) -> Either String ()
+checkRewindRunsAgain (status, queue, attempts, output, stepIds, decoded, after) = do
+  checkEq Enqueued status
+  let QueueName internal = internalQueueName
+  checkEq (Just internal) queue
+  checkEq 0 attempts
+  checkEq Nothing output
+  checkEq [0] stepIds
+  checkEq 1 decoded
+  checkEq 2 after
+
+-- | Refusals name their cause and write nothing: a missing id, a negative
+-- cut, an empty queue name, and a workflow still enqueued. Returns the
+-- four verdicts with the active row's status and steps afterwards.
+scenarioRewindRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                       => MgmtFixture m ->
+                          m ( Either (Error EngineOnly) (),
+                              Either (Error EngineOnly) (),
+                              Either (Error EngineOnly) (),
+                              Either (Error EngineOnly) (),
+                              WorkflowStatus,
+                              [Int]
+                            )
+scenarioRewindRefusals fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "rewindable"
+        refKey = newWorkflowKey "rewindable-ref"
+        finished = WorkflowId ("hs-l2-mgmt-rewind-done-" <> suffix)
+        active = WorkflowId ("hs-l2-mgmt-rewind-active-" <> suffix)
+    registered <- registerWorkflow dbos key zeroBody
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    refE <- registerWorkflowRef dbos refKey zeroBody
+    ref <- case refE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key finished (Just (encodeWorkflowValue ()))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    missing <- rewindWorkflows dbos (WorkflowId "never-existed") (defaultRewindOptions {rewindStartStep = 0})
+    negative <- rewindWorkflows dbos finished (defaultRewindOptions {rewindStartStep = -1})
+    emptyQueue <- rewindWorkflows dbos finished (defaultRewindOptions {rewindQueueName = Just ""})
+    started <-
+      startWfRef
+        exec
+        ref
+        (startOptionsDefault {startWorkflowId = Just active, startQueue = Just (enqueueNew "no-runner-here")})
+        (Just (encodeWorkflowValue ()))
+    case started of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    refused <- rewindWorkflows dbos active (defaultRewindOptions {rewindStartStep = 0})
+    row <- fx.mfReadRow active
+    listed <- listStepsWf dbos active
+    stepIds <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepId | record <- records]
+    pure (missing, negative, emptyQueue, refused, row.workflowRecordStatus, stepIds)
+
+-- | Every refusal names its cause; the active row is untouched.
+checkRewindRefusals :: ( Either (Error EngineOnly) (),
+                         Either (Error EngineOnly) (),
+                         Either (Error EngineOnly) (),
+                         Either (Error EngineOnly) (),
+                         WorkflowStatus,
+                         [Int]
+                       ) -> Either String ()
+checkRewindRefusals (missing, negative, emptyQueue, refused, statusAfter, stepsAfter) = do
+  case missing of
+    Left (SystemDatabase SystemDB.NonExistentWorkflow {}) -> pure ()
+    other -> Left ("expected a missing workflow refusal, got: " <> show other)
+  case negative of
+    Left (InvalidArgument op detail) -> do
+      checkEq "rewind a workflow" op
+      checkEq "start_step must not be negative, got -1" detail
+    other -> Left ("expected a negative-cut refusal, got: " <> show other)
+  case emptyQueue of
+    Left (InvalidArgument op detail) -> do
+      checkEq "rewind a workflow" op
+      checkEq "queue_name must be absent rather than empty" detail
+    other -> Left ("expected an empty-queue refusal, got: " <> show other)
+  case refused of
+    Left (SystemDatabase (SystemDB.WorkflowNotRewindable {status})) -> checkEq "ENQUEUED" status
+    other -> Left ("expected an active-workflow refusal, got: " <> show other)
+  checkEq Enqueued statusAfter
+  checkEq [] stepsAfter
+
+-- | Runs the undo fixture and rewinds it at the given cut, reading back
+-- every undone surface: the surviving notification messages, the current
+-- event value for the published key, the stream values in order, the
+-- surviving step ids, and the row status.
+undoAt :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+       => MgmtFixture m ->
+          Int ->
+          m ([Text], Maybe Text, [Text], [Int], WorkflowStatus)
+undoAt fx cut = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "rewind-undo"
+        widText = "hs-l2-mgmt-rewind-undo-" <> suffix
+        wid = WorkflowId widText
+    registered <- registerWorkflow dbos key rewindUndoBody
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowValue widText))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    rewound <- rewindWorkflows dbos wid (defaultRewindOptions {rewindStartStep = cut})
+    case rewound of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    notified <- runSystemDB fx.mfSystemDB (\db -> SystemDB.getAllNotifications db wid)
+    messages <- case notified of
+      Left err -> throwIO (userError (show err))
+      Right rows -> pure [row.notificationRecordMessage | row <- rows]
+    published <- runSystemDB fx.mfSystemDB (\db -> SystemDB.getAllEvents db wid)
+    eventHit <- case published of
+      Left err -> throwIO (userError (show err))
+      Right rows -> pure (lookup "k" [(row.eventKey, row.eventValue) | row <- rows])
+    entries <- runSystemDB fx.mfSystemDB (\db -> SystemDB.getAllStreamEntries db wid)
+    values <- case entries of
+      Left err -> throwIO (userError (show err))
+      Right rows -> pure [row.streamValue | row <- rows]
+    listed <- listStepsWf dbos wid
+    stepIds <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepId | record <- records]
+    row <- fx.mfReadRow wid
+    pure (messages, eventHit, values, stepIds, row.workflowRecordStatus)
+
+-- | Rewound at the first step, everything the run did is undone: no
+-- message survives, the published key is gone, the close is lifted while
+-- the entries stay, and only the first step stands.
+scenarioRewindUndoCut :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                      => MgmtFixture m -> m ([Text], Maybe Text, [Text], [Int], WorkflowStatus)
+scenarioRewindUndoCut fx = undoAt fx 1
+
+-- | The cut wipes the run's messages, restores the key, lifts the close,
+-- and keeps the first step.
+checkRewindUndoCut :: ([Text], Maybe Text, [Text], [Int], WorkflowStatus) -> Either String ()
+checkRewindUndoCut (messages, eventHit, values, stepIds, status) = do
+  checkEq [] messages
+  checkEq Nothing eventHit
+  checkEq (map (.serializedText) [encodeWorkflowValue ("a" :: Text), encodeWorkflowValue ("b" :: Text)]) values
+  checkEq [0] stepIds
+  checkEq Enqueued status
+
+-- | Rewound mid-run, what fell below the cut survives: the message the
+-- first recv took stays queued, the key restores to its first value, and
+-- the later message and the parked send are gone.
+scenarioRewindKeepBelowCut :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                           => MgmtFixture m -> m ([Text], Maybe Text, [Text], [Int], WorkflowStatus)
+scenarioRewindKeepBelowCut fx = undoAt fx 5
+
+-- | The kept message is the first one, the key holds its first value, the
+-- entries stand without their close, and only pre-cut steps stand. Step
+-- membership is asserted as a bound, not an exact list: a recv's timeout
+-- step is recorded on every stack live but only in-workflow under sim, a
+-- pre-existing engine divergence outside this slice.
+checkRewindKeepBelowCut :: ([Text], Maybe Text, [Text], [Int], WorkflowStatus) -> Either String ()
+checkRewindKeepBelowCut (messages, eventHit, values, stepIds, status) = do
+  checkEq [(encodeWorkflowValue ("m0" :: Text)).serializedText] messages
+  checkEq (Just (encodeWorkflowValue ("v0" :: Text)).serializedText) eventHit
+  checkEq (map (.serializedText) [encodeWorkflowValue ("a" :: Text), encodeWorkflowValue ("b" :: Text)]) values
+  checkEq True (0 `elem` stepIds)
+  checkEq True (all (< 5) stepIds)
+  checkEq Enqueued status
+
+-- | The rewind names the queue and version the re-run gets: the row
+-- carries them, the counters clear, and the history from the cut is gone.
+scenarioRewindQueueVersion :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                           => MgmtFixture m -> m (WorkflowStatus, Maybe Text, Maybe Text, Int64, [Int])
+scenarioRewindQueueVersion fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "rewindable-qv"
+        wid = WorkflowId ("hs-l2-mgmt-rewind-qv-" <> suffix)
+    registered <- registerWorkflow dbos key zeroBody
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    rewound <- rewindWorkflow dbos wid (defaultRewindOptions {rewindStartStep = 0, rewindQueueName = Just "custom-q", rewindApplicationVersion = Just "v9"})
+    case rewound of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    row <- fx.mfReadRow wid
+    listed <- listStepsWf dbos wid
+    stepIds <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepId | record <- records]
+    pure
+      ( row.workflowRecordStatus,
+        row.workflowRecordQueueName,
+        row.workflowRecordApplicationVersion,
+        row.workflowRecordRecoveryAttempts,
+        stepIds
+      )
+
+-- | The chosen queue and version land on the row; the cut clears all steps.
+checkRewindQueueVersion :: (WorkflowStatus, Maybe Text, Maybe Text, Int64, [Int]) -> Either String ()
+checkRewindQueueVersion (status, queue, version, attempts, stepIds) = do
+  checkEq Enqueued status
+  checkEq (Just "custom-q") queue
+  checkEq (Just "v9") version
+  checkEq 0 attempts
+  checkEq [] stepIds
+
+-- | A workflow rewinding another as its own step: the rewind runs once
+-- under the caller's checkpoint. Returns the caller's decoded output, the
+-- target's status, and the caller's recorded step names.
+scenarioRewindInWorkflow :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                         => MgmtFixture m -> m (Text, WorkflowStatus, [Text])
+scenarioRewindInWorkflow fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let targetKey = newWorkflowKey "rewind-target"
+        callerKey = newWorkflowKey "rewind-caller"
+        targetText = "hs-l2-mgmt-rewind-target-" <> suffix
+        callerText = "hs-l2-mgmt-rewind-caller-" <> suffix
+        callerBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        callerBody target wctx = do
+          rewound <- rewindWorkflowsInWorkflow wctx (WorkflowId target) (defaultRewindOptions {rewindStartStep = 0})
+          case rewound of
+            Left err -> pure (Left err)
+            Right () -> pure (Right target)
+    targetRegistered <- registerWorkflow dbos targetKey zeroBody
+    case targetRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    callerRegistered <- registerWorkflow dbos callerKey callerBody
+    case callerRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowValue ()))
+    case ranTarget of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowValue targetText))
+    decoded <- case ranCaller of
+      Left err -> throwIO (userError (show err))
+      Right Nothing -> throwIO (userError "expected the caller result")
+      Right (Just output) ->
+        case decodeWorkflowValue "result" (Just output) :: Either CodecError Text of
+          Right value -> pure value
+          Left err -> throwIO (userError (show err))
+    target <- fx.mfReadRow (WorkflowId targetText)
+    listed <- listStepsWf dbos (WorkflowId callerText)
+    names <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepName | record <- records]
+    pure (decoded, target.workflowRecordStatus, names)
+
+-- | The caller hands back the target id, the target is re-enqueued, and
+-- the caller's rewind took its framework step.
+checkRewindInWorkflow :: (Text, WorkflowStatus, [Text]) -> Either String ()
+checkRewindInWorkflow (decoded, status, names) = do
+  checkEq True ("hs-l2-mgmt-rewind-target-" `Text.isPrefixOf` decoded)
+  checkEq Enqueued status
+  checkEq ["DBOS.rewind_workflow"] names
+
+-- | The executor rewind drops the datasource checkpoints from the cut on:
+-- the fake holds one checkpoint before the rewind and none after, while
+-- the row is re-enqueued. Returns the checkpoint count before and after
+-- with the row status.
+scenarioRewindDropsDatasourceCheckpoints :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                                         => MgmtFixture m -> m (Int, Int, WorkflowStatus)
+scenarioRewindDropsDatasourceCheckpoints fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    fake <- mkFakeDs
+    registeredDs <- registerDataSource dbos fake.fakeSource
+    case registeredDs of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    let key = newWorkflowKey "rewind-tx"
+        wid = WorkflowId ("hs-l2-mgmt-rewind-tx-" <> suffix)
+    registered <- registerWorkflow dbos key zeroBody
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    wrote <- fake.fakeSource.dsRecordOutput (Tx (\_ _ -> error "rewind probe: statements unsupported")) wid "probe" 0 "x"
+    case wrote of
+      True -> pure ()
+      False -> throwIO (userError "expected the probe checkpoint to land")
+    before <- Map.size <$> readTVarIO fake.fakeRows
+    rewound <- rewindWorkflows dbos wid (defaultRewindOptions {rewindStartStep = 0})
+    case rewound of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    after <- Map.size <$> readTVarIO fake.fakeRows
+    row <- fx.mfReadRow wid
+    pure (before, after, row.workflowRecordStatus)
+
+-- | One checkpoint stood, none stands, and the row runs again.
+checkRewindDropsDatasourceCheckpoints :: (Int, Int, WorkflowStatus) -> Either String ()
+checkRewindDropsDatasourceCheckpoints (before, after, status) = do
+  checkEq True (before > 0)
+  checkEq 0 after
+  checkEq Enqueued status
+
+-- | Every completion clears the run's datasource checkpoints, however it
+-- ran: the checkpoint stands mid-run and is gone after, on the direct
+-- path and on the driven (dequeue) path alike. Mirrors Python's
+-- @test_sync_ds_completion_clears_checkpoints@. Returns the mid-run and
+-- post-run counts for each path.
+scenarioCompletionClearsCheckpoints :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, HasCallStack)
+                                    => MgmtFixture m -> m (Int, Int, Int, Int)
+scenarioCompletionClearsCheckpoints fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    fake <- mkFakeDs
+    registeredDs <- registerDataSource dbos fake.fakeSource
+    case registeredDs of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    midDirect <- newTVarIO (0 :: Int)
+    midDriven <- newTVarIO (0 :: Int)
+    let directKey = newWorkflowKey "clearing-direct"
+        drivenRefKey = newWorkflowKey "clearing-driven-ref"
+        directWid = WorkflowId ("hs-l2-mgmt-clear-direct-" <> suffix)
+        drivenWid = WorkflowId ("hs-l2-mgmt-clear-driven-" <> suffix)
+        QueueName internal = internalQueueName
+    directRegistered <- registerWorkflow dbos directKey (txCountBody fake midDirect)
+    case directRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    drivenRefE <- registerWorkflowRef dbos drivenRefKey (txCountBody fake midDriven)
+    drivenRef <- case drivenRefE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    exec <- fx.mfLaunch dbos
+    ranDirect <- runWf exec directKey directWid (Just (encodeWorkflowValue ()))
+    case ranDirect of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    mid1 <- readTVarIO midDirect
+    post1 <- Map.size <$> readTVarIO fake.fakeRows
+    started <-
+      startWfRef
+        exec
+        drivenRef
+        (startOptionsDefault {startWorkflowId = Just drivenWid, startQueue = Just (enqueueNew internal)})
+        (Just (encodeWorkflowValue ()))
+    case started of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    drove <- dequeueWorkflows dbos
+    case drove of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    waited <- waitForWorkflow dbos drivenWid
+    case waited of
+      Right (SystemDB.AwaitedSucceeded _ _) -> pure ()
+      other -> throwIO (userError ("expected the driven transaction to finish, got: " <> show other))
+    mid2 <- readTVarIO midDriven
+    post2 <- Map.size <$> readTVarIO fake.fakeRows
+    pure (mid1, post1, mid2, post2)
+
+-- | Both paths hold one checkpoint mid-run and none after.
+checkCompletionClearsCheckpoints :: (Int, Int, Int, Int) -> Either String ()
+checkCompletionClearsCheckpoints (mid1, post1, mid2, post2) = do
+  checkEq (1, 0, 1, 0) (mid1, post1, mid2, post2)
+
+-- | The parent of a child that runs a datasource transaction: the parent's
+-- own checkpoint stands while the child runs, so the child's lands beside
+-- it and the parent observes both once the child finishes.
+childClearParentBody :: forall exec m. (MonadTime m, MonadMVar m, MonadCatch m, MonadTimer m, HasCallStack)
+                     => FakeDs m ->
+                        WorkflowRef m EngineOnly ->
+                        StrictTVar m Int ->
+                        () ->
+                        WorkflowCtx exec m ->
+                        m (Either (Error EngineOnly) Text)
+childClearParentBody fake childRef midParent () wctx = do
+  outcome <- runTxStep fake.fakeSource protoConfig wctx (\_ _ -> pure (Right ("p" :: Text)))
+  case outcome of
+    Left err -> pure (Left err)
+    Right _ -> do
+      started <- startChildWorkflow wctx childRef startOptionsDefault Nothing
+      case started of
+        Left err -> pure (Left err)
+        Right child -> do
+          awaited <- handleResult child
+          case awaited of
+            Left err -> pure (Left err)
+            Right _ -> do
+              n <- Map.size <$> readTVarIO fake.fakeRows
+              atomically (writeTVar midParent n)
+              pure (Right "done")
+
+-- | An inline child clears its own datasource checkpoints when it finishes,
+-- exactly like a top-level run: the child's checkpoint stands mid-run next
+-- to the parent's, the child's completion drops its own before the parent
+-- observes, and the parent's completion drops the last. Mirrors Python's
+-- @_dropping_datasource_checkpoints@ covering the child execution paths.
+-- Returns the checkpoint count inside the child, inside the parent once the
+-- child finished, and after the parent finished.
+scenarioChildClearsCheckpoints :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, HasCallStack)
+                                => MgmtFixture m -> m (Int, Int, Int)
+scenarioChildClearsCheckpoints fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    fake <- mkFakeDs
+    registeredDs <- registerDataSource dbos fake.fakeSource
+    case registeredDs of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    midChild <- newTVarIO (0 :: Int)
+    midParent <- newTVarIO (0 :: Int)
+    let childKey = newWorkflowKey "clearing-child"
+        parentKey = newWorkflowKey "clearing-parent"
+        parentWid = WorkflowId ("hs-l2-mgmt-clear-child-" <> suffix)
+    childRefE <- registerWorkflowRef dbos childKey (txCountBody fake midChild)
+    childRef <- case childRefE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    parentRegistered <- registerWorkflow dbos parentKey (childClearParentBody fake childRef midParent)
+    case parentRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec parentKey parentWid (Just (encodeWorkflowValue ()))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    mid1 <- readTVarIO midChild
+    mid2 <- readTVarIO midParent
+    post <- Map.size <$> readTVarIO fake.fakeRows
+    pure (mid1, mid2, post)
+
+-- | Both checkpoints stand mid-child-run; the child's own is gone once it
+-- finishes; none stands after the parent.
+checkChildClearsCheckpoints :: (Int, Int, Int) -> Either String ()
+checkChildClearsCheckpoints (midChild, midParent, post) = do
+  checkEq (2, 1, 0) (midChild, midParent, post)
+
+-- | A direct system-database rewind naming its caller records the call:
+-- the second identical call replays the step instead of rewinding again,
+-- while invalid options are refused on the sysdb channel without
+-- recording anything. Returns both verdicts with the recorded step
+-- names, the row status, and whether the invalid call refused as
+-- 'InvalidInput'. Exercises the caller branch the engine paths leave to
+-- the backend, on both stacks.
+scenarioRewindCallerStep :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                         => MgmtFixture m -> m (Bool, Bool, [Text], WorkflowStatus, Bool)
+scenarioRewindCallerStep fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "rewind-caller-target"
+        wid = WorkflowId ("hs-l2-mgmt-rewind-caller-" <> suffix)
+    registered <- registerWorkflow dbos key zeroBody
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    let direct = runSystemDB fx.mfSystemDB (\db -> SystemDB.rewindWorkflow db wid 0 (SysRewindOptions Nothing Nothing Nothing) (Just (wid, 0)))
+    first <- direct
+    second <- direct
+    invalid <- runSystemDB fx.mfSystemDB (\db -> SystemDB.rewindWorkflow db wid (-1) (SysRewindOptions Nothing Nothing Nothing) (Just (wid, 1)))
+    let invalidRefused = case invalid of
+          Left (SystemDB.InvalidInput {}) -> True
+          _ -> False
+    listed <- listStepsWf dbos wid
+    names <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepName | record <- records]
+    row <- fx.mfReadRow wid
+    pure (first == Right (), second == Right (), names, row.workflowRecordStatus, invalidRefused)
+
+-- | Both calls succeed, one step records the call, the row is queued, and
+-- the invalid call refused without recording a second step.
+checkRewindCallerStep :: (Bool, Bool, [Text], WorkflowStatus, Bool) -> Either String ()
+checkRewindCallerStep (first, second, names, status, invalidRefused) = do
+  checkEq True first
+  checkEq True second
+  checkEq ["DBOS.rewind_workflow"] names
+  checkEq Enqueued status
+  checkEq True invalidRefused
+
+-- | A rewound parent replays to its child and adopts the row already
+-- there: the parent runs again, the child does not. Returns both decoded
+-- outputs with the run counts.
+scenarioRewindAdoptsChild :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                          => MgmtFixture m -> m (Int, Int, Int, Int)
+scenarioRewindAdoptsChild fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    parentRan <- newTVarIO (0 :: Int)
+    childRan <- newTVarIO (0 :: Int)
+    let childKey = newWorkflowKey "adopted-child"
+        parentKey = newWorkflowKey "adopting-parent"
+        wid = WorkflowId ("hs-l2-mgmt-rewind-adopt-" <> suffix)
+    childRefE <- registerWorkflowRef dbos childKey (adoptChildBody childRan)
+    childRef <- case childRefE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    parentRegistered <- registerWorkflow dbos parentKey (adoptParentBody childRef parentRan)
+    case parentRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    first <- runWf exec parentKey wid (Just (encodeWorkflowValue ()))
+    firstDecoded <- case first of
+      Left err -> throwIO (userError (show err))
+      Right Nothing -> throwIO (userError "expected the parent result")
+      Right (Just output) ->
+        case decodeWorkflowValue "result" (Just output) :: Either CodecError Int of
+          Right value -> pure value
+          Left err -> throwIO (userError (show err))
+    rewound <- rewindWorkflows dbos wid (defaultRewindOptions {rewindStartStep = 0})
+    case rewound of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    drove <- dequeueWorkflows dbos
+    case drove of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    waited <- waitForWorkflow dbos wid
+    secondDecoded <- case waited of
+      Right (SystemDB.AwaitedSucceeded (Just output) _) ->
+        case decodeWorkflowValue "result" (Just (SystemDB.SerializedWorkflowValue output Nothing)) :: Either CodecError Int of
+          Right n -> pure n
+          Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the re-run to finish, got: " <> show other))
+    parents <- readTVarIO parentRan
+    children <- readTVarIO childRan
+    pure (firstDecoded, secondDecoded, parents, children)
+
+-- | Both runs return the doubled input; the parent ran twice, the child
+-- once.
+checkRewindAdoptsChild :: (Int, Int, Int, Int) -> Either String ()
+checkRewindAdoptsChild (first, second, parents, children) = do
+  checkEq 42 first
+  checkEq 42 second
+  checkEq 2 parents
+  checkEq 1 children
+
+-- | A refused rewind inside a workflow spends no step id: the caller
+-- hands back the refusal and records nothing. Returns the refusal field
+-- with the caller's recorded step names.
+scenarioRewindRefusedTakesNoStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                                 => MgmtFixture m -> m (Text, [Text])
+scenarioRewindRefusedTakesNoStep fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let targetKey = newWorkflowKey "rewind-target"
+        callerKey = newWorkflowKey "refused-caller"
+        targetText = "hs-l2-mgmt-rewind-refused-tgt-" <> suffix
+        callerText = "hs-l2-mgmt-rewind-refused-op-" <> suffix
+    targetRegistered <- registerWorkflow dbos targetKey zeroBody
+    case targetRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    callerRegistered <- registerWorkflow dbos callerKey rewindRefusedBody
+    case callerRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowValue ()))
+    case ranTarget of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowValue targetText))
+    field <- case ranCaller of
+      Left err -> throwIO (userError (show err))
+      Right Nothing -> throwIO (userError "expected the caller result")
+      Right (Just output) ->
+        case decodeWorkflowValue "result" (Just output) :: Either CodecError Text of
+          Right value -> pure value
+          Left err -> throwIO (userError (show err))
+    listed <- listStepsWf dbos (WorkflowId callerText)
+    names <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepName | record <- records]
+    pure (field, names)
+
+-- | The refusal names the cut problem, and the caller recorded no step.
+checkRewindRefusedTakesNoStep :: (Text, [Text]) -> Either String ()
+checkRewindRefusedTakesNoStep (detail, names) = do
+  checkEq "start_step must not be negative, got -3" detail
+  checkEq [] names

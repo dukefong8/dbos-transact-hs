@@ -42,6 +42,7 @@ module DBOS.Transact.Client
     clientResumeWorkflows,
     clientDeleteWorkflows,
     clientForkWorkflows,
+    clientRewindWorkflows,
     -- * Versions from outside
     clientListApplicationVersions,
     clientLatestApplicationVersion,
@@ -63,13 +64,14 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewWorkflow (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, timestampNow, validateSendKeys)
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewWorkflow (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, sysRewindOptions, timestampNow, validateSendKeys)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, runSystemDB, withConnection)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
 import DBOS.Transact.Logger (nullTracer)
+import DBOS.Transact.Management (checkRewindOptions)
 import DBOS.Transact.Serialization (encodeAttributes)
 import DBOS.Transact.Workflow (Enqueue (..), enqueueNew, maxRecoveryAttempts, resolveEnqueueCollision, storedPriority, validateEnqueue)
 import System.Environment (lookupEnv)
@@ -412,6 +414,23 @@ clientForkWorkflows :: Monad m
 clientForkWorkflows client forks options = do
   result <- withConnection client.conn (\db -> SystemDB.forkWorkflows db forks options Nothing)
   pure result
+
+-- | Rewind a workflow from outside and hand back its handle: the
+-- system-database rewind only, with no datasource checkpoint deletion —
+-- rewound datasource transactions are not re-executed through this path.
+-- For workflows that use datasources, rewind from a launched instance
+-- instead. Mirrors Rust @Client::rewind_with@, whose polling handle this
+-- builds through 'retrieveClientWorkflow'.
+clientRewindWorkflows :: Monad m
+                      => Client m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+clientRewindWorkflows client workflowId@(WorkflowId workflowText) options =
+  case checkRewindOptions options of
+    Left err -> pure (Left err)
+    Right () -> do
+      result <- withConnection client.conn (\db -> SystemDB.rewindWorkflow db workflowId options.rewindStartStep (sysRewindOptions options) Nothing)
+      case result of
+        Left err -> pure (Left err)
+        Right () -> pure (Right (retrieveClientWorkflow client workflowText))
 
 -- | The registered application versions.
 clientListApplicationVersions :: Monad m

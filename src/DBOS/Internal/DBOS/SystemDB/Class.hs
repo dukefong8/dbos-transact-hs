@@ -60,6 +60,7 @@ class Monad m => SystemDB db m where
   deleteWorkflows :: db -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either Error Word64)
   forkWorkflows :: db -> [Fork] -> ForkOptions -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
   forkFrom :: db -> [WorkflowId] -> ForkPoint -> ForkOptions -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
+  rewindWorkflow :: db -> WorkflowId -> Int -> SysRewindOptions -> Maybe (WorkflowId, Int) -> m (Either Error ())
   sendMessage :: db -> SendMessage -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> m (Either Error ())
   sendMessages :: db -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> m (Either Error ())
   recv :: (MonadDelay m, MonadTime m)

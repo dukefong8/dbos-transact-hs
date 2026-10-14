@@ -36,6 +36,7 @@ import DBOS.Transact.MessageCases
     checkReplayTakes,
     checkSendDeliveredOnce,
     checkStepSend,
+    checkSendNameMismatch,
     checkThirdParty,
     checkTopics,
     scenarioBulkEmpty,
@@ -50,6 +51,7 @@ import DBOS.Transact.MessageCases
     scenarioReplayTakes,
     scenarioSendDeliveredOnce,
     scenarioStepSend,
+    scenarioSendNameMismatch,
     scenarioThirdParty,
     scenarioTopics,
   )
@@ -143,6 +145,7 @@ tests =
       simCase simMessageFixture "topics do not cross and absence is a value" scenarioTopics checkTopics traceMessageSilent,
       simCase simMessageFixture "a replay takes the recorded message and sends once" scenarioReplayTakes checkReplayTakes traceMessageSilent,
       simCase simMessageFixture "a step may send but may not receive" scenarioStepSend checkStepSend traceStepSend,
+      simCase simMessageFixture "a send from a renamed position is refused" scenarioSendNameMismatch checkSendNameMismatch traceStepSend,
       simCase simMessageFixture "a send through a captured parent is plain and moves no id" scenarioCapturedSend checkCapturedSend traceMessageSilent,
       simCase simMessageFixture "a recv through a captured parent is refused" scenarioCapturedRecv checkCapturedRecv traceMessageSilent,
       simCase simMessageFixture "a batch delivers every message and checkpoints once" scenarioBulkSend checkBulkSend traceBulkSend,

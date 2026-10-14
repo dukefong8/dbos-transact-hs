@@ -11,7 +11,6 @@
 module DBOS.Transact.WidgetTest (tests) where
 
 import Data.Int (Int32, Int64)
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -45,6 +44,7 @@ import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep, wit
 import DBOS.Transact.WidgetCases
   ( CheckoutSteps (..),
     lostAckOnce,
+    loggedDataSource,
     DispatchSteps (..),
     OrderId (..),
     WidgetFixture (..),
@@ -98,9 +98,7 @@ data WidgetTables = WidgetTables
     wtTick :: Statement.Statement Int32 Int32,
     wtInventory :: Statement.Statement () Int32,
     wtOrders :: Statement.Statement () [(Int32, Int32, Int32)],
-    wtCheckpoints :: Statement.Statement Text Int64,
-    wtSetInventory :: Statement.Statement Int32 (),
-    wtCommits :: Statement.Statement () [(Text, Text, Int64)]
+    wtSetInventory :: Statement.Statement Int32 ()
   }
 
 widgetTables :: Text -> WidgetTables
@@ -148,27 +146,11 @@ widgetTables schema =
                   <*> Decoders.column (Decoders.nonNullable Decoders.int4)
               )
           ),
-      wtCheckpoints =
-        stmt
-          ("SELECT COUNT(*) FROM " <> q <> ".transaction_completion WHERE workflow_id = $1")
-          (Encoders.param (Encoders.nonNullable Encoders.text))
-          (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8))),
       wtSetInventory =
         stmt
           ("UPDATE " <> q <> ".products SET inventory = $1 WHERE product_id = 1")
           (Encoders.param (Encoders.nonNullable Encoders.int4))
-          Decoders.noResult,
-      wtCommits =
-        stmt
-          ("SELECT workflow_id, step_name, COUNT(*) FROM " <> q <> ".transaction_completion GROUP BY workflow_id, step_name")
-          Encoders.noParams
-          ( Decoders.rowList
-              ( (,,)
-                  <$> Decoders.column (Decoders.nonNullable Decoders.text)
-                  <*> Decoders.column (Decoders.nonNullable Decoders.text)
-                  <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-              )
-          )
+          Decoders.noResult
     }
   where
     q = quoteIdent schema
@@ -263,7 +245,8 @@ withWidgetFixture body = do
   tables <- pure (widgetTables schema)
   createWidgetSchema app tables
   dbos <- newDBOS config
-  let ds = toDataSource app
+  commitLog <- newTVarIO Map.empty
+  let ds = loggedDataSource commitLog (toDataSource app)
   _ <- registerDataSource dbos ds >>= either (fail . show) pure
   checkoutTid <- newTVarIO Nothing
   dispatchTid <- newTVarIO Nothing
@@ -304,7 +287,9 @@ withWidgetFixture body = do
             wfWithTableStep = \tableBody -> withWorkflow conn tableIdentity (WorkflowId "widget-tables") Nothing (\wctx -> nextWorkflowMarker wctx >>= \marker -> withStep wctx marker (firstStepStatus 0) tableBody),
             wfReadInventory = readInventory app tables,
             wfReadOrders = readOrders app tables,
-            wfReadStepCommits = readCommits app tables,
+            wfReadStepCommits = do
+              commits <- readTVarIO commitLog
+              pure (Map.fromListWith (Map.unionWith (+)) [(widText, Map.singleton name 1) | ((widText, _), (name, _)) <- Map.toList commits]),
             wfReadStatus = \wid -> do
               found <- retrieveWorkflow dbos wid
               case found of
@@ -339,13 +324,6 @@ readOrders :: AppDataSource -> WidgetTables -> IO [(Int, Int, Int)]
 readOrders app tables = do
   rows <- runAppSession app (Session.statement () tables.wtOrders) >>= either (fail . show) pure
   pure [(fromIntegral o, fromIntegral s, fromIntegral p) | (o, s, p) <- rows]
-
--- | Commits per workflow text id and step name — the exactly-once instrument
--- on the live side (the sim fake's map is the mirror).
-readCommits :: AppDataSource -> WidgetTables -> IO (Map Text (Map Text Int))
-readCommits app tables = do
-  rows <- runAppSession app (Session.statement () tables.wtCommits) >>= either (fail . show) pure
-  pure (Map.fromListWith (Map.unionWith (+)) [(wid, Map.singleton name (fromIntegral n)) | (wid, name, n) <- rows])
 
 -- * Cases
 

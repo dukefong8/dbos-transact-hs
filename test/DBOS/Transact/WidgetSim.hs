@@ -32,6 +32,7 @@ import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep, wit
 import DBOS.Transact.WidgetCases
   ( CheckoutSteps (..),
     lostAckOnce,
+    loggedDataSource,
     DispatchSteps (..),
     OrderId (..),
     WidgetFixture (..),
@@ -190,7 +191,8 @@ simWidgetFixture = do
   dbos <- simInstance
   store <- newWidgetStore 5
   calls <- newTVarIO 0
-  let ds = mkWidgetDs store
+  commitLog <- newTVarIO Map.empty
+  let ds = loggedDataSource commitLog (mkWidgetDs store)
   checkoutTid <- newTVarIO Nothing
   dispatchTid <- newTVarIO Nothing
   dispatchRef <- either (error . show) id <$> registerWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (\_tx -> captureDispatchThread dispatchTid (stmDispatchSteps store)))
@@ -220,7 +222,7 @@ simWidgetFixture = do
         wfReadInventory = readTVarIO store.wsInventory,
         wfReadOrders = map (\(oid, (status, progress)) -> (oid, status, progress)) . Map.toList <$> readTVarIO store.wsOrders,
         wfReadStepCommits = do
-          commits <- readTVarIO store.wsCommits
+          commits <- readTVarIO commitLog
           pure (Map.fromListWith (Map.unionWith (+)) [(widText, Map.singleton name 1) | ((widText, _), (name, _)) <- Map.toList commits]),
         wfReadStatus = \wid -> do
           found <- retrieveWorkflow dbos wid

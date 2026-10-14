@@ -59,6 +59,7 @@ import DBOS.Transact
     connectClient,
     decodeWorkflowValue,
     defaultQueueOptions,
+    defaultRewindOptions,
     deleteWorkflowsInWorkflow,
     encodeWorkflowValue,
     enqueueWorkflow,
@@ -66,6 +67,7 @@ import DBOS.Transact
     handleResult,
     handleStatus,
     launchWithEnvironment,
+    listWorkflowSteps,
     listWorkflowsInWorkflow,
     newDBOS,
     newWorkflowKey,
@@ -85,6 +87,8 @@ import DBOS.Transact
     deleteWorkflowsInWorkflow,
     forkWorkflowsInWorkflow,
     resumeWorkflowsInWorkflow,
+    rewindWorkflowsInWorkflow,
+    RewindOptions (rewindStartStep),
     startChildWorkflow)
 import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
@@ -108,6 +112,19 @@ import DBOS.Transact.ManagementCases
     checkForkPartitioned,
     checkAttributes,
     checkDelayRelease,
+    checkRewindRunsAgain,
+    checkRewindRefusals,
+    checkRewindUndoCut,
+    checkRewindKeepBelowCut,
+    checkRewindQueueVersion,
+    checkRewindInWorkflow,
+    checkRewindCallerStep,
+    checkRewindAdoptsChild,
+    checkRewindRefusedTakesNoStep,
+    checkRewindDropsDatasourceCheckpoints,
+    checkCompletionClearsCheckpoints,
+    checkChildClearsCheckpoints,
+    checkCompletionClearsCheckpoints,
     checkDelete,
     checkResumeMissing,
     checkResumeOntoQueue,
@@ -131,6 +148,19 @@ import DBOS.Transact.ManagementCases
     scenarioForkPartitioned,
     scenarioAttributes,
     scenarioDelayRelease,
+    scenarioRewindRunsAgain,
+    scenarioRewindRefusals,
+    scenarioRewindUndoCut,
+    scenarioRewindKeepBelowCut,
+    scenarioRewindQueueVersion,
+    scenarioRewindInWorkflow,
+    scenarioRewindCallerStep,
+    scenarioRewindAdoptsChild,
+    scenarioRewindRefusedTakesNoStep,
+    scenarioRewindDropsDatasourceCheckpoints,
+    scenarioCompletionClearsCheckpoints,
+    scenarioChildClearsCheckpoints,
+    scenarioCompletionClearsCheckpoints,
     scenarioDelete,
     scenarioResumeMissing,
     scenarioResumeOntoQueue,
@@ -174,6 +204,18 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a fork takes the id it is given" scenarioForkTakesIdAndQueue checkForkTakesIdAndQueue,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from a chosen step replays the steps below it" scenarioForkFromStep checkForkFromStep,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "bulk cancel and resume hand back every id" scenarioBulkCancelResume checkBulkCancelResume,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a finished workflow rewound to its second step runs again under the same id" scenarioRewindRunsAgain checkRewindRunsAgain,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "rewind refusals name their cause and write nothing" scenarioRewindRefusals checkRewindRefusals,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewind at the first step undoes the run" scenarioRewindUndoCut checkRewindUndoCut,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewind keeps what fell below the cut" scenarioRewindKeepBelowCut checkRewindKeepBelowCut,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewind names the queue and version the re-run gets" scenarioRewindQueueVersion checkRewindQueueVersion,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow rewinding another as its step runs once" scenarioRewindInWorkflow checkRewindInWorkflow,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a direct rewind naming its caller records the call" scenarioRewindCallerStep checkRewindCallerStep,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewound parent replays to its child and adopts it" scenarioRewindAdoptsChild checkRewindAdoptsChild,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a refused rewind inside a workflow spends no step" scenarioRewindRefusedTakesNoStep checkRewindRefusedTakesNoStep,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an executor rewind drops the datasource checkpoints" scenarioRewindDropsDatasourceCheckpoints checkRewindDropsDatasourceCheckpoints,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "every completion clears the run's datasource checkpoints" scenarioCompletionClearsCheckpoints checkCompletionClearsCheckpoints,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an inline child clears its own datasource checkpoints on completion" scenarioChildClearsCheckpoints checkChildClearsCheckpoints,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "bulk forking hands back one new id per source, in order" scenarioBulkFork checkBulkFork,
       testCase "resuming onto a named queue through a full launch puts the workflow there" $
         withInstance "mgmt-resume-queue" $ \dbos suffix -> do
@@ -389,6 +431,64 @@ tests =
           case forks of
             Right rows -> length rows @?= 1
             other -> fail ("expected exactly one fork row, got: " <> show other),
+      testCase "a recovered caller does not rewind its target again" $
+        withInstance "mgmt-rewind-replay" $ \dbos suffix -> do
+          -- A rewind commits under the same id, so a replay without the
+          -- checkpoint would meet an ENQUEUED target and fail: crash after
+          -- the call is recorded and let recovery prove the replay adopts
+          -- it.
+          let targetKey = newWorkflowKey "rewind-target"
+              operatorKey = newWorkflowKey "rewinding-operator"
+              targetText = "hs-l2-mgmt-rewind-replay-tgt-" <> suffix
+              operatorText = "hs-l2-mgmt-rewind-replay-op-" <> suffix
+              targetBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+              targetBody value wctx = runStep wctx "double" (const (pure (value * 2)))
+          shouldCrash <- newIORef True
+          seen <- newEmptyMVar
+          let operatorBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+              operatorBody target wctx = do
+                rewound <- rewindWorkflowsInWorkflow wctx (WorkflowId target) (defaultRewindOptions {rewindStartStep = 0})
+                case rewound of
+                  Left err -> pure (Left err)
+                  Right () -> do
+                    void (tryPutMVar seen target)
+                    crash <- readIORef shouldCrash
+                    if crash
+                      then liftIO (ioError (userError "rewound then crashed"))
+                      else pure (Right target)
+          targetRegistered <- registerWorkflow dbos targetKey targetBody
+          case targetRegistered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          operatorRegistered <- registerWorkflow dbos operatorKey operatorBody
+          case operatorRegistered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchOrFail dbos
+          ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowValue (21 :: Int)))
+          case ranTarget of
+            Right _ -> pure ()
+            other -> fail ("expected the target to run, got: " <> show other)
+          first <- try (runWf exec operatorKey (WorkflowId operatorText) (Just (encodeWorkflowValue (targetText :: Text)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+          case first of
+            Left exception -> assertBool "the crash escapes" ("rewound then crashed" `Text.isInfixOf` Text.pack (show exception))
+            Right other -> fail ("expected the crash, got: " <> show other)
+          shutdown dbos
+          writeIORef shouldCrash False
+          _ <- launchWithEnvironment dbos isolatedEnvironment
+          settled <- timeout 10000000 (waitForWorkflow dbos (WorkflowId operatorText))
+          case settled of
+            Just (Right (AwaitedSucceeded (Just output) _)) -> do
+              let decoded = decodeWorkflowValue "result" (Just (SerializedWorkflowValue output Nothing)) :: Either CodecError Text
+              recorded <- takeMVar seen
+              case decoded of
+                Right tid -> tid @?= recorded
+                Left err -> fail (show err)
+            other -> fail ("expected the recovery to finish, got: " <> show other)
+          listed <- listWorkflowSteps dbos (WorkflowId operatorText)
+          case listed of
+            Right records -> map (.stepRecordStepName) records @?= ["DBOS.rewind_workflow"]
+            other -> fail ("expected one recorded rewind step, got: " <> show other),
       testCase "resume puts a cancelled workflow on a queue that runs it" $
         withInstance "mgmt-resume-run" $ \dbos suffix -> do
           let targetKey = newWorkflowKey "resumable"

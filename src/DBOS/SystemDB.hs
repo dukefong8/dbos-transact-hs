@@ -13,8 +13,8 @@ module DBOS.SystemDB
     BackendErrorKind (..),
     invalidInput,
     renderError,
-    sleepStepName,
     renderBackendError,
+    shouldRecord,
     -- * Retry (retry.rs)
     RetryPolicy (..),
     defaultRetryPolicy,
@@ -39,6 +39,7 @@ import DBOS.SystemDB.Error
     invalidInput,
     renderBackendError,
     renderError,
+    shouldRecord,
   )
 import DBOS.SystemDB.Retry
   ( RetryPolicy (..),

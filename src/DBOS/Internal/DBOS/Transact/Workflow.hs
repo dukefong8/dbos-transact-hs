@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Internal workflow runner. Runs a registered body and records its outcome:
 -- @SUCCESS@ with the output, or @ERROR@ with the failure. A missing row is
@@ -62,7 +63,8 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (AwaitedOutcome (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Submission (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowStatus (..), addTimeout, newWorkflow, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
-import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), deadline, insideAStep, nextStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
+import DBOS.Transact.Datasource (DataSourceRegistry, clearDatasourceCheckpoints)
+import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), clearSpawnerCheckpoints, deadline, insideAStep, nextStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
@@ -80,13 +82,13 @@ maxRecoveryAttempts = 100
 -- The connection, resolved identity and task registry belong to the
 -- executor; the body takes the explicit context it runs in.
 runRegisteredWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
-                      => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runRegisteredWorkflow = runRegisteredWorkflowWithSubmission Fresh
+                      => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runRegisteredWorkflow tasks conn identity snapshot key workflowId input datasources = runRegisteredWorkflowWithSubmission Fresh tasks conn identity snapshot key workflowId input datasources
 
 runRegisteredWorkflowWithSubmission :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
-                                    => Submission -> Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runRegisteredWorkflowWithSubmission submission tasks conn identity snapshot key workflowId input =
-  runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflowId input (workflowNewWorkflow conn identity key workflowId input Nothing)
+                                    => Submission -> Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runRegisteredWorkflowWithSubmission submission tasks conn identity snapshot key workflowId input datasources =
+  runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflowId input (workflowNewWorkflow conn identity key workflowId input Nothing) datasources
 
 -- | The execute-or-adopt core both runners share: one init decides whether
 -- this call owns the row. A fresh row (or a recovery/dequeue claim) runs
@@ -101,8 +103,8 @@ runRegisteredWorkflowWithSubmission submission tasks conn identity snapshot key 
 -- shutdown that aborts it visible here as 'TransactError.Interrupted'
 -- rather than as a hang.
 runRegisteredWorkflowWithRow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
-                             => Submission -> Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflowId@(WorkflowId workflowText) input new =
+                             => Submission -> Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflowId@(WorkflowId workflowText) input new datasources =
   case lookupSnapshotWorkflow key snapshot of
     Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
     Just workflow -> do
@@ -116,7 +118,7 @@ runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflo
           | otherwise -> do
               channel <-
                 spawnLocal
-                  (tasksSpawner tasks)
+                  (tasksSpawner tasks (clearCheckpointsFor datasources))
                   ( \spawner ->
                       executeRegisteredWorkflow spawner conn identity workflowId workflow input result.initResultDeadline
                   )
@@ -138,11 +140,14 @@ runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflo
 -- execution hands its grandchildren is its own. The outcome lands in the
 -- returned box while the task unwinds, so a handle awaiting a task the
 -- shutdown aborted still learns 'LocalTaskCancelled' rather than hanging.
+-- The clearance rides the same capability: a child the body starts inherits
+-- its parent's spawner, so its checkpoints clear on completion exactly like
+-- a top-level run's, with no registry channel on any body-level signature.
 tasksSpawner :: (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m)
-             => Tasks m -> TaskSpawner m
-tasksSpawner tasks = spawner
+             => Tasks m -> (Text -> m ()) -> TaskSpawner m
+tasksSpawner tasks clear = spawner
   where
-    spawner = TaskSpawner $ \action -> do
+    spawner = TaskSpawner (\action -> do
       channel <- newEmptyMVar
       spawned <- spawnTracked tasks $ mask $ \restore -> do
         result <- try (restore (action spawner))
@@ -161,6 +166,14 @@ tasksSpawner tasks = spawner
         Nothing -> putMVar channel LocalTaskCancelled
         Just _  -> pure ()
       pure channel
+      ) clear
+
+-- | The checkpoint clearance a spawner carries for one registry: drop the
+-- named workflow's rows. Best effort and silent at the call site — the
+-- registry call already swallows per-source failures, and the runner
+-- swallows what the snapshot read itself could still throw.
+clearCheckpointsFor :: (MonadMVar m, MonadCatch m) => DataSourceRegistry m -> Text -> m ()
+clearCheckpointsFor registry widText = clearDatasourceCheckpoints registry (WorkflowId widText)
 
 -- | Park-and-adopt: wait for whoever owns the row and report its recorded
 -- outcome as an erased failure. Mirrors @Connection::adopt@: the recorded
@@ -203,7 +216,7 @@ adoptRecordedOutcome conn (WorkflowId workflowText) = do
 -- what is left, and children inherit the instant rather than a fresh budget.
 -- The spawner rides the context, so a child this body starts is detached
 -- into the same registry and hands its own children the same capability.
-executeRegisteredWorkflow :: (MonadTimer m, MonadTime m, MonadCatch m)
+executeRegisteredWorkflow :: forall m. (MonadTimer m, MonadTime m, MonadCatch m)
                           => TaskSpawner m -> Connection m -> Identity -> WorkflowId -> ErasedWorkflow m -> Maybe SerializedWorkflowValue -> Maybe Timestamp -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
 executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowText) workflow input deadline = do
   attempted <- try (runBody)
@@ -220,6 +233,22 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
         throwIO se
     Right value -> pure value
   where
+    -- | Drops this execution's datasource checkpoints, best effort and
+    -- silent, through the spawner's registry channel. A child this body
+    -- starts runs under its parent's spawner, so its checkpoints clear on
+    -- completion exactly like a top-level run's.
+    --
+    -- Only completions clear, never escapes: a panic before the app
+    -- transaction committed already rolled its checkpoints back with it,
+    -- so there is nothing to drop; a panic after it committed must keep
+    -- them, or the redrive re-runs committed work instead of adopting it
+    -- (pinned by the outbox redrive cases). Decided 2026-10-14 under the
+    -- oracle rule: Python deletes on every escape, but has no counterpart
+    -- test in the panic-post-commit shape, and deletion there breaks
+    -- exactly-once adoption.
+    clearExecution = do
+      _ <- try (clearSpawnerCheckpoints spawner workflowText) :: m (Either SomeException ())
+      pure ()
     -- The scope the body runs in: fresh counters, the row's deadline, and
     -- the executor's task spawner, so a converted body's scoped entries
     -- reach the same machinery the context-level ones did. The row's stored
@@ -245,12 +274,18 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
               | isControlFailure failure -> do
                   runTracer conn.connTracer (WorkflowControlEnded (TransactError.renderTransactError (failureControl failure)))
                   pure (Left failure)
-              | otherwise -> case failure of
-                  TransactError.FailureRecorded payload -> recordOutcome (OutcomeError payload) (Left failure)
-                  -- Unreachable by construction: only control failures are
-                  -- `Control`, and those were handled above.
-                  TransactError.FailureControl err      -> recordOutcome (OutcomeError (TransactError.encodeErrorText (TransactError.liftEngine err :: (TransactError.Error TransactError.EngineOnly)))) (Left failure)
-            Right output -> recordOutcome (OutcomeOutput ((.serializedText) <$> output)) (Right output)
+              | otherwise -> do
+                  -- A settled body holds no checkpoints: clear before the
+                  -- outcome commits, so no observer ever sees a finished
+                  -- row with rows still present — the oracle deletes in
+                  -- its run wrapper for the same reason.
+                  clearExecution
+                  case failure of
+                    TransactError.FailureRecorded payload -> recordOutcome (OutcomeError payload) (Left failure)
+                    -- Unreachable by construction: only control failures are
+                    -- `Control`, and those were handled above.
+                    TransactError.FailureControl err      -> recordOutcome (OutcomeError (TransactError.encodeErrorText (TransactError.liftEngine err :: (TransactError.Error TransactError.EngineOnly)))) (Left failure)
+            Right output -> clearExecution >> recordOutcome (OutcomeOutput ((.serializedText) <$> output)) (Right output)
     -- Records one outcome and reports what the write decided: recording a
     -- second outcome behind a finished row is a supersede, not a write, and
     -- the recorded outcome is the answer.
@@ -298,8 +333,8 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
 -- skip, not a fault. The release action runs when the spawned task ends, or
 -- immediately on every path that does not spawn.
 spawnRegisteredWorkflowWithRow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-                               => Tasks m -> m () -> Submission -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe (ThreadId m)))
-spawnRegisteredWorkflowWithRow tasks release submission conn identity snapshot key workflowId@(WorkflowId _) input new =
+                               => Tasks m -> m () -> Submission -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> DataSourceRegistry m -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe (ThreadId m)))
+spawnRegisteredWorkflowWithRow tasks release submission conn identity snapshot key workflowId@(WorkflowId _) input new datasources =
   case lookupSnapshotWorkflow key snapshot of
     Nothing -> release >> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
     Just workflow -> do
@@ -314,7 +349,7 @@ spawnRegisteredWorkflowWithRow tasks release submission conn identity snapshot k
                 spawnTracked
                   tasks
                   ( finally
-                      (void (executeRegisteredWorkflow (tasksSpawner tasks) conn identity workflowId workflow input result.initResultDeadline))
+                      (void (executeRegisteredWorkflow (tasksSpawner tasks (clearCheckpointsFor datasources)) conn identity workflowId workflow input result.initResultDeadline))
                       release
                   )
               case spawned of
@@ -590,8 +625,8 @@ debounceCreation queue now = case queue of
 -- handle must not stop the run — while a queued row is the supervisor's,
 -- as the oracle returns a polling handle for enqueues.
 startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-              => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
-startWorkflow tasks conn identity snapshot ref options input =
+              => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startWorkflow tasks conn identity snapshot ref options input datasources =
   case traverse validateEnqueue options.startQueue of
     Left err -> pure (Left (TransactError.liftEngine err))
     Right _ -> do
@@ -632,7 +667,7 @@ startWorkflow tasks conn identity snapshot ref options input =
               Just workflow -> do
                 channel <-
                   spawnLocal
-                    (tasksSpawner tasks)
+                    (tasksSpawner tasks (clearCheckpointsFor datasources))
                     ( \spawner ->
                         executeRegisteredWorkflow spawner conn identity (WorkflowId workflowText) workflow input result.initResultDeadline
                     )
@@ -648,8 +683,8 @@ startWorkflow tasks conn identity snapshot ref options input =
 -- second init would always read back the start's foreign owner and poll a
 -- row nothing runs — so the record and the decision are one upsert.
 runWorkflowRef :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
-               => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runWorkflowRef tasks conn identity snapshot ref options input = do
+               => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runWorkflowRef tasks conn identity snapshot ref options input datasources = do
   now <- timestampNow
   generated <- generatedWorkflowId conn
   let key = ref.refKey
@@ -660,7 +695,7 @@ runWorkflowRef tasks conn identity snapshot ref options input = do
             newWorkflowDeadline = resolveTimeoutDeadline options.runTimeout Nothing Nothing now,
             newWorkflowAttributes = encodeAttributes options.runAttributes
           }
-  runRegisteredWorkflowWithRow Fresh tasks conn identity snapshot key (WorkflowId workflowText) input new
+  runRegisteredWorkflowWithRow Fresh tasks conn identity snapshot key (WorkflowId workflowText) input new datasources
 
 -- | Starts the referenced workflow as a child of the running one and
 -- returns a handle to it. The ambient context decides the parentage, so
@@ -781,6 +816,9 @@ startChildWorkflow wctx ref options input = do
                     Just child -> do
                       channel <-
                         spawnLocal spawner $ \childSpawner ->
+                          -- The child runs under its parent's spawner, so the
+                          -- spawner's clearance drops the child's checkpoints
+                          -- on completion exactly like a top-level run's.
                           executeRegisteredWorkflow childSpawner conn identity (WorkflowId childText) child input result.initResultDeadline
                       pure (Right (localHandle conn childText channel))
                 _ -> pure (Right (pollingHandle conn childText True))

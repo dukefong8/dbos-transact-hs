@@ -334,7 +334,7 @@ scenarioDeleteCheckpoints fx = do
         cleared <- fake.fakeSource.dsDeleteCheckpoints (WorkflowId wid) step
         case cleared of
           Left err -> pure (Left (SystemDatabase (SysDB.Backend err)))
-          Right () -> pure (Right "cleaned")
+          Right () -> pure (Right ("cleaned" :: Text))
   (first, second) <-
     runFixture fx "ds-wf-9" $ \wctx -> do
       first <- runTxStep fake.fakeSource protoConfig wctx (\_ tx -> counted tx)

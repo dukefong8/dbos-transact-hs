@@ -616,7 +616,7 @@ tasksTests =
         filled <- mapM (\_ -> do
             tasks <- newTasks
             _ <- abortAll tasks
-            channel <- spawnLocal (tasksSpawner tasks) (\_ -> pure ())
+            channel <- spawnLocal (tasksSpawner tasks (\_ -> pure ())) (\_ -> pure ())
             timeout 1000000 (readMVar channel)
           ) [1 .. 50 :: Int]
         case [() | Nothing <- filled] of

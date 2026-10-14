@@ -55,6 +55,7 @@ module DBOS.Transact.WidgetCases
     checkCrashMidDispatch,
     checkLostAck,
     lostAckOnce,
+    loggedDataSource,
     captureCheckoutThread,
     captureDispatchThread,
     waitThread,
@@ -70,6 +71,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.Prelude
 import DBOS.SystemDB (BackendErrorKind (..))
+import DBOS.Transact.Datasource (RecordedOutcome (..))
 import DBOS.Transact
   (
   CodecError,
@@ -578,6 +580,28 @@ scenarioKilledMidDispatch wf = do
   observe wf wid
 
 -- * Commit-boundary fault injection
+
+-- | A datasource that mirrors every committed checkpoint write into an
+-- append-only log: outputs and errors that land stay listed under the
+-- table's primary key, and nothing is ever deleted. Post-completion
+-- observations read the log because completions clear the table (as
+-- Python specifies); the engine keeps reading checkpoints from the
+-- source, never from the log. Writes that lose their race record nothing
+-- here, exactly as @ON CONFLICT DO NOTHING@ writes no row.
+loggedDataSource :: MonadSTM m => StrictTVar m (Map (Text, Int) (Text, RecordedOutcome)) -> DataSource m -> DataSource m
+loggedDataSource commitLog source =
+  source
+    { dsRecordOutput = \tx wid name step out -> do
+        wrote <- (source.dsRecordOutput) tx wid name step out
+        when wrote (atomically (modifyTVar commitLog (Map.insert (commitWid wid, step) (name, RecordedOutput out))))
+        pure wrote,
+      dsRecordError = \tx wid name step message -> do
+        wrote <- (source.dsRecordError) tx wid name step message
+        when wrote (atomically (modifyTVar commitLog (Map.insert (commitWid wid, step) (name, RecordedError message))))
+        pure wrote
+    }
+  where
+    commitWid (WorkflowId widText) = widText
 
 -- | A datasource that loses the acknowledgement of the next successful
 -- transaction: the commit lands, the caller sees a transport-class failure.

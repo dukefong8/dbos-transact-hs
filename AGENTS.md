@@ -25,6 +25,8 @@ Repo guide for DBOS Haskell.
 - **A split or a rename requires an explicit ADR** in `docs/adr/` recording why it was unavoidable. (No module split is in force today: the short-lived `DBOS.SystemDB.Time` leaf was merged back into `Types` once the cycle it broke was removed. Constructor-prefix collisions like `ForkStep` and `ErrorMaxRecoveryAttemptsExceeded` are the deviation style instead.)
 - Facades (`DBOS.SystemDB`, `DBOS.Transact`) and `[typedSql| ... |]` session modules are the port's own seams, not Rust module counterparts; they may re-export (`module Types`) but never redefine ported types.
 - **Keep the established `SystemDB` spelling in Haskell module, type, and class names.** Use `DBOS.SystemDB.*`, `SystemDB`, and `PostgresSystemDB` — never `SystemDatabase` — for Haskell artifacts. References to Rust's `trait SystemDatabase` keep the Rust spelling.
+- **Rust is the API and ADT design oracle; Python is the behavior spec oracle.** Method shapes, type shapes, variant lists, and the error taxonomy come from `~/dev/dbos-transact-rust` (pinned to v0.5.0 semantics): one Rust method maps to one Haskell function, one Rust type with its variants to one Haskell ADT, exhaustive predicates (`should_record`) ported variant-for-variant with no wildcard. Runtime semantics — ordering, retry sets, user-visible behavior — are specified against Python (`~/dev/dbos-transact-py`, skill references under `~/dev/dbos-agent-skills`) wherever Rust is silent (datasources, client ergonomics) and as the second witness wherever both speak. When the oracles disagree, Rust wins by default and the decision is recorded with a dated note (as the `25P03` permanence note does); Python wins only where Rust has no counterpart.
+- **Make illegal states unrepresentable with compile-time types.** Ported invariants ride ADTs, not booleans: opaque verdict types built only by smart constructors (`CallerStep` via `checkCallerStep`), exhaustive predicates with no wildcard arm (`shouldRecord`), and one error channel per layer (`InvalidArgument` at the engine, `InvalidInput` at the sysdb). A skip that bypasses verification, a failure that escapes unrecorded, or a refusal on the wrong channel must fail to compile — never merely be convention. When the oracle achieves the same guarantee at runtime (a separate connection, a pre-check), the port achieves it in the type or documents why it cannot.
 
 ## Naming and Refactor Conventions
 
@@ -117,7 +119,7 @@ Soft conventions: they apply only where the Rust oracle and the plan rules (`.la
      `let DataSource {dsWithTransaction = withTx} = ds` (`Datasource`),
      `Right (Just WorkflowRecord {workflowRecordStatus = status}) -> ...`.
      Rank-n fields only expose through patterns:
-     `spawnLocal (TaskSpawner spawn) = spawn`, `let ErasedWorkflow body = workflow`.
+     `spawnLocal (TaskSpawner spawn _) = spawn`, `let ErasedWorkflow body = workflow`.
      Newtype/sum destructuring likewise: `let WorkflowId destination = ...`,
      `case ... of Just (WorkflowSucceeded stored) -> ...`.
      RecordWildCards destructures a whole record (`InitWorkflowParams {..} = params`,

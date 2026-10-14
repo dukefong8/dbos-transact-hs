@@ -33,7 +33,7 @@ import Data.Aeson (Value (..), eitherDecodeStrict, encode)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text.Encoding (decodeUtf8)
-import Data.List (nub, sort, sortOn)
+import Data.List (nub, partition, sort, sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -72,6 +72,7 @@ import DBOS.SystemDB
     AwaitedStream (..),
     StreamRead (..),
     StreamRecord (..),
+    SysRewindOptions (..),
     SystemDB (..),
     Timestamp,
     Topic (..),
@@ -96,15 +97,20 @@ import DBOS.SystemDB
     IdempotencyKey (..),
     initialStatus,
     internalQueueName,
+    isActiveStatus,
     isQueueUpdateEmpty,
     newWorkflow,
     nullTopicSentinel,
     recvStepName,
+    rewindStepName,
+    shouldRecord,
     secondsDuration,
     sendBulkStepName,
     sleepStepName,
+    sysRewindValidate,
     sendStepName,
     validateSendKeys,
+    workflowStatusText,
     writeStreamStepName,
     closeStreamStepName,
     streamClosedSentinel,
@@ -114,6 +120,7 @@ import DBOS.SystemDB
     timestampNow,
     timestampToEpochMs,
     zeroRowCounts)
+import DBOS.SystemDB.Postgres.Statements (CallerStep (..))
 import DBOS.Transact
   ( DBOS,
     Executor,
@@ -190,6 +197,7 @@ instance SystemDB MockSystemDB (IOSim s) where
   deleteWorkflows = \cases _ ids _ _ -> pure (Right (fromIntegral (length ids)))
   forkWorkflows = \cases _ forks _ _ -> pure (Right (map (\fork -> WorkflowId fork.forkSourceId) forks))
   forkFrom = \cases _ ids _ _ _ -> pure (Right ids)
+  rewindWorkflow = \cases _ _ _ _ _ -> pure (Right ())
   sendMessage = \cases _ _ _ _ _ -> pure (Right ())
   sendMessages = \cases _ _ _ _ _ -> pure (Right ())
   recv = \cases _ _ _ _ _ _ -> pure (Right (Just (EncodedValue mockMessageBody (Just mockSerialization))))
@@ -341,10 +349,11 @@ data MemSystemDB s = MemSystemDB
     memDedup :: StrictTVar (IOSim s) (Map (Text, Text) Text),
     -- | Registered queues by name.
     memQueues :: StrictTVar (IOSim s) (Map Text QueueRecord),
-    -- | Parked messages by (destination, topic); 'recv' blocks on this TVar,
-    -- so a 'sendMessage' genuinely wakes a parked reader. A workflow never
-    -- reads another's queue, as live addresses rows per recipient.
-    memMessages :: StrictTVar (IOSim s) (Map (Text, Text) [EncodedValue]),
+    -- | Parked messages by (destination, topic), each tagged with its
+    -- stored id; 'recv' blocks on this TVar, so a 'sendMessage' genuinely
+    -- wakes a parked reader. A workflow never reads another's queue, as
+    -- live addresses rows per recipient.
+    memMessages :: StrictTVar (IOSim s) (Map (Text, Text) [(Text, EncodedValue)]),
     -- | Message ids already stored, never removed: the in-memory
     -- @ON CONFLICT (message_uuid) DO NOTHING@. Consumed rows keep
     -- occupying the key live, so a resend stays a no-op after a receive.
@@ -352,8 +361,15 @@ data MemSystemDB s = MemSystemDB
     -- | Delivered notifications by destination, for
     -- 'getAllNotifications'.
     memNotifications :: StrictTVar (IOSim s) (Map Text [NotificationRecord]),
+    -- | The step that consumed each message, by (destination, message id):
+    -- the in-memory @consumed_by_function_id@. Written when a 'recv' takes
+    -- a message, read when a rewind decides what goes.
+    memConsumedBy :: StrictTVar (IOSim s) (Map (Text, Text) Int),
     -- | Published events by (workflow, key); readers block on this TVar.
     memEvents :: StrictTVar (IOSim s) (Map (Text, Text) EncodedValue),
+    -- | Every published event by (workflow, key, step): the undo log a
+    -- rewind restores from, as @workflow_events_history@ is live.
+    memEventHistory :: StrictTVar (IOSim s) (Map (Text, Text, Int) EncodedValue),
     -- | Append-only workflow streams keyed by workflow and stream key.
     memStreams :: StrictTVar (IOSim s) (Map (Text, Text) [StreamRecord]),
     -- | Registered schedules by name.
@@ -387,6 +403,8 @@ newMemDBWithApplication application =
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
     <*> newTVarIO Set.empty
+    <*> newTVarIO Map.empty
+    <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
@@ -722,6 +740,9 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       memStartStep (ForkStepNamed name) source steps = memNamedStep source name steps
       memMaxStep source steps = maximum (-1 : [sid | ((wid, sid), _) <- Map.toList steps, wid == source])
       memNamedStep source name steps = maximum (-1 : [sid | ((wid, sid), record) <- Map.toList steps, wid == source, record.stepRecordStepName == name])
+  rewindWorkflow db (WorkflowId wid) cut sysOpts caller = case sysRewindValidate cut sysOpts of
+    Left err -> pure (Left err)
+    Right () -> memRewind db wid cut sysOpts caller
   checkStep db (WorkflowId wid) stepId _name = Right . Map.lookup (wid, stepId) <$> readTVarIO db.memSteps
   recordStep db (WorkflowId wid) stepId name outcome serialization timing = atomically $ do
     steps <- readTVar db.memSteps
@@ -821,8 +842,13 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       Nothing -> do
         waited <- memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memTakeMessage db widText storedTopic))
         case waited of
-          Just value -> do
+          Just (uuid, value) -> do
             memRecordRecvStep db wid stepId recvStepName (Just value)
+            atomically $ do
+              notifications <- readTVar db.memNotifications
+              writeTVar db.memNotifications (Map.adjust (map (markConsumed uuid)) widText notifications)
+              consumed <- readTVar db.memConsumedBy
+              writeTVar db.memConsumedBy (Map.insert (widText, uuid) stepId consumed)
             pure (Right (Just value))
           Nothing -> do
             memRecordRecvStep db wid stepId recvStepName Nothing
@@ -891,6 +917,8 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
         atomically $ do
           events <- readTVar db.memEvents
           writeTVar db.memEvents (Map.insert (widTextOf wid, key) (EncodedValue value serialization) events)
+          history <- readTVar db.memEventHistory
+          writeTVar db.memEventHistory (Map.insert (widTextOf wid, key, stepId) (EncodedValue value serialization) history)
           memInsertStep db wid stepId setEventStepName (Just value) serialization now
           pure (Right ())
   -- A recorded getEvent step is the answer (value or recorded absence);
@@ -1382,15 +1410,23 @@ memRecordRecvStep db wid stepId name value = do
   atomically (memInsertStep db wid stepId name ((.encodedValue) <$> value) (value >>= (.encodedSerialization)) now)
 
 -- | Take the first parked message for a destination on a topic, blocking
--- until one lands.
-memTakeMessage :: MemSystemDB s -> Text -> Text -> STM (IOSim s) EncodedValue
+-- until one lands. Hands back the stored id with the value, so the taker
+-- can record which step consumed it.
+memTakeMessage :: MemSystemDB s -> Text -> Text -> STM (IOSim s) (Text, EncodedValue)
 memTakeMessage db wid topic = do
   stored <- readTVar db.memMessages
   case Map.lookup (wid, topic) stored of
-    Just (value : _) -> do
+    Just ((uuid, value) : _) -> do
       writeTVar db.memMessages (Map.adjust (drop 1) (wid, topic) stored)
-      pure value
+      pure (uuid, value)
     _ -> retry
+
+-- | Marks one notification consumed, leaving the rest of the
+-- destination's rows alone.
+markConsumed :: Text -> NotificationRecord -> NotificationRecord
+markConsumed uuid notification
+  | notification.notificationRecordMessageUuid == uuid = notification {notificationRecordConsumed = True}
+  | otherwise = notification
 
 -- | Wait for an event to be published, blocking until it lands.
 memWaitEvent :: MemSystemDB s -> Text -> Text -> STM (IOSim s) EncodedValue
@@ -1530,6 +1566,34 @@ memReplayDebounce (WorkflowId widText) stepId stored = case stored.stepRecordOut
         )
     Right value -> Right value
 
+-- | The caller's verified state, mirroring 'checkCallerStep': the same
+-- refusals (a missing caller row, a cancelled caller, a position recorded
+-- under another name), the same replay decoding, and the same freshness.
+-- The expected name is the step the call replays: 'rewindStepName' for a
+-- rewind, the send's own name for a send.
+verifyCallerStep :: Text -> Maybe (WorkflowId, Int) -> Map Text WorkflowRecord -> Map (Text, Int) StepRecord -> CallerStep
+verifyCallerStep expectedName caller rows steps = case caller of
+  Nothing -> CallerAbsent
+  Just (callerWid, callerStep) ->
+    let callerText = widTextOf callerWid
+     in case Map.lookup callerText rows of
+          Nothing -> CallerRefused (NonExistentWorkflow {workflowIds = [callerText]})
+          Just callerRow
+            | callerRow.workflowRecordStatus == Cancelled ->
+                CallerRefused (WorkflowCancelled {workflowId = callerText})
+            | otherwise -> case Map.lookup (callerText, callerStep) steps of
+                Nothing -> CallerFresh
+                Just record -> case record.stepRecordStepName of
+                  name | name /= expectedName ->
+                    CallerRefused (UnexpectedStep {workflowId = callerText, stepId = callerStep, expected = expectedName, recorded = name})
+                  _ -> CallerReplayed (replayMemStep record)
+  where
+    replayMemStep record = case record.stepRecordError of
+      Just text -> case eitherDecodeStrict (encodeUtf8 text) of
+        Right err -> Left err
+        Left _ -> Left (Malformed "unreadable recorded step error")
+      Nothing -> Right ()
+
 -- | Deliver messages to their topics and destinations, appending a
 -- notification per delivery so 'getAllNotifications' sees them, and record
 -- the caller's step. A send writes the messages TVar, which is what wakes
@@ -1547,11 +1611,12 @@ memSend db stepName messages serialization caller sendToForks = do
       seen <- readTVar db.memMessageIds
       notifications <- readTVar db.memNotifications
       steps <- readTVar db.memSteps
-      -- A replay must not send again: like the live insert, a caller step
-      -- that already stands means this batch went out before.
-      case caller of
-        Just (callerWid, callerStep)
-          | Map.member (widTextOf callerWid, callerStep) steps -> pure (Right ())
+      -- A replay must not send again, and a position whose recorded name is
+      -- not this send's is refused: the same verdict the live transaction
+      -- reaches through 'checkCallerStep'.
+      case verifyCallerStep stepName caller rows steps of
+        CallerRefused err -> pure (Left err)
+        CallerReplayed _ -> pure (Right ())
         _ -> do
           let topicOf m = maybe nullTopicSentinel (\(Topic topic) -> topic) m.sendTopic
               bodyOf m = EncodedValue m.sendMessageBody.serializedText serialization
@@ -1576,6 +1641,7 @@ memSend db stepName messages serialization caller sendToForks = do
               -- seen-set admits each id once), unkeyed ones take the next
               -- per-destination-topic counter, seeded from the rows already
               -- stored so a later batch never reuses an earlier number.
+              seedCounts :: Map (Text, Text) Int
               seedCounts =
                 Map.fromListWith
                   (+)
@@ -1586,7 +1652,7 @@ memSend db stepName messages serialization caller sendToForks = do
               insertOne (wid, topic, value, maybeUuid) (st, no, sn, counters) = case maybeUuid of
                 Just uuid | Set.member uuid sn -> (st, no, sn, counters)
                 Just uuid ->
-                  ( Map.insertWith (<>) (wid, topic) [value] st,
+                  ( Map.insertWith (<>) (wid, topic) [(uuid, value)] st,
                     Map.insertWith (<>) wid [notificationFor uuid topic value] no,
                     Set.insert uuid sn,
                     counters
@@ -1594,7 +1660,7 @@ memSend db stepName messages serialization caller sendToForks = do
                 Nothing ->
                   let next = Map.findWithDefault 0 (wid, topic) counters + 1
                       uuid = topic <> ":" <> Text.pack (show next)
-                   in ( Map.insertWith (<>) (wid, topic) [value] st,
+                   in ( Map.insertWith (<>) (wid, topic) [(uuid, value)] st,
                         Map.insertWith (<>) wid [notificationFor uuid topic value] no,
                         sn,
                         Map.insert (wid, topic) next counters
@@ -1629,6 +1695,119 @@ memSend db stepName messages serialization caller sendToForks = do
                     }
               writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) entry steps)
               pure (Right ())
+
+-- | Discards a finished workflow's history from the cut on and re-enqueues
+-- it under the same id. Mirrors 'rewindTx' map by map: caller verification
+-- first (missing, cancelled, or misnamed caller refused; recorded calls
+-- replayed), then the guarded status read, event deletion with restoration
+-- from the history undo log, stream close removal, step and history
+-- deletion, message deletion by consume step, output clearing, and the row
+-- reset. A recordable refusal commits a failure step for the caller
+-- through the should-record gate, exactly as live does; anything else
+-- returns unrecorded, and nothing has run yet either way. The status guard
+-- is vacuous here — one atomic block admits no interleaving — but the
+-- shape stays. Stored statuses are the ADT itself, so the unknown-spelling
+-- refusal has no sim path; consumed rows with no recorded step are kept,
+-- as live keeps rows whose @consumed_by_function_id@ stayed null.
+memRewind :: MemSystemDB s -> Text -> Int -> SysRewindOptions -> Maybe (WorkflowId, Int) -> IOSim s (Either Error ())
+memRewind db wid cut sysOpts caller = do
+  now <- timestampNow
+  atomically $ do
+    rows <- readTVar db.memRows
+    steps <- readTVar db.memSteps
+    case verifyCallerStep rewindStepName caller rows steps of
+      CallerReplayed replayed -> pure replayed
+      CallerRefused err -> refuseWith steps now err
+      _ -> case Map.lookup wid rows of
+        Nothing -> refuseWith steps now (NonExistentWorkflow {workflowIds = [wid]})
+        Just row
+          | isActiveStatus row.workflowRecordStatus ->
+              refuseWith steps now (WorkflowNotRewindable {workflowId = wid, status = workflowStatusText row.workflowRecordStatus})
+          | otherwise -> do
+            events <- readTVar db.memEvents
+            history <- readTVar db.memEventHistory
+            streams <- readTVar db.memStreams
+            stored <- readTVar db.memMessages
+            seen <- readTVar db.memMessageIds
+            notifications <- readTVar db.memNotifications
+            consumed <- readTVar db.memConsumedBy
+            let cutKeys = nub [key | ((w, key, step), _) <- Map.toList history, w == wid, step >= cut]
+                restored =
+                  [ ((wid, key), value)
+                  | key <- cutKeys,
+                    (_, value) <- take 1 (sortOn (negate . fst) [(step, value) | ((w, k, step), value) <- Map.toList history, w == wid, k == key, step < cut])
+                  ]
+                events' = foldr (\(key, value) acc -> Map.insert key value acc) (foldr Map.delete events [(wid, key) | key <- cutKeys]) restored
+                isClose entry =
+                  entry.streamStepId >= cut
+                    && entry.streamValue == streamClosedSentinel
+                    && entry.streamSerialization == Just streamClosedSerialization
+                streams' = Map.mapWithKey (\(w, _) entries -> if w == wid then filter (not . isClose) entries else entries) streams
+                steps' = Map.filterWithKey (\(w, step) _ -> w /= wid || step < cut) steps
+                history' = Map.filterWithKey (\(w, _, step) _ -> w /= wid || step < cut) history
+                keepNotif notification =
+                  notification.notificationRecordConsumed
+                    && maybe True (< cut) (Map.lookup (wid, notification.notificationRecordMessageUuid) consumed)
+                prior = fromMaybe [] (Map.lookup wid notifications)
+                (kept, dropped) = partition keepNotif prior
+                stored' = Map.filterWithKey (\(w, _) _ -> w /= wid) stored
+                seen' = foldr (Set.delete . (.notificationRecordMessageUuid)) seen dropped
+                QueueName internal = internalQueueName
+                row' =
+                  row
+                    { workflowRecordStatus = Enqueued,
+                      workflowRecordQueueName = Just (fromMaybe internal sysOpts.sysRewindQueueName),
+                      workflowRecordQueuePartitionKey = sysOpts.sysRewindQueuePartitionKey,
+                      workflowRecordApplicationVersion = sysOpts.sysRewindApplicationVersion <|> row.workflowRecordApplicationVersion,
+                      workflowRecordRecoveryAttempts = 0,
+                      workflowRecordOwnerXid = Nothing,
+                      workflowRecordDeadline = Nothing,
+                      workflowRecordDeduplicationId = Nothing,
+                      workflowRecordStartedAt = Nothing,
+                      workflowRecordCompletedAt = Nothing,
+                      workflowRecordOutput = Nothing,
+                      workflowRecordError = Nothing,
+                      workflowRecordUpdatedAt = now
+                    }
+            writeTVar db.memEvents events'
+            writeTVar db.memEventHistory history'
+            writeTVar db.memStreams streams'
+            writeTVar db.memSteps steps'
+            writeTVar db.memMessages stored'
+            writeTVar db.memMessageIds seen'
+            writeTVar db.memNotifications (Map.insert wid kept notifications)
+            writeTVar db.memRows (Map.insert wid row' rows)
+            let finalSteps = case caller of
+                  Just (callerWid, callerStep) ->
+                    Map.insert (widTextOf callerWid, callerStep) (memCallerEntry callerWid callerStep now (Right ())) steps'
+                  Nothing -> steps'
+            writeTVar db.memSteps finalSteps
+            pure (Right ())
+  where
+    -- | Settles a pre-write refusal through the should-record gate, as
+    -- live does: recordable failures commit a failure step for the
+    -- caller, anything else returns unrecorded.
+    refuseWith steps now err = case caller of
+      Just (callerWid, callerStep) | shouldRecord err -> do
+        writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) (memCallerEntry callerWid callerStep now (Left err)) steps)
+        pure (Left err)
+      _ -> pure (Left err)
+    -- | The caller's step row: the unit output on success, the structured
+    -- error on a recordable refusal.
+    memCallerEntry callerWid callerStep now outcome =
+      StepRecord
+        { stepRecordWorkflowId = callerWid,
+          stepRecordStepId = callerStep,
+          stepRecordStepName = rewindStepName,
+          stepRecordOutput = either (const Nothing) (const (Just "null")) outcome,
+          stepRecordError = either (Just . memErrorJson) (const Nothing) outcome,
+          stepRecordChildWorkflowId = Nothing,
+          stepRecordSerialization = either (const Nothing) (const (Just "portable_json")) outcome,
+          stepRecordStartedAt = Just now,
+          stepRecordCompletedAt = Just now
+        }
+    memErrorJson :: Error -> Text
+    memErrorJson err = decodeUtf8 (LBS.toStrict (encode err))
 
 memQueueRecord :: NewQueue -> QueueRecord
 memQueueRecord queue =

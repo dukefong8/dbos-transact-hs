@@ -72,6 +72,7 @@ module DBOS.Transact.Context
     TaskSpawner (..),
     LocalTaskOutcome (..),
     spawnLocal,
+    clearSpawnerCheckpoints,
 
     -- * Backend access
     withSystemDB,
@@ -115,6 +116,7 @@ data LocalTaskOutcome a
 -- engine's.
 data TaskSpawner m = TaskSpawner
   { spawnLocalTask :: forall a. (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
+  , spawnerClearCheckpoints :: Text -> m ()
   }
 
 -- | Spawns an action detached on the spawner's registry and hands back the
@@ -122,7 +124,17 @@ data TaskSpawner m = TaskSpawner
 -- site for the record's field, so callers never touch record-dot on a
 -- function-typed field.
 spawnLocal :: TaskSpawner m -> (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
-spawnLocal (TaskSpawner spawn) = spawn
+spawnLocal (TaskSpawner spawn _) = spawn
+
+-- | Drops one finished workflow's datasource checkpoints through the
+-- spawner's registry channel, by workflow id text. The channel is a
+-- clearance callback rather than the registry itself because this module
+-- cannot import it ('DBOS.Transact.Datasource' imports this module): the
+-- engine closes the callback over the registry when it builds the spawner.
+-- The other call site for the record's fields, so callers never touch
+-- record-dot on a function-typed field.
+clearSpawnerCheckpoints :: TaskSpawner m -> Text -> m ()
+clearSpawnerCheckpoints (TaskSpawner _ clear) = clear
 
 -- | Two views are equal when they are the same execution — identity, not
 -- structure, because the mutable refs inside cannot be compared. This is

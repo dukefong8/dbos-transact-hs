@@ -2041,7 +2041,7 @@ scenarioJoinHeldKey fx = do
           case (.workflowRecordStatus) <$> row of
             Just Pending -> threadDelay 200000 >> drive (n - 1)
             _ -> pure ()
-    drive 100
+    drive (100 :: Int)
     -- Best-effort hygiene: the shared database keeps a queue row per run and
     -- every unscoped sweep pays one claim query per row. The queue is idle
     -- now (the drive settled its workflows); workflow rows are left alone.
@@ -2221,6 +2221,7 @@ checkChildIdsInBuildOrder (n, steps, parentText, firstChildOutput)
   | otherwise = Right ()
   where
     table = map (\row -> (row.stepRecordStepId, row.stepRecordStepName, row.stepRecordChildWorkflowId)) steps
+    child :: Int -> WorkflowId
     child k = WorkflowId (parentText <> "-" <> Text.pack (show k))
     expected =
       [ (0, "child", Just (child 0)),
@@ -2695,6 +2696,7 @@ checkStepIdPairs (n, steps, parentText)
   | otherwise = Right ()
   where
     table = map (\row -> (row.stepRecordStepId, row.stepRecordStepName, row.stepRecordChildWorkflowId)) steps
+    child :: Int -> WorkflowId
     child k = WorkflowId (parentText <> "-" <> Text.pack (show k))
     expected =
       [ (0, "child", Just (child 0)),

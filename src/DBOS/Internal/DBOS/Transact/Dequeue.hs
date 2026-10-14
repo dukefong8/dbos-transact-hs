@@ -33,6 +33,7 @@ import DBOS.SystemDB.Types
     resolvedIsPartitioned,
     secondsDuration)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
+import DBOS.Transact.Datasource (DataSourceRegistry)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
@@ -190,18 +191,18 @@ workerBudget limits running
 -- contended flag the caller backs off on. Announcements go through the
 -- connection's tracer.
 pollOnce :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-         => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> m (Bool, [WorkflowId])
-pollOnce conn identity workflows tasks running queue = do
+         => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> DataSourceRegistry m -> m (Bool, [WorkflowId])
+pollOnce conn identity workflows tasks running queue datasources = do
   if not (resolvedIsPartitioned limits)
     then do
       local <- runningCount running queueName
-      claimed <- startClaim Nothing local 0
+      claimed <- startClaim Nothing local (0 :: Int)
       case claimed of
         Left err -> do
           contended <- reportDequeueError conn.connTracer err
           pure (contended, [])
         Right ids -> do
-          dispatchClaimed conn identity workflows tasks running queue Nothing ids
+          dispatchClaimed conn identity workflows tasks running queue Nothing ids datasources
           pure (False, ids)
     else do
       alreadyRunning <- runningCount running queueName
@@ -230,7 +231,7 @@ pollOnce conn identity workflows tasks running queue = do
                   -- The sweep returns one head per partition and does not
                   -- say which; each claimed row carries its own key, so the
                   -- tally is credited from the rows themselves.
-                  dispatchClaimed conn identity workflows tasks running queue Nothing ids
+                  dispatchClaimed conn identity workflows tasks running queue Nothing ids datasources
                   pure (False, ids)
         _ -> do
           partitions <- runSystemDB conn.connSysdb (\db -> SystemDB.getQueuePartitions db queueName)
@@ -286,7 +287,7 @@ pollOnce conn identity workflows tasks running queue = do
                   _ <- reportDequeueError conn.connTracer err
                   walk rest alreadyRunning claimedHere
             Right ids -> do
-              dispatchClaimed conn identity workflows tasks running queue (Just partition) ids
+              dispatchClaimed conn identity workflows tasks running queue (Just partition) ids datasources
               walk rest alreadyRunning (claimedHere + length ids)
 
 -- | Turns a failed dequeue into the "was it contention" answer the caller
@@ -332,8 +333,8 @@ shuffled seed keys = Map.elems (go (length keys - 1) (seed `xor` 1) initial)
 -- if this one is still starting. Walked in claim order, not in the order
 -- the read came back, because claim order is what priority is for.
 dispatchClaimed :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-                => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> m ()
-dispatchClaimed conn identity workflows tasks running queue partition claimed
+                => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> DataSourceRegistry m -> m ()
+dispatchClaimed conn identity workflows tasks running queue partition claimed datasources
   | null claimed = pure ()
   | otherwise = do
       fetched <-
@@ -381,6 +382,7 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed
                       workflowId
                       input
                       new
+                      datasources
                   case spawned of
                     Left err ->
                       runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError err))
@@ -439,8 +441,8 @@ internalQueueRecord =
 -- point: a contended queue stays backed off rather than rediscovering the
 -- contention.
 pollQueue :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-          => Tasks m -> Connection m -> Identity -> Snapshot m -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> m ()
-pollQueue tasks conn identity workflows queues running name = go (secondsDuration 1)
+          => Tasks m -> Connection m -> Identity -> Snapshot m -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> DataSourceRegistry m -> m ()
+pollQueue tasks conn identity workflows queues running name datasources = go (secondsDuration 1)
   where
     go interval = do
       current <- Map.lookup name <$> readTVarIO queues
@@ -453,7 +455,7 @@ pollQueue tasks conn identity workflows queues running name = go (secondsDuratio
           let floorInterval = queue.queueRecordPollingInterval
               ceiling = max floorInterval maxPollingInterval
               clamped = max floorInterval (min ceiling interval)
-          (contended, _) <- pollOnce conn identity workflows tasks running queue
+          (contended, _) <- pollOnce conn identity workflows tasks running queue datasources
           let next =
                 if contended
                   then min (scaleDuration backoffFactor clamped) ceiling
@@ -465,8 +467,8 @@ pollQueue tasks conn identity workflows queues running name = go (secondsDuratio
 -- | The supervisor: transition, rebuild the set, spawn and reap one worker
 -- per queue, and sleep a second.
 superviseForever :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-                 => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m ()
-superviseForever tasks conn identity workflows listenQueues = do
+                 => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> DataSourceRegistry m -> m ()
+superviseForever tasks conn identity workflows listenQueues datasources = do
   queues <- newTVarIO Map.empty
   workers <- newTVarIO Map.empty
   warnedInternal <- newTVarIO False
@@ -491,7 +493,7 @@ superviseForever tasks conn identity workflows listenQueues = do
             spawnTracked
               tasks
               ( finally
-                  (pollQueue tasks conn identity workflows queues running name)
+                  (pollQueue tasks conn identity workflows queues running name datasources)
                   (atomically (modifyTVar workers (Map.delete name)))
               )
           -- A closed registry refuses the worker without forking, so there
@@ -509,8 +511,8 @@ superviseForever tasks conn identity workflows listenQueues = do
 -- the supervisor skips it: the synthetic record's no-limit cadence always
 -- wins, and the row's presence is said out loud.
 dequeuePass :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-            => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
-dequeuePass tasks conn identity workflows listenQueues = do
+            => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> DataSourceRegistry m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+dequeuePass tasks conn identity workflows listenQueues datasources = do
   passStart <- getCurrentTime
   transitioned <- runSystemDB conn.connSysdb (\db -> SystemDB.transitionDelayedWorkflows db)
   case transitioned of
@@ -526,7 +528,7 @@ dequeuePass tasks conn identity workflows listenQueues = do
               queues = internalQueueRecord : visible
           when (any (\record -> record.queueRecordName == internalName) records) $
             runTracer conn.connTracer InternalQueueLimitsIgnored
-          claimedByQueue <- traverse (\queue -> pollOnce conn identity workflows tasks running queue) queues
+          claimedByQueue <- traverse (\queue -> pollOnce conn identity workflows tasks running queue datasources) queues
           let claimed = concatMap snd claimedByQueue
           reportSlowPass conn passStart (length queues) (length claimed)
           pure (Right claimed)

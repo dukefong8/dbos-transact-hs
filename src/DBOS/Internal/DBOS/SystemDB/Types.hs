@@ -21,6 +21,7 @@ module DBOS.SystemDB.Types
     parseWorkflowStatus,
     workflowStatusText,
     isTerminal,
+    isActiveStatus,
     internalQueueName,
     message,
     messageTo,
@@ -114,6 +115,7 @@ module DBOS.SystemDB.Types
     resumeStepName,
     deleteStepName,
     forkStepName,
+    rewindStepName,
     setWorkflowDelayStepName,
     updateWorkflowAttributesStepName,
     listWorkflowsStepName,
@@ -151,6 +153,12 @@ module DBOS.SystemDB.Types
     forkValidate,
     forkOptionsValidate,
     defaultForkOptions,
+    RewindOptions (..),
+    defaultRewindOptions,
+    SysRewindOptions (..),
+    sysRewindOptions,
+    rewindOptionProblems,
+    sysRewindValidate,
     debounceValidate,
     outcomeStatus,
     outcomeColumns,
@@ -643,6 +651,9 @@ deleteStepName = "DBOS.delete_workflow"
 
 forkStepName :: Text
 forkStepName = "DBOS.fork_workflow"
+
+rewindStepName :: Text
+rewindStepName = "DBOS.rewind_workflow"
 
 setWorkflowDelayStepName :: Text
 setWorkflowDelayStepName = "DBOS.set_workflow_delay"
@@ -1427,6 +1438,90 @@ forkOptionsValidate options =
               Left (invalidInput "replacement_children" (original <> " is replaced more than once"))
           | otherwise = go rest (original : seen)
 
+-- | Where a rewound workflow re-runs. Mirrors Rust @RewindOptions@: the cut
+-- step rides with the options (unlike the sysdb-internal split, whose
+-- lifetimes need no translation), the version is kept when unset, and an
+-- unset queue means the internal queue with no partition — not the
+-- workflow's previous ones.
+data RewindOptions = RewindOptions
+  { rewindStartStep           :: Int,
+    rewindApplicationVersion  :: Maybe Text,
+    rewindQueueName           :: Maybe Text,
+    rewindQueuePartitionKey   :: Maybe Text
+  }
+  deriving stock (Eq, Show)
+
+-- | The system-database half of a rewind: everything but the cut, which
+-- the trait takes as its own argument. Mirrors Rust @SysRewindOptions@ —
+-- the split exists there for lifetimes (the management form borrows, the
+-- sysdb form is built per call); here the field prefix keeps the two
+-- records unambiguous under @DuplicateRecordFields@.
+data SysRewindOptions = SysRewindOptions
+  { sysRewindApplicationVersion :: Maybe Text,
+    sysRewindQueueName          :: Maybe Text,
+    sysRewindQueuePartitionKey  :: Maybe Text
+  }
+  deriving stock (Eq, Show)
+
+-- | A rewind from the beginning under the workflow's own version and queue.
+-- Mirrors @RewindOptions::default@.
+defaultRewindOptions :: RewindOptions
+defaultRewindOptions =
+  RewindOptions
+    { rewindStartStep = 0,
+      rewindApplicationVersion = Nothing,
+      rewindQueueName = Nothing,
+      rewindQueuePartitionKey = Nothing
+    }
+
+-- | The sysdb half of engine options, dropping the cut the trait takes
+-- separately. Both layers build it from the same fields, so a new option
+-- cannot reach one layer and miss the other.
+sysRewindOptions :: RewindOptions -> SysRewindOptions
+sysRewindOptions options =
+  SysRewindOptions
+    { sysRewindApplicationVersion = options.rewindApplicationVersion,
+      sysRewindQueueName = options.rewindQueueName,
+      sysRewindQueuePartitionKey = options.rewindQueuePartitionKey
+    }
+
+-- | The first problem the options carry, if any: the cut must not be
+-- negative, and an empty option would replace rather than keep. Pure
+-- rules, shared by both error channels — the engine refusal (the
+-- management layer's @InvalidArgument@) and the system-database refusal
+-- below — so the two cannot disagree on what is invalid, only on how they
+-- report it.
+rewindOptionProblems :: RewindOptions -> Maybe (Text, Text)
+rewindOptionProblems options =
+  rewindFieldsValid
+    options.rewindStartStep
+    options.rewindApplicationVersion
+    options.rewindQueueName
+    options.rewindQueuePartitionKey
+
+-- | The same rules over the split sysdb type, reported as 'InvalidInput'.
+-- Reunites the fields so both channels validate identically; the
+-- system-database entry points (which take the cut separately, as the
+-- oracle's trait does) refuse through this before opening a transaction.
+sysRewindValidate :: Int -> SysRewindOptions -> Either Error ()
+sysRewindValidate cut sys = case rewindFieldsValid cut (sys.sysRewindApplicationVersion) (sys.sysRewindQueueName) (sys.sysRewindQueuePartitionKey) of
+  Nothing -> Right ()
+  Just (field, detail) -> Left (invalidInput field detail)
+
+-- | The shared rule body, positional over the wire fields.
+rewindFieldsValid :: Int -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe (Text, Text)
+rewindFieldsValid cut version queue partition
+  | cut < 0 = Just ("start_step", "must not be negative, got " <> showText cut)
+  | otherwise = case find (maybe False Text.null . snd) optionals of
+      Just (field, _) -> Just (field, "must be absent rather than empty")
+      Nothing -> Nothing
+  where
+    optionals =
+      [ ("application_version", version),
+        ("queue_name", queue),
+        ("queue_partition_key", partition)
+      ]
+
 -- | The workflow a @get_event@ runs on behalf of, and the steps it records
 -- against. Two step ids because they are not interchangeable: one records
 -- the read, the other the deadline. Mirrors Rust @GetEventCaller@.
@@ -1519,6 +1614,19 @@ isTerminal status =
     Error     -> True
     Cancelled -> True
     _         -> False
+
+-- | Whether a result is still waited for: the three statuses a rewind
+-- refuses, since rewinding would delete the history the running execution
+-- replays from. 'MaxRecoveryAttemptsExceeded' is not active and passes —
+-- re-running a workflow that kept dying is what a rewind is for. Mirrors
+-- Rust @WorkflowStatus::is_active@.
+isActiveStatus :: WorkflowStatus -> Bool
+isActiveStatus status =
+  case status of
+    Pending  -> True
+    Enqueued -> True
+    Delayed  -> True
+    _        -> False
 
 -- | Identity and payload wrappers over the oracle's @String@ fields. Rust
 -- spells these as bare @String@/@&str@ in @types.rs@ and the modules above

@@ -49,6 +49,8 @@ module DBOS.Transact.Instance
     forkWorkflow,
     forkWorkflows,
     forkFrom,
+    rewindWorkflow,
+    rewindWorkflows,
     dequeueWorkflows,
     updateWorkflowAttributes,
     listWorkflowSteps,
@@ -61,7 +63,7 @@ import Data.Int (Int64)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, forkNew, Topic, WorkflowDelay (..), WorkflowFilter (..), VersionInfo (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, forkNew, Topic, WorkflowDelay (..), WorkflowFilter (..), VersionInfo (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
 import DBOS.Transact.Config (Config (..))
 import DBOS.Transact.Config qualified as Config
 import DBOS.Transact.Connection (Connection (..), releaseConnection, acquireConnection, withConnection)
@@ -74,7 +76,7 @@ import DBOS.Transact.Logger (SomeTracer, acquireLoggerBackend, ioTracer, runTrac
 import DBOS.Transact.Management qualified as Management
 import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
-import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, thawDataSourceRegistry)
+import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, snapshotDatasources, thawDataSourceRegistry)
 import DBOS.Transact.Datasource qualified as Datasource (registerDataSource)
 import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflow, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
 import DBOS.Transact.Registry qualified as Registry (registerWorkflowRef)
@@ -242,7 +244,7 @@ runWorkflow executor key workflowId input = do
       key
       workflowId
       input
-  _ <- try (clearDatasourceCheckpoints executor.datasources workflowId) :: m (Either SomeException ())
+      executor.datasources
   pure outcome
 
 -- | Starts the referenced workflow via the launched executor: what
@@ -250,7 +252,7 @@ runWorkflow executor key workflowId input = do
 startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
               => Executor m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflow executor ref options input =
-  Workflow.startWorkflow executor.tasks executor.conn executor.identity executor.workflows ref options input
+  Workflow.startWorkflow executor.tasks executor.conn executor.identity executor.workflows ref options input executor.datasources
 
 -- | Runs the referenced workflow via the launched executor and waits: a
 -- start followed by an await under the same id.
@@ -258,12 +260,8 @@ runWorkflowRef :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer
                => Executor m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflowRef executor ref options input = do
   outcome <-
-    Workflow.runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input
-  case options.runWorkflowId of
-    Just workflowId' -> do
-      _ <- try (clearDatasourceCheckpoints executor.datasources workflowId') :: m (Either SomeException ())
-      pure outcome
-    Nothing -> pure outcome
+    Workflow.runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input executor.datasources
+  pure outcome
 
 enqueueWorkflow :: (MonadMVar m)
                 => DBOS m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
@@ -290,6 +288,7 @@ dequeueWorkflows dbos = do
       executor.identity
       executor.workflows
       executor.listen_queues
+      executor.datasources
 
 -- | A handle to a workflow by id. Nothing here has seen the row: the id is
 -- the caller's, taken on faith, which is the one handle shape that waits
@@ -404,6 +403,32 @@ forkWorkflow dbos workflowId from options = do
     Left err         -> pure (Left err)
     Right []         -> pure (Left (TransactError.SystemDatabase (SystemDBError.InvalidInput {field = "fork", detail = "the fork produced no workflow"})))
     Right (newId : _) -> retrieveWorkflow dbos newId
+
+-- | Rewinds a workflow in place, keeping its id: the datasource
+-- checkpoints go first, best effort, and the system-database rewind last,
+-- so a failure leaves the row as it was and the rewind retries safely.
+-- Mirrors Python @rewind_workflow@'s ordering; the client form
+-- ('Client.clientRewindWorkflows') skips the checkpoint drop, so rewound
+-- datasource transactions are not re-executed there.
+rewindWorkflows :: (MonadMVar m)
+                => DBOS m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+rewindWorkflows dbos workflowId options =
+  withExecutor dbos "rewind workflow" $ \executor -> do
+    sources <- snapshotDatasources dbos.dbos_datasources
+    outcomes <- traverse (\source -> source.dsDeleteCheckpoints workflowId options.rewindStartStep) sources
+    case sequence outcomes of
+      Left backendErr -> pure (Left (TransactError.SystemDatabase (SystemDBError.Backend backendErr)))
+      Right _ -> Management.rewindWorkflows executor.conn workflowId options
+
+-- | Rewinds one workflow and hands back its handle. Mirrors Rust
+-- @DBOS::rewind@ / @rewind_with@.
+rewindWorkflow :: (MonadMVar m)
+               => DBOS m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+rewindWorkflow dbos workflowId options = do
+  rewound <- rewindWorkflows dbos workflowId options
+  case rewound of
+    Left err -> pure (Left err)
+    Right () -> retrieveWorkflow dbos workflowId
 
 -- | One workflow's status, or 'Nothing' when no row matches: the singular
 -- of 'fetchWorkflowStatuses'.
@@ -562,7 +587,7 @@ launchExecutor dbos executor = do
     Right _ -> do
       bindRegistryInstance dbos.dbos_registry executor.conn.connInstanceId
       runTracer executor.conn.connTracer (EngineLaunched executor.identity.identityAppName executor.identity.identityExecutorId executor.identity.identityAppVersion)
-      _ <- spawnTracked executor.tasks (superviseForever executor.tasks executor.conn executor.identity executor.workflows executor.listen_queues)
+      _ <- spawnTracked executor.tasks (superviseForever executor.tasks executor.conn executor.identity executor.workflows executor.listen_queues executor.datasources)
       modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
       pure (Right executor)
 

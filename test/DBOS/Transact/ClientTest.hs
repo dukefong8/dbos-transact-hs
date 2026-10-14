@@ -49,6 +49,7 @@ import DBOS.Transact
     clientListWorkflows,
     clientPromoteVersion,
     clientResumeWorkflows,
+    clientRewindWorkflows,
     clientSendMessage,
     clientSendMessages,
     clientSendMessageInTx,
@@ -60,6 +61,7 @@ import DBOS.Transact
     connectClient,
     decodeWorkflowValue,
     defaultQueueOptions,
+    defaultRewindOptions,
     encodeWorkflowValue,
     enqueueClientWorkflowWith,
     enqueueClientWorkflow,
@@ -70,6 +72,7 @@ import DBOS.Transact
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
+    registerDataSource,
     registerWorkflow,
     registerQueue,
     retrieveClientWorkflow,
@@ -79,13 +82,16 @@ import DBOS.Transact
     setEvent,
     shutdown,
     validateClientConfig,
+    RewindOptions (rewindStartStep),
     WorkflowKey,
-    withClientTransaction,
     workflowStatusClient,
     WorkflowHandle (workflowId),
     recv,
     runStep,
     setEvent)
+import DBOS.Transact.DatasourceCases (FakeDs (..), mkFakeDs)
+import DBOS.Transact.Datasource (DataSource (..))
+import DBOS.Transact.Datasource qualified as DSTx (Tx (Tx))
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Instance (dequeueWorkflows)
 import DBOS.Transact.Workflow (storedPriority, validateEnqueue)
@@ -610,6 +616,82 @@ tests =
                 composed @?= Right ()
                 notified <- Postgres.runSession backend "client-tx-probe" (Session.statement topicName countTopic)
                 notified @?= Right 2),
+      testCase "a client rewinds a finished workflow" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-rewind-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-rewind-id-" <> suffix
+            key = newWorkflowKey "redoubled"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          case ran of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            rewound <- clientRewindWorkflows client (WorkflowId workflowText) (defaultRewindOptions {rewindStartStep = 0})
+            case rewound of
+              Right handle -> handle.workflowId @?= workflowText
+              Left err -> fail (show err)
+            backend <- getBackend
+            found <- SystemDB.getWorkflow backend (WorkflowId workflowText)
+            case found of
+              Right (Just record) -> record.workflowRecordStatus @?= Enqueued
+              other -> fail (show other),
+      testCase "a client rewind keeps datasource checkpoints" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-rewind-ds-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-rewind-ds-id-" <> suffix
+            key = newWorkflowKey "plain"
+            body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
+            body () _ = pure (Right ())
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          fake <- mkFakeDs
+          registeredDs <- registerDataSource dbos fake.fakeSource
+          case registeredDs of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue ()))
+          case ran of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          -- A checkpoint written outside any run: the client rewind must
+          -- leave datasource state alone, so rewound transactions are not
+          -- re-executed through this path.
+          wrote <- fake.fakeSource.dsRecordOutput (DSTx.Tx (\_ _ -> error "client rewind probe")) (WorkflowId workflowText) "probe" 0 "x"
+          wrote @?= True
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            rewound <- clientRewindWorkflows client (WorkflowId workflowText) (defaultRewindOptions {rewindStartStep = 0})
+            case rewound of
+              Right handle -> handle.workflowId @?= workflowText
+              Left err -> fail (show err)
+            remaining <- Map.size <$> readTVarIO fake.fakeRows
+            remaining @?= 1
+            backend <- getBackend
+            found <- SystemDB.getWorkflow backend (WorkflowId workflowText)
+            case found of
+              Right (Just record) -> record.workflowRecordStatus @?= Enqueued
+              other -> fail (show other),
       testCase "a client reads a workflow's events" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)

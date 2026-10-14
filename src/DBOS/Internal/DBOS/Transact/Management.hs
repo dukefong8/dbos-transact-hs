@@ -17,6 +17,9 @@ module DBOS.Transact.Management
     forkWorkflowsInWorkflow,
     forkFrom,
     forkFromInWorkflow,
+    checkRewindOptions,
+    rewindWorkflows,
+    rewindWorkflowsInWorkflow,
     updateWorkflowAttributes,
     listWorkflows,
     listWorkflowSteps,
@@ -28,7 +31,7 @@ where
 import DBOS.Prelude
 import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, StepRecord, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionsValidate, forkValidate, forkStepName, listStepsStepName, listWorkflowsStepName, resumeStepName)
+import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, QueueName (..), RewindOptions (..), StepRecord, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionsValidate, forkValidate, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, resumeStepName, rewindOptionProblems, rewindStepName, sysRewindOptions)
 import DBOS.Transact.Connection (Connection (..), withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, stepStatusId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
@@ -46,6 +49,7 @@ data ManagementEvent
   | WorkflowsResumed { managementRequested :: Int, managementResumed :: Int }
   | WorkflowForked { managementForkedId :: Text }
   | WorkflowsForked { managementForked :: Int }
+  | WorkflowRewound { managementRewoundId :: Text, managementRewindCut :: Int, managementRewindQueue :: Text }
   | WorkflowsDeleted { managementDeleted :: Word64 }
   | WorkflowDelayMoveAsked { managementWorkflowId :: Text }
   | WorkflowAttributesReplaceAsked { managementWorkflowId :: Text }
@@ -56,6 +60,7 @@ instance LogEvent ManagementEvent where
   eventSeverity WorkflowsResumed {}               = SeverityInfo
   eventSeverity WorkflowForked {}                 = SeverityInfo
   eventSeverity WorkflowsForked {}                = SeverityInfo
+  eventSeverity WorkflowRewound {}                = SeverityInfo
   eventSeverity WorkflowsDeleted {}               = SeverityInfo
   eventSeverity WorkflowDelayMoveAsked {}         = SeverityInfo
   eventSeverity WorkflowAttributesReplaceAsked {} = SeverityInfo
@@ -67,6 +72,8 @@ instance LogEvent ManagementEvent where
     "forked the workflow onto its queue forked_id=" <> forkedId
   renderEvent (WorkflowsForked count) =
     "forked workflows onto their queues count=" <> showText count
+  renderEvent (WorkflowRewound rewoundId cut queue) =
+    "rewound the workflow onto its queue workflow_id=" <> rewoundId <> " start_step=" <> showText cut <> " queue=" <> queue
   renderEvent (WorkflowsDeleted deleted) =
     "deleted workflows deleted=" <> showText deleted
   renderEvent (WorkflowDelayMoveAsked workflowId) =
@@ -224,6 +231,56 @@ announceFork :: Monad m => Connection m -> [WorkflowId] -> m ()
 announceFork conn forked = case forked of
   [WorkflowId only] -> runTracer conn.connTracer (WorkflowForked only)
   many -> runTracer conn.connTracer (WorkflowsForked (length many))
+
+-- | The engine-layer options check: the same rules as the system
+-- database, reported as an engine refusal (Rust @InvalidArgument@) rather
+-- than a database one. Runs before any step id moves or anything runs, on
+-- every engine entry point; the backends keep their own sysdb refusal as
+-- defense in depth.
+checkRewindOptions :: RewindOptions -> Either (TransactError.Error e) ()
+checkRewindOptions options = case rewindOptionProblems options of
+  Nothing -> Right ()
+  Just (field, detail) -> Left (TransactError.InvalidArgument "rewind a workflow" (field <> " " <> detail))
+
+-- | Rewinds a workflow as the operator asked: options are refused before
+-- anything runs, and the datasource checkpoints are dropped by the
+-- instance layer first (see 'DBOS.Transact.Instance.rewindWorkflows') —
+-- this call owns only the system-database rewind. Mirrors Rust
+-- @Connection::rewind@.
+rewindWorkflows :: Monad m
+                => Connection m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+rewindWorkflows conn target options = case checkRewindOptions options of
+  Left err -> pure (Left err)
+  Right () -> do
+    result <- withConnection conn (\db -> SystemDB.rewindWorkflow db target options.rewindStartStep (sysRewindOptions options) Nothing)
+    case result of
+      Left err -> pure (Left err)
+      Right () -> do
+        let WorkflowId widText = target
+            QueueName queue = fromMaybe internalQueueName (QueueName <$> options.rewindQueueName)
+        runTracer conn.connTracer (WorkflowRewound widText options.rewindStartStep queue)
+        pure (Right ())
+
+-- | Rewinds a workflow as a step of the calling workflow: the engine
+-- step owns the checkpoint, so the system-database call runs without a
+-- caller of its own — recording in both places would collide on the step
+-- id, the same reason forks pass no caller. A recovered caller replays
+-- the recorded step rather than rewinding the target a second time.
+-- Arguments are refused before the step id is taken. Same leaf rule as
+-- every in-workflow call.
+rewindWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                          => WorkflowCtx exec m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+rewindWorkflowsInWorkflow wctx target options =
+  case checkRewindOptions options of
+    Left err -> pure (Left err)
+    Right () ->
+      runStepWith
+        stepOptionsDefault
+        wctx
+        rewindStepName
+        (\_ -> rewindWorkflows conn target options)
+  where
+    conn = wctx.wctxConn
 
 -- | Forks from a point as a step of the calling workflow. Arguments are
 -- refused before the step id is taken. Same leaf rule as every
