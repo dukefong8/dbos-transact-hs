@@ -68,6 +68,7 @@ module DBOS.SystemDB.Types
     EncodedValue (..),
     EventRecord (..),
     StreamRead (..),
+    AwaitedStream (..),
     StreamRecord (..),
     NotificationRecord (..),
     VersionInfo (..),
@@ -101,6 +102,7 @@ module DBOS.SystemDB.Types
     sendBulkStepName,
     writeStreamStepName,
     closeStreamStepName,
+    readStreamStepName,
     setEventStepName,
     getEventStepName,
     getResultStepName,
@@ -124,6 +126,7 @@ module DBOS.SystemDB.Types
     resumeScheduleStepName,
     deleteScheduleStepName,
     streamClosedSentinel,
+    streamClosedSerialization,
     dequeueSweepCap,
     secondsDuration,
     millisDuration,
@@ -571,92 +574,104 @@ data OnExistingQueue
   | LeaveExisting
   deriving stock (Eq, Show)
 
--- | The step names the engine records for bulk sends, streams, events,
--- children, selections, management calls and schedules. Stored contract
--- like 'sleepStepName' and 'recvStepName'; most are cross-SDK spellings,
--- documented per name in the oracle. Mirrors Rust @step_names@.
+-- | Rust-specific persisted step names for sends, streams, events, children,
+-- selections, management calls and schedules. They are replay names rather
+-- than cross-SDK wire fields. Mirrors Rust @step_names@.
 sendStepName :: Text
 sendStepName = "DBOS.send"
 
 sendBulkStepName :: Text
-sendBulkStepName = "DBOS.sendBulk"
+sendBulkStepName = "DBOS.send_bulk"
 
 writeStreamStepName :: Text
-writeStreamStepName = "DBOS.writeStream"
+writeStreamStepName = "DBOS.write_stream"
 
 closeStreamStepName :: Text
-closeStreamStepName = "DBOS.closeStream"
+closeStreamStepName = "DBOS.close_stream"
+
+-- | The step name a workflow's stream read records, one step per value it
+-- delivers. The oracle's single-value read (@DBOS.read_stream_value@) is
+-- deliberately not ported; see ADR-0034.
+readStreamStepName :: Text
+readStreamStepName = "DBOS.read_stream"
 
 setEventStepName :: Text
-setEventStepName = "DBOS.setEvent"
+setEventStepName = "DBOS.set_event"
 
 getEventStepName :: Text
-getEventStepName = "DBOS.getEvent"
+getEventStepName = "DBOS.get_event"
 
 getResultStepName :: Text
-getResultStepName = "DBOS.getResult"
+getResultStepName = "DBOS.get_result"
 
 selectStepName :: Text
-selectStepName = "DBOS.selectWorkflow"
+selectStepName = "DBOS.select_workflow"
 
 selectStepStepName :: Text
-selectStepStepName = "DBOS.selectStep"
+selectStepStepName = "DBOS.select_step"
 
 debounceStepName :: Text
-debounceStepName = "DBOS.debounceDelayedWorkflow"
+debounceStepName = "DBOS.debounce_delayed_workflow"
 
 cancelStepName :: Text
-cancelStepName = "DBOS.cancelWorkflow"
+cancelStepName = "DBOS.cancel_workflow"
 
 resumeStepName :: Text
-resumeStepName = "DBOS.resumeWorkflow"
+resumeStepName = "DBOS.resume_workflow"
 
 deleteStepName :: Text
-deleteStepName = "DBOS.deleteWorkflow"
+deleteStepName = "DBOS.delete_workflow"
 
 forkStepName :: Text
-forkStepName = "DBOS.forkWorkflow"
+forkStepName = "DBOS.fork_workflow"
 
 setWorkflowDelayStepName :: Text
-setWorkflowDelayStepName = "DBOS.setWorkflowDelay"
+setWorkflowDelayStepName = "DBOS.set_workflow_delay"
 
 updateWorkflowAttributesStepName :: Text
-updateWorkflowAttributesStepName = "DBOS.updateWorkflowAttributes"
+updateWorkflowAttributesStepName = "DBOS.update_workflow_attributes"
 
 listWorkflowsStepName :: Text
-listWorkflowsStepName = "DBOS.listWorkflows"
+listWorkflowsStepName = "DBOS.list_workflows"
 
 listStepsStepName :: Text
-listStepsStepName = "DBOS.listWorkflowSteps"
+listStepsStepName = "DBOS.list_workflow_steps"
 
 createScheduleStepName :: Text
-createScheduleStepName = "DBOS.createSchedule"
+createScheduleStepName = "DBOS.create_schedule"
 
 upsertScheduleStepName :: Text
-upsertScheduleStepName = "DBOS.upsertSchedule"
+upsertScheduleStepName = "DBOS.upsert_schedule"
 
 getScheduleStepName :: Text
-getScheduleStepName = "DBOS.getSchedule"
+getScheduleStepName = "DBOS.get_schedule"
 
 listSchedulesStepName :: Text
-listSchedulesStepName = "DBOS.listSchedules"
+listSchedulesStepName = "DBOS.list_schedules"
 
 updateScheduleStepName :: Text
-updateScheduleStepName = "DBOS.updateSchedule"
+updateScheduleStepName = "DBOS.update_schedule"
 
 pauseScheduleStepName :: Text
-pauseScheduleStepName = "DBOS.pauseSchedule"
+pauseScheduleStepName = "DBOS.pause_schedule"
 
 resumeScheduleStepName :: Text
-resumeScheduleStepName = "DBOS.resumeSchedule"
+resumeScheduleStepName = "DBOS.resume_schedule"
 
 deleteScheduleStepName :: Text
-deleteScheduleStepName = "DBOS.deleteSchedule"
+deleteScheduleStepName = "DBOS.delete_schedule"
 
--- | The closing sentinel of a stream, arriving like any other value.
--- Mirrors @STREAM_CLOSED@.
+-- | The closing sentinel of a stream, stored JSON-encoded like every value
+-- so the column holds one format and other implementations read our closes.
+-- Mirrors Rust @STREAM_CLOSED@, whose quotes are the JSON encoding of the
+-- string (Python stores the same bytes through its portable serializer).
 streamClosedSentinel :: Text
-streamClosedSentinel = "__DBOS_STREAM_CLOSED__"
+streamClosedSentinel = "\"__DBOS_STREAM_CLOSED__\""
+
+-- | The serialization label stored with the sentinel. Mirrors Rust
+-- @STREAM_CLOSED_SERIALIZATION@.
+streamClosedSerialization :: Text
+streamClosedSerialization = "portable_json"
 
 -- | Cap on the partitioned-dequeue sweep. Mirrors
 -- @PARTITIONED_DEQUEUE_SWEEP_CAP@.
@@ -1151,8 +1166,17 @@ data EventRecord = EventRecord
 -- Mirrors Rust @StreamRead@.
 data StreamRead = StreamRead
   { streamStatus :: WorkflowStatus,
-    streamValue  :: Maybe EncodedValue
+    streamValues  :: [EncodedValue]
   }
+  deriving stock (Eq, Show)
+
+-- | What a blocking stream read found. The close sentinel is returned in
+-- 'Values'; only an empty final look reports 'Ended'. Mirrors Rust
+-- @AwaitedStream@.
+data AwaitedStream
+  = Values [EncodedValue]
+  | Ended
+  | TimedOut
   deriving stock (Eq, Show)
 
 -- | One entry of a workflow's stream, as @streams@ holds it. Mirrors Rust

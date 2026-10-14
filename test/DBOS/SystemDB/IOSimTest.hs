@@ -35,8 +35,6 @@ import DBOS.SystemDB
     SendMessage (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
-    StreamRead (..),
-    StreamRecord (..),
     Submission (..),
     SystemDB (..),
     Timestamp (..),
@@ -48,7 +46,6 @@ import DBOS.SystemDB
     WorkflowInitResult (..),
     WorkflowRecord (..),
     WorkflowStatus (..),
-    WrittenBy (..),
     defaultForkOptions,
     defaultQueueUpdate,
     defaultScheduleFilter,
@@ -75,7 +72,6 @@ tests =
       waitTests,
       stepTests,
       eventMessageTests,
-      streamTests,
       versionTests,
       queueTests,
       scheduleTests,
@@ -215,25 +211,6 @@ eventMessageTests =
         run (sendMessages backend [message (WorkflowId "wf-1") (SerializedWorkflowValue "\"v\"" Nothing)] Nothing Nothing False) @?= Right (),
       testCase "recv answers a message" $ do
         run (recv backend (WorkflowId "wf-1") 0 0 Nothing (secondsDuration 1)) @?= Right (Just (EncodedValue "mock-message" (Just "rust_serde")))
-    ]
-
--- * Streams
-
-streamTests :: TestTree
-streamTests =
-  testGroup
-    "Streams"
-    [ testCase "writeStream succeeds" $ do
-        run (writeStream backend (WorkflowId "wf-1") 0 "key" "\"v\"" Nothing Workflow) @?= Right (),
-      testCase "closeStream succeeds" $ do
-        run (closeStream backend (WorkflowId "wf-1") 0 "key") @?= Right (),
-      testCase "readStreamValue answers a value and the producer's status" $ do
-        run (readStreamValue backend (WorkflowId "wf-1") "key" 0) @?= Right (StreamRead Pending (Just (EncodedValue "mock-stream" (Just "rust_serde")))),
-      testCase "getAllStreamEntries answers the entries" $ do
-        let result = run (getAllStreamEntries backend (WorkflowId "wf-1"))
-        case result of
-          Right entries -> map (.streamKey) entries @?= ["mock-key"]
-          Left err -> fail (show err)
     ]
 
 -- * Versions

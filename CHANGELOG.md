@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Stream pulls page (100 values per blocking read, each still recorded and delivered one pull at a time) and own one step id across wait slices, so a replay finds the row where the pull recorded it; the sim backend takes the same final look after a terminal producer as Postgres.
+- The stream close sentinel is stored JSON-encoded (`"__DBOS_STREAM_CLOSED__"` quoted, `portable_json`), matching what Rust and Python write and detect — the old build stored it bare. Rows written by the old build keep the bare form.
+- Stream write offset races retry 16 times (`STREAM_OFFSET_ATTEMPTS`), not 8.
+
 - `TRACE_LEVEL` (`debug`/`info`/`warning`/`warn`/`error`, case-insensitive) sets the FastLogger backend's floor: an event below it is dropped before any formatting or thread-id lookup — the null path for a level nobody asked for. Unset, blank or unrecognised keeps logging everything.
 - Tracer lines name their event's constructor (`[Debug] StepRunning: …`); FastLogger lines also carry the emitting `ThreadId`, pre-formatted once per thread in a capped hash-map cache (fast-logger has no thread support to reuse; per-line `show`+`pack` measured ~59 ns against a ~9–11 ns cache hit).
 - Merged `DBOS.SystemDB.{Hasql,Queries}` into `DBOS.SystemDB.Postgres` (typedSql sessions + pool runners, one module).

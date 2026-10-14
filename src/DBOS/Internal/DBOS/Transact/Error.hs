@@ -113,6 +113,8 @@ data Error e
   | -- | One attempt exceeded its own timeout. The bound is per attempt,
     -- not per step. Mirrors Rust @Error::StepTimeout@.
     StepTimeout {step :: Text, timeout :: Duration}
+  | -- | No stream value arrived before the per-value read timeout.
+    StreamTimeout {streamWorkflowId :: Text, streamKey :: Text, streamTimeout :: Maybe Duration}
   | -- | Every attempt failed. Carries all of them, oldest first. Mirrors
     -- Rust @Error::MaxStepRetriesExceeded@.
     MaxStepRetriesExceeded {step :: Text, attempts :: Int, errors :: [Error e]}
@@ -146,6 +148,7 @@ mapApplication f = \case
   InvalidArgument operation detail -> InvalidArgument operation detail
   StepBuiltElsewhere step built polled -> StepBuiltElsewhere step built polled
   StepTimeout step limit -> StepTimeout step limit
+  StreamTimeout workflowText key limit -> StreamTimeout workflowText key limit
   MaxStepRetriesExceeded step attempts errors -> MaxStepRetriesExceeded step attempts (map (mapApplication f) errors)
 
 -- | Rust @Error::lift@: an engine error carried into any workflow's
@@ -181,6 +184,7 @@ renderTransactError = \case
   InvalidArgument operation detail -> "invalid argument to " <> operation <> ": " <> detail
   StepBuiltElsewhere step built polled -> "step " <> step <> " was built " <> built <> " but polled " <> polled <> ": a step takes its id where it is built"
   StepTimeout step limit -> "the step " <> step <> " exceeded its " <> pack (show (durationAsMillis limit)) <> "ms timeout"
+  StreamTimeout workflowText key limit -> "reading stream " <> key <> " from workflow " <> workflowText <> " timed out" <> maybe "" (\duration -> " after " <> pack (show (durationAsMillis duration)) <> "ms") limit
   MaxStepRetriesExceeded step attempts _ -> "the step " <> step <> " failed after " <> pack (show attempts) <> " attempts"
 
 -- | Haskell best practice for the oracle's @Display@: the 'Exception'
@@ -214,7 +218,7 @@ instance ToJSON e => ToJSON (Error e) where
     AlreadyRegistered key -> tagged "AlreadyRegistered" (object ["key" .= key])
     ErrorSerialization what message -> tagged "ErrorSerialization" (object ["what" .= what, "message" .= message])
     Deserialization what message -> tagged "Deserialization" (object ["what" .= what, "message" .= message])
-    SystemDatabase err -> tagged "SystemDatabase" (object ["message" .= SystemDBError.renderError err])
+    SystemDatabase err -> tagged "SystemDatabase" (toJSON err)
     StepFailed step message -> tagged "StepFailed" (object ["step" .= step, "message" .= message])
     NotRegistered key -> tagged "NotRegistered" (object ["key" .= key])
     WorkflowClaimLost workflowId -> tagged "WorkflowClaimLost" (object ["workflowId" .= workflowId])
@@ -226,15 +230,15 @@ instance ToJSON e => ToJSON (Error e) where
     InvalidArgument operation detail -> tagged "InvalidArgument" (object ["operation" .= operation, "detail" .= detail])
     StepBuiltElsewhere step built polled -> tagged "StepBuiltElsewhere" (object ["step" .= step, "built" .= built, "polled" .= polled])
     StepTimeout step limit -> tagged "StepTimeout" (object ["step" .= step, "timeout" .= limit])
+    StreamTimeout workflowText key limit -> tagged "StreamTimeout" (object ["workflowId" .= workflowText, "key" .= key, "timeout" .= limit])
     MaxStepRetriesExceeded step attempts errors -> tagged "MaxStepRetriesExceeded" (object ["step" .= step, "attempts" .= attempts, "errors" .= errors])
     where
       tagged tag payload = object [tag .= payload]
 
--- | The decode side of the same round trip. Engine-only variants that never
--- reach a recorded row (the system-database failure is control) are refused
--- rather than guessed; a caller with a legacy or undecodable payload falls
--- back to 'WorkflowFailed', as the oracle's @decode(...).unwrap_or_else@
--- does.
+-- | The decode side of the same round trip. Legacy message-only database
+-- errors remain undecodable; typed serde-compatible errors replay as their
+-- original constructor. Other malformed payloads fall back to 'WorkflowFailed',
+-- as the oracle's @decode(...).unwrap_or_else@ does.
 instance FromJSON e => FromJSON (Error e) where
   parseJSON = withObject "Error" $ \fields -> case KeyMap.toList fields of
     [(tag, payload)] -> case tag of
@@ -246,7 +250,7 @@ instance FromJSON e => FromJSON (Error e) where
       "AlreadyRegistered"     -> withObject "AlreadyRegistered" (\o -> AlreadyRegistered <$> o .: "key") payload
       "ErrorSerialization"         -> withObject "ErrorSerialization" (\o -> ErrorSerialization <$> o .: "what" <*> o .: "message") payload
       "Deserialization"       -> withObject "Deserialization" (\o -> Deserialization <$> o .: "what" <*> o .: "message") payload
-      "SystemDatabase"        -> fail "a system-database failure is a control signal and is never decoded from an outcome"
+      "SystemDatabase"        -> SystemDatabase <$> parseJSON payload
       "StepFailed"                 -> withObject "StepFailed" (\o -> StepFailed <$> o .: "step" <*> o .: "message") payload
       "NotRegistered" -> withObject "NotRegistered" (\o -> NotRegistered <$> o .: "key") payload
       "WorkflowClaimLost"     -> withObject "WorkflowClaimLost" (\o -> WorkflowClaimLost <$> o .: "workflowId") payload
@@ -258,6 +262,7 @@ instance FromJSON e => FromJSON (Error e) where
       "InvalidArgument"            -> withObject "InvalidArgument" (\o -> InvalidArgument <$> o .: "operation" <*> o .: "detail") payload
       "StepBuiltElsewhere"         -> withObject "StepBuiltElsewhere" (\o -> StepBuiltElsewhere <$> o .: "step" <*> o .: "built" <*> o .: "polled") payload
       "StepTimeout"                -> withObject "StepTimeout" (\o -> StepTimeout <$> o .: "step" <*> o .: "timeout") payload
+      "StreamTimeout"              -> withObject "StreamTimeout" (\o -> StreamTimeout <$> o .: "workflowId" <*> o .: "key" <*> o .: "timeout") payload
       "MaxStepRetriesExceeded"     -> withObject "MaxStepRetriesExceeded" (\o -> MaxStepRetriesExceeded <$> o .: "step" <*> o .: "attempts" <*> o .: "errors") payload
       _                            -> fail ("unknown error variant " <> show tag)
     _ -> fail "an error records exactly one tagged variant"

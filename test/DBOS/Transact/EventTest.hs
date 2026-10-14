@@ -4,7 +4,7 @@
 -- | Event behavior through the workflow-facing API and live SystemDB: the
 -- shared 'EventCases' scenarios over a real 'PostgresSystemDB' with a
 -- FastLogger tracer, for @main@.
-module DBOS.Transact.EventTest (tests) where
+module DBOS.Transact.EventTest (tests, liveEventFixture) where
 
 import DBOS.DualStack (liveCase)
 import DBOS.Prelude

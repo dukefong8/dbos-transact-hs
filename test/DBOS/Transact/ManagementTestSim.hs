@@ -224,7 +224,7 @@ traceListStepsInWorkflow tr = do
   selectTraceEventsDynamic tr
     @?= [ StepRunning "first" 0,
           StepOutputRecorded "first" 0,
-          StepOutputRecorded "DBOS.listWorkflowSteps" 1,
+          StepOutputRecorded "DBOS.list_workflow_steps" 1,
           WorkflowCompleted "hs-l2-mgmt-liststeps-in-sim"
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]

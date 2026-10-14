@@ -193,6 +193,17 @@ module DBOS.Transact
     debounce,
     debounceInWorkflow,
 
+  -- * Durable streams
+    StreamReader,
+    ReadStreamOptions (..),
+    defaultReadStreamOptions,
+    readStream,
+    readStreamFrom,
+    writeStream,
+    closeStream,
+    toVectorStream,
+    foldVectorStream,
+
   -- * Testing (test-): test-setup describes process, not API — no dedicated facade entries
   -- * Client (client-): external access without launch
   -- client-setup (mirrors the executor surface)
@@ -264,6 +275,7 @@ import DBOS.Transact.Registry (WorkflowKey (..), WorkflowRef, newWorkflowKey)
 import DBOS.Transact.Select (SelectArm (..), Winner (..), selectStep)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Sleep (pendingSleep, sleepPlain, sleepStep)
+import DBOS.Transact.Stream (ReadStreamOptions (..), StreamReader, closeStream, defaultReadStreamOptions, foldVectorStream, readStream, readStreamFrom, toVectorStream, writeStream)
 import DBOS.Transact.Step (StepError (..), StepOptions (..), pendingStep, pendingStepWith, runNestedStep, runStep, runStepWith, stepOptionsDefault)
 import DBOS.Transact.Wait (joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
 import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Timeout (..), enqueueNew, runOptionsDefault, startChildWorkflow, startOptionsDefault)

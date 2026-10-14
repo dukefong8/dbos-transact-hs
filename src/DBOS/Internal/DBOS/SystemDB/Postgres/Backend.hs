@@ -97,11 +97,11 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB.Class (SystemDB (..))
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput)
-import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, messageKey, newRegistry, notified, subscribe, subscribeExclusive, unsubscribe)
+import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, messageKey, newRegistry, notified, streamKey, streamsChannel, subscribe, subscribeExclusive, unsubscribe)
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdempotencyKey (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, workflowStatusText)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdempotencyKey (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, workflowStatusText, writeStreamStepName)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -1212,7 +1212,7 @@ decodeRoles (Just json) =
 -- because it depends on the handle too — @Unset@ with no explicit ids means
 -- the handle's own application plus the unclaimed rows, while @AnyApplication@ and an
 -- id-keyed read see everything. NOTE: @caller@ is not yet recorded as the
--- @DBOS.listWorkflows@ step; that checkpoint lands with 'recordStep'.
+-- @DBOS.list_workflows@ step; that checkpoint lands with 'recordStep'.
 listParams :: PostgresSystemDB -> WorkflowFilter -> Statements.WorkflowListParams
 listParams env workflowFilter =
   Statements.WorkflowListParams
@@ -2747,14 +2747,70 @@ instance SystemDB PostgresSystemDB IO where
               `finally` unsubscribe subscription
     where
       unwrap (Types.WorkflowId widText) = widText
-  -- DEFERRED (P7.4): streams are the one family held back — they are the
-  -- only consumers of the STREAM_CLOSED sentinel and the offset-retry loop,
-  -- and nothing the engine needs today touches them. The ported tests are
-  -- in @DBOS.SystemDB.PostgresTest.streamTests@, ready to wire the day these
-  -- land; the stubs stay 'undefined' so a caller cannot mistake them for
-  -- working.
-  writeStream = undefined
-  closeStream = undefined
+  writeStream env wid stepId key value serialization writtenBy = do
+    startedAt <- timestampNow
+    completedAt <- timestampNow
+    let widText = unwrap wid
+        stepName =
+          if value == streamClosedSentinel && serialization == Just streamClosedSerialization
+            then closeStreamStepName
+            else writeStreamStepName
+        recordParams =
+          Statements.RecordStepParams
+            { recordStepWorkflowId = widText,
+              recordStepStepId = stepId,
+              recordStepStepName = stepName,
+              recordStepOutput = Nothing,
+              recordStepError = Nothing,
+              recordStepSerialization = Nothing,
+              recordStepStartedAt = Just (timestampToEpochMs startedAt),
+              recordStepCompletedAt = Just (timestampToEpochMs completedAt),
+              recordStepApplicationName = env.psdbApplicationName,
+              recordStepChildWorkflowId = Nothing
+            }
+        writeOnce = do
+          result <- runTransaction env "write_stream" $ do
+            replay <- case writtenBy of
+              Step     -> pure Nothing
+              Workflow -> Tx.statement (widText, stepId) Statements.checkStepStatement
+            case replay of
+              Just raw -> case stepCheckToRecord wid stepId stepName raw of
+                Left err       -> pure (Left err)
+                Right (Just _) -> pure (Right True)
+                Right Nothing  -> append
+              Nothing -> append
+          pure $ case result of
+            Left (Backend backendError)
+              | backendError.backendSqlState == Just "23503" -> Left (NonExistentWorkflow {workflowIds = [widText]})
+            other -> join other
+        append = do
+          inserted <- Tx.statement (widText, stepId, key, value, serialization) Statements.streamWriteStatement
+          if inserted == 0
+            then pure (Right False)
+            else do
+              when (writtenBy == Workflow) $ do
+                void (Tx.statement () (Statements.recordStepStatement recordParams))
+              pure (Right True)
+        -- How many times a stream write retries onto a fresh offset before
+        -- giving up. Mirrors Rust @STREAM_OFFSET_ATTEMPTS@: a collision means
+        -- another writer took the offset this one computed, and the retry
+        -- recomputes it — so each attempt is lost to a *different* rival, and
+        -- the loop converges as long as writers are finite.
+        go attempts
+          | attempts >= 16 = pure (Left (Backend (BackendError {backendMessage = "stream offset was repeatedly claimed by concurrent writers", backendSqlState = Nothing, backendKind = Transient})))
+          | otherwise = do
+              written <- writeOnce
+              case written of
+                Right False -> go (attempts + 1)
+                Right True -> do
+                  signal env.psdbNotifier streamsChannel widText key
+                  pure (Right ())
+                Left err -> pure (Left err)
+    go 0
+    where
+      unwrap (Types.WorkflowId widText) = widText
+  closeStream env wid stepId key writtenBy =
+    writeStream env wid stepId key streamClosedSentinel (Just streamClosedSerialization) writtenBy
   close env = releasePostgresSystemDB env
   checkStep env wid stepId stepName = do
     result <- runSession env "check_step" (Statements.checkStepSession (unwrap wid) stepId)
@@ -2835,7 +2891,7 @@ instance SystemDB PostgresSystemDB IO where
         -- this (migration 44 removes it), so the writer must — after the
         -- commit, not inside it.
         signal env.psdbNotifier eventsChannel (unwrap wid) key
-        pure (() <$ traverse (stepCheckToRecord wid stepId "DBOS.setEvent") row)
+        pure (() <$ traverse (stepCheckToRecord wid stepId "DBOS.set_event") row)
     where
       unwrap (Types.WorkflowId widText) = widText
   getEvent env wid key timeout caller = do
@@ -2845,7 +2901,7 @@ instance SystemDB PostgresSystemDB IO where
     replay <- case caller of
       Nothing -> pure (Right Nothing)
       Just c -> do
-        found <- checkStep env c.getEventCallerWorkflowId c.getEventCallerStepId "DBOS.getEvent"
+        found <- checkStep env c.getEventCallerWorkflowId c.getEventCallerStepId "DBOS.get_event"
         pure (fmap (fmap stepEncodedValue) found)
     case replay of
       Left err -> pure (Left err)
@@ -2883,7 +2939,7 @@ instance SystemDB PostgresSystemDB IO where
                     Right Nothing -> Right value
                     Right (Just row) ->
                       fmap (>>= stepEncodedValue)
-                        (stepCheckToRecord c.getEventCallerWorkflowId c.getEventCallerStepId "DBOS.getEvent" row)
+                        (stepCheckToRecord c.getEventCallerWorkflowId c.getEventCallerStepId "DBOS.get_event" row)
     where
       unwrap (Types.WorkflowId widText) = widText
   getAllNotifications env wid = do
@@ -2896,9 +2952,78 @@ instance SystemDB PostgresSystemDB IO where
     pure (fmap (map eventRecordFromRaw) result)
     where
       unwrap (Types.WorkflowId widText) = widText
-  -- DEFERRED (P7.4): see writeStream above.
-  readStreamValue = undefined
-  getAllStreamEntries = undefined
+  readStreamValues env wid key offset limit
+    | offset < 0 = pure (Left (invalidInput "offset" "must not be negative"))
+    | limit < 1 = pure (Left (invalidInput "limit" "must be at least 1"))
+    | otherwise = do
+        let end = fromIntegral offset + fromIntegral limit
+        result <-
+          runPolling
+            env
+            "read_stream_values"
+            (Session.statement (unwrap wid, key, offset, end) Statements.streamPageStatement)
+        pure $ do
+          rows <- result
+          first <- maybe (Left (NonExistentWorkflow {workflowIds = [unwrap wid]})) Right (listToMaybe rows)
+          status <- case parseWorkflowStatus first.streamPageRawStatus of
+            Left _       -> Left (Malformed ("unknown workflow status \"" <> first.streamPageRawStatus <> "\""))
+            Right parsed -> Right parsed
+          let contiguous expected [] = []
+              contiguous expected (row : rest) =
+                case row.streamPageRawOffset of
+                  Just actual | actual == expected ->
+                    maybeToList (EncodedValue <$> row.streamPageRawValue <*> pure row.streamPageRawSerialization)
+                      <> contiguous (expected + 1) rest
+                  _ -> []
+          pure StreamRead {streamStatus = status, streamValues = contiguous offset rows}
+    where
+      unwrap (Types.WorkflowId widText) = widText
+  awaitStreamValues env wid key offset limit deadline pollInterval
+    | offset < 0 = pure (Left (invalidInput "offset" "must not be negative"))
+    | limit < 1 = pure (Left (invalidInput "limit" "must be at least 1"))
+    | durationAsMillis pollInterval < 1 = pure (Left (invalidInput "polling_interval" "must be at least 1 millisecond"))
+    | otherwise = do
+        subscription <- subscribe env.psdbNotify (streamKey (unwrap wid) key)
+        loop subscription False `finally` unsubscribe subscription
+    where
+      unwrap (Types.WorkflowId widText) = widText
+      loop subscription finalLook = do
+        found <- readStreamValues env wid key offset limit
+        case found of
+          Left err -> pure (Left err)
+          Right page
+            | not (null page.streamValues) -> pure (Right (Types.Values page.streamValues))
+            | finalLook -> pure (Right Types.Ended)
+            | page.streamStatus `notElem` [Pending, Enqueued, Delayed] -> loop subscription True
+            | otherwise -> do
+                now <- timestampNow
+                case deadline of
+                  Just endAt -> case durationSince endAt now of
+                    Nothing -> pure (Right Types.TimedOut)
+                    Just remaining
+                      | durationAsMillis remaining <= 0 -> pure (Right Types.TimedOut)
+                      | otherwise -> do
+                          waitForWakeup subscription (shorter pollInterval remaining)
+                          loop subscription False
+                  Nothing -> do
+                    waitForWakeup subscription pollInterval
+                    loop subscription False
+      shorter first second
+        | durationAsMillis first <= durationAsMillis second = first
+        | otherwise = second
+  getAllStreamEntries env wid = do
+    result <- runSession env "get_all_stream_entries" (Session.statement (unwrap wid) Statements.allStreamEntriesStatement)
+    pure $ fmap (map toRecord) result
+    where
+      unwrap (Types.WorkflowId widText) = widText
+      toRecord row =
+        StreamRecord
+          { streamKey = row.streamEntryRawKey,
+            streamOffset = row.streamEntryRawOffset,
+            streamValue = row.streamEntryRawValue,
+            streamSerialization = row.streamEntryRawSerialization,
+            streamStepId = row.streamEntryRawStepId
+          }
   createApplicationVersion env versionName applicationName = do
     let claimant = applicationName <|> env.psdbApplicationName
     holder <- runSession env "create_application_version" (Statements.versionHolderSession versionName)

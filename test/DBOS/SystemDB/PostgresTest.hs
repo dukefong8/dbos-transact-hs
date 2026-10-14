@@ -47,6 +47,7 @@ import DBOS.SystemDB
     SerializedWorkflowValue (..),
     Serialization (..),
     NotificationRecord (..),
+    AwaitedStream (..),
     Topic (..),
     VersionInfo (..),
     StepRecord (..),
@@ -77,6 +78,7 @@ import DBOS.SystemDB
     defaultForkOptions,
     defaultRetryPolicy,
     defaultWorkflowFilter,
+    addTimeout,
     messageTo,
     newSchedule,
     millisDuration,
@@ -1532,7 +1534,7 @@ queueTests getBackend =
           _ <- insertFixtureChecked env (defaultFixture parent)
           recorded <- recordChildResult env (WorkflowId parent) 2 (WorkflowId child) (OutcomeOutput (Just "done")) Nothing Nothing
           recorded @?= Right ()
-          found <- checkStep env (WorkflowId parent) 2 "DBOS.getResult"
+          found <- checkStep env (WorkflowId parent) 2 "DBOS.get_result"
           case found of
             Right (Just _) -> pure ()
             other -> fail ("expected the recorded step, got: " <> show other),
@@ -2080,7 +2082,7 @@ eventTests getBackend =
           _ <- setEvent env (WorkflowId unique) 4 "progress" "second" Nothing
           read2 <- getEvent env (WorkflowId unique) "progress" (millisDuration 0) (Just caller)
           read2 @?= Right (Just (EncodedValue "first" Nothing))
-          step <- checkStep env (WorkflowId unique) 2 "DBOS.getEvent"
+          step <- checkStep env (WorkflowId unique) 2 "DBOS.get_event"
           case step of
             Right (Just recorded) -> recorded.stepRecordOutput @?= Just "first"
             other -> fail ("expected the recorded read, got: " <> show other)
@@ -2152,11 +2154,8 @@ sleepTests getBackend =
           woke @?= Right (timestampFromEpochMs 12345)
     ]
 
--- | DEFERRED (P7.4): the ported stream contract, kept compiled but not
--- wired into 'tests' — the stream methods are stubs until their turn, so
--- wiring these now would leave the watcher red. Enable by adding
--- @streamTests@ to 'tests' in the same change that implements
--- @writeStream@/@closeStream@/@readStreamValue@/@getAllStreamEntries@.
+-- | The ported stream contract, run against the live backend as part of the
+-- standard Postgres test tree.
 -- Semantics verified against @postgres.rs@: append-with-computed-offset
 -- under a primary-key collision retry, the close sentinel recorded as a
 -- close, replay suppressed only for workflow-level writes, and reads that
@@ -2165,25 +2164,47 @@ streamTests :: TestTree
 streamTests =
   withResource acquireSuiteBackend releasePostgresSystemDB $ \getBackend ->
   testGroup
-    "Streams (deferred)"
+    "Streams"
     [ testCase "a workflow-written value reads back at its offset" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique)
           written <- writeStream env (WorkflowId unique) 1 "progress" "one" (Just "json") Workflow
           written @?= Right ()
-          found <- readStreamValue env (WorkflowId unique) "progress" 0
-          found @?= Right (StreamRead Pending (Just (EncodedValue "one" (Just "json")))),
+          found <- readStreamValues env (WorkflowId unique) "progress" 0 10
+          found @?= Right (StreamRead Pending [EncodedValue "one" (Just "json")]),
+      testCase "await returns an already-written page" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture unique)
+          _ <- writeStream env (WorkflowId unique) 1 "progress" "one" (Just "json") Step
+          awaited <- awaitStreamValues env (WorkflowId unique) "progress" 0 10 Nothing (millisDuration 5)
+          awaited @?= Right (Values [EncodedValue "one" (Just "json")]),
+      testCase "await times out while the producer is pending" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture unique)
+          now <- timestampNow
+          let deadline = addTimeout now (millisDuration 5)
+          awaited <- awaitStreamValues env (WorkflowId unique) "progress" 0 10 deadline (millisDuration 2)
+          awaited @?= Right TimedOut,
+      testCase "await ends after a terminal producer has no values" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture unique)
+          _ <- recordWorkflowOutcome env (WorkflowId unique) (OutcomeOutput Nothing)
+          awaited <- awaitStreamValues env (WorkflowId unique) "progress" 0 10 Nothing (millisDuration 2)
+          awaited @?= Right Ended,
       testCase "an offset with no entry still reports the producer's status" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique)
-          found <- readStreamValue env (WorkflowId unique) "progress" 0
-          found @?= Right (StreamRead Pending Nothing),
+          found <- readStreamValues env (WorkflowId unique) "progress" 0 10
+          found @?= Right (StreamRead Pending []),
       testCase "a stream for a missing workflow is reported" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          found <- readStreamValue env (WorkflowId unique) "progress" 0
+          found <- readStreamValues env (WorkflowId unique) "progress" 0 10
           case found of
             Left (NonExistentWorkflow {}) -> pure ()
             other -> fail ("expected NonExistentWorkflow, got: " <> show other),
@@ -2202,11 +2223,11 @@ streamTests =
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique)
-          closed <- closeStream env (WorkflowId unique) 1 "progress"
+          closed <- closeStream env (WorkflowId unique) 1 "progress" Workflow
           closed @?= Right ()
-          found <- readStreamValue env (WorkflowId unique) "progress" 0
+          found <- readStreamValues env (WorkflowId unique) "progress" 0 10
           case found of
-            Right (StreamRead _ (Just value)) -> value.encodedValue @?= streamClosedSentinel
+            Right (StreamRead _ [value]) -> value.encodedValue @?= streamClosedSentinel
             other -> fail ("expected the sentinel, got: " <> show other),
       testCase "a replayed workflow-level write does not append twice" $ do
         unique <- freshWorkflowId

@@ -47,6 +47,8 @@ import DBOS.Transact.StepRetryTest qualified as StepRetryTest
 import DBOS.Transact.StepRetryTestSim qualified as StepRetrySim
 import DBOS.Transact.StepTest qualified as StepTest
 import DBOS.Transact.StepTestSim qualified as StepSim
+import DBOS.Transact.StreamSim qualified as StreamSim
+import DBOS.Transact.StreamTest qualified as StreamTest
 import DBOS.Transact.WaitTest qualified as WaitTest
 import DBOS.Transact.WaitTestSim qualified as WaitSim
 import DBOS.Transact.WidgetSim qualified as WidgetSim
@@ -66,6 +68,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SystemDBRetry.tests
 --- $> tasty SystemDBTypes.tests
 --- $> tasty Logger.tests
+-- $> tasty StreamTest.tests
+-- $> tasty StreamSim.tests
 --- $> tasty CheckpointTest.tests
 --- $> tasty CheckpointSim.tests
 --- $> tasty ClientTest.tests
@@ -74,7 +78,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty ContextSim.tests
 --- $> tasty DatasourceTest.tests
 --- $> tasty DatasourceSim.tests
--- $> tasty QueueSim.tests
+--- $> tasty QueueSim.tests
 --- $> tasty WidgetSim.tests
 --- $> tasty WidgetTest.tests
 --- $> tasty DeadlinesTest.tests
@@ -94,7 +98,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty MessageSim.tests
 --- $> tasty OutboxTest.tests
 --- $> tasty OutboxSim.tests
--- $> tasty QueueTest.tests
+--- $> tasty QueueTest.tests
 --- $> tasty RegistryTest.tests
 --- $> tasty SelectTest.tests
 --- $> tasty SelectSim.tests
@@ -160,6 +164,7 @@ tests =
     , DebouncerTest.tests
     , ErrorTest.tests
     , EventTest.tests
+    , StreamTest.tests
     , HandleTest.tests
     , IdentityTest.tests
     , InstanceTest.tests
@@ -195,6 +200,7 @@ simTests =
   , WaitSim.tests
   , DatasourceSim.tests
   , QueueSim.tests
+  , StreamSim.tests
   , WidgetSim.tests
   , WorkflowSim.tests
   , SelectSim.tests

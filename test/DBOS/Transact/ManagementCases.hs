@@ -711,7 +711,7 @@ checkListSteps (names, ids, missing) = do
 
 -- | The listing sees the steps before it, and is itself recorded after.
 checkListStepsInWorkflow :: ([Text], [Text]) -> Either String ()
-checkListStepsInWorkflow = checkEq (["first"], ["first", "DBOS.listWorkflowSteps"])
+checkListStepsInWorkflow = checkEq (["first"], ["first", "DBOS.list_workflow_steps"])
 
 -- | Cancel leaves it cancelled, resume re-enqueues it, delete removes the
 -- row, and the fork is a new enqueued workflow.

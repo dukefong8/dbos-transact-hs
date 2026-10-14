@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en" data-lavish-annotate="off">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review: port Rust commits #93 and #94</title>
+  <style>
+    :root { --bg:#f7f9fb; --panel:#fff; --ink:#14202b; --muted:#5d6b79; --line:#d9e1e8; --accent:#0f766e; --blue:#075985; --warn:#92400e; --shadow:0 12px 34px rgba(20,32,43,.08); }
+    *,*::before,*::after{box-sizing:border-box} body{margin:0;background:linear-gradient(180deg,#eef5f8 0,var(--bg) 420px);color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    header{padding:38px max(22px,calc((100vw - 1120px)/2)) 22px;border-bottom:1px solid var(--line)} header .kicker{color:var(--blue);font-size:12px;font-weight:800;letter-spacing:.09em;text-transform:uppercase} h1{font-size:clamp(28px,4vw,42px);line-height:1.12;margin:8px 0 12px;letter-spacing:-.03em} header p{max-width:78ch;color:var(--muted);margin:0}
+    main{width:min(1120px,calc(100vw - 32px));margin:0 auto;padding:26px 0 76px;display:grid;gap:18px;min-width:0} section{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:22px;min-width:0} h2{font-size:21px;margin:0 0 6px} h3{font-size:16px;margin:0 0 5px} p{margin:6px 0} .muted{color:var(--muted)} .eyebrow{color:var(--blue);font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+    .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:18px}.tile,.card{border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}.tile strong{display:block;font-size:19px}.tile span{color:var(--muted);font-size:13px}.flow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;align-items:stretch;margin-top:14px}.phase{border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:10px;padding:13px;min-width:0}.phase:nth-child(2){border-top-color:#2563eb}.phase:nth-child(3){border-top-color:#d97706}.phase:nth-child(4){border-top-color:#7c3aed}.phase b{display:block}.phase small{display:block;color:var(--muted);margin-top:6px}.phase .num{font:700 12px ui-monospace,monospace;color:var(--muted)}
+    .checks{display:grid;gap:9px;list-style:none;padding:0;margin:12px 0 0}.checks li{border:1px solid var(--line);border-radius:9px;padding:11px 12px;min-width:0}.checks strong{display:block}.checks code,code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;color:#075985}.checks span{font-size:13px;color:var(--muted)}
+    .api{background:#101820;color:#d8edf2;border-radius:10px;padding:15px;overflow-x:auto;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.warning{border-left:4px solid #d97706;background:#fffbeb;padding:12px 14px;border-radius:6px;color:#713f12}.decision{border:1px dashed var(--blue);border-radius:10px;padding:16px;margin-top:14px}.choice{display:block;padding:10px;border:1px solid var(--line);border-radius:8px;margin:8px 0;cursor:pointer}.choice input{margin-right:8px}.decision button{margin-top:9px;background:var(--accent);color:white;border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}.status{font-size:13px;color:var(--muted);min-height:1.5em}.refs{display:flex;flex-wrap:wrap;gap:8px}.pill{border:1px solid var(--line);border-radius:999px;padding:5px 9px;color:var(--muted);font-size:12px} footer{color:var(--muted);font-size:12px;padding:2px 4px}
+    @media(max-width:760px){.summary{grid-template-columns:1fr}.flow{grid-template-columns:1fr 1fr}section{padding:17px}} @media(max-width:460px){.flow{grid-template-columns:1fr}}
+    :where(.summary,.flow) > *{min-width:0} :where(p,li,td,th,.pill){overflow-wrap:anywhere}
+  </style>
+</head>
+<body>
+<header>
+  <div class="kicker">Implementation plan · review before coding</div>
+  <h1>Port Rust commits #93 and #94</h1>
+  <p>Target commits: <code>3fc0434 Add durable streams</code> and <code>9170513 Spell the recorded step names in snake_case</code>. This review plan uses the Haskell repo’s existing module boundaries, SystemDB tests, watcher gates, and the public API decision made in this conversation.</p>
+  <div class="summary">
+    <div class="tile"><strong>1 · SystemDB</strong><span>Replace stream stubs; enable DB contract tests.</span></div>
+    <div class="tile"><strong>2 · Workflow API</strong><span>Add durable reader and public adapters.</span></div>
+    <div class="tile"><strong>3 · Recorded names</strong><span>Port the Rust snake_case spelling change.</span></div>
+  </div>
+</header>
+<main>
+  <section>
+    <div class="eyebrow">Goal and current state</div>
+    <h2>Deliver durable stream parity and the recorded-name update</h2>
+    <p>The SystemDB already has stream data types and notifier key support. The Postgres stream methods remain deferred stubs; the Postgres stream tests are compiled but not included in the active group. There is no app-facing stream reader yet.</p>
+    <p>Rust adds a pull reader, a client stream, paged SystemDB reads, waits, and broad changes to recorded internal step names. Haskell’s port should keep the oracle’s behavior while preserving its own explicit <code>WorkflowCtx</code> and <code>m (Either Error a)</code> conventions.</p>
+    <div class="warning"><strong>Replay compatibility needs a decision.</strong> Step names are persisted and checked on replay. Changing <code>DBOS.readStream</code> to <code>DBOS.read_stream</code> can make an existing recorded operation fail its name check. The same concern applies to the other renamed operations.</div>
+  </section>
+  <section>
+    <div class="eyebrow">Proposed order</div>
+    <h2>Build bottom-up, gate each slice</h2>
+    <div class="flow">
+      <div class="phase"><span class="num">01 · Database</span><b>SystemDB stream contract</b><small>Types and class contract; SQL/backend methods; port and enable live contract tests.</small></div>
+      <div class="phase"><span class="num">02 · Workflow</span><b>Reader and facade</b><small>Add the stream module and export the agreed API from <code>DBOS.Transact</code>.</small></div>
+      <div class="phase"><span class="num">03 · Interop</span><b>Vector and foldl adapters</b><small>Adapt the pull reader to vector’s monadic stream, then consume it with a FoldM.</small></div>
+      <div class="phase"><span class="num">04 · Fidelity</span><b>Snake_case and final gates</b><small>Update names and literal assertions; run simulation, full-suite, psql, and Rust oracle checks.</small></div>
+    </div>
+  </section>
+  <section>
+    <div class="eyebrow">Agreed public surface</div>
+    <h2>Export all three from <code>DBOS.Transact</code></h2>
+    <div class="api">StreamReader
+toVectorStream
+foldVectorStream</div>
+    <p><code>toVectorStream</code> maps DBOS read errors into an error-carrying monad so they cannot look like normal end-of-stream. <code>foldVectorStream</code> consumes the vector stream with <code>Foldl.FoldM</code>. No <code>M</code> suffix.</p>
+    <p class="muted">The reader should remain opaque and execution-scoped. The vector fusion stream and fold adapter make the chosen interop part of the public contract; tests should verify errors propagate and end-of-stream remains distinct.</p>
+  </section>
+  <section>
+    <div class="eyebrow">Likely implementation files</div>
+    <h2>SystemDB and engine slices</h2>
+    <ul class="checks">
+      <li><strong>SystemDB</strong><span><code>src/DBOS/Internal/DBOS/SystemDB/Types.hs</code>, <code>Class.hs</code>, <code>Postgres/Statements.hs</code>, <code>Postgres/Backend.hs</code>. Reconcile single-value reads with Rust’s page/await operations.</span></li>
+      <li><strong>Workflow stream module</strong><span>New <code>src/DBOS/Internal/DBOS/Transact/Stream.hs</code>; add its private-library exposure in <code>dbos-transact-hs.cabal</code>; add facade exports in <code>src/DBOS/Transact.hs</code>.</span></li>
+      <li><strong>Tests</strong><span>Extend <code>test/DBOS/SystemDB/PostgresTest.hs</code> and <code>TypesTest.hs</code>; add stream case/live/sim modules following the existing Transact test pattern; wire the intended pair in <code>test/Main.hs</code>.</span></li>
+      <li><strong>Recorded step names</strong><span>Update constants in <code>Types.hs</code>, find direct SQL statement literals and all affected assertions/cases. Keep string edits deliberate and verify the DBOS names against Rust.</span></li>
+      <li><strong>Plan record</strong><span>After behavior and compatibility decisions are settled, add a dated delta to <code>.lavish/rust-port-plan.html</code>; add/amend an ADR if the port takes a compatibility deviation.</span></li>
+    </ul>
+  </section>
+  <section>
+    <div class="eyebrow">Behavior to cover</div>
+    <h2>Acceptance checklist</h2>
+    <ul class="checks">
+      <li><strong>SystemDB stream behavior</strong><span>Write/close idempotence, computed offsets and collision behavior, sentinel handling, paged reads, missing workflow, status with empty pages, limit validation, and all-entry listing.</span></li>
+      <li><strong>Workflow reader</strong><span>Replay returns first-run values and end position; offset advances correctly; timeout, cancellation, terminal producer, serialization failure, and close sentinel behave like the oracle.</span></li>
+      <li><strong>Wakeups</strong><span>Prove the supported local notifier wake path. Retain polling correctness; document cross-process listener limitations if Rust behavior cannot be mirrored under the existing Haskell backend decision.</span></li>
+      <li><strong>Adapters</strong><span>Vector <code>Skip</code> does not call the fold step; <code>Yield</code> calls it once; <code>Done</code> extracts once; stream errors propagate instead of becoming EOF.</span></li>
+      <li><strong>Name change</strong><span>Every changed constant matches commit #94, literal assertions pin the intended spelling, and no old step-name literal remains where the oracle changed it. SQL/wire data that Rust did not change remains untouched.</span></li>
+    </ul>
+  </section>
+  <section>
+    <div class="eyebrow">Decision recorded</div>
+    <h2>Adopt snake_case in this port slice</h2>
+    <p>Port the #94 recorded-name spelling changes with the stream work. No compatibility alias for old names is planned. A workflow replaying history written under the prior spelling may fail its operation-name check; keep this risk visible in the dated port-plan delta and user-facing change notes.</p>
+  </section>
+  <section>
+    <div class="eyebrow">Verification gates</div>
+    <h2>Project-required checks</h2>
+    <ul class="checks">
+      <li><strong>Before DB work</strong><span><code>make db-migrate</code>; verify migration ceiling 114. Preserve one active IO/Sim pair; watcher owns <code>ghcid.txt</code>.</span></li>
+      <li><strong>During edits</strong><span>Use the existing <code>make dev</code> watcher, read <code>ghcid.txt</code> immediately after each reload, and verify the active pair actually ran.</span></li>
+      <li><strong>Final gates</strong><span>When watcher is idle: <code>cabal test all</code>, then query expected rows using <code>$DBOS_DATABASE_URL</code>. Run matching Rust tests read-only and structurally compare tracing call sites.</span></li>
+    </ul>
+    <p class="warning"><strong>Workspace note:</strong> existing changes in <code>demo-apps/dbos-rust-widget-store/src/main.rs</code> and untracked <code>pighcid.sh</code> are unrelated and must be preserved.</p>
+  </section>
+  <section>
+    <div class="eyebrow">Sources checked</div>
+    <div class="refs"><span class="pill">Rust #93: 3fc0434</span><span class="pill">Rust #94: 9170513</span><span class="pill">Haskell deferred stream stubs</span><span class="pill">AGENTS.md gates</span><span class="pill">ADR-0010 notifier limits</span><span class="pill">ADR-0012 explicit context</span></div>
+  </section>
+  <footer>Review surface generated from the current repository state and the recorded compatibility decision.</footer>
+</main>
+</body>
+</html>

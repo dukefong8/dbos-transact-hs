@@ -15,16 +15,17 @@ module DBOS.SystemDB.Error
 where
 
 import DBOS.Prelude
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, withText, (.:), (.=))
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Int (Int64)
 import Data.Text qualified as Text
 
 -- | What went wrong talking to the system database. Names match the Rust
--- @Error@ variants exactly, and the id payloads are plain 'Text' — the
--- oracle's fields are @String@, so this module stays a leaf exactly as
--- @error.rs@ is. Serializable
--- in the oracle (a failed step's error replays from the column); that
--- encoding lands with the checkpoint path, so there are no JSON instances
--- yet.
+    -- @Error@ variants exactly, and the id payloads are plain 'Text' — the
+    -- oracle's fields are @String@, so this module stays a leaf exactly as
+    -- @error.rs@ is. Its serde-compatible instances let failed operations
+    -- replay this typed error from their checkpoint.
 data Error
   = Backend BackendError
   | Malformed Text
@@ -67,6 +68,73 @@ data BackendErrorKind
   | Transient
   | Permanent
   deriving stock (Eq, Show)
+
+instance ToJSON Error where
+  toJSON = \case
+    Backend err -> tagged "Backend" (toJSON err)
+    Malformed message -> tagged "Malformed" (toJSON message)
+    ConflictingWorkflow {workflowId, detail} -> tagged "ConflictingWorkflow" (object ["workflow_id" .= workflowId, "detail" .= detail])
+    ConcurrentRecv {workflowId, topic} -> tagged "ConcurrentRecv" (object ["workflow_id" .= workflowId, "topic" .= topic])
+    InvalidInput {field, detail} -> tagged "InvalidInput" (object ["field" .= field, "detail" .= detail])
+    QueueDeduplicated {workflowId, queueName, deduplicationId} -> tagged "QueueDeduplicated" (object ["workflow_id" .= workflowId, "queue_name" .= queueName, "deduplication_id" .= deduplicationId])
+    WorkflowCancelled {workflowId} -> tagged "WorkflowCancelled" (object ["workflow_id" .= workflowId])
+    UnexpectedStep {workflowId, stepId, expected, recorded} -> tagged "UnexpectedStep" (object ["workflow_id" .= workflowId, "step_id" .= stepId, "expected" .= expected, "recorded" .= recorded])
+    StepAlreadyRecorded {workflowId, stepId} -> tagged "StepAlreadyRecorded" (object ["workflow_id" .= workflowId, "step_id" .= stepId])
+    NoForkPoint {workflowIds, stepName} -> tagged "NoForkPoint" (object ["workflow_ids" .= workflowIds, "step_name" .= stepName])
+    NonExistentWorkflow {workflowIds} -> tagged "NonExistentWorkflow" (object ["workflow_ids" .= workflowIds])
+    -- Tag keeps the Rust spelling; see the decode side.
+    ErrorMaxRecoveryAttemptsExceeded {workflowId, limit} -> tagged "MaxRecoveryAttemptsExceeded" (object ["workflow_id" .= workflowId, "limit" .= limit])
+    AlreadyRegistered {kind, name} -> tagged "AlreadyRegistered" (object ["kind" .= kind, "name" .= name])
+    NotRegistered {kind, name} -> tagged "NotRegistered" (object ["kind" .= kind, "name" .= name])
+    RegisteredByAnother {kind, name, holder, claimant} -> tagged "RegisteredByAnother" (object ["kind" .= kind, "name" .= name, "holder" .= holder, "claimant" .= claimant])
+    where
+      tagged name payload = object [name .= payload]
+
+instance FromJSON Error where
+  parseJSON = withObject "SystemDB.Error" $ \fields -> case KeyMap.toList fields of
+    [(tag, payload)] -> case Key.toText tag of
+      "Backend" -> Backend <$> parseJSON payload
+      "Malformed" -> Malformed <$> parseJSON payload
+      "ConflictingWorkflow" -> withObject "ConflictingWorkflow" (\o -> ConflictingWorkflow <$> o .: "workflow_id" <*> o .: "detail") payload
+      "ConcurrentRecv" -> withObject "ConcurrentRecv" (\o -> ConcurrentRecv <$> o .: "workflow_id" <*> o .: "topic") payload
+      "InvalidInput" -> withObject "InvalidInput" (\o -> InvalidInput <$> o .: "field" <*> o .: "detail") payload
+      "QueueDeduplicated" -> withObject "QueueDeduplicated" (\o -> QueueDeduplicated <$> o .: "workflow_id" <*> o .: "queue_name" <*> o .: "deduplication_id") payload
+      "WorkflowCancelled" -> withObject "WorkflowCancelled" (\o -> WorkflowCancelled <$> o .: "workflow_id") payload
+      "UnexpectedStep" -> withObject "UnexpectedStep" (\o -> UnexpectedStep <$> o .: "workflow_id" <*> o .: "step_id" <*> o .: "expected" <*> o .: "recorded") payload
+      "StepAlreadyRecorded" -> withObject "StepAlreadyRecorded" (\o -> StepAlreadyRecorded <$> o .: "workflow_id" <*> o .: "step_id") payload
+      "NoForkPoint" -> withObject "NoForkPoint" (\o -> NoForkPoint <$> o .: "workflow_ids" <*> o .: "step_name") payload
+      "NonExistentWorkflow" -> withObject "NonExistentWorkflow" (\o -> NonExistentWorkflow <$> o .: "workflow_ids") payload
+      -- Tag keeps the Rust spelling: the oracle names this variant
+      -- @MaxRecoveryAttemptsExceeded@, and the port's @Error@ prefix is
+      -- collision avoidance only (constructors, never wire names).
+      "MaxRecoveryAttemptsExceeded" -> withObject "MaxRecoveryAttemptsExceeded" (\o -> ErrorMaxRecoveryAttemptsExceeded <$> o .: "workflow_id" <*> o .: "limit") payload
+      "AlreadyRegistered" -> withObject "AlreadyRegistered" (\o -> AlreadyRegistered <$> o .: "kind" <*> o .: "name") payload
+      "NotRegistered" -> withObject "NotRegistered" (\o -> NotRegistered <$> o .: "kind" <*> o .: "name") payload
+      "RegisteredByAnother" -> withObject "RegisteredByAnother" (\o -> RegisteredByAnother <$> o .: "kind" <*> o .: "name" <*> o .: "holder" <*> o .: "claimant") payload
+      other -> fail ("unknown system database error variant " <> Text.unpack other)
+    _ -> fail "a system database error must have one tagged variant"
+
+instance ToJSON BackendError where
+  toJSON BackendError {backendMessage, backendSqlState, backendKind} =
+    object ["message" .= backendMessage, "sqlstate" .= backendSqlState, "kind" .= backendKind]
+
+instance FromJSON BackendError where
+  parseJSON = withObject "BackendError" $ \fields ->
+    BackendError <$> fields .: "message" <*> fields .: "sqlstate" <*> fields .: "kind"
+
+instance ToJSON BackendErrorKind where
+  -- Tags keep the Rust spelling: the oracle names this variant @Conflict@,
+  -- where the port's @Transient@ says what it means for retry.
+  toJSON Connection = toJSON ("Connection" :: Text)
+  toJSON Transient = toJSON ("Conflict" :: Text)
+  toJSON Permanent = toJSON ("Permanent" :: Text)
+
+instance FromJSON BackendErrorKind where
+  parseJSON = withText "BackendErrorKind" $ \case
+    "Connection" -> pure Connection
+    "Conflict" -> pure Transient
+    "Permanent" -> pure Permanent
+    _ -> fail "unknown backend error kind"
 
 instance Exception Error
 

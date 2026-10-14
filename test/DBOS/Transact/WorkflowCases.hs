@@ -494,7 +494,7 @@ scenarioFreshJoinPolls fx = do
 
 -- | Awaiting a child is recorded as a step: the parent starts the child
 -- and awaits it, so the parent's history holds the start and a
--- @DBOS.getResult@ checkpoint naming the child. Returns the decoded
+-- @DBOS.get_result@ checkpoint naming the child. Returns the decoded
 -- result, the parent's steps, and the derived child id.
 scenarioAwaitRecorded :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
                       => WfFixture m ->
@@ -1644,7 +1644,7 @@ scenarioScopedSelect fx = do
 checkScopedSelect :: (Either (Error EngineOnly) Int, [(Int, Text)]) -> Either String ()
 checkScopedSelect (outcome, steps)
   | outcome /= Right 1 = Left ("expected the fast arm's value, got: " <> show outcome)
-  | steps /= [(1, "fast"), (2, "DBOS.selectStep")] = Left ("unexpected rows: " <> show steps)
+  | steps /= [(1, "fast"), (2, "DBOS.select_step")] = Left ("unexpected rows: " <> show steps)
   | otherwise = Right ()
 
 -- | A losing step has its cancellation token fired: the loser registers
@@ -1757,7 +1757,7 @@ scenarioSelectStepRaces fx = do
               selectStep
                 wctx
                 [ SelectArm "slow" slow (\outcome -> pure (outcome >>= \value -> Right value)),
-                  SelectArm "DBOS.getResult" awaited $ \outcome ->
+                  SelectArm "DBOS.get_result" awaited $ \outcome ->
                     pure $ case outcome of
                       Left err -> Left err
                       Right (Just stored) ->
@@ -1840,7 +1840,7 @@ scenarioStepIdPairs fx = do
 
 -- | Awaiting a child inside a step is covered by that step: the parent
 -- history holds the child start and the enclosing @collect@ step whose
--- output is the child's value — no @DBOS.getResult@ checkpoint of its
+-- output is the child's value — no @DBOS.get_result@ checkpoint of its
 -- own. Returns the enclosing step's value, the parent's steps, and the
 -- derived child id.
 scenarioAwaitInsideStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
@@ -2176,7 +2176,7 @@ checkAwaitRecorded (n, steps, childText)
         ]
         | startName /= "child" -> Left ("expected the start step, got: " <> show startName)
         | startedChild /= childText -> Left ("expected the start to name the child, got: " <> show startedChild)
-        | awaitName /= "DBOS.getResult" -> Left ("expected the recorded await, got: " <> show awaitName)
+        | awaitName /= "DBOS.get_result" -> Left ("expected the recorded await, got: " <> show awaitName)
         | awaitOutput /= "99" -> Left ("expected the awaited output 99, got: " <> show awaitOutput)
         | awaitedChild /= childText -> Left ("expected the await to name the child, got: " <> show awaitedChild)
         | otherwise -> Right ()
@@ -2226,9 +2226,9 @@ checkChildIdsInBuildOrder (n, steps, parentText, firstChildOutput)
       [ (0, "child", Just (child 0)),
         (1, "child", Just (child 1)),
         (2, "child", Just (child 2)),
-        (3, "DBOS.getResult", Just (child 0)),
-        (4, "DBOS.getResult", Just (child 1)),
-        (5, "DBOS.getResult", Just (child 2))
+        (3, "DBOS.get_result", Just (child 0)),
+        (4, "DBOS.get_result", Just (child 1)),
+        (5, "DBOS.get_result", Just (child 2))
       ]
 
 -- | The refusal names the call; nothing was written for the refused
@@ -2260,7 +2260,7 @@ checkJoinHeldKey (ran, holderText, derived, listed, children) = case ran of
           ] -> do
             unless (startName == "child") $ Left ("expected the joining start, got: " <> show startName)
             unless (startedChild == holderText) $ Left ("expected the start to name the holder, got: " <> show startedChild)
-            unless (awaitName == "DBOS.getResult") $ Left ("expected the recorded await, got: " <> show awaitName)
+            unless (awaitName == "DBOS.get_result") $ Left ("expected the recorded await, got: " <> show awaitName)
             unless (awaitOutput == "9") $ Left ("expected the joined output recorded, got: " <> show awaitOutput)
             unless (awaitedChild == holderText) $ Left ("expected the await to name the holder, got: " <> show awaitedChild)
             unless (children == []) $ Left ("expected the holder among no children, got: " <> show children)
@@ -2644,7 +2644,7 @@ checkCancelledChildAwaited (ran, steps, parentStatus, childStatus, childText)
     namesChild result = case result of
       Left (AwaitedWorkflowCancelled {workflowId}) -> workflowId == childText
       _ -> False
-    recordsChild rows = case [row | row <- rows, row.stepRecordStepName == "DBOS.getResult"] of
+    recordsChild rows = case [row | row <- rows, row.stepRecordStepName == "DBOS.get_result"] of
       [awaitRow] -> case awaitRow.stepRecordError of
         Just recorded -> case decodeErrorText recorded :: Either Text (Error EngineOnly) of
           Right (AwaitedWorkflowCancelled {workflowId}) -> workflowId == childText
@@ -2682,8 +2682,8 @@ checkSelectStepRaces (n, steps, childText)
     expected =
       [ (0, "child", Just (WorkflowId childText)),
         -- Id 1 is the losing step, built and dropped without a row.
-        (2, "DBOS.getResult", Just (WorkflowId childText)),
-        (3, "DBOS.selectStep", Nothing)
+        (2, "DBOS.get_result", Just (WorkflowId childText)),
+        (3, "DBOS.select_step", Nothing)
       ]
 
 -- | Each await sits immediately behind its own start: the pairs are
@@ -2698,11 +2698,11 @@ checkStepIdPairs (n, steps, parentText)
     child k = WorkflowId (parentText <> "-" <> Text.pack (show k))
     expected =
       [ (0, "child", Just (child 0)),
-        (1, "DBOS.getResult", Just (child 0)),
+        (1, "DBOS.get_result", Just (child 0)),
         (2, "child", Just (child 2)),
-        (3, "DBOS.getResult", Just (child 2)),
+        (3, "DBOS.get_result", Just (child 2)),
         (4, "child", Just (child 4)),
-        (5, "DBOS.getResult", Just (child 4))
+        (5, "DBOS.get_result", Just (child 4))
       ]
 
 -- | What every shared task case needs from io-classes: a constraint

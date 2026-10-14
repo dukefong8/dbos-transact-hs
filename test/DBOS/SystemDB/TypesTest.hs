@@ -8,7 +8,7 @@ where
 import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
-import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), Submission (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, newQueue, newSchedule, newWorkflow, outcomeStatus, parseScheduleStatus, pauseScheduleStepName, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
+import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), Submission (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, newQueue, newSchedule, newWorkflow, outcomeStatus, parseScheduleStatus, pauseScheduleStepName, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, renameFromApplication, resolveWorkflowDelay, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
 import DBOS.Transact
   (
   IdempotencyKey (..),
@@ -228,6 +228,7 @@ engineTests =
           sendBulkStepName,
           writeStreamStepName,
           closeStreamStepName,
+          readStreamStepName,
           setEventStepName,
           getEventStepName,
           getResultStepName,
@@ -254,35 +255,38 @@ engineTests =
         ]
           @?= [ "DBOS.sleep",
                 "DBOS.send",
-                "DBOS.sendBulk",
-                "DBOS.writeStream",
-                "DBOS.closeStream",
-                "DBOS.setEvent",
-                "DBOS.getEvent",
-                "DBOS.getResult",
-                "DBOS.selectWorkflow",
-                "DBOS.selectStep",
+                "DBOS.send_bulk",
+                "DBOS.write_stream",
+                "DBOS.close_stream",
+                "DBOS.read_stream",
+                "DBOS.set_event",
+                "DBOS.get_event",
+                "DBOS.get_result",
+                "DBOS.select_workflow",
+                "DBOS.select_step",
                 "DBOS.recv",
-                "DBOS.debounceDelayedWorkflow",
-                "DBOS.cancelWorkflow",
-                "DBOS.resumeWorkflow",
-                "DBOS.deleteWorkflow",
-                "DBOS.forkWorkflow",
-                "DBOS.setWorkflowDelay",
-                "DBOS.updateWorkflowAttributes",
-                "DBOS.listWorkflows",
-                "DBOS.listWorkflowSteps",
-                "DBOS.createSchedule",
-                "DBOS.upsertSchedule",
-                "DBOS.getSchedule",
-                "DBOS.listSchedules",
-                "DBOS.updateSchedule",
-                "DBOS.pauseSchedule",
-                "DBOS.resumeSchedule",
-                "DBOS.deleteSchedule"
+                "DBOS.debounce_delayed_workflow",
+                "DBOS.cancel_workflow",
+                "DBOS.resume_workflow",
+                "DBOS.delete_workflow",
+                "DBOS.fork_workflow",
+                "DBOS.set_workflow_delay",
+                "DBOS.update_workflow_attributes",
+                "DBOS.list_workflows",
+                "DBOS.list_workflow_steps",
+                "DBOS.create_schedule",
+                "DBOS.upsert_schedule",
+                "DBOS.get_schedule",
+                "DBOS.list_schedules",
+                "DBOS.update_schedule",
+                "DBOS.pause_schedule",
+                "DBOS.resume_schedule",
+                "DBOS.delete_schedule"
               ],
       testCase "pins the stream sentinel and sweep cap" $ do
-        streamClosedSentinel @?= "__DBOS_STREAM_CLOSED__"
+        -- Quoted: the stored form is the JSON encoding, as Rust stores it.
+        streamClosedSentinel @?= "\"__DBOS_STREAM_CLOSED__\""
+        streamClosedSerialization @?= "portable_json"
         dequeueSweepCap @?= 8192,
       testCase "a partial update leaves fields alone by default" $ do
         defaultChange @?= (Leave :: Change Int)

@@ -8,7 +8,7 @@
 -- elsewhere, or to one that finished before this process started, polls the
 -- database. Dropping a handle stops watching, never the workflow.
 --
--- The local-task await and the durable parent-side @DBOS.getResult@
+-- The local-task await and the durable parent-side @DBOS.get_result@
 -- checkpoint are L2 engine work (NOTE): this module polls the database,
 -- which is the whole of the polling provenance and the whole of what
 -- management and client surfaces hand back.
@@ -113,7 +113,7 @@ handleResult handle = do
   pure (settled >>= settledResult handle.workflowId)
 
 -- | Await a child workflow from inside a workflow body, recording the wait
--- as a @DBOS.getResult@ step. Mirrors the oracle's @handle.result()@ where
+-- as a @DBOS.get_result@ step. Mirrors the oracle's @handle.result()@ where
 -- its ambient context is a running workflow: the id is claimed at the call
 -- site, before anything can fail, so a replay rebuilds the same position;
 -- a recorded row is adopted rather than waited for again; and a settled
@@ -132,7 +132,7 @@ awaitChild :: (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MonadThrow m,
               m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 awaitChild wctx handle = placeCall wctx >>= driveAwait wctx handle
 
--- | An await built at its position and not yet run: the @DBOS.getResult@
+-- | An await built at its position and not yet run: the @DBOS.get_result@
 -- step claims its id here, where the call is written, and 'pendingRun'
 -- drives the wait when the pending value is awaited or raced. Mirrors the
 -- oracle's @handle.result()@ building a @PendingStep@; a pending await the

@@ -3,12 +3,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | The port's own sim backend (P7.7 seed, no Rust counterpart). Every
--- method answers with deterministic canned data, keyed on the arguments the
--- mirror tests pass, so the whole 'SystemDB' seam can be exercised under
--- @IOSim@ without a database. The mocks are a test seam, not an in-memory
--- database: they exist to prove the wiring and to mirror the backend test
--- names; the live semantics stay in 'DBOS.SystemDB.PostgresTest'.
+-- | The port's own simulator backend (P7.7 seed, no Rust counterpart).
+-- 'MockSystemDB' supplies deterministic canned answers for seam coverage;
+-- 'MemSystemDB' stores lifecycle, messaging, event, and stream state for
+-- shared live/sim workflow scenarios.
 module DBOS.SystemDB.IOSim
   ( MockSystemDB (..),
     MemSystemDB (..),
@@ -72,7 +70,9 @@ import DBOS.SystemDB
     SerializedWorkflowValue (..),
     StepRecord (..),
     StepTiming (..),
+    AwaitedStream (..),
     StreamRead (..),
+    StreamRecord (..),
     SystemDB (..),
     Timestamp,
     Topic (..),
@@ -83,12 +83,14 @@ import DBOS.SystemDB
     WorkflowInitResult (..),
     WorkflowRecord (..),
     WorkflowStatus (..),
+    WrittenBy (..),
     addTimeout,
     changeSet,
     debounceStepName,
     debounceValidate,
     dequeueSweepCap,
     durationAsMillis,
+    durationSince,
     getEventStepName,
     invalidInput,
     getResultStepName,
@@ -102,6 +104,10 @@ import DBOS.SystemDB
     sendBulkStepName,
     sleepStepName,
     sendStepName,
+    writeStreamStepName,
+    closeStreamStepName,
+    streamClosedSentinel,
+    streamClosedSerialization,
     setEventStepName,
     timestampFromEpochMs,
     timestampNow,
@@ -187,7 +193,7 @@ instance SystemDB MockSystemDB (IOSim s) where
   sendMessages = \cases _ _ _ _ _ -> pure (Right ())
   recv = \cases _ _ _ _ _ _ -> pure (Right (Just (EncodedValue mockMessageBody (Just mockSerialization))))
   writeStream = \cases _ _ _ _ _ _ _ -> pure (Right ())
-  closeStream = \cases _ _ _ _ -> pure (Right ())
+  closeStream = \cases _ _ _ _ _ -> pure (Right ())
   close = \cases _ -> pure ()
   checkStep = \cases _ _ _ _ -> pure (Right Nothing)
   recordStep = \cases _ _ _ _ _ _ _ -> pure (Right ())
@@ -197,7 +203,8 @@ instance SystemDB MockSystemDB (IOSim s) where
   getEvent = \cases _ _ _ _ _ -> pure (Right (Just (EncodedValue mockEventBody (Just mockSerialization))))
   getAllNotifications = \cases _ _ -> pure (Right [mockNotification])
   getAllEvents = \cases _ _ -> pure (Right [mockEvent])
-  readStreamValue = \cases _ _ _ _ -> pure (Right (StreamRead Pending (Just (EncodedValue mockStreamBody (Just mockSerialization)))))
+  readStreamValues = \cases _ _ _ _ _ -> pure (Right (StreamRead Pending [EncodedValue mockStreamBody (Just mockSerialization)]))
+  awaitStreamValues = \cases _ _ _ _ _ _ _ -> pure (Right (Values [EncodedValue mockStreamBody (Just mockSerialization)]))
   getAllStreamEntries = \cases _ _ -> pure (Right [mockStreamRecord])
   createApplicationVersion = \cases _ _ _ -> pure (Right ())
   listApplicationVersions = \cases _ -> pure (Right [mockVersion])
@@ -342,6 +349,8 @@ data MemSystemDB s = MemSystemDB
     memNotifications :: StrictTVar (IOSim s) (Map Text [NotificationRecord]),
     -- | Published events by (workflow, key); readers block on this TVar.
     memEvents :: StrictTVar (IOSim s) (Map (Text, Text) EncodedValue),
+    -- | Append-only workflow streams keyed by workflow and stream key.
+    memStreams :: StrictTVar (IOSim s) (Map (Text, Text) [StreamRecord]),
     -- | Registered schedules by name.
     memSchedules :: StrictTVar (IOSim s) (Map Text ScheduleRecord),
     -- | Registered application versions, newest last.
@@ -359,7 +368,7 @@ data MemSystemDB s = MemSystemDB
   }
 
 -- | Fresh simulated data: empty rows, steps, dedup holds, queues,
--- messages, events, schedules, versions, and a fresh instance counter.
+-- messages, events, streams, schedules, versions, and an instance counter.
 newMemDB :: IOSim s (MemSystemDB s)
 newMemDB = newMemDBWithApplication Nothing
 
@@ -368,6 +377,7 @@ newMemDBWithApplication :: Maybe Text -> IOSim s (MemSystemDB s)
 newMemDBWithApplication application =
   MemSystemDB
     <$> newTVarIO Map.empty
+    <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty
@@ -811,8 +821,33 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           Nothing -> do
             memRecordRecvStep db wid stepId recvStepName Nothing
             pure (Right Nothing)
-  writeStream _ = writeStream MockSystemDB
-  closeStream _ = closeStream MockSystemDB
+  writeStream db wid@(WorkflowId widText) stepId key value serialization writtenBy = do
+    let stepName = if value == streamClosedSentinel && serialization == Just streamClosedSerialization then closeStreamStepName else writeStreamStepName
+    replay <- case writtenBy of
+      Step -> pure (Right Nothing)
+      Workflow -> checkStep db wid stepId stepName
+    case replay of
+      Left err -> pure (Left err)
+      Right (Just _) -> pure (Right ())
+      Right Nothing -> do
+        now <- timestampNow
+        atomically $ do
+          rows <- readTVar db.memRows
+          case Map.lookup widText rows of
+            Nothing -> pure (Left (NonExistentWorkflow {workflowIds = [widText]}))
+            Just _ -> do
+              streams <- readTVar db.memStreams
+              let streamKey' = (widText, key)
+                  entries = fromMaybe [] (Map.lookup streamKey' streams)
+                  entry = StreamRecord {streamKey = key, streamOffset = length entries, streamValue = value, streamSerialization = serialization, streamStepId = stepId}
+              writeTVar db.memStreams (Map.insert streamKey' (entries <> [entry]) streams)
+              when (writtenBy == Workflow) $ do
+                steps <- readTVar db.memSteps
+                let record = StepRecord {stepRecordWorkflowId = wid, stepRecordStepId = stepId, stepRecordStepName = stepName, stepRecordOutput = Nothing, stepRecordError = Nothing, stepRecordChildWorkflowId = Nothing, stepRecordSerialization = Nothing, stepRecordStartedAt = Just now, stepRecordCompletedAt = Just now}
+                writeTVar db.memSteps (Map.insert (widText, stepId) record steps)
+              pure (Right ())
+  closeStream db wid stepId key writtenBy =
+    writeStream db wid stepId key streamClosedSentinel (Just streamClosedSerialization) writtenBy
   close _ = close MockSystemDB
   recordSleep db wid stepId duration = do
     now <- timestampNow
@@ -916,8 +951,63 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               eventWid == widText
           ]
       )
-  readStreamValue _ = readStreamValue MockSystemDB
-  getAllStreamEntries _ = getAllStreamEntries MockSystemDB
+  readStreamValues db (WorkflowId widText) key offset limit
+    | offset < 0 = pure (Left (invalidInput "offset" "must not be negative"))
+    | limit < 1 = pure (Left (invalidInput "limit" "must be at least 1"))
+    | otherwise = atomically $ do
+        rows <- readTVar db.memRows
+        streams <- readTVar db.memStreams
+        case Map.lookup widText rows of
+          Nothing -> pure (Left (NonExistentWorkflow {workflowIds = [widText]}))
+          Just workflow -> do
+            let entries = fromMaybe [] (Map.lookup (widText, key) streams)
+                page = take limit (drop offset entries)
+                values = [EncodedValue entry.streamValue entry.streamSerialization | entry <- page]
+            pure (Right (StreamRead workflow.workflowRecordStatus values))
+  awaitStreamValues db wid@(WorkflowId widText) key offset limit deadline pollInterval
+    | durationAsMillis pollInterval < 1 = pure (Left (invalidInput "polling_interval" "must be at least 1 millisecond"))
+    | otherwise = loop False
+    where
+      -- Mirrors the Postgres await: values win, then a final look once the
+      -- producer leaves Pending/Enqueued/Delayed (a cancel or timeout can
+      -- mark it terminal while its last writes are still committing), then
+      -- bounded waits. A cancel or timeout sets a terminal status out of
+      -- band, so the drain stops at the first empty offset.
+      loop finalLook = do
+        page <- readStreamValues db wid key offset limit
+        case page of
+          Left err -> pure (Left err)
+          Right found
+            | not (null found.streamValues) -> pure (Right (Values found.streamValues))
+            | finalLook -> pure (Right Ended)
+            | found.streamStatus `notElem` [Pending, Enqueued, Delayed] -> loop True
+            | otherwise -> do
+                now <- timestampNow
+                -- A passed deadline is a timeout, like the Postgres backend:
+                -- 'durationSince' is 'Nothing' once the end is past, which a
+                -- missing deadline also reports, so match those separately.
+                case deadline of
+                  Nothing -> do
+                    threadDelay (fromInteger (durationAsMillis pollInterval * 1000))
+                    loop False
+                  Just endAt -> case durationSince endAt now of
+                    Nothing -> pure (Right TimedOut)
+                    Just remaining
+                      | durationAsMillis remaining <= 0 -> pure (Right TimedOut)
+                      | otherwise -> do
+                          threadDelay (fromInteger (durationAsMillis (shorter pollInterval remaining) * 1000))
+                          loop False
+      shorter first second
+        | durationAsMillis first <= durationAsMillis second = first
+        | otherwise = second
+  getAllStreamEntries db (WorkflowId widText) = do
+    streams <- readTVarIO db.memStreams
+    pure
+      ( Right
+          ( sortOn (\entry -> (entry.streamKey, entry.streamOffset))
+              [entry | ((streamWorkflow, _), entries) <- Map.toList streams, streamWorkflow == widText, entry <- entries]
+          )
+      )
   createApplicationVersion db versionName applicationName = do
     now <- timestampNow
     atomically $ do

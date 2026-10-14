@@ -48,7 +48,7 @@ instance ToLogStr WaitEvent where
   toLogStr = toLogStr . renderLine
 
 -- | Wait for the first of a set of workflows to finish, checkpointed as the
--- @DBOS.selectWorkflow@ step so a replay reads the same winner back. A set
+-- @DBOS.select_workflow@ step so a replay reads the same winner back. A set
 -- with no ids has no answer it could give, so it is refused and the refusal
 -- is recorded, exactly as the Rust @select_workflow@ records it. A recorded
 -- winner must still be in the set: a workflow that changed which ids it

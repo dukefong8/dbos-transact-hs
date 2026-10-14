@@ -113,6 +113,11 @@ module DBOS.SystemDB.Postgres.Statements
     allNotificationsStatement,
     EventRecordRaw (..),
     allEventsStatement,
+    StreamEntryRaw (..),
+    StreamPageRaw (..),
+    streamWriteStatement,
+    streamPageStatement,
+    allStreamEntriesStatement,
     RecordChildWorkflowParams (..),
     recordChildWorkflowStatement,
     QueueInsertParams (..),
@@ -1570,13 +1575,13 @@ eventHistoryUpsertStatement workflowId stepId key value serialization =
   |]
 
 -- | The step record a @set_event@ writes: a void success under the
--- @DBOS.setEvent@ name, carrying the timing fixed outside the retry.
+-- @DBOS.set_event@ name, carrying the timing fixed outside the retry.
 setEventStepRecord :: SetEventParams -> RecordStepParams
 setEventStepRecord params =
   RecordStepParams
     { recordStepWorkflowId = params.setEventWorkflowId,
       recordStepStepId = params.setEventStepId,
-      recordStepStepName = "DBOS.setEvent",
+      recordStepStepName = "DBOS.set_event",
       recordStepOutput = Nothing,
       recordStepError = Nothing,
       recordStepSerialization = Nothing,
@@ -1640,7 +1645,7 @@ getEventStepRecord params =
   RecordStepParams
     { recordStepWorkflowId = params.getEventRecordWorkflowId,
       recordStepStepId = params.getEventRecordStepId,
-      recordStepStepName = "DBOS.getEvent",
+      recordStepStepName = "DBOS.get_event",
       recordStepOutput = params.getEventRecordOutput,
       recordStepError = Nothing,
       recordStepSerialization = params.getEventRecordSerialization,
@@ -2594,6 +2599,82 @@ allEventsStatement =
             <$> Decoders.column (Decoders.nonNullable Decoders.text)
             <*> Decoders.column (Decoders.nonNullable Decoders.text)
             <*> Decoders.column (Decoders.nullable Decoders.text)
+        )
+    )
+
+-- | One stored stream entry, with its offset and writer step. Mirrors the
+-- rows selected by @get_all_stream_entries@.
+data StreamEntryRaw = StreamEntryRaw
+  { streamEntryRawKey           :: Text,
+    streamEntryRawOffset        :: Int,
+    streamEntryRawValue         :: Text,
+    streamEntryRawSerialization :: Maybe Text,
+    streamEntryRawStepId        :: Int
+  }
+  deriving stock (Eq, Show)
+
+data StreamPageRaw = StreamPageRaw
+  { streamPageRawStatus        :: Text,
+    streamPageRawOffset         :: Maybe Int,
+    streamPageRawValue          :: Maybe Text,
+    streamPageRawSerialization  :: Maybe Text
+  }
+  deriving stock (Eq, Show)
+
+-- | Append at max(offset)+1. A concurrent writer may win that offset; the
+-- caller retries when this statement affects no row.
+streamWriteStatement :: Statement.Statement (Text, Int, Text, Text, Maybe Text) Int64
+streamWriteStatement =
+  Statement.preparable
+    ( "insert into dbos.streams (workflow_uuid, function_id, key, value, serialization, \"offset\") \
+      \select $1, $2, $3, $4, $5, coalesce((select max(\"offset\") from dbos.streams where workflow_uuid = $1 and key = $3), -1) + 1 \
+      \on conflict do nothing"
+    )
+    ( contramap (\(wid, _, _, _, _) -> wid) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, stepId, _, _, _) -> stepId) (Encoders.param (Encoders.nonNullable (contramap fromIntegral Encoders.int4)))
+        <> contramap (\(_, _, key, _, _) -> key) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, _, value, _) -> value) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, _, _, serialization) -> serialization) (Encoders.param (Encoders.nullable Encoders.text))
+    )
+    Decoders.rowsAffected
+
+-- | Reads a bounded run from one snapshot. The workflow row anchors the
+-- LEFT JOIN so an empty range still reports producer status.
+streamPageStatement :: Statement.Statement (Text, Text, Int, Int64) [StreamPageRaw]
+streamPageStatement =
+  Statement.preparable
+    ( "select w.status, s.\"offset\" as stream_offset, s.value, s.serialization from dbos.workflow_status w \
+      \left join dbos.streams s on s.workflow_uuid = w.workflow_uuid and s.key = $2 \
+      \and s.\"offset\" >= $3 and s.\"offset\" < $4 \
+      \where w.workflow_uuid = $1 order by s.\"offset\""
+    )
+    ( contramap (\(wid, _, _, _) -> wid) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, key, _, _) -> key) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, offset, _) -> offset) (Encoders.param (Encoders.nonNullable (contramap fromIntegral Encoders.int4)))
+        <> contramap (\(_, _, _, end) -> end) (Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    ( Decoders.rowList
+        ( StreamPageRaw
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> (fmap fromIntegral <$> Decoders.column (Decoders.nullable Decoders.int4))
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+        )
+    )
+
+-- | Lists a workflow's entries in key and offset order.
+allStreamEntriesStatement :: Statement.Statement Text [StreamEntryRaw]
+allStreamEntriesStatement =
+  Statement.preparable
+    "select key, \"offset\", value, serialization, function_id from dbos.streams where workflow_uuid = $1 order by key, \"offset\""
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    ( Decoders.rowList
+        ( StreamEntryRaw
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> (fromIntegral <$> Decoders.column (Decoders.nonNullable Decoders.int4))
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> (fromIntegral <$> Decoders.column (Decoders.nonNullable Decoders.int4))
         )
     )
 

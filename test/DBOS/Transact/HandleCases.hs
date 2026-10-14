@@ -364,7 +364,7 @@ checkDropHandle :: Int -> Either String ()
 checkDropHandle = checkEq 42
 
 -- | The scoped await adopts the recorded output and records one
--- @DBOS.getResult@ step under the parent.
+-- @DBOS.get_result@ step under the parent.
 checkScopedAwait :: (Int, [Text]) -> Either String ()
 checkScopedAwait = checkEq (42, [getResultStepName])
 

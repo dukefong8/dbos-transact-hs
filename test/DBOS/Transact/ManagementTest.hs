@@ -328,7 +328,7 @@ tests =
           case listed of
             Right steps ->
               map (\StepRecord {stepRecordStepId = sid, stepRecordStepName = name} -> (sid, name)) steps
-                @?= [(0, "DBOS.cancelWorkflow"), (1, "DBOS.listWorkflows")]
+                @?= [(0, "DBOS.cancel_workflow"), (1, "DBOS.list_workflows")]
             other -> fail (show other),
       testCase "a replayed fork hands back the id it recorded" $
         withInstance "mgmt-fork-replay" $ \dbos suffix -> do
@@ -452,7 +452,7 @@ tests =
           case listed of
             Right steps ->
               map (\StepRecord {stepRecordStepId = sid, stepRecordStepName = name} -> (sid, name)) steps
-                @?= [(0, "DBOS.cancelWorkflow"), (1, "DBOS.resumeWorkflow")]
+                @?= [(0, "DBOS.cancel_workflow"), (1, "DBOS.resume_workflow")]
             other -> fail (show other),
       testCase "a clients management call inside a workflow is not a step" $
         withInstance "mgmt-client-call" $ \dbos suffix -> do
@@ -571,7 +571,7 @@ tests =
         listed <- SystemDB.listSteps backend (WorkflowId workflowText) False Nothing Nothing Nothing
         case listed of
           Right [StepRecord {stepRecordStepId = sid, stepRecordStepName = name}] ->
-            (sid, name) @?= (0, "DBOS.forkWorkflow")
+            (sid, name) @?= (0, "DBOS.fork_workflow")
           other -> fail ("expected the empty batch at step zero, got: " <> show other)
     ]
 

@@ -8,7 +8,7 @@
 -- module. The memory backend ('MemSystemDB', fresh per case) records rows,
 -- steps, and events for real, so publishes, reads, and replays assert what
 -- live asserts. Nothing prints: traces speak through types, not lines.
-module DBOS.Transact.EventTestSim (tests) where
+module DBOS.Transact.EventTestSim (tests, simEventFixture) where
 
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)

@@ -151,9 +151,9 @@ traceStepSend tr =
 -- | The batch checkpoints once under its bulk step.
 traceBulkSend :: SimTrace a -> IO ()
 traceBulkSend tr =
-  assertBool "the batch must checkpoint once" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.sendBulk" 0])
+  assertBool "the batch must checkpoint once" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.send_bulk" 0])
 
 -- | The empty batch still takes its step.
 traceBulkEmpty :: SimTrace a -> IO ()
 traceBulkEmpty tr =
-  assertBool "the empty batch must take its step" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.sendBulk" 0])
+  assertBool "the empty batch must take its step" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.send_bulk" 0])

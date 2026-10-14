@@ -44,7 +44,7 @@ module DBOS.Transact.EventCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), QueueName (..), SerializedWorkflowValue (..), Submission (..), WorkflowId (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), Submission (..), WorkflowId (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
   ( CodecError,
@@ -108,6 +108,9 @@ data EventFixture m = EventFixture
     efConn :: m (Connection m),
     efIdentity :: Identity,
     efInitRow :: Text -> Text -> m (),
+    efFinishWorkflow :: WorkflowId -> Outcome -> m (),
+    efCancelWorkflow :: WorkflowId -> m (),
+    efDeleteWorkflow :: WorkflowId -> m (),
     efStepNames :: WorkflowId -> m [(Int, Text)],
     efStepAbsent :: WorkflowId -> Int -> Text -> m Bool
   }
@@ -154,6 +157,21 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
         efInitRow = \widText name -> do
           created <- runSystemDB sysdb (\db -> initWorkflow db ((newWorkflow widText) {newWorkflowName = Just name}) Nothing Fresh Nothing)
           case created of
+            Left err -> throwIO (userError (show err))
+            Right _ -> pure (),
+        efFinishWorkflow = \wid outcome -> do
+          recorded <- runSystemDB sysdb (\db -> SystemDB.recordWorkflowOutcome db wid outcome)
+          case recorded of
+            Left err -> throwIO (userError (show err))
+            Right _ -> pure (),
+        efCancelWorkflow = \wid -> do
+          cancelled <- runSystemDB sysdb (\db -> SystemDB.cancelWorkflows db [wid] False Nothing)
+          case cancelled of
+            Left err -> throwIO (userError (show err))
+            Right _ -> pure (),
+        efDeleteWorkflow = \wid -> do
+          deleted <- runSystemDB sysdb (\db -> SystemDB.deleteWorkflows db [wid] False Nothing)
+          case deleted of
             Left err -> throwIO (userError (show err))
             Right _ -> pure (),
         efStepNames = \wid -> do

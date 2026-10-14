@@ -2,7 +2,7 @@
 {-# LANGUAGE RankNTypes #-}
 
 -- | 'DBOS.Transact.WaitTest' mirrored under IOSim over the in-memory
--- backend: the checkpointed @DBOS.selectWorkflow@ step and the
+-- backend: the checkpointed @DBOS.select_workflow@ step and the
 -- uncheckpointed all-wait with real stored rows. Scenarios and checks are
 -- shared; this module owns the sim factory and the sim-only extra — the
 -- typed 'WaitEvent' record, which fires only when a replay adopts its

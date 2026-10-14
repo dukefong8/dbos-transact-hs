@@ -38,6 +38,7 @@ common commons
     mtl,
     rerefined,
     safe-wild-cards,
+    stm-chans,
     stm-containers,
     strict-wrapper,
     template-haskell,
@@ -77,6 +78,7 @@ library dbos-transact-internals
     DBOS.Transact.Select
     DBOS.Transact.Serialization
     DBOS.Transact.Sleep
+    DBOS.Transact.Stream
     DBOS.Transact.Step
     DBOS.Transact.Wait
     DBOS.Transact.Workflow
@@ -157,6 +159,9 @@ test-suite test
     DBOS.Transact.EventCases
     DBOS.Transact.EventTest
     DBOS.Transact.EventTestSim
+    DBOS.Transact.StreamCases
+    DBOS.Transact.StreamTest
+    DBOS.Transact.StreamSim
     DBOS.Transact.MessageCases
     DBOS.Transact.MessageTest
     DBOS.Transact.MessageTestSim

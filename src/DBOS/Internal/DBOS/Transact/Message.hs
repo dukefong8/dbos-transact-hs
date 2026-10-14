@@ -109,7 +109,7 @@ sendWith wctx destination value options = do
     Right () -> Right ()
 
 -- | Send many messages in one transaction: all or none. The batch is
--- checkpointed as one @DBOS.sendBulk@ step however long it is, so a replay
+-- checkpointed as one @DBOS.send_bulk@ step however long it is, so a replay
 -- sends none of it again; inside a step it sends plainly, the enclosing
 -- step's checkpoint standing for the send. Payloads are encoded before the
 -- step id is taken, so a message that cannot be encoded is a send that never
