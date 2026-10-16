@@ -43,6 +43,8 @@ module DBOS.Transact.Client
     clientDeleteWorkflows,
     clientForkWorkflows,
     clientRewindWorkflows,
+    -- * Queues from outside
+    clientListQueues,
     -- * Versions from outside
     clientListApplicationVersions,
     clientLatestApplicationVersion,
@@ -57,14 +59,13 @@ import Data.Map.Strict (Map)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import Hasql.Transaction qualified as Tx
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewWorkflow (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, sysRewindOptions, timestampNow, validateSendKeys)
+import DBOS.SystemDB.Types (Applications (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewWorkflow (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, sysRewindOptions, timestampNow, validateSendKeys)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, runSystemDB, withConnection)
 import DBOS.Transact.Error qualified as TransactError
@@ -72,8 +73,10 @@ import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Management (checkRewindOptions)
+import DBOS.Transact.Queue (Queue, queueFromRecord)
 import DBOS.Transact.Serialization (encodeAttributes)
 import DBOS.Transact.Workflow (Enqueue (..), enqueueNew, maxRecoveryAttempts, resolveEnqueueCollision, storedPriority, validateEnqueue)
+import Hasql.Transaction qualified as Tx
 import System.Environment (lookupEnv)
 
 -- | Everything a 'Client' needs. A separate type from 'Config' rather than
@@ -146,7 +149,7 @@ clientOutcomePollInterval config =
 -- plus the transaction runner where the backend hosts caller transactions.
 -- Mirrors the oracle's @Client(Arc<Connection>)@.
 data Client m = Client
-  { conn :: Connection m,
+  { conn           :: Connection m,
     -- | Run caller-composed statements on the system database, when the
     -- backend can host them: set from the concrete backend at connect, so
     -- only live Postgres clients run transactions and anything else is a
@@ -207,6 +210,14 @@ connectClient config =
 
 -- | Closes the connection: the notifier stops before the pool closes, so
 -- nothing queued is lost to a closed pool.
+--
+-- Two deliberate divergences from Rust @Client::close@, decided 2026-10-15
+-- under the oracle rule. First, a closed client stays usable: @Pool.release@
+-- is documented to leave the pool usable ("use this function to reset the
+-- connections in the pool"), so a later call reconnects rather than failing
+-- as unreachable — pinned by the client test. Second, there is no @DBOS
+-- client closed@ announcement: the client carries @nullTracer@, so there is
+-- no channel to announce through, unlike the engine's shutdown.
 closeClient ::  Client m -> m ()
 closeClient client = releaseConnection client.conn
 
@@ -432,20 +443,31 @@ clientRewindWorkflows client workflowId@(WorkflowId workflowText) options =
         Left err -> pure (Left err)
         Right () -> pure (Right (retrieveClientWorkflow client workflowText))
 
+-- | Every queue this client's application can see: its own, plus the
+-- unclaimed ones. A nameless client sees every queue. Mirrors the oracle's
+-- reader, which takes no application: passing no scope lets the backend
+-- fall back to the connection's own application name.
+clientListQueues :: Monad m
+                 => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) [Queue])
+clientListQueues client = do
+  result <- withConnection client.conn (\db -> SystemDB.listQueues db Unset)
+  pure (fmap (map queueFromRecord) result)
+
 -- | The registered application versions.
 clientListApplicationVersions :: Monad m
                               => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) [VersionInfo])
 clientListApplicationVersions client = do
-  result <- withConnection client.conn SystemDB.listApplicationVersions
-  pure result
+  withConnection client.conn SystemDB.listApplicationVersions
 
--- | The latest registered application version, optionally scoped to one
--- application. Unscoped reads the global latest, which concurrent tenants
--- can move under you: prefer the scoped form in tests and deployments.
+-- | The latest registered application version, scoped to this client's
+-- application, or global when the client is nameless. Mirrors the oracle's
+-- reader, which takes no application: reading claims nothing, so it has
+-- nothing to say a name about. Passing no scope lets the backend fall back
+-- to the connection's own application name.
 clientLatestApplicationVersion :: Monad m
-                               => Client m -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe VersionInfo))
-clientLatestApplicationVersion client application = do
-  result <- withConnection client.conn (\db -> SystemDB.getLatestApplicationVersion db application)
+                               => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe VersionInfo))
+clientLatestApplicationVersion client = do
+  result <- withConnection client.conn (\db -> SystemDB.getLatestApplicationVersion db Nothing)
   pure result
 
 -- | Promote a version by stamping it now, making it the latest: a rollback

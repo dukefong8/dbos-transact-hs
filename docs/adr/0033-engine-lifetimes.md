@@ -53,10 +53,11 @@ which is what keeps every borrow valid.
   `Backend.hs:1048`; activate failure, `Connection.hs:168` and
   `Client.hs:180`; tests via `withResource`), and elsewhere release runs
   iff shutdown/`closeClient`/launch-cleanup runs. Known holes: unmasked
-  async exceptions skipping shutdown, forgotten `closeClient`, double
-  `closeClient` (Hasql.Pool release idempotency unverified), and
+  async exceptions skipping shutdown, forgotten `closeClient`, and
   `launchOn` connections (ownership transfers to the executor; no
-  shutdown means no release).
+  shutdown means no release). (Double `closeClient` was listed here as
+  unverified; verified 2026-10-15: `Pool.release` is documented to leave
+  the pool usable, and the client test closes twice, then reuses.)
 - **Pool hold duration is minimal as-is.** The pool lives exactly
   executor/client lifetime; borrowing is already per-session via
   `Pool.use`, and idle connections are reaped by pool config

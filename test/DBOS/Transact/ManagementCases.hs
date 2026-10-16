@@ -39,9 +39,12 @@ module DBOS.Transact.ManagementCases
     scenarioForkFromFailure,
     scenarioBulkCancelResume,
     scenarioBulkFork,
+    scenarioForkRefusals,
     scenarioForkPartitioned,
     scenarioAttributes,
+    scenarioAttributesInWorkflow,
     scenarioDelayRelease,
+    scenarioDelayReleaseInWorkflow,
     scenarioRewindRunsAgain,
     scenarioRewindRefusals,
     scenarioRewindUndoCut,
@@ -71,9 +74,12 @@ module DBOS.Transact.ManagementCases
     checkForkFromFailure,
     checkBulkCancelResume,
     checkBulkFork,
+    checkForkRefusals,
     checkForkPartitioned,
     checkAttributes,
+    checkAttributesInWorkflow,
     checkDelayRelease,
+    checkDelayReleaseInWorkflow,
     checkRewindRunsAgain,
     checkRewindRefusals,
     checkRewindUndoCut,
@@ -147,8 +153,10 @@ import DBOS.Transact
     send,
     setEvent,
     setWorkflowDelay,
+    setWorkflowDelayInWorkflow,
     Topic (..),
     updateWorkflowAttributes,
+    updateWorkflowAttributesInWorkflow,
     listWorkflowStepsInWorkflow,
     listWorkflowSteps,
     listWorkflows,
@@ -1140,6 +1148,67 @@ checkBulkFork (firstText, secondText, forked, decoded) = do
   checkEq True (case forked of [a, b] -> a /= b; _ -> False)
   checkEq [18, 20] decoded
 
+-- | Invalid plain forks are refused on the engine channel before anything
+-- runs: an empty source, a negative fork step, and bad options each report
+-- InvalidArgument, and no fork is written. Returns the three verdicts plus
+-- whether the named fork row exists afterwards: the refusal precedes any
+-- write, so the explicitly named fork id must stay absent. Empty inputs
+-- are an immediate success with no validation, as the oracle returns @Ok@
+-- before validating options: the last two verdicts must both be empty.
+scenarioForkRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                     => MgmtFixture m -> m ( Either (Error EngineOnly) [WorkflowId],
+                                            Either (Error EngineOnly) [WorkflowId],
+                                            Either (Error EngineOnly) [WorkflowId],
+                                            Either (Error EngineOnly) [WorkflowId],
+                                            Either (Error EngineOnly) [WorkflowId],
+                                            Bool
+                                          )
+scenarioForkRefusals fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let refusedText = "hs-l2-mgmt-fork-refused-" <> suffix
+        badOptions = defaultForkOptions {forkOptionsQueueName = Just ""}
+    _ <- fx.mfLaunch dbos
+    emptySource <- forkWorkflows dbos [Fork "" Nothing 0] defaultForkOptions
+    negativeStep <- forkFrom dbos [WorkflowId "hs-l2-mgmt-fork-negative"] (ForkStep (-1)) defaultForkOptions
+    emptyQueue <- forkWorkflows dbos [Fork "hs-l2-mgmt-fork-source" (Just refusedText) 0] badOptions
+    emptyForks <- forkWorkflows dbos [] badOptions
+    emptyIds <- forkFrom dbos [] (ForkStep (-1)) badOptions
+    found <- runSystemDB fx.mfSystemDB (\db -> SystemDB.getWorkflow db (WorkflowId refusedText))
+    let written = case found of
+          Right (Just _) -> True
+          _ -> False
+    pure (emptySource, negativeStep, emptyQueue, emptyForks, emptyIds, written)
+
+-- | Each refusal names its argument on the engine channel, empty inputs
+-- succeed without validation, and the named fork was never written.
+checkForkRefusals :: ( Either (Error EngineOnly) [WorkflowId],
+                       Either (Error EngineOnly) [WorkflowId],
+                       Either (Error EngineOnly) [WorkflowId],
+                       Either (Error EngineOnly) [WorkflowId],
+                       Either (Error EngineOnly) [WorkflowId],
+                       Bool
+                     ) -> Either String ()
+checkForkRefusals (emptySource, negativeStep, emptyQueue, emptyForks, emptyIds, written) = do
+  case emptySource of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "fork workflows" operation
+      checkEq "source_id must not be empty" detail
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case negativeStep of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "fork from workflows" operation
+      checkEq "start_step must not be negative" detail
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case emptyQueue of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "fork workflows" operation
+      checkEq "queue_name must be absent rather than empty" detail
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  checkEq (Right []) emptyForks
+  checkEq (Right []) emptyIds
+  checkEq False written
+
 -- | The fork's row carries the partition key it was given.
 checkForkPartitioned :: Maybe Text -> Either String ()
 checkForkPartitioned = checkEq (Just "pk-7")
@@ -1200,6 +1269,76 @@ checkAttributes (widText, found, after, cleared) = do
   checkEq [widText] found
   checkEq [] after
   checkEq Nothing cleared
+
+-- | A workflow replacing another's attributes as its step: the target row
+-- carries the replacement, and the caller's move took its framework step.
+-- Returns the target's stored attributes, the attributes after clearing,
+-- and the caller's recorded step names. The clearing leaves no searchable
+-- residue: attribute searches are unscoped, so a standing row would leak
+-- into other cases sharing the database.
+scenarioAttributesInWorkflow :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                             => MgmtFixture m -> m (Maybe Text, Maybe Text, [Text])
+scenarioAttributesInWorkflow fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let targetKey = newWorkflowKey "tagged-target"
+        callerKey = newWorkflowKey "attributes-caller"
+        targetText = "hs-l2-mgmt-attributes-target-" <> suffix
+        callerText = "hs-l2-mgmt-attributes-caller-" <> suffix
+        replacement = "{\"tenant\":\"acme-" <> suffix <> "\",\"tier\":\"gold\"}"
+        callerBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        callerBody target wctx = do
+          replaced <- updateWorkflowAttributesInWorkflow wctx (WorkflowId target) (Just replacement)
+          case replaced of
+            Left err -> pure (Left err)
+            Right () -> pure (Right target)
+    targetRegistered <- registerWorkflow dbos targetKey zeroBody
+    case targetRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    callerRegistered <- registerWorkflow dbos callerKey callerBody
+    case callerRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowValue ()))
+    case ranTarget of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowValue targetText))
+    decoded <- case ranCaller of
+      Left err -> throwIO (userError (show err))
+      Right Nothing -> throwIO (userError "expected the caller result")
+      Right (Just output) ->
+        case decodeWorkflowValue "result" (Just output) :: Either CodecError Text of
+          Right value -> pure value
+          Left err -> throwIO (userError (show err))
+    unless (decoded == targetText) $ throwIO (userError ("expected the target id back, got: " <> show decoded))
+    row <- fx.mfReadRow (WorkflowId targetText)
+    listed <- listStepsWf dbos (WorkflowId callerText)
+    names <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepName | record <- records]
+    cleared <- updateWorkflowAttributes dbos (WorkflowId targetText) Nothing
+    case cleared of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    clearedRow <- fx.mfReadRow (WorkflowId targetText)
+    pure (row.workflowRecordAttributes, clearedRow.workflowRecordAttributes, names)
+
+-- | The target carried the replacement, clearing removed it, and the
+-- caller's move took its framework step.
+checkAttributesInWorkflow :: (Maybe Text, Maybe Text, [Text]) -> Either String ()
+checkAttributesInWorkflow (stored, cleared, names) = do
+  -- The backend re-serializes the object, so the check is containment of
+  -- both keys rather than the input's exact bytes.
+  case stored of
+    Just attributes
+      | "tenant" `Text.isInfixOf` attributes && "gold" `Text.isInfixOf` attributes -> pure ()
+      | otherwise -> Left ("expected the replacement attributes, got: " <> show stored)
+    Nothing -> Left "expected the replacement attributes, got nothing"
+  checkEq Nothing cleared
+  checkEq ["DBOS.update_workflow_attributes"] names
 
 -- | The workflow waited as delayed, then ran its body on release.
 checkDelayRelease :: (Maybe WorkflowStatus, Int) -> Either String ()
@@ -1451,6 +1590,77 @@ scenarioDelayRelease fx = do
           Left err -> throwIO (userError (show err))
       other -> throwIO (userError ("expected the released run, got: " <> show other))
     pure (Just waiting.workflowRecordStatus, decoded)
+
+-- | A workflow moving another's delay as its step releases the target: the
+-- delayed start waits, the caller's step brings it forward, and the driven
+-- pass transitions and runs it. Returns the caller's verdict, the target's
+-- decoded output, and the caller's recorded step names.
+scenarioDelayReleaseInWorkflow :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                               => MgmtFixture m -> m (Text, Int, [Text])
+scenarioDelayReleaseInWorkflow fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let targetKey = newWorkflowKey "delayable-target"
+        callerKey = newWorkflowKey "delay-caller"
+        targetText = "hs-l2-mgmt-delay-target-" <> suffix
+        callerText = "hs-l2-mgmt-delay-caller-" <> suffix
+        QueueName internal = internalQueueName
+        callerBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        callerBody target wctx = do
+          moved <- setWorkflowDelayInWorkflow wctx (WorkflowId target) (DelayFor (secondsDuration 0))
+          case moved of
+            Left err -> pure (Left err)
+            Right () -> pure (Right target)
+    targetRefE <- registerWorkflowRef dbos targetKey zeroBody
+    targetRef <- case targetRefE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    callerRegistered <- registerWorkflow dbos callerKey callerBody
+    case callerRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    started <-
+      startWfRef
+        exec
+        targetRef
+        (startOptionsDefault {startWorkflowId = Just (WorkflowId targetText), startQueue = Just ((enqueueNew internal) {delay = Just (secondsDuration 3600)})})
+        Nothing
+    case started of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowValue targetText))
+    decoded <- case ranCaller of
+      Left err -> throwIO (userError (show err))
+      Right Nothing -> throwIO (userError "expected the caller result")
+      Right (Just output) ->
+        case decodeWorkflowValue "result" (Just output) :: Either CodecError Text of
+          Right value -> pure value
+          Left err -> throwIO (userError (show err))
+    drove <- dequeueWorkflows dbos
+    case drove of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    waited <- waitForWorkflow dbos (WorkflowId targetText)
+    released <- case waited of
+      Right (SystemDB.AwaitedSucceeded (Just output) _) ->
+        case decodeWorkflowValue "result" (Just (SystemDB.SerializedWorkflowValue output Nothing)) :: Either CodecError Int of
+          Right n -> pure n
+          Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the released run, got: " <> show other))
+    listed <- listStepsWf dbos (WorkflowId callerText)
+    names <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepRecordStepName | record <- records]
+    pure (decoded, released, names)
+
+-- | The caller hands back the target id, the target ran, and the caller's
+-- move took its framework step.
+checkDelayReleaseInWorkflow :: (Text, Int, [Text]) -> Either String ()
+checkDelayReleaseInWorkflow (decoded, released, names) = do
+  checkEq True ("hs-l2-mgmt-delay-target-" `Text.isPrefixOf` decoded)
+  checkEq 0 released
+  checkEq ["DBOS.set_workflow_delay"] names
 
 -- | The fork ran only the steps at or above the fork point; the steps below
 -- replayed from the copied history.

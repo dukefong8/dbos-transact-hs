@@ -58,9 +58,12 @@ import DBOS.Transact.ManagementCases
     checkForkTakesIdAndQueue,
     checkBulkCancelResume,
     checkBulkFork,
+    checkForkRefusals,
     checkForkPartitioned,
     checkAttributes,
+    checkAttributesInWorkflow,
     checkDelayRelease,
+    checkDelayReleaseInWorkflow,
     checkRewindRunsAgain,
     checkRewindRefusals,
     checkRewindUndoCut,
@@ -92,9 +95,12 @@ import DBOS.Transact.ManagementCases
     scenarioForkTakesIdAndQueue,
     scenarioBulkCancelResume,
     scenarioBulkFork,
+    scenarioForkRefusals,
     scenarioForkPartitioned,
     scenarioAttributes,
+    scenarioAttributesInWorkflow,
     scenarioDelayRelease,
+    scenarioDelayReleaseInWorkflow,
     scenarioRewindRunsAgain,
     scenarioRewindRefusals,
     scenarioRewindUndoCut,
@@ -163,9 +169,12 @@ tests =
       simCase simMgmtFixture "forking from the last failure restarts at the failed step" scenarioForkFromFailure checkForkFromFailure traceForkFromFailure,
       simCase simMgmtFixture "bulk cancel and resume hand back every id" scenarioBulkCancelResume checkBulkCancelResume traceBulkCancelResume,
       simCase simMgmtFixture "bulk forking hands back one new id per source, in order" scenarioBulkFork checkBulkFork traceBulkFork,
+      simCase simMgmtFixture "invalid forks are refused on the engine channel" scenarioForkRefusals checkForkRefusals traceForkRefusals,
       simCase simMgmtFixture "a fork onto a partitioned queue carries the key it is given" scenarioForkPartitioned checkForkPartitioned traceForkPartitioned,
       simCase simMgmtFixture "attributes are replaced and can be searched" scenarioAttributes checkAttributes traceAttributes,
+      simCase simMgmtFixture "a workflow replacing another attributes as its step stores the replacement" scenarioAttributesInWorkflow checkAttributesInWorkflow traceAttributesInWorkflow,
       simCase simMgmtFixture "a delayed workflow can be released sooner" scenarioDelayRelease checkDelayRelease traceDelayRelease,
+      simCase simMgmtFixture "a workflow moving another delay as its step releases the target" scenarioDelayReleaseInWorkflow checkDelayReleaseInWorkflow traceDelayReleaseInWorkflow,
       simCase simMgmtFixture "a finished workflow rewound to its second step runs again under the same id" scenarioRewindRunsAgain checkRewindRunsAgain traceRewindRunsAgain,
       simCase simMgmtFixture "rewind refusals name their cause and write nothing" scenarioRewindRefusals checkRewindRefusals traceRewindRefusals,
       simCase simMgmtFixture "a rewind at the first step undoes the run" scenarioRewindUndoCut checkRewindUndoCut traceRewindUndoCut,
@@ -200,6 +209,13 @@ traceMgmtSilent tr = do
   selectTraceEventsDynamic tr @?= ([] :: [WorkflowEvent])
   selectTraceEventsDynamic tr @?= ([] :: [EngineEvent])
   selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+
+-- | The in-workflow replacement and the clearing each announce the
+-- request; the replaced row is judged by the shared check, not the trace.
+traceAttributesInWorkflow :: forall a. SimTrace a -> IO ()
+traceAttributesInWorkflow tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowAttributesReplaceAsked "hs-l2-mgmt-attributes-target-sim", WorkflowAttributesReplaceAsked "hs-l2-mgmt-attributes-target-sim"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | Rewind announcements name the rewound id; the re-run's own steps and
 -- completions are judged by the shared checks, not the trace.
@@ -437,6 +453,13 @@ traceBulkFork tr = do
   selectTraceEventsDynamic tr @?= [WorkflowsForked 2]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
+-- | The refusals are silent; the two empty-input successes each announce a
+-- zero-count fork, as every fork call does. The launch still shuts down.
+traceForkRefusals :: forall a. SimTrace a -> IO ()
+traceForkRefusals tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowsForked 0, WorkflowsForked 0]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
 -- | The source runs, the single fork is announced, and the shutdown ends the
 -- run. The fork itself never runs: the case asserts the row, not the run.
 traceForkPartitioned :: forall a. SimTrace a -> IO ()
@@ -455,6 +478,13 @@ traceAttributes tr = do
 traceDelayRelease :: forall a. SimTrace a -> IO ()
 traceDelayRelease tr = do
   selectTraceEventsDynamic tr @?= [WorkflowEnqueued "hs-l2-mgmt-delayed-sim" "_dbos_internal_queue", WorkflowCompleted "hs-l2-mgmt-delayed-sim"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The in-workflow move announces the request; the re-run's own steps are
+-- judged by the shared check, not the trace.
+traceDelayReleaseInWorkflow :: forall a. SimTrace a -> IO ()
+traceDelayReleaseInWorkflow tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowDelayMoveAsked "hs-l2-mgmt-delay-target-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | One of every management announcement, through the say-carrier: the

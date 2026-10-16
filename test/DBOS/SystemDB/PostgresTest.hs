@@ -55,6 +55,7 @@ import DBOS.SystemDB
     StreamRead (..),
     StreamRecord (..),
     Submission (..),
+    SysRewindOptions (..),
     SystemDB (..),
     WrittenBy (..),
     WorkflowDelay (..),
@@ -768,6 +769,25 @@ workflowTests getBackend =
           checkPayloads env legacyOk (Just "\"old in\"") (Just "\"old out\"") Nothing
           checkPayloads env legacyErr (Just "\"old in\"") Nothing (Just "\"old err\"")
           checkPayloads env both (Just "\"new in\"") (Just "\"new out\"") Nothing,
+      testCase "a rewind clears a legacy-only outcome with its steps" $ do
+        base <- freshWorkflowId
+        let legacyOnly = base <> "-legacy"
+            newOnly = base <> "-new"
+        withBackend getBackend $ \env -> do
+          _ <- runSession env "fixture" (seedPayloadRow legacyOnly "SUCCESS" (Just "\"old in\"", Just "\"old out\"", Nothing) (Nothing, Nothing, Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow newOnly "SUCCESS" (Nothing, Nothing, Nothing) (Just "\"new in\"", Just "\"new out\"", Nothing))
+          _ <- recordStep env (WorkflowId legacyOnly) 0 "DBOS.step" (OutcomeOutput (Just "one")) Nothing Nothing
+          _ <- recordStep env (WorkflowId newOnly) 0 "DBOS.step" (OutcomeOutput (Just "one")) Nothing Nothing
+          -- The outcomes stand before the rewind, so the cleared read below
+          -- proves the transition rather than a vacuous absence.
+          checkPayloads env legacyOnly (Just "\"old in\"") (Just "\"old out\"") Nothing
+          checkPayloads env newOnly (Just "\"new in\"") (Just "\"new out\"") Nothing
+          rewoundLegacy <- rewindWorkflow env (WorkflowId legacyOnly) 0 (SysRewindOptions Nothing Nothing Nothing) Nothing
+          rewoundLegacy @?= Right ()
+          rewoundNew <- rewindWorkflow env (WorkflowId newOnly) 0 (SysRewindOptions Nothing Nothing Nothing) Nothing
+          rewoundNew @?= Right ()
+          checkRewound env legacyOnly
+          checkRewound env newOnly,
       testCase "returns Nothing for a missing id" $ do
         wid <- freshWorkflowId
         withBackend getBackend $ \env -> do
@@ -793,6 +813,20 @@ workflowTests getBackend =
           record.workflowRecordInput @?= input
           record.workflowRecordOutput @?= output
           record.workflowRecordError @?= errorValue
+    -- | A rewound row is re-enqueued with no outcome standing in either
+    -- layout and no steps: the legacy columns read null and the payload
+    -- table reads back through them.
+    checkRewound env wid = do
+      found <- getWorkflow env (WorkflowId wid)
+      case found of
+        Left err -> fail ("expected the rewound row, got: " <> show err)
+        Right Nothing -> fail "expected the rewound row, got Nothing"
+        Right (Just record) -> do
+          record.workflowRecordStatus @?= Enqueued
+          record.workflowRecordOutput @?= Nothing
+          record.workflowRecordError @?= Nothing
+      steps <- listSteps env (WorkflowId wid) True Nothing Nothing Nothing
+      (map (.stepRecordStepName) <$> steps) @?= Right []
 
 -- | Descendant walks over fixture trees: a root with two children, one of
 -- which has a child of its own, plus a self-parented root (a workflow is
@@ -1828,7 +1862,18 @@ forkTests getBackend =
           forked <- forkFrom env [WorkflowId source] ForkLastStep defaultForkOptions Nothing
           case forked of
             Left (NoForkPoint {workflowIds = ids}) -> ids @?= [source]
-            other -> fail ("expected NoForkPoint, got: " <> show other)
+            other -> fail ("expected NoForkPoint, got: " <> show other),
+      testCase "an invalid fork point is refused before anything runs" $ do
+        source <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          negative <- forkFrom env [WorkflowId source] (ForkStep (-1)) defaultForkOptions Nothing
+          case negative of
+            Left (InvalidInput {field, detail}) -> (field, detail) @?= ("start_step", "must not be negative")
+            other -> fail ("expected InvalidInput, got: " <> show other)
+          empty <- forkFrom env [WorkflowId ""] (ForkStep 0) defaultForkOptions Nothing
+          case empty of
+            Left (InvalidInput {field, detail}) -> (field, detail) @?= ("source_id", "must not be empty")
+            other -> fail ("expected InvalidInput, got: " <> show other)
     ]
   where
     runReaderAt env forkedId = do

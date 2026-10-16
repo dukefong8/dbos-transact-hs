@@ -8,6 +8,57 @@ Design record: `.lavish/rust-port-plan.html` (Phase 10, Rule 9, TODO 12–16),
 `docs/agent-skill-api-review.md` (per-rule verdicts),
 `proto/deterministic-steps/README.md`, `proto/dual-store/README.md`.
 
+## Constraint-audit actions (2026-10-16)
+
+Audit of the Python skill's Lifecycle/CRITICAL, Workflow/CRITICAL,
+Step/HIGH, Queue/HIGH constraints against the port; tables in
+`.lavish/dbos-python-constraint-audit.html`. Tree audited: `ad906e0` +
+the 19-file uncommitted stack. Fix in this order, red-first where a pin
+holds the wrong behavior:
+
+- [ ] B1 queue over-validation: drop `partitionRate`'s cross-check in
+      `validateQueueOptions` (`Queue.hs:252, 271-277`); Rust compares
+      concurrency only (`queue.rs:455-461`). Repoint the pins at
+      `QueueCases.hs:270` and `:349` to acceptance.
+- [ ] B2 both concurrency spellings: refuse `concurrency` +
+      `globalConcurrency` both-set with Python's message
+      (`_queue.py:148-151`); flip `scenarioConcurrencySpellings`
+      (`QueueCases.hs:414-441`).
+- [ ] B3 empty first-wait mirror: `MemSystemDB.awaitFirstWorkflowId []`
+      refuses like live (`Backend.hs:2596`) instead of hanging
+      (`IOSim.hs:1250`); annotate the mock placeholder pin
+      (`IOSim.hs:186`, `IOSimTest.hs:161`); add the shared
+      executor-level `waitForFirstWorkflow` empty-set case (also
+      closes G5's wait coverage).
+- [ ] G1 `Duration` abstract from `DBOS.Transact` (`Transact.hs:188`);
+      keep `millisDuration`/`secondsDuration`, internal `(..)` stays.
+- [ ] Notes (dated, no behavior): G4 `_dbos_` prefix
+      (`_queue.py:58`) vs exact-name-only here (`Queue.hs:366`, Rust
+      `sysdb/mod.rs:21`); G6 observability query timeout, graceful
+      destroy (`Instance.hs:214`), client schedules/rename exposure,
+      `set_latest_application_version` writer; G7 datasource comment
+      "levels both oracles expose" (`Datasource.hs:84-89`) and
+      ADR-0021's stale `ReadCommitted` default (code: `Serializable`).
+- [ ] G3 config: `configUseListenNotify`/`configMigrate`
+      (`Config.hs:70-71`) are read nowhere — wire or mark deliberately
+      inert (polling-only port; migrations out-of-band).
+- [ ] G2 client slices, one per commit: queue CRUD + `set_*`,
+      `wait_first`, `update_workflow_attributes`, `set_workflow_delay`,
+      `enqueue`/`enqueue_in_transaction`, `list_queued_workflows`,
+      `read_stream`; client `register_queue` defaults `AlwaysUpdate`
+      and refuses `UpdateIfLatestVersion` with `ErrorConfig`
+      (`queue.rs:640-660`).
+- [ ] Stack-review follow-ups: R1 empty fork input returns `Ok` with no
+      validation on every layer now (engine early-`Right`, sim null guards
+      matching the Postgres guards; shared refusal scenario pins both
+      empty verdicts plus the two zero-count announcements in the sim
+      trace) — done 2026-10-16, uncommitted; R2 comment narrowed to
+      launched-instance entries (client forks call the backends directly)
+      — done 2026-10-16, uncommitted; R3 `coghcid.sh` moves out
+      of the repo root.
+- [ ] Close-out: full `cabal test all` + direct psql mirror against
+      `$DBOS_DATABASE_URL` with the watcher idle; then `/review`.
+
 ## Locked decisions (do not relitigate without new evidence)
 
 1. Phantom brands over Bluefin-the-dependency (`Eff` is `Env -> IO a`,

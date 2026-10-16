@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DBOS Python-skill constraint audit — dbos-transact-hs</title>
+  <style>
+    :root {
+      --bg: #f7f9fb;
+      --panel: #ffffff;
+      --ink: #14202b;
+      --muted: #5d6b79;
+      --line: #d9e1e8;
+      --accent: #0f766e;
+      --accent-2: #075985;
+      --warn: #b45309;
+      --bad: #b91c1c;
+      --good: #15803d;
+      --shadow: 0 12px 34px rgba(20, 32, 43, 0.08);
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #eef5f8 0, var(--bg) 420px);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+    header { padding: 40px max(24px, calc((100vw - 1180px) / 2)) 24px; border-bottom: 1px solid var(--line); }
+    header .kicker { color: var(--accent-2); font-weight: 700; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+    header h1 { margin: 8px 0; font-size: 30px; line-height: 1.2; }
+    header p { color: var(--muted); max-width: 90ch; }
+    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 28px 0 80px; display: grid; gap: 24px; min-width: 0; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 24px; min-width: 0; }
+    section h2 { margin: 0 0 4px; font-size: 21px; }
+    section .sub { color: var(--muted); margin: 0 0 16px; }
+    section h3 { margin: 20px 0 8px; font-size: 16px; }
+    .badge { display: inline-block; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 2px 10px; margin-right: 6px; white-space: nowrap; }
+    .b-ok   { background: #dcfce7; color: #166534; }
+    .b-bug  { background: #fee2e2; color: #991b1b; }
+    .b-gap  { background: #fef3c7; color: #92400e; }
+    .b-note { background: #e0f2fe; color: #075985; }
+    .b-na   { background: #e5e7eb; color: #4b5563; }
+    .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .grid2 { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; }
+    @media (max-width: 860px) { .grid3, .grid2 { grid-template-columns: minmax(0,1fr); } }
+    .card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+    .card h3 { margin: 0 0 6px; font-size: 16px; }
+    .card p, .card li { font-size: 14px; }
+    .card .big { font-size: 26px; font-weight: 800; margin: 0; }
+    .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+    th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+    th { background: #f1f5f9; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+    tr:last-child td { border-bottom: none; }
+    code, .mono, .ref { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+    .ref { color: var(--accent-2); }
+    .id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; font-size: 12.5px; white-space: nowrap; }
+    ul.tight { margin: 6px 0 0; padding-left: 20px; }
+    ul.tight li { margin-bottom: 4px; font-size: 13.5px; }
+    ol.order { margin: 8px 0 0; padding-left: 22px; display: grid; gap: 9px; }
+    ol.order li { font-size: 14px; }
+    ol.order li strong { margin-right: 6px; }
+    .kv { font-size: 13.5px; }
+    .kv dt { font-weight: 700; margin-top: 8px; }
+    .kv dd { margin: 0 0 0 0; color: var(--muted); }
+    footer.note { color: var(--muted); font-size: 13px; }
+    .legend { display: grid; gap: 6px; font-size: 13.5px; margin: 8px 0 0; }
+  </style>
+</head>
+<body>
+<header>
+  <div class="kicker">dbos-transact-hs · constraint audit · 2026-10-16</div>
+  <h1>Python-skill constraints vs. the Haskell engine</h1>
+  <p>Scope: the four highest-priority constraint categories of the DBOS Python skill —
+  <span class="mono">Lifecycle</span> (CRITICAL), <span class="mono">Workflow</span> (CRITICAL),
+  <span class="mono">Step</span> (HIGH), and <span class="mono">Queue</span> (HIGH) — checked
+  constraint by constraint against the port. Sources: the 17 reference files behind those categories in
+  <span class="mono">~/dev/dbos-agent-skills/skills/dbos-python/</span>; oracle rule applied throughout
+  (Rust <span class="mono">~/dev/dbos-transact-rust</span> = API/ADT design oracle, Python
+  <span class="mono">~/dev/dbos-transact-py</span> = behavior spec, Rust wins where both speak).</p>
+  <p>State audited: <span class="mono">ad906e0</span> plus the 19-file uncommitted stack (uncommitted until
+  <span class="mono">/review</span>). Read-only audit — no behavior changed by it. The tables below are the
+  record; the actions live in <span class="mono">TODO.md</span>.</p>
+  <p><span class="badge b-bug">3 bugs</span><span class="badge b-gap">7 gaps</span><span class="badge b-ok">53 constraint rows classified</span><span class="badge b-note">3 stack-review follow-ups</span></p>
+</header>
+<main>
+
+  <section id="legend">
+    <h2>How to read the tables</h2>
+    <p class="sub">Every constraint row carries its enforcement class and verdict; every citation is to the working tree or an oracle file.</p>
+    <div class="grid2">
+      <div class="card">
+        <h3>Enforcement classes</h3>
+        <div class="legend">
+          <div><span class="badge b-ok">CT</span> compile-time — the state is unrepresentable or the only entry point has the required shape (phantom brands, view-typed APIs, sum types, absence of a workflow-less signature).</div>
+          <div><span class="badge b-ok">RT</span> runtime — refused on a matchable ADT channel (<span class="mono">ErrorConfig</span>, <span class="mono">InvalidArgument</span>, <span class="mono">InsideStep</span>, <span class="mono">InvalidInput</span>) with a test pinning the refusal.</div>
+          <div><span class="badge b-na">N/A</span> not expressible or not applicable in Haskell (event-loop rules, async-step parameters) or a documented discipline where no oracle enforces (determinism, globals).</div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Verdicts</h3>
+        <div class="legend">
+          <div><span class="badge b-ok">sound</span> constraint holds and is enforced where the oracles enforce it.</div>
+          <div><span class="badge b-bug">B1–B3</span> the port diverges from an oracle (queue over-validation, both-spelling acceptance, sim/live wait divergence).</div>
+          <div><span class="badge b-gap">G1–G7</span> missing surface or unrecorded divergence (client surface, inert config, exported <span class="mono">Duration</span>, doc drift).</div>
+          <div><span class="badge b-note">note</span> deliberate/recorded divergence with a dated note still owed.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="findings">
+    <h2>Bugs found (fix first, red-first)</h2>
+    <p class="sub">Each is an oracle divergence with a test currently pinning the wrong behavior, so the pin flips with the source fix.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Ref</th><th>Port behavior</th><th>Oracle</th><th>Evidence</th><th>Fix</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="id">B1</span><br><span class="badge b-bug">over-refusal</span></td>
+            <td><span class="mono">validateQueueOptions</span> refuses a <span class="mono">partition_rate_limit</span> whose cross-multiplied window exceeds the queue-wide <span class="mono">rate_limit</span> ("must not exceed <span class="mono">rate_limit</span>"). Both oracles accept that shape: a shorter per-partition window merely caps bursts the queue-wide window allows.</td>
+            <td>Rust <span class="mono">queue.rs:455–461</span>: "Only concurrency is compared: the rate limits are not, because a per-partition window shorter than the queue-wide one caps bursts the queue-wide one allows." Python validates limit/period shape only.</td>
+            <td class="ref">src/DBOS/Internal/DBOS/Transact/Queue.hs:252, 271–277</td>
+            <td>Delete <span class="mono">partitionRate</span> from <span class="mono">validateQueueOptions</span>; repoint the two pinning rows (<span class="mono">QueueCases.hs:270</span> incoherent table, <span class="mono">:349</span> unhonourable table) to acceptance assertions, red-first.</td>
+          </tr>
+          <tr>
+            <td><span class="id">B2</span><br><span class="badge b-bug">missing refusal</span></td>
+            <td><span class="mono">{concurrency = Just 2, globalConcurrency = Just 5}</span> is accepted with explicit-wins precedence; there is no both-set check.</td>
+            <td>Python <span class="mono">_queue.py:148–151</span> raises "concurrency is deprecated in favor of global_concurrency; set only one of them". Rust has no <span class="mono">global_concurrency</span> field at all, so Python speaks here.</td>
+            <td class="ref">Queue.hs:187–188 (<span class="mono">effectiveConcurrency = globalConcurrency &lt;|&gt; concurrency</span>); pin: QueueCases.hs:414–441 (<span class="mono">scenarioConcurrencySpellings</span> expects "the explicit limit to win")</td>
+            <td>Refuse both-set in <span class="mono">validateQueueOptions</span> with Python's message; update <span class="mono">scenarioConcurrencySpellings</span> to expect the refusal.</td>
+          </tr>
+          <tr>
+            <td><span class="id">B3</span><br><span class="badge b-bug">sim/live divergence</span></td>
+            <td>Empty first-wait disagrees across the three backends: live refuses (<span class="mono">invalidInput "workflow_ids"</span>), <span class="mono">MemSystemDB</span> retries forever (hang), <span class="mono">MockSystemDB</span> fabricates <span class="mono">Right (WorkflowId "mock")</span>. ADR-0020 requires sim mirrors to drive the same engine functions with only backend/scheduler differing.</td>
+            <td>Rust refuses an empty first-wait (<span class="mono">wait.rs:566, 780–791</span>) — and records the refusal when a step slot exists, which the port's in-workflow <span class="mono">selectWorkflow</span> already mirrors (<span class="mono">Wait.hs:104–113</span>). Empty wait-all returning at once is faithful (<span class="mono">Backend.hs:2607</span>).</td>
+            <td class="ref">Backend.hs:2595–2596; IOSim.hs:1250–1256 (mem), :186–187 (mock); pin IOSimTest.hs:161–162</td>
+            <td>Make <span class="mono">MemSystemDB</span> refuse empty like live; annotate the mock placeholder pin; add the shared executor-level <span class="mono">waitForFirstWorkflow</span> empty-set case (live+sim), which also closes G5's wait coverage.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="gaps">
+    <h2>Gaps and drift</h2>
+    <p class="sub">Missing surface or unrecorded divergence — none invalidates a currently shipped path; each needs either a slice or a dated note.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Ref</th><th>Gap</th><th>Evidence</th><th>Recommendation</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="id">G1</span></td>
+            <td>The facade exports the raw <span class="mono">Duration</span> constructor although the type documents "non-negative by construction"; validators only check zero-ness, so a negative timeout/delay is constructible at the boundary.</td>
+            <td class="ref">Transact.hs:188 (<span class="mono">Duration (..)</span>); Types.hs:1683–1687 (doc), 1830–1831 (<span class="mono">durationIsZero</span>)</td>
+            <td>Export <span class="mono">Duration</span> abstract from <span class="mono">DBOS.Transact</span> (keep <span class="mono">millisDuration</span>/<span class="mono">secondsDuration</span>); internal <span class="mono">(..)</span> stays for internals/tests.</td>
+          </tr>
+          <tr>
+            <td><span class="id">G2</span></td>
+            <td>Client surface short of the Python client: queue CRUD + runtime <span class="mono">set_*</span>, <span class="mono">wait_first</span>, <span class="mono">update_workflow_attributes</span>, <span class="mono">set_workflow_delay</span>, <span class="mono">enqueue</span>/<span class="mono">enqueue_in_transaction</span>, <span class="mono">list_queued_workflows</span>, <span class="mono">read_stream</span> (± schedules, <span class="mono">rename_application</span>, <span class="mono">check_connection</span>). Present today: send/(bulk)/in-tx, get_event, cancel/resume/delete/fork/rewind, list_queues, versions, promote, list workflows/steps.</td>
+            <td class="ref">Client.hs:17–53 (export list); skill client-setup.md API table, queue-management.md "From a DBOSClient", queue-delay.md, client-enqueue.md</td>
+            <td>Client slices, one per commit. Client <span class="mono">register_queue</span> defaults <span class="mono">AlwaysUpdate</span> and refuses <span class="mono">UpdateIfLatestVersion</span> with <span class="mono">ErrorConfig</span> (Rust <span class="mono">queue.rs:640–660</span>).</td>
+          </tr>
+          <tr>
+            <td><span class="id">G3</span></td>
+            <td><span class="mono">configUseListenNotify</span> and <span class="mono">configMigrate</span> exist (defaulted <span class="mono">True</span>) but are read nowhere: the port polls (no LISTEN), and migrations are always out-of-band. Least-privilege verify-only launch and the pooler caveat are unexpressed.</td>
+            <td class="ref">Config.hs:70–71, 91–92; no other reads (grep)</td>
+            <td>Decide per field: wire (<span class="mono">configMigrate=False</span> → verify-only, <span class="mono">configUseListenNotify=False</span> → accepted no-op) or document deliberately inert with a refusal for unsupported values.</td>
+          </tr>
+          <tr>
+            <td><span class="id">G4</span></td>
+            <td>Reserved queue names: the port refuses only the exact internal name <span class="mono">_dbos_internal_queue</span> (Rust parity), while Python reserves the whole <span class="mono">_dbos_</span> prefix.</td>
+            <td class="ref">Queue.hs:366–374; Rust sysdb/mod.rs:21; Python _queue.py:58, 143–147</td>
+            <td>Record the dated divergence note (Rust exact-name wins per oracle rule) — do not widen the refusal without an oracle change.</td>
+          </tr>
+          <tr>
+            <td><span class="id">G5</span></td>
+            <td>Executor-level waits (<span class="mono">waitForFirstWorkflow</span>/<span class="mono">waitForWorkflows</span>, facade-exported) have no shared test cases; only the backend calls are exercised.</td>
+            <td class="ref">Wait.hs:156–168; Transact.hs:61–62; tests only: IOSimTest.hs:159–162, PostgresTest.hs:1136–1139</td>
+            <td>Shared cases (live+sim) for first-wait winner, empty set (pairs with B3), and wait-all empty-is-satisfied.</td>
+          </tr>
+          <tr>
+            <td><span class="id">G6</span></td>
+            <td>Python-only lifecycle items with no Rust counterpart, currently unrecorded: <span class="mono">observability_query_timeout_sec</span> (listing statement timeout), graceful <span class="mono">destroy</span> (Python waits for completion; the port's <span class="mono">shutdown</span> aborts at once and PENDING rows recover on relaunch), client schedules and <span class="mono">rename_application</span> exposure, <span class="mono">set_latest_application_version</span> writer variant (port has <span class="mono">promoteVersion</span> only).</td>
+            <td class="ref">Instance.hs:214–237; Backend.hs:3522 (<span class="mono">renameApplication</span>); Client.hs export list</td>
+            <td>Dated notes deciding each: port now / document N/A / defer with the owning slice. <span class="mono">closeClient</span> stays documentation only (hasql-pool release contract).</td>
+          </tr>
+          <tr>
+            <td><span class="id">G7</span></td>
+            <td>Doc drift: <span class="mono">IsolationLevel</span> claims to mirror "the levels both oracles expose" but Python offers three (<span class="mono">SERIALIZABLE</span> default, <span class="mono">REPEATABLE READ</span>, <span class="mono">READ COMMITTED</span>) while the port has four; ADR-0021 still says the default is <span class="mono">ReadCommitted</span>, code and Python say <span class="mono">Serializable</span>.</td>
+            <td class="ref">Datasource.hs:84–89; docs/adr/0021-transactional-step-datasource.md:48; skill step-transactions.md</td>
+            <td>Dated notes: narrow the comment to the truth (Rust's ladder + Python's three), fix the ADR default.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="lifecycle">
+    <h2>Lifecycle · CRITICAL</h2>
+    <p class="sub">lifecycle-config.md + lifecycle-fastapi.md — launch discipline, name validation, config fields, teardown. Verdicts: nothing broken; two gaps are the inert config fields (G3) and two Python-only items (G6).</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Constraint</th><th>Enforcement</th><th>Verdict</th><th>Evidence</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Configure and launch in <span class="mono">main</span>, never at import time.</td>
+            <td><span class="badge b-ok">N/A-shape</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Haskell module top level cannot launch; launch is the explicit <span class="mono">launch</span>/<span class="mono">launchWithEnvironment</span> call. No ambient singleton — the <span class="mono">Executor</span> is threaded.</td>
+          </tr>
+          <tr>
+            <td>Application name: 3–256 chars, <span class="mono">[a-z0-9_-]</span>; the ownership key; distinct names required per system DB.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Shape validated like both oracles (rename: <span class="mono">Backend.hs:3523</span>, <span class="mono">Types.hs:536</span>; Rust <span class="mono">postgres.rs:7231</span>; Python <span class="mono">_sys_db.py:6094</span>). Python additionally checks shape at config translation (<span class="mono">_dbos_config.py:356</span>); Rust does not, so the port follows Rust. Empty name refused at launch (<span class="mono">Identity.hs:116–123</span>).</td>
+          </tr>
+          <tr>
+            <td>Name scopes ownership: workflows/queues/versions belong to an app; an app runs only its own workflows; listings default to own rows (+ unclaimed).</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Claim/candidate filters by application on both backends (<span class="mono">newMemDBWithApplication</span>; Postgres claim filter); queue-scoping race pinned by <span class="mono">QueueTestSim</span>; scoped lists use the unclaimed-inclusive scope.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">listen_queues</span> after config and before launch, at most once, names only; enqueue to any queue still allowed.</td>
+            <td><span class="badge b-ok">CT+RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Single field <span class="mono">configListenQueues :: Maybe [Text]</span> makes "once" and "names only" structural (<span class="mono">Config.hs:78</span>); dequeue filter honors it (<span class="mono">Dequeue.hs:397, 527</span>).</td>
+          </tr>
+          <tr>
+            <td><span class="mono">use_listen_notify</span>: LISTEN/NOTIFY vs polling (1s fallback); do not change after DB creation; transaction-mode poolers need it off.</td>
+            <td><span class="badge b-gap">field inert</span></td>
+            <td><span class="badge b-gap">G3</span></td>
+            <td>Port is polling-only by design; the field exists but is read nowhere (<span class="mono">Config.hs:70, 91</span>). Pooler caveat holds trivially (no LISTEN registration to orphan).</td>
+          </tr>
+          <tr>
+            <td><span class="mono">run_migrations</span> least privilege: launch migrates, or verifies when disabled; behind-version fails, ahead-version accepted.</td>
+            <td><span class="badge b-gap">field inert</span></td>
+            <td><span class="badge b-gap">G3</span></td>
+            <td><span class="mono">configMigrate</span> read nowhere (<span class="mono">Config.hs:71, 92</span>); migrations are out-of-band via the Rust runner (ADR-0004 guardrail).</td>
+          </tr>
+          <tr>
+            <td><span class="mono">observability_query_timeout_sec</span>: statement timeout for listing queries (Postgres; raises a query-timeout error).</td>
+            <td><span class="badge b-gap">absent</span></td>
+            <td><span class="badge b-gap">G6</span></td>
+            <td>Python-only (no Rust counterpart); the port's listing statements carry no timeout. Record decision.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">destroy</span>: graceful teardown (completion timeout, optional registry drop); timed-out workflows cannot checkpoint after.</td>
+            <td><span class="badge b-gap">different shape</span></td>
+            <td><span class="badge b-gap">G6</span></td>
+            <td><span class="mono">shutdown</span> aborts tasks immediately and waits for unwinding; mid-run workflows stay PENDING and are recovered by the next launch (<span class="mono">Instance.hs:214–237</span>) — a deliberate contract, worth a dated note.</td>
+          </tr>
+          <tr>
+            <td>FastAPI/async rules: sync DBOS calls raise inside a running loop; use <span class="mono">_async</span> variants; launch from lifespan or main.</td>
+            <td><span class="badge b-na">N/A</span></td>
+            <td><span class="badge b-na">no counterpart</span></td>
+            <td>No event loop or import-time launch in Haskell; the thread model is the engine's own.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="workflow">
+    <h2>Workflow · CRITICAL</h2>
+    <p class="sub">workflow-constraints / background / timeout / determinism / control / introspection / attributes. The in-step refusals and deadline machinery are compile-time or ADT-pinned; the one bug is the empty first-wait mirror (B3).</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Constraint</th><th>Enforcement</th><th>Verdict</th><th>Evidence</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Never start a workflow from inside a step.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">InsideStep "starting a workflow"</span> before anything is written (<span class="mono">Workflow.hs:712, 725</span>); capture tests refuse the degraded shape too.</td>
+          </tr>
+          <tr>
+            <td>Never call <span class="mono">recv</span> from a step.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">InsideStep "recv"</span> (<span class="mono">Message.hs:166</span>).</td>
+          </tr>
+          <tr>
+            <td>Never call <span class="mono">set_event</span> from outside a workflow (steps included).</td>
+            <td><span class="badge b-ok">CT+RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>No workflow-less signature exists; a step placement is refused (<span class="mono">InsideStep "set_event"</span>, <span class="mono">Event.hs:53</span>).</td>
+          </tr>
+          <tr>
+            <td>Do not modify global state from workflows/steps (determinism sibling).</td>
+            <td><span class="badge b-na">discipline</span></td>
+            <td><span class="badge b-ok">documented</span></td>
+            <td>Not type-encodable; replay correctness rests on step-recorded non-determinism (below).</td>
+          </tr>
+          <tr>
+            <td>Do not use threads to start workflows; use handles (start/retrieve) and <span class="mono">wait_first</span>.</td>
+            <td><span class="badge b-ok">CT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Starts return handles and spawn through the engine's tracked spawner (<span class="mono">Local</span> provenance); registering a raw thread as a workflow has no API term.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">wait_first</span> over a non-empty handle set; empty raises; poll interval configurable.</td>
+            <td><span class="badge b-bug">RT (live only)</span></td>
+            <td><span class="badge b-bug">B3</span></td>
+            <td>Live refuses (<span class="mono">Backend.hs:2596</span>); mem hangs, mock fabricates (<span class="mono">IOSim.hs:1250, 186</span>). In-workflow <span class="mono">selectWorkflow</span> records its refusal correctly (<span class="mono">Wait.hs:104–113</span>).</td>
+          </tr>
+          <tr>
+            <td>Timeouts: start-to-completion, durable, cancel at the next step boundary, all children cancelled; queue wait excluded.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Deadline inheritance/replacement/decline cases (<span class="mono">WorkflowCases.hs:1324–1506</span>); delay stamps and re-enqueue guarded on DELAYED (<span class="mono">Statements.hs:1964–1972</span>); timeout sums make zero/absent distinctions total.</td>
+          </tr>
+          <tr>
+            <td>Determinism: same steps, same order; non-determinism lives in steps.</td>
+            <td><span class="badge b-na">discipline</span></td>
+            <td><span class="badge b-ok">documented</span></td>
+            <td>Replay reads recorded outcomes back (step outputs, select winners, fork points); divergence surfaces as <span class="mono">UnexpectedStep</span> rather than silently re-running.</td>
+          </tr>
+          <tr>
+            <td>Cancel at the next step; <span class="mono">cancel_children</span> opt-in; queued workflows removed from the queue.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">cancelWorkflows includeChildren</span> engine + client parity; queue removal and PENDING→CANCELLED transitions pinned in Management/Client cases.</td>
+          </tr>
+          <tr>
+            <td>Resume from the last completed step; enqueued resumes bypass the queue.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">resumeWorkflows</span> with queue-bypass in the same slice as rewind; refusal shapes pinned.</td>
+          </tr>
+          <tr>
+            <td>Fork from a step; target application version; invalid steps/options refused.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">forkWorkflows</span>/<span class="mono">forkFrom</span> with shared <span class="mono">forkProblems</span> validation (engine <span class="mono">InvalidArgument</span>, backends <span class="mono">InvalidInput</span> as defense in depth).</td>
+          </tr>
+          <tr>
+            <td>Rewind: terminal-only, in place (same ID), discards steps ≥ start_step, restores events, deletes consumed messages and datasource checkpoints (engine only; client keeps them).</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Landed in <span class="mono">ad906e0</span>: engine singles + in-workflow form + client (no checkpoint drop), sim mirror with event-history tracking; Rust <span class="mono">rewind</span> suite 13/13.</td>
+          </tr>
+          <tr>
+            <td>Attributes: recorded at creation, not inherited by children, replace-not-merge, update-in-workflow recorded as a step; attributes filtering Postgres-only.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>"Its own, inherits nothing" case (<span class="mono">WorkflowCases.hs:755</span>); <span class="mono">DBOS.update_workflow_attributes</span> recorded step name; filter field <span class="mono">workflowFilterAttributes</span>.</td>
+          </tr>
+          <tr>
+            <td>Introspection: filters/status values/load flags; step listing; <span class="mono">queues_only</span>.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">WorkflowFilter</span> carries ids/status/name/version/fork/parent/user/queue/prefix/executor/time bounds/attributes/schedule names/queues-only; <span class="mono">listWorkflowSteps</span> returns the oracle fields.</td>
+          </tr>
+          <tr>
+            <td>Listing queries bounded by a statement timeout (Postgres).</td>
+            <td><span class="badge b-gap">absent</span></td>
+            <td><span class="badge b-gap">G6</span></td>
+            <td>Same Python-only item as the lifecycle table; record the decision.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="step">
+    <h2>Step · HIGH</h2>
+    <p class="sub">step-basics / step-retries / step-transactions. Retry defaults are exact Rust parity; the datasource seam is the port's own design with the oracle-confirmed shape.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Constraint</th><th>Enforcement</th><th>Verdict</th><th>Evidence</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>External/side-effecting operations belong in steps; results are checkpointed for recovery.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Step runner records output/error rows; replay reads them back; trace events pin run vs replay (<span class="mono">StepSim</span>).</td>
+          </tr>
+          <tr>
+            <td>Inputs and outputs must be serializable.</td>
+            <td><span class="badge b-ok">CT+RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">DurableError</span> bounds on registered bodies; codec failures surface typed at the checkpoint (<span class="mono">Serialization.hs</span>, <span class="mono">CodecError</span> cases).</td>
+          </tr>
+          <tr>
+            <td>Steps should not modify global state.</td>
+            <td><span class="badge b-na">discipline</span></td>
+            <td><span class="badge b-ok">documented</span></td>
+            <td>Same as the workflow globals rule.</td>
+          </tr>
+          <tr>
+            <td>Non-negative durations (timeouts, delays) by construction.</td>
+            <td><span class="badge b-ok">CT (leaky)</span></td>
+            <td><span class="badge b-gap">G1</span></td>
+            <td>Smart constructors reject negatives (<span class="mono">Types.hs:1683–1687</span>), but the raw constructor is exported at the facade (<span class="mono">Transact.hs:188</span>).</td>
+          </tr>
+          <tr>
+            <td>Retries configurable; defaults match the oracle (attempts, interval, backoff, cap).</td>
+            <td><span class="badge b-ok">CT+RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Port defaults <span class="mono">maxAttempts=1, interval=1s, backoffRate=2.0, maxInterval=3600s</span> (<span class="mono">Step.hs:273–277</span>) equal Rust <span class="mono">step.rs:122–125</span>; <span class="mono">StepRetryTest</span> pins retry/backoff/exhaustion rows.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">should_retry</span> predicate; exhaustion raises a max-retries error to the workflow.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Typed predicate in <span class="mono">StepOptions e</span>; exhaustion outcome recorded and replayed; exact Rust parity per the same suite.</td>
+          </tr>
+          <tr>
+            <td>Step timeouts: per attempt, checkpointed on timeout; every-attempt-timeout surfaces as exhaustion; async-only in Python.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Port keeps the timeout on the attempt and records the failure (<span class="mono">StepTimeout</span>); the async-only restriction is a Python language shape, N/A here.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">preemptible</span> async steps cancel mid-execution.</td>
+            <td><span class="badge b-na">N/A</span></td>
+            <td><span class="badge b-na">shape</span></td>
+            <td>No sync/async split; cancellation is a thread abort at the engine's boundary with preemption events mirrored from the oracle sweep.</td>
+          </tr>
+          <tr>
+            <td>Datasources are created before launch; wrong-kind decoration raises at definition time.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Datasource registry freezes at launch, thaws on failed launch/shutdown; registration after launch refused (<span class="mono">Datasource.Registry</span> cases).</td>
+          </tr>
+          <tr>
+            <td>Isolation: Python's three levels, <span class="mono">SERIALIZABLE</span> default.</td>
+            <td><span class="badge b-ok">CT+RT</span></td>
+            <td><span class="badge b-note">G7 note</span></td>
+            <td>Code default <span class="mono">Serializable</span> is correct per Python; comment overclaims "both oracles" and ADR-0021 still says <span class="mono">ReadCommitted</span> (<span class="mono">Datasource.hs:84–89</span>; ADR:48).</td>
+          </tr>
+          <tr>
+            <td><span class="mono">sql_session</span> only inside a transaction; undecorated functions via <span class="mono">run_tx_step</span>.</td>
+            <td><span class="badge b-ok">CT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Opaque <span class="mono">Tx</span> is only ever handed to the body; <span class="mono">runTxStep</span>/<span class="mono">runTxOutside</span> take the config explicitly.</td>
+          </tr>
+          <tr>
+            <td>Exactly-once database execution within a workflow; rewind deletes datasource checkpoints.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Single-commit attempt with conflict adopt (<span class="mono">runTxStep</span>); engine rewind drops checkpoints, client rewind keeps them (<span class="mono">ad906e0</span>).</td>
+          </tr>
+          <tr>
+            <td><span class="mono">@DBOS.transaction</span> / <span class="mono">DBOS.sql_session</span> removed in 3.0.</td>
+            <td><span class="badge b-na">N/A</span></td>
+            <td><span class="badge b-na">no counterpart</span></td>
+            <td>The port is 3.0-shaped; no legacy names exist.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="queue">
+    <h2>Queue · HIGH</h2>
+    <p class="sub">queue-basics / concurrency / deduplication / delay / listening / management / partitioning / rate-limiting. Two bugs (B1, B2) are validation divergences; the runtime scheduling machinery is oracle-parity.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Constraint</th><th>Enforcement</th><th>Verdict</th><th>Evidence</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Register after launch; config persists in the system DB; enqueue on an unregistered queue stays ENQUEUED until registration.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">registerQueue</span> requires the executor (post-launch write); never-registered dequeue case pinned in QueueTest.</td>
+          </tr>
+          <tr>
+            <td>A queue is owned by the application that registers it; only that app dequeues; names are unique system-wide.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>App-scoped claims on both backends; the cross-application claim race is pinned deterministically in <span class="mono">QueueTestSim</span>.</td>
+          </tr>
+          <tr>
+            <td>Names starting with <span class="mono">_dbos_</span> are reserved.</td>
+            <td><span class="badge b-note">RT (narrower)</span></td>
+            <td><span class="badge b-note">G4</span></td>
+            <td>Exact internal name refused (<span class="mono">Queue.hs:366–374</span>) matching Rust (<span class="mono">sysdb/mod.rs:21</span>); Python reserves the prefix (<span class="mono">_queue.py:58</span>). Recorded divergence.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">on_conflict</span>: <span class="mono">update_if_latest_version</span> (default) / <span class="mono">always_update</span> / <span class="mono">never_update</span>; legacy-flagged rows refused updates.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">QueueConflict</span> + version-gated resolve; legacy row refusal names the deprecated flag; re-registration cases pinned.</td>
+          </tr>
+          <tr>
+            <td>Priority: always on, lower runs first, absent runs first, same-priority FIFO, range 1..int32 max.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Sentinel 0 for absent; SQL orders <span class="mono">priority asc, created_at asc</span> (<span class="mono">Backend.hs:686</span>); ordering cases over a pre-registration backlog.</td>
+          </tr>
+          <tr>
+            <td>Worker/global concurrency bounds (<span class="mono">worker ≤ fleet</span>, pending counts to the global limit).</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">ordered</span> checks in <span class="mono">validateQueueOptions</span> (<span class="mono">Queue.hs:242–253</span>); mid-flight limit updates pinned.</td>
+          </tr>
+          <tr>
+            <td>The deprecated <span class="mono">concurrency</span> alias and <span class="mono">global_concurrency</span> are mutually exclusive (Python).</td>
+            <td><span class="badge b-bug">RT (missing)</span></td>
+            <td><span class="badge b-bug">B2</span></td>
+            <td>Explicit-wins with no both-set refusal (<span class="mono">Queue.hs:187–188</span>); Python raises (<span class="mono">_queue.py:148–151</span>).</td>
+          </tr>
+          <tr>
+            <td>Limiter shape: limit ≥ 1, period &gt; 0, both keys present.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">rate</span> checks for both spellings (<span class="mono">Queue.hs:263–269</span>); zero-period and zero-limit rows pinned.</td>
+          </tr>
+          <tr>
+            <td>Partition bounds: per-partition ≤ queue-wide counterparts; partition rate windows are <em>not</em> cross-compared.</td>
+            <td><span class="badge b-bug">RT (over-strict)</span></td>
+            <td><span class="badge b-bug">B1</span></td>
+            <td>Port adds a cross-multiplied rate comparison (<span class="mono">Queue.hs:271–277</span>) Rust explicitly declines (<span class="mono">queue.rs:455–461</span>).</td>
+          </tr>
+          <tr>
+            <td>Deduplication: one active per ID per queue; released on completion; unsupported on partitioned queues.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Admission + join-tail cases; dedup-on-partitioned refusal; key reuse after completion pinned.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">duplication_policy="return-existing"</span>: requires a queue + dedup id, returns the original handle, arguments discarded.</td>
+            <td><span class="badge b-ok">CT+RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Sum type (<span class="mono">DuplicationPolicy</span>) with exhaustive rules; requires-shape validation before anything is written.</td>
+          </tr>
+          <tr>
+            <td>Delay: durable DELAYED status; <span class="mono">set_workflow_delay</span> with exactly one of relative/absolute; DELAYED-only no-op otherwise.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">WorkflowDelay</span> sum (relative/absolute/absent); guarded update (<span class="mono">Statements.hs:1964–1972</span>); shared in-workflow case with the recorded <span class="mono">DBOS.set_workflow_delay</span> step.</td>
+          </tr>
+          <tr>
+            <td>Un-keyed workflows on a partitioned queue stay ENQUEUED; setting a partition limit partitions; clearing un-partitions.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td>Per-partition and un-partition cases; sentinel handling in the sweep.</td>
+          </tr>
+          <tr>
+            <td><span class="mono">listen_queues</span> scope (see lifecycle).</td>
+            <td><span class="badge b-ok">CT+RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">configListenQueues</span> + dequeue filter; still enqueues to any queue.</td>
+          </tr>
+          <tr>
+            <td>Runtime management (executor): retrieve/list/delete, <span class="mono">set_*</span> reconfigure, delete no-op, register-overwrite warning.</td>
+            <td><span class="badge b-ok">RT</span></td>
+            <td><span class="badge b-ok">sound</span></td>
+            <td><span class="mono">updateQueue</span>/<span class="mono">deleteQueue</span>/<span class="mono">listQueues</span> with <span class="mono">Change</span> semantics; clearing all partition limits un-partitions.</td>
+          </tr>
+          <tr>
+            <td>Client surface: <span class="mono">register_queue</span> (default <span class="mono">always_update</span>; refuses <span class="mono">update_if_latest_version</span>), <span class="mono">retrieve_queue</span>, <span class="mono">list_queues</span>, <span class="mono">delete_queue</span>.</td>
+            <td><span class="badge b-gap">absent</span></td>
+            <td><span class="badge b-gap">G2</span></td>
+            <td>Only <span class="mono">clientListQueues</span> exists; the refusal must ride <span class="mono">ErrorConfig</span> per Rust <span class="mono">queue.rs:640–660</span>.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="order">
+    <h2>Recommended fix order</h2>
+    <p class="sub">Smallest first, red-first where a test pins the wrong behavior. The actions are mirrored in <span class="mono">TODO.md</span>.</p>
+    <ol class="order">
+      <li><strong>B1 + B2</strong> — queue validation: drop the rate cross-check, add the both-spellings refusal, flip the three pinning rows. One slice, both channels exercised by the same suite.</li>
+      <li><strong>B3 (+ the shared empty wait case from G5)</strong> — align <span class="mono">MemSystemDB</span> with live, annotate the mock pin, add executor-level wait cases. Closes the last sim/live mirror divergence known.</li>
+      <li><strong>G1</strong> — export <span class="mono">Duration</span> abstract from the facade. One-line surface change; no behavior.</li>
+      <li><strong>Dated notes: G4, G6, G7</strong> — record the reserved-prefix divergence, the Python-only lifecycle items, and the isolation doc drift. No behavior.</li>
+      <li><strong>G3 wiring decision</strong> — wire <span class="mono">configMigrate</span>/<span class="mono">configUseListenNotify</span> semantics or mark them deliberately inert.</li>
+      <li><strong>G2 client slices</strong> — queue CRUD + set_*, wait_first, attributes/delay, enqueue_in_transaction, list_queued_workflows, read_stream; each its own commit with the Rust client as the shape oracle.</li>
+      <li><strong>Stack-review follow-ups</strong> (from the code review of the uncommitted 19-file stack):
+        <ul class="tight">
+          <li><span class="mono">R1</span> — empty input + no caller should return <span class="mono">Ok</span> before option validation (Rust <span class="mono">postgres.rs:4152–4160</span>); the port's blanket <span class="mono">checkForkArgs</span> refuses (<span class="mono">Management.hs:192–217</span>).</li>
+          <li><span class="mono">R2</span> — the <span class="mono">Management.hs:~216</span> comment "every engine entry point" overclaims: client entries call <span class="mono">SystemDB.forkWorkflows</span> directly.</li>
+          <li><span class="mono">R3</span> — <span class="mono">coghcid.sh</span> moves out of the repo root (scratch space, per guardrails).</li>
+        </ul>
+      </li>
+      <li><strong>Close-out</strong> — full <span class="mono">cabal test all</span> + direct psql mirror against <span class="mono">$DBOS_DATABASE_URL</span> with the watcher idle; then <span class="mono">/review</span>.</li>
+    </ol>
+  </section>
+
+  <section id="method">
+    <h2>Method and provenance</h2>
+    <dl class="kv">
+      <dt>Constraint sources</dt>
+      <dd>The 17 reference files behind Lifecycle/Workflow/Step/Queue in <span class="mono">~/dev/dbos-agent-skills/skills/dbos-python/references/</span> (client-setup/client-enqueue consulted for the client-surface rows).</dd>
+      <dt>Oracle rule</dt>
+      <dd>Rust <span class="mono">~/dev/dbos-transact-rust</span> pinned to v0.5.0 semantics is the API/ADT oracle; Python <span class="mono">~/dev/dbos-transact-py</span> is the behavior spec where Rust is silent; disagreements recorded as dated notes.</dd>
+      <dt>Port state</dt>
+      <dd><span class="mono">ad906e0</span> + the uncommitted 19-file stack (rewind follow-ups, client latest-version scoping, plain-fork validation, shared management cases). Citations re-verified 2026-10-16 against this working tree.</dd>
+      <dt>What the audit did not do</dt>
+      <dd>No code was changed; no suite was run for this record. Slice gates stay as recorded in <span class="mono">CHANGELOG.md</span> and the plan.</dd>
+    </dl>
+    <footer class="note">dbos-transact-hs · constraint audit tables · saved 2026-10-16 · actions in TODO.md</footer>
+  </section>
+
+</main>
+</body>
+</html>

@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
 
 -- | Workflow management operations on the launched instance. Transactional
 -- validation and writes remain in the SystemDB class; this layer owns only
@@ -15,9 +15,14 @@ module DBOS.Transact.Management
     deleteWorkflowsInWorkflow,
     forkWorkflows,
     forkWorkflowsInWorkflow,
+    updateWorkflowAttributesInWorkflow,
     forkFrom,
     forkFromInWorkflow,
+    setWorkflowDelay,
+    setWorkflowDelayInWorkflow,
     checkRewindOptions,
+    checkForkArgs,
+    checkForkFromArgs,
     rewindWorkflows,
     rewindWorkflowsInWorkflow,
     updateWorkflowAttributes,
@@ -29,14 +34,14 @@ module DBOS.Transact.Management
 where
 
 import DBOS.Prelude
-import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Fork, ForkOptions, ForkPoint, QueueName (..), RewindOptions (..), StepRecord, WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionsValidate, forkValidate, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, resumeStepName, rewindOptionProblems, rewindStepName, sysRewindOptions)
+import DBOS.SystemDB.Types (Fork (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), StepRecord, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
 import DBOS.Transact.Connection (Connection (..), withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, stepStatusId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
-import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
+import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
+import System.Log.FastLogger (ToLogStr (..))
 
 -- | Operator-action events: the management surface's announcements.
 -- Rendered lines keep the Rust @tracing!@ message bodies with their
@@ -186,13 +191,50 @@ deleteWorkflowsInWorkflow wctx workflowIds deleteChildren =
 
 forkWorkflows :: Monad m
               => Connection m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
-forkWorkflows conn forks options = do
-  result <- withConnection conn (\db -> SystemDB.forkWorkflows db forks options Nothing)
-  case result of
-    Left err -> pure (Left err)
-    Right forked -> do
-      announceFork conn forked
-      pure (Right forked)
+forkWorkflows conn forks options = case checkForkArgs forks options of
+  Left err -> pure (Left err)
+  Right () -> do
+    result <- withConnection conn (\db -> SystemDB.forkWorkflows db forks options Nothing)
+    case result of
+      Left err -> pure (Left err)
+      Right forked -> do
+        announceFork conn forked
+        pure (Right forked)
+
+-- | The engine-layer fork validation: the same rules as the system
+-- database, reported as an engine refusal (Rust @InvalidArgument@) rather
+-- than a database one. Runs before anything runs on the launched-instance
+-- entries, plain and in-workflow; the client calls the backends directly
+-- and reports their sysdb refusal. The backends keep their own refusal as
+-- defense in depth.
+-- An empty fork list is an immediate success with no validation, as the
+-- oracle returns @Ok@ before validating options and the backends return
+-- an empty fork list the same way.
+checkForkArgs :: [Fork] -> ForkOptions -> Either (TransactError.Error e) ()
+checkForkArgs [] _ = Right ()
+checkForkArgs forks options = case problems of
+  (field, detail) : _ -> Left (TransactError.InvalidArgument "fork workflows" (field <> " " <> detail))
+  []                  -> Right ()
+  where
+    problems = [problem | Just problem <- forkOptionProblems options : map forkProblems forks]
+
+-- | The engine-layer fork-from validation: options plus the per-source
+-- checks the oracle makes by validating a synthesized fork per id — three
+-- of the four points resolve inside the transaction, so only the stated
+-- step and the ids can be checked up front. Same channel as every engine
+-- refusal. An empty id list is an immediate success with no validation,
+-- matching the oracle and the backends.
+checkForkFromArgs :: [WorkflowId] -> ForkPoint -> ForkOptions -> Either (TransactError.Error e) ()
+checkForkFromArgs [] _ _ = Right ()
+checkForkFromArgs workflowIds point options = case problems of
+  (field, detail) : _ -> Left (TransactError.InvalidArgument "fork from workflows" (field <> " " <> detail))
+  []                  -> Right ()
+  where
+    givenStep = case point of
+      ForkStep step -> step
+      _             -> 0
+    synthesized (WorkflowId source) = Fork source Nothing givenStep
+    problems = [problem | Just problem <- forkOptionProblems options : map (forkProblems . synthesized) workflowIds]
 
 -- | Forks workflows as a step of the calling workflow: a fork generates a
 -- new id, so a replay without this checkpoint would write a second fork
@@ -202,10 +244,9 @@ forkWorkflows conn forks options = do
 forkWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
                         => WorkflowCtx exec m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkWorkflowsInWorkflow wctx forks options =
-  case (forkOptionsValidate options, traverse forkValidate forks) of
-    (Left err, _) -> pure (Left (TransactError.SystemDatabase err))
-    (_, Left err) -> pure (Left (TransactError.SystemDatabase err))
-    (Right (), Right _) ->
+  case checkForkArgs forks options of
+    Left err -> pure (Left err)
+    Right () ->
       runStepWith
         stepOptionsDefault
         wctx
@@ -216,13 +257,15 @@ forkWorkflowsInWorkflow wctx forks options =
 
 forkFrom :: Monad m
          => Connection m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
-forkFrom conn workflowIds point options = do
-  result <- withConnection conn (\db -> SystemDB.forkFrom db workflowIds point options Nothing)
-  case result of
-    Left err -> pure (Left err)
-    Right forked -> do
-      announceFork conn forked
-      pure (Right forked)
+forkFrom conn workflowIds point options = case checkForkFromArgs workflowIds point options of
+  Left err -> pure (Left err)
+  Right () -> do
+    result <- withConnection conn (\db -> SystemDB.forkFrom db workflowIds point options Nothing)
+    case result of
+      Left err -> pure (Left err)
+      Right forked -> do
+        announceFork conn forked
+        pure (Right forked)
 
 -- | The fork announcement shared by both fork paths, mirroring
 -- @fork_all@: one id names its fork, any other count — including zero —
@@ -230,7 +273,7 @@ forkFrom conn workflowIds point options = do
 announceFork :: Monad m => Connection m -> [WorkflowId] -> m ()
 announceFork conn forked = case forked of
   [WorkflowId only] -> runTracer conn.connTracer (WorkflowForked only)
-  many -> runTracer conn.connTracer (WorkflowsForked (length many))
+  many              -> runTracer conn.connTracer (WorkflowsForked (length many))
 
 -- | The engine-layer options check: the same rules as the system
 -- database, reported as an engine refusal (Rust @InvalidArgument@) rather
@@ -239,7 +282,7 @@ announceFork conn forked = case forked of
 -- defense in depth.
 checkRewindOptions :: RewindOptions -> Either (TransactError.Error e) ()
 checkRewindOptions options = case rewindOptionProblems options of
-  Nothing -> Right ()
+  Nothing              -> Right ()
   Just (field, detail) -> Left (TransactError.InvalidArgument "rewind a workflow" (field <> " " <> detail))
 
 -- | Rewinds a workflow as the operator asked: options are refused before
@@ -288,14 +331,43 @@ rewindWorkflowsInWorkflow wctx target options =
 forkFromInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
                    => WorkflowCtx exec m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFromInWorkflow wctx workflowIds point options =
-  case forkOptionsValidate options of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+  case checkForkFromArgs workflowIds point options of
+    Left err -> pure (Left err)
     Right () ->
       runStepWith
         stepOptionsDefault
         wctx
         forkStepName
         (\_ -> forkFrom conn workflowIds point options)
+  where
+    conn = wctx.wctxConn
+
+-- | Moves a delayed workflow's release: brought forward to now, the
+-- supervisor releases it on its next pass. Mirrors Rust
+-- @Connection::set_workflow_delay@: phrased as the request, not the
+-- effect — the row may already be released, so this announces
+-- unconditionally.
+setWorkflowDelay :: Monad m
+                 => Connection m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+setWorkflowDelay conn workflowId delay = do
+  result <- withConnection conn (\db -> SystemDB.setWorkflowDelay db workflowId delay Nothing)
+  case result of
+    Left err -> pure (Left err)
+    Right () -> do
+      let WorkflowId workflowText = workflowId
+      runTracer conn.connTracer (WorkflowDelayMoveAsked workflowText)
+      pure (Right ())
+
+-- | Moves a delayed workflow's release as a step of the calling workflow.
+-- Same leaf rule as every in-workflow call.
+setWorkflowDelayInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                           => WorkflowCtx exec m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+setWorkflowDelayInWorkflow wctx workflowId delay =
+  runStepWith
+    stepOptionsDefault
+    wctx
+    setWorkflowDelayStepName
+    (\_ -> setWorkflowDelay conn workflowId delay)
   where
     conn = wctx.wctxConn
 
@@ -315,6 +387,25 @@ updateWorkflowAttributes conn workflowId attributes = do
       let WorkflowId workflowText = workflowId
       runTracer conn.connTracer (WorkflowAttributesReplaceAsked workflowText)
       pure (Right ())
+
+-- | Replaces a workflow's attributes as a step of the calling workflow, or
+-- clears them when given 'Nothing'. The encoding happens before the step id
+-- is taken — attributes that cannot be encoded are a call that never
+-- happens — as the oracle encodes before it places. Same leaf rule as every
+-- in-workflow call.
+updateWorkflowAttributesInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                                   => WorkflowCtx exec m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+updateWorkflowAttributesInWorkflow wctx workflowId attributes =
+  case validateAttributes attributes of
+    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Right () ->
+      runStepWith
+        stepOptionsDefault
+        wctx
+        updateWorkflowAttributesStepName
+        (\_ -> updateWorkflowAttributes conn workflowId attributes)
+  where
+    conn = wctx.wctxConn
 
 -- | Reads the workflows matching a filter. Mirrors Rust
 -- @DBOS::list_workflows@ outside a workflow, where the call is plain: every

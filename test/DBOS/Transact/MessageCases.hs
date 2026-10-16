@@ -25,6 +25,7 @@ module DBOS.Transact.MessageCases
     scenarioTopics,
     scenarioReplayTakes,
     scenarioStepSend,
+    scenarioRecvTimeoutSteps,
     scenarioSendNameMismatch,
     scenarioCapturedSend,
     scenarioCapturedRecv,
@@ -40,6 +41,7 @@ module DBOS.Transact.MessageCases
     checkTopics,
     checkReplayTakes,
     checkStepSend,
+    checkRecvTimeoutSteps,
     checkSendNameMismatch,
     checkCapturedSend,
     checkCapturedRecv,
@@ -51,7 +53,7 @@ where
 
 import DBOS.Prelude
 import Data.List (nub)
-import DBOS.SystemDB (StepRecord (..), WorkflowId (..), sendBulkStepName, sendStepName)
+import DBOS.SystemDB (StepRecord (..), WorkflowId (..), recvStepName, sendBulkStepName, sendStepName, sleepStepName)
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact
   ( EngineOnly,
@@ -203,6 +205,20 @@ scenarioSendNameMismatch fx = do
   refused <- mfFreshRun fx source $ \sender -> send sender destination (Just (Topic "approval")) Nothing ("ping" :: Text)
   count <- fx.mfNotifyCount destination
   pure (refused, count)
+
+-- | A timed-out recv records both its steps: the recv step with no output
+-- (the absence) at the first id, and the deadline sleep step at the next.
+-- Both oracles record the deadline unconditionally, so a replay that waited
+-- has the same remainder left rather than the full duration. Returns the
+-- recv verdict with the two steps' outputs and the sleep step's name.
+scenarioRecvTimeoutSteps :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+                         => MessageFixture m -> m (Either (Error EngineOnly) (Maybe Text), Maybe (Maybe Text), Maybe (Maybe Text), Maybe Text)
+scenarioRecvTimeoutSteps fx = do
+  (source, _) <- fx.mfFreshPair "recv-timeout-steps"
+  timedOut <- mfFreshRun fx source $ \receiver -> recv receiver (Just (Topic "quiet")) (millisDuration 5)
+  recvStep <- fx.mfCheckStep source recvStepName 0
+  sleepStep <- fx.mfCheckStep source sleepStepName 1
+  pure (timedOut, (.stepRecordOutput) <$> recvStep, (.stepRecordOutput) <$> sleepStep, (.stepRecordStepName) <$> sleepStep)
 
 -- | A send through a captured parent is plain and moves no id.
 scenarioCapturedSend :: forall m. (MonadSTM m, MonadCatch m)
@@ -361,6 +377,17 @@ checkReplayTakes (firstSend, firstReceive, secondSend, replayed, secondReceive, 
 checkStepSend :: Either (Error EngineOnly) Text -> Either String ()
 checkStepSend outcome =
   unless (outcome == Right "sent recv") $ Left ("expected the probe line, got: " <> show outcome)
+
+-- | The recv timed out with no output recorded, and the deadline sleep step
+-- stands beside it carrying the wake instant.
+checkRecvTimeoutSteps :: (Either (Error EngineOnly) (Maybe Text), Maybe (Maybe Text), Maybe (Maybe Text), Maybe Text) -> Either String ()
+checkRecvTimeoutSteps (timedOut, recvOutput, sleepOutput, sleepName) = do
+  unless (timedOut == Right Nothing) $ Left ("expected the timeout absence, got: " <> show timedOut)
+  unless (recvOutput == Just Nothing) $ Left ("expected the recv step to record no output, got: " <> show recvOutput)
+  unless (sleepName == Just "DBOS.sleep") $ Left ("expected the deadline step beside the recv, got: " <> show sleepName)
+  case sleepOutput of
+    Just (Just _) -> pure ()
+    other -> Left ("expected the deadline step to carry its wake instant, got: " <> show other)
 
 -- | The refusal names the recorded step, and nothing was delivered.
 checkSendNameMismatch :: (Either (Error EngineOnly) (), Int) -> Either String ()

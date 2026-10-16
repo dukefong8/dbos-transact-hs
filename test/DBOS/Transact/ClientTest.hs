@@ -34,6 +34,7 @@ import DBOS.Transact
     Environment (..),
     Error (..),
     IdempotencyKey (..),
+    Queue (..),
     QueueConflict (..),
     WorkflowCtx,
     SerializedWorkflowValue (..),
@@ -45,7 +46,9 @@ import DBOS.Transact
     clientDeleteWorkflows,
     clientForkWorkflows,
     clientGetEvent,
+    clientLatestApplicationVersion,
     clientListApplicationVersions,
+    clientListQueues,
     clientListWorkflows,
     clientPromoteVersion,
     clientResumeWorkflows,
@@ -851,6 +854,81 @@ tests =
               case rolled of
                 Left err -> fail (show err)
                 Right versions -> assertAppLatest appName versionA versions,
+      testCase "a client reads the latest version of its own application" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appA = "hs-l2-client-latest-a-" <> Text.take 12 suffix
+            appB = "hs-l2-client-latest-b-" <> Text.take 12 suffix
+            versionA = "hs-l2-client-latest-va-" <> suffix
+            versionB = "hs-l2-client-latest-vb-" <> suffix
+        config0 <- configFromEnv appA
+        let configA = config0 {configAppVersion = Just versionA, configExecutorId = Just ("exec-latest-a-" <> suffix)}
+        configB0 <- configFromEnv appB
+        let configB = configB0 {configAppVersion = Just versionB, configExecutorId = Just ("exec-latest-b-" <> suffix)}
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfigA = (clientConfig0 :: ClientConfig) {appName = Just appA}
+            clientConfigB = (clientConfig0 :: ClientConfig) {appName = Just appB}
+        bracket (newDBOS configA) shutdown $ \dbosA ->
+          bracket (newDBOS configB) shutdown $ \dbosB -> do
+            _ <- launchClientExec dbosA isolatedEnvironment
+            -- B stamps later, so a global read would name it: the scoped
+            -- read must still name each application's own version.
+            threadDelay 100000
+            _ <- launchClientExec dbosB isolatedEnvironment
+            bracket (connectOrFail clientConfigA) closeClient $ \clientA -> do
+              latestA <- clientLatestApplicationVersion clientA
+              case latestA of
+                Right (Just (VersionInfo {versionInfoName})) -> versionInfoName @?= versionA
+                other -> fail ("expected A's own latest " <> Text.unpack versionA <> ", got: " <> show other)
+            bracket (connectOrFail clientConfigB) closeClient $ \clientB -> do
+              latestB <- clientLatestApplicationVersion clientB
+              case latestB of
+                Right (Just (VersionInfo {versionInfoName})) -> versionInfoName @?= versionB
+                other -> fail ("expected B's own latest " <> Text.unpack versionB <> ", got: " <> show other),
+      testCase "a client lists its own application's queues" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appA = "hs-l2-client-queues-a-" <> Text.take 12 suffix
+            appB = "hs-l2-client-queues-b-" <> Text.take 12 suffix
+            queueA = "hs-l2-client-qa-" <> suffix
+            queueB = "hs-l2-client-qb-" <> suffix
+        config0 <- configFromEnv appA
+        let configA = config0 {configAppVersion = Just ("vqa-" <> suffix), configExecutorId = Just ("exec-qa-" <> suffix)}
+        configB0 <- configFromEnv appB
+        let configB = configB0 {configAppVersion = Just ("vqb-" <> suffix), configExecutorId = Just ("exec-qb-" <> suffix)}
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfigA = (clientConfig0 :: ClientConfig) {appName = Just appA}
+            clientConfigB = (clientConfig0 :: ClientConfig) {appName = Just appB}
+        bracket (newDBOS configA) shutdown $ \dbosA ->
+          bracket (newDBOS configB) shutdown $ \dbosB -> do
+            _ <- launchClientExec dbosA isolatedEnvironment
+            _ <- launchClientExec dbosB isolatedEnvironment
+            regA <- registerQueue dbosA queueA defaultQueueOptions AlwaysUpdate
+            case regA of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            regB <- registerQueue dbosB queueB defaultQueueOptions AlwaysUpdate
+            case regB of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            bracket (connectOrFail clientConfigA) closeClient $ \clientA -> do
+              listedA <- clientListQueues clientA
+              case listedA of
+                Right queues ->
+                  let names = [name | Queue {name} <- queues]
+                   in do
+                        assertBool ("expected A's queue listed, got: " <> show names) (queueA `elem` names)
+                        assertBool ("expected B's queue hidden, got: " <> show names) (queueB `notElem` names)
+                Left err -> fail (show err)
+            bracket (connectOrFail clientConfigB) closeClient $ \clientB -> do
+              listedB <- clientListQueues clientB
+              case listedB of
+                Right queues ->
+                  let names = [name | Queue {name} <- queues]
+                   in do
+                        assertBool ("expected B's queue listed, got: " <> show names) (queueB `elem` names)
+                        assertBool ("expected A's queue hidden, got: " <> show names) (queueA `notElem` names)
+                Left err -> fail (show err),
       testCase "a client lists workflows" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)

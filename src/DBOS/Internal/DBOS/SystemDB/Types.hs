@@ -150,7 +150,9 @@ module DBOS.SystemDB.Types
     defaultScheduleFilter,
     defaultWorkflowFilter,
     forkNew,
+    forkProblems,
     forkValidate,
+    forkOptionProblems,
     forkOptionsValidate,
     defaultForkOptions,
     RewindOptions (..),
@@ -1368,14 +1370,23 @@ forkNew source =
 
 -- | Rejects ids the schema cannot key on. Mirrors @Fork::validate@.
 forkValidate :: Fork -> Either Error ()
-forkValidate fork
+forkValidate fork = case forkProblems fork of
+  Nothing -> Right ()
+  Just (field, detail) -> Left (invalidInput field detail)
+
+-- | The first problem a fork carries, if any: the rules shared by the
+-- engine refusal (the management layer's @InvalidArgument@) and the
+-- system-database refusal below — so the two cannot disagree on what is
+-- invalid, only on how they report it. Mirrors @Fork::validate@.
+forkProblems :: Fork -> Maybe (Text, Text)
+forkProblems fork
   | Text.null fork.forkSourceId =
-      Left (invalidInput "source_id" "must not be empty")
+      Just ("source_id", "must not be empty")
   | fork.forkForkedId == Just "" =
-      Left (invalidInput "forked_id" "must be absent rather than empty")
+      Just ("forked_id", "must be absent rather than empty")
   | fork.forkStartStep < 0 =
-      Left (invalidInput "start_step" "must not be negative")
-  | otherwise = Right ()
+      Just ("start_step", "must not be negative")
+  | otherwise = Nothing
 
 -- | Which step a fork restarts from, when the caller wants it worked out
 -- rather than stated. 'Step' is prefixed because 'WrittenBy' owns the bare
@@ -1412,12 +1423,18 @@ defaultForkOptions =
 -- columns, plus the replacement map's own: one child named twice would
 -- match a copied step twice. Mirrors @ForkOptions::validate@.
 forkOptionsValidate :: ForkOptions -> Either Error ()
-forkOptionsValidate options =
+forkOptionsValidate options = case forkOptionProblems options of
+  Nothing -> Right ()
+  Just (field, detail) -> Left (invalidInput field detail)
+
+-- | The first problem the options carry, if any: the rules shared by the
+-- engine refusal and the system-database refusal below.
+forkOptionProblems :: ForkOptions -> Maybe (Text, Text)
+forkOptionProblems options =
   case findEmpty optionals of
-    Just field -> Left (invalidInput field "must be absent rather than empty")
+    Just field -> Just (field, "must be absent rather than empty")
     Nothing -> case options.forkOptionsTimeout of
-      Just timeout | durationIsZero timeout ->
-        Left (invalidInput "timeout" "must be absent rather than zero")
+      Just timeout | durationIsZero timeout -> Just ("timeout", "must be absent rather than zero")
       _ -> validateChildren options.forkOptionsReplacementChildren
   where
     optionals =
@@ -1430,12 +1447,12 @@ forkOptionsValidate options =
       Nothing         -> Nothing
     validateChildren children = go children []
       where
-        go [] _ = Right ()
+        go [] _ = Nothing
         go ((original, _) : rest) seen
           | Text.null original =
-              Left (invalidInput "replacement_children" "a replaced child id must not be empty")
+              Just ("replacement_children", "a replaced child id must not be empty")
           | original `elem` seen =
-              Left (invalidInput "replacement_children" (original <> " is replaced more than once"))
+              Just ("replacement_children", original <> " is replaced more than once")
           | otherwise = go rest (original : seen)
 
 -- | Where a rewound workflow re-runs. Mirrors Rust @RewindOptions@: the cut

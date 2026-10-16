@@ -18,7 +18,10 @@ import DBOS.SystemDB
     Debounce (..),
     DebounceRequest (..),
     EncodedValue (..),
+    Error (..),
     EventRecord (..),
+    Fork (..),
+    ForkOptions (..),
     ForkPoint (..),
     NewQueue (..),
     NewWorkflow (..),
@@ -36,6 +39,7 @@ import DBOS.SystemDB
     SerializedWorkflowValue (..),
     StepRecord (..),
     Submission (..),
+    SysRewindOptions (..),
     SystemDB (..),
     Timestamp (..),
     Topic (..),
@@ -405,6 +409,36 @@ memTests =
           mem <- newMemDB
           recv mem (WorkflowId "wf-m") 0 0 (Just "quiet") (millisDuration 5)
         result @?= Right Nothing,
+      testCase "a rewind clears the finished row's outcome with its steps" $ do
+        (before, rewound, row, steps) <- runMem $ do
+          mem <- newMemDB
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-rw") Nothing Fresh Nothing
+          _ <- orFailSim =<< recordStep mem (WorkflowId "wf-rw") 0 "DBOS.step" (OutcomeOutput (Just "\"one\"")) Nothing Nothing
+          _ <- orFailSim =<< recordWorkflowOutcome mem (WorkflowId "wf-rw") (OutcomeOutput (Just "\"done\""))
+          started <- orJustSim "the finished row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-rw")
+          done <- orFailSim =<< rewindWorkflow mem (WorkflowId "wf-rw") 0 (SysRewindOptions Nothing Nothing Nothing) Nothing
+          row <- orJustSim "the rewound row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-rw")
+          steps <- orFailSim =<< listSteps mem (WorkflowId "wf-rw") True Nothing Nothing Nothing
+          pure (started, done, row, steps)
+        before.workflowRecordStatus @?= Success
+        before.workflowRecordOutput @?= Just "\"done\""
+        rewound @?= ()
+        row.workflowRecordStatus @?= Enqueued
+        row.workflowRecordOutput @?= Nothing
+        row.workflowRecordError @?= Nothing
+        steps @?= [],
+      testCase "an invalid fork is refused before anything runs" $ do
+        (badOptions, badFork, badStep, badSource) <- runMem $ do
+          mem <- newMemDB
+          badOptions <- forkWorkflows mem [forkNew "wf-f"] (defaultForkOptions {forkOptionsQueueName = Just ""}) Nothing
+          badFork <- forkWorkflows mem [Fork "" Nothing 0] defaultForkOptions Nothing
+          badStep <- forkFrom mem [WorkflowId "wf-f"] (ForkStep (-1)) defaultForkOptions Nothing
+          badSource <- forkFrom mem [WorkflowId ""] (ForkStep 0) defaultForkOptions Nothing
+          pure (badOptions, badFork, badStep, badSource)
+        badOptions @?= Left (InvalidInput "queue_name" "must be absent rather than empty")
+        badFork @?= Left (InvalidInput "source_id" "must not be empty")
+        badStep @?= Left (InvalidInput "start_step" "must not be negative")
+        badSource @?= Left (InvalidInput "source_id" "must not be empty"),
       testCase "an event published after a getEvent parks is delivered" $ do
         result <- runMem $ do
           mem <- newMemDB

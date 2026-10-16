@@ -316,17 +316,7 @@ resumeWorkflows dbos workflowIds queueName = do
 setWorkflowDelay :: (MonadMVar m)
                  => DBOS m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 setWorkflowDelay dbos workflowId delay = do
-  withExecutor dbos "set a workflow delay" $ \executor -> do
-    result <- withConnection executor.conn (\db -> SystemDB.setWorkflowDelay db workflowId delay Nothing)
-    case result of
-      Left err -> pure (Left err)
-      -- Mirrors @set_workflow_delay@: phrased as the request, not the
-      -- effect — the row may already be released, so this announces
-      -- unconditionally.
-      Right () -> do
-        let WorkflowId workflowText = workflowId
-        runTracer executor.conn.connTracer (WorkflowDelayMoveAsked workflowText)
-        pure (Right ())
+  withExecutor dbos "set a workflow delay" $ \executor -> Management.setWorkflowDelay executor.conn workflowId delay
 
 deleteWorkflows :: (MonadMVar m)
                 => DBOS m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)

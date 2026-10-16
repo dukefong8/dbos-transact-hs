@@ -91,6 +91,8 @@ import DBOS.SystemDB
     dequeueSweepCap,
     durationAsMillis,
     durationSince,
+    forkOptionsValidate,
+    forkValidate,
     getEventStepName,
     invalidInput,
     getResultStepName,
@@ -724,11 +726,26 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     writeTVar db.memRows (foldr Map.delete rows [wid | WorkflowId wid <- ids])
     modifyTVar db.memSteps (Map.filterWithKey (\(wid, _) _ -> wid `notElem` [w | WorkflowId w <- ids]))
     pure (Right (fromIntegral gone))
-  forkWorkflows db forks options _ = memFork db [(fork.forkSourceId, fork.forkForkedId, fork.forkStartStep) | fork <- forks] options
-  forkFrom db ids point options _ = do
-    steps <- readTVarIO db.memSteps
-    memFork db [(source, Nothing, memStartStep point source steps) | WorkflowId source <- ids] options
+  forkWorkflows db forks options _
+    | null forks = pure (Right [])
+    | otherwise = case (forkOptionsValidate options, traverse forkValidate forks) of
+    (Left err, _) -> pure (Left err)
+    (_, Left err) -> pure (Left err)
+    (Right (), Right _) -> memFork db [(fork.forkSourceId, fork.forkForkedId, fork.forkStartStep) | fork <- forks] options
+  forkFrom db ids point options _
+    | null ids = pure (Right [])
+    | otherwise = case (forkOptionsValidate options, traverse (forkValidate . synthesized) sources) of
+    (Left err, _) -> pure (Left err)
+    (_, Left err) -> pure (Left err)
+    (Right (), Right _) -> do
+      steps <- readTVarIO db.memSteps
+      memFork db [(source, Nothing, memStartStep point source steps) | WorkflowId source <- ids] options
     where
+      sources = [source | WorkflowId source <- ids]
+      givenStep = case point of
+        ForkStep step -> step
+        _ -> 0
+      synthesized source = Fork source Nothing givenStep
       memStartStep (ForkStep step) _ _ = step
       -- Mirrors the SQL 'COALESCE(MAX ... FILTER (WHERE error IS NOT NULL),
       -- MAX ...)': the failed step, falling back to the last step.
@@ -831,28 +848,35 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   sendMessage db message serialization caller sendToForks = memSend db sendStepName [message] serialization caller sendToForks
   sendMessages db messages serialization caller sendToForks = memSend db sendBulkStepName messages serialization caller sendToForks
   -- A parked reader blocks on the messages TVar, so a send genuinely
-  -- wakes it; the engine's own duration bounds the wait, and a timeout
-  -- records the step with no output so a replay adopts the absence.
-  recv db wid stepId _timeoutStepId topic duration = do
+  -- wakes it; the engine's own duration bounds the wait. The deadline sleep
+  -- step is recorded before the wait, unconditionally like the live
+  -- checkpoint, so a replay that waited has the same remainder left; the
+  -- recv step with no output records the absence a timeout produced, so a
+  -- replay adopts it.
+  recv db wid stepId timeoutStepId topic duration = do
     let WorkflowId widText = wid
         storedTopic = fromMaybe nullTopicSentinel topic
     replayed <- atomically (Map.lookup (widText, stepId) <$> readTVar db.memSteps)
     case replayed of
       Just record -> pure (Right (memEncodedFromStep record))
       Nothing -> do
-        waited <- memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memTakeMessage db widText storedTopic))
-        case waited of
-          Just (uuid, value) -> do
-            memRecordRecvStep db wid stepId recvStepName (Just value)
-            atomically $ do
-              notifications <- readTVar db.memNotifications
-              writeTVar db.memNotifications (Map.adjust (map (markConsumed uuid)) widText notifications)
-              consumed <- readTVar db.memConsumedBy
-              writeTVar db.memConsumedBy (Map.insert (widText, uuid) stepId consumed)
-            pure (Right (Just value))
-          Nothing -> do
-            memRecordRecvStep db wid stepId recvStepName Nothing
-            pure (Right Nothing)
+        slept <- recordSleep db wid timeoutStepId duration
+        case slept of
+          Left err -> pure (Left err)
+          Right _ -> do
+            waited <- memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memTakeMessage db widText storedTopic))
+            case waited of
+              Just (uuid, value) -> do
+                memRecordRecvStep db wid stepId recvStepName (Just value)
+                atomically $ do
+                  notifications <- readTVar db.memNotifications
+                  writeTVar db.memNotifications (Map.adjust (map (markConsumed uuid)) widText notifications)
+                  consumed <- readTVar db.memConsumedBy
+                  writeTVar db.memConsumedBy (Map.insert (widText, uuid) stepId consumed)
+                pure (Right (Just value))
+              Nothing -> do
+                memRecordRecvStep db wid stepId recvStepName Nothing
+                pure (Right Nothing)
   writeStream db wid@(WorkflowId widText) stepId key value serialization writtenBy = do
     let stepName = if value == streamClosedSentinel && serialization == Just streamClosedSerialization then closeStreamStepName else writeStreamStepName
     replay <- case writtenBy of

@@ -109,9 +109,12 @@ import DBOS.Transact.ManagementCases
     checkForkTakesIdAndQueue,
     checkBulkCancelResume,
     checkBulkFork,
+    checkForkRefusals,
     checkForkPartitioned,
     checkAttributes,
+    checkAttributesInWorkflow,
     checkDelayRelease,
+    checkDelayReleaseInWorkflow,
     checkRewindRunsAgain,
     checkRewindRefusals,
     checkRewindUndoCut,
@@ -145,9 +148,12 @@ import DBOS.Transact.ManagementCases
     scenarioForkTakesIdAndQueue,
     scenarioBulkCancelResume,
     scenarioBulkFork,
+    scenarioForkRefusals,
     scenarioForkPartitioned,
     scenarioAttributes,
+    scenarioAttributesInWorkflow,
     scenarioDelayRelease,
+    scenarioDelayReleaseInWorkflow,
     scenarioRewindRunsAgain,
     scenarioRewindRefusals,
     scenarioRewindUndoCut,
@@ -217,6 +223,7 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "every completion clears the run's datasource checkpoints" scenarioCompletionClearsCheckpoints checkCompletionClearsCheckpoints,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an inline child clears its own datasource checkpoints on completion" scenarioChildClearsCheckpoints checkChildClearsCheckpoints,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "bulk forking hands back one new id per source, in order" scenarioBulkFork checkBulkFork,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "invalid forks are refused on the engine channel" scenarioForkRefusals checkForkRefusals,
       testCase "resuming onto a named queue through a full launch puts the workflow there" $
         withInstance "mgmt-resume-queue" $ \dbos suffix -> do
           let key = newWorkflowKey "queued"
@@ -245,7 +252,9 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a fork onto a partitioned queue carries the key it is given" scenarioForkPartitioned checkForkPartitioned,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from the last failure restarts at the failed step" scenarioForkFromFailure checkForkFromFailure,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "attributes are replaced and can be searched" scenarioAttributes checkAttributes,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow replacing another attributes as its step stores the replacement" scenarioAttributesInWorkflow checkAttributesInWorkflow,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a delayed workflow can be released sooner" scenarioDelayRelease checkDelayRelease,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow moving another delay as its step releases the target" scenarioDelayReleaseInWorkflow checkDelayReleaseInWorkflow,
       testCase "a workflow cannot delete itself" $
         withInstance "mgmt-self-delete" $ \dbos suffix -> do
           let key = newWorkflowKey "self-deleter"
@@ -644,7 +653,7 @@ tests =
             probe <- (runStep wctx "probe" (const (pure ())) :: IO (Either (Error EngineOnly) ()))
             pure (refused, probe)
         case refused of
-          Left (SystemDatabase (SystemDB.InvalidInput {})) -> pure ()
+          Left (InvalidArgument _ _) -> pure ()
           other -> fail ("expected an argument refusal, got: " <> show other)
         case probe of
           Left err -> fail (show err)
