@@ -12,7 +12,7 @@ Use `Client` from outside a DBOS process (API servers, CLIs). It connects direct
 ```haskell
 cfg <- clientConfigFromEnv
 Right client <- connectClient cfg
-_ <- enqueueClientWorkflow client "MyWorkflow" "email" (Just (encodeWorkflowValue input))
+_ <- clientEnqueueWorkflow client "MyWorkflow" "email" (Just (encodeWorkflowValue input))
 _ <- closeClient client
 ```
 

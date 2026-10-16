@@ -324,10 +324,10 @@ StarterTest mirror, and removal of the v1 pool/Store path have not landed.
 - `Transact.Client` (new, 5 tests): `ClientConfig` (all 9 Rust fields),
   `clientConfigNew`/`clientConfigFromEnv`/`validateClientConfig`,
   `connectClient` (eager, verifies via acquire — never migrates),
-  `closeClient`, `enqueueClientWorkflow`, `retrieveClientWorkflow`,
-  `workflowStatusClient`. `Transact.Workflow` gains `Enqueue`/
+  `closeClient`, `clientEnqueueWorkflow`, `clientRetrieveWorkflow`,
+  `clientWorkflowStatus`. `Transact.Workflow` gains `Enqueue`/
   `DuplicationPolicy`/`enqueueNew`/`validateEnqueue`/`storedPriority`;
-  `enqueueClientWorkflowWith` + `EnqueueOptions` honor every field
+  `clientEnqueueWorkflowWith` + `EnqueueOptions` honor every field
   (dedup join resolves the holder via `getDeduplicationKeyHolder`;
   `ReturnExisting` without a key, dedup+partition, and priority 0/overflow
   are refused before any write, as in the oracle).

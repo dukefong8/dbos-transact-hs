@@ -33,6 +33,8 @@ module DBOS.Transact.QueueCases
     checkEqualLimits,
     scenarioConcurrencySpellings,
     checkConcurrencySpellings,
+    scenarioConcurrencyUpdate,
+    checkConcurrencyUpdate,
     scenarioRateLimit,
     checkRateLimit,
     scenarioPartitionLimits,
@@ -267,29 +269,36 @@ incoherentTable =
       (defaultQueueOptions :: QueueOptions) {globalConcurrency = Just 2, partitionConcurrency = Just 4},
       "must not exceed"
     ),
-    ( "a partition allowed to start faster than the whole queue",
-      (defaultQueueOptions :: QueueOptions)
-        { rateLimit = Just (RateLimit {rateLimitLimit = 10, rateLimitPeriod = secondsDuration 60}),
-          partitionRateLimit = Just (RateLimit {rateLimitLimit = 5, rateLimitPeriod = secondsDuration 1})
-        },
-      "must not exceed `rate_limit`"
+    ( "a partition worker allowed more than the whole queue",
+      (defaultQueueOptions :: QueueOptions) {concurrency = Just 2, partitionWorkerConcurrency = Just 4},
+      "must not exceed `concurrency`"
     )
   ]
 
 -- | Every incoherent table entry is refused before it reaches the row,
 -- and the refused registration writes nothing.
 scenarioIncoherent :: forall m. (MonadSTM m, MonadMVar m)
-                   => QueueFixture m -> m ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue)
+                   => QueueFixture m -> m ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue, Either (Error EngineOnly) Queue)
 scenarioIncoherent fx = do
   _ <- fx.qfLaunch
   let queueName = "hs-l2-checked-" <> Text.take 12 fx.qfSuffix
   refused <- mapM (\(what, options, fragment) -> (what,fragment,) <$> registerQueue fx.qfDBOS queueName options AlwaysUpdate) incoherentTable
   stored <- queue fx.qfDBOS queueName >>= either (error . show) pure
+  accepted <-
+    registerQueue
+      fx.qfDBOS
+      ("hs-l2-rated-q-" <> Text.take 12 fx.qfSuffix)
+      ( defaultQueueOptions
+          { rateLimit = Just (RateLimit {rateLimitLimit = 10, rateLimitPeriod = secondsDuration 60}),
+            partitionRateLimit = Just (RateLimit {rateLimitLimit = 5, rateLimitPeriod = secondsDuration 1})
+          }
+      )
+      AlwaysUpdate
   fx.qfShutdown
-  pure (refused, stored)
+  pure (refused, stored, accepted)
 
-checkIncoherent :: ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue) -> Either String ()
-checkIncoherent (refused, stored) = do
+checkIncoherent :: ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue, Either (Error EngineOnly) Queue) -> Either String ()
+checkIncoherent (refused, stored, accepted) = do
   mapM_
     ( \(what, fragment, result) -> case result of
         Left (ErrorConfig message)
@@ -299,6 +308,9 @@ checkIncoherent (refused, stored) = do
     )
     refused
   unless (stored == Nothing) $ Left ("a refused registration wrote a row anyway: " <> show stored)
+  case accepted of
+    Right _ -> Right ()
+    other -> Left ("a shorter per-partition window should be honoured: " <> show other)
 
 -- | An update is judged against the merged row: wrong beside the stored
 -- concurrency is refused and leaves the row untouched, while raising both
@@ -330,8 +342,10 @@ checkUpdateCoherent (refused, stored, raised) = do
     other -> Left ("expected the coherent raise accepted, got: " <> show other)
 
 -- | The per-partition honour table: what it is, the options, and the
--- fragment the refusal must carry. A slower per-partition rate over a
--- longer window stays honourable and is accepted.
+-- fragment the refusal must carry. Per-partition rates are never
+-- cross-compared against the queue-wide rate (Rust queue.rs): a slower
+-- per-partition rate over a longer window and a faster per-partition rate
+-- alike stay honourable and are accepted.
 unhonourableTable :: [(Text, QueueOptions, Text)]
 unhonourableTable =
   [ ( "a per-partition rate limit over no window",
@@ -345,18 +359,11 @@ unhonourableTable =
     ( "a partition's worker limit above this process's own",
       (defaultQueueOptions :: QueueOptions) {workerConcurrency = Just 2, partitionWorkerConcurrency = Just 4},
       "must not exceed `worker_concurrency`"
-    ),
-    ( "a partition allowed to start faster than the whole queue",
-      (defaultQueueOptions :: QueueOptions)
-        { rateLimit = Just (RateLimit {rateLimitLimit = 10, rateLimitPeriod = secondsDuration 1}),
-          partitionRateLimit = Just (RateLimit {rateLimitLimit = 100, rateLimitPeriod = secondsDuration 1})
-        },
-      "must not exceed `rate_limit`"
     )
   ]
 
 scenarioUnhonourable :: forall m. (MonadSTM m, MonadMVar m)
-                     => QueueFixture m -> m ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue, Either (Error EngineOnly) Queue)
+                     => QueueFixture m -> m ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue, Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue)
 scenarioUnhonourable fx = do
   _ <- fx.qfLaunch
   let queueName = "hs-l2-checked-" <> Text.take 12 fx.qfSuffix
@@ -368,11 +375,17 @@ scenarioUnhonourable fx = do
       queueName
       (defaultQueueOptions {rateLimit = Just (RateLimit {rateLimitLimit = 10, rateLimitPeriod = secondsDuration 1}), partitionRateLimit = Just (RateLimit {rateLimitLimit = 100, rateLimitPeriod = secondsDuration 60})})
       UpdateIfLatestVersion
+  acceptedFast <-
+    registerQueue
+      fx.qfDBOS
+      ("hs-l2-fast-q-" <> Text.take 12 fx.qfSuffix)
+      (defaultQueueOptions {rateLimit = Just (RateLimit {rateLimitLimit = 10, rateLimitPeriod = secondsDuration 1}), partitionRateLimit = Just (RateLimit {rateLimitLimit = 100, rateLimitPeriod = secondsDuration 1})})
+      UpdateIfLatestVersion
   fx.qfShutdown
-  pure (refused, stored, accepted)
+  pure (refused, stored, accepted, acceptedFast)
 
-checkUnhonourable :: ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue, Either (Error EngineOnly) Queue) -> Either String ()
-checkUnhonourable (refused, stored, accepted) = do
+checkUnhonourable :: ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue, Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue) -> Either String ()
+checkUnhonourable (refused, stored, accepted, acceptedFast) = do
   mapM_
     ( \(what, fragment, result) -> case result of
         Left (ErrorConfig message)
@@ -385,6 +398,9 @@ checkUnhonourable (refused, stored, accepted) = do
   case accepted of
     Right _ -> Right ()
     other -> Left ("a slower per-partition rate should be honoured: " <> show other)
+  case acceptedFast of
+    Right _ -> Right ()
+    other -> Left ("a faster per-partition rate is never binding and should be honoured: " <> show other)
 
 -- | A per-process limit may equal the fleet limit it serves.
 scenarioEqualLimits :: forall m. (MonadSTM m, MonadMVar m)
@@ -408,9 +424,9 @@ checkEqualLimits registered = case registered of
     unless (receipt.workerConcurrency == Just 3) $ Left ("expected the worker limit 3, got: " <> show receipt.workerConcurrency)
   other -> Left ("expected the equal limits accepted, got: " <> show other)
 
--- | The fleet limit has two spellings: the explicit one wins over the
--- deprecated alias, and the alias alone still works. Each spelling gets
--- its own queue; all three receipts report the effective limit.
+-- | The fleet limit has two spellings, and setting both is refused (Python
+-- _queue.py): the explicit spelling alone and the deprecated alias alone
+-- each work, and each gets its own queue reporting the effective limit.
 scenarioConcurrencySpellings :: forall m. (MonadSTM m, MonadMVar m)
                              => QueueFixture m -> m (Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue)
 scenarioConcurrencySpellings fx = do
@@ -431,8 +447,39 @@ checkConcurrencySpellings (explicit, legacy, both) = do
     Right receipt -> unless (receipt.concurrency == Just 4) $ Left ("expected the alias limit 4, got: " <> show receipt.concurrency)
     other -> Left ("expected the deprecated alias accepted, got: " <> show other)
   case both of
-    Right receipt -> unless (receipt.concurrency == Just 5) $ Left ("expected the explicit limit to win, got: " <> show receipt.concurrency)
-    other -> Left ("expected both spellings accepted, got: " <> show other)
+    Left (ErrorConfig message)
+      | "set only one of them" `Text.isInfixOf` message -> Right ()
+      | otherwise -> Left ("the both-spellings refusal names no exclusivity, got: " <> Text.unpack message)
+    other -> Left ("expected both spellings refused, got: " <> show other)
+
+-- | Updates name one spelling at a time: migrating a queue from the alias
+-- to the explicit spelling succeeds, while a single change naming both
+-- spellings is refused and leaves the row untouched.
+scenarioConcurrencyUpdate :: forall m. (MonadSTM m, MonadMVar m)
+                          => QueueFixture m -> m (Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue, Maybe Queue)
+scenarioConcurrencyUpdate fx = do
+  _ <- fx.qfLaunch
+  let queueName = "hs-l2-spell-q-" <> Text.take 12 fx.qfSuffix
+  _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {concurrency = Just 2}) AlwaysUpdate >>= either (error . show) pure
+  migrated <- updateQueue fx.qfDBOS queueName (defaultQueueChange {globalConcurrency = Set (Just 5)})
+  refused <- updateQueue fx.qfDBOS queueName (defaultQueueChange {concurrency = Set (Just 7), globalConcurrency = Set (Just 9)})
+  stored <- queue fx.qfDBOS queueName >>= either (error . show) pure
+  fx.qfShutdown
+  pure (migrated, refused, stored)
+
+checkConcurrencyUpdate :: (Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue, Maybe Queue) -> Either String ()
+checkConcurrencyUpdate (migrated, refused, stored) = do
+  case migrated of
+    Right receipt -> unless (receipt.concurrency == Just 5) $ Left ("expected the migrated limit 5, got: " <> show receipt.concurrency)
+    other -> Left ("expected the spelling migration accepted, got: " <> show other)
+  case refused of
+    Left (ErrorConfig message)
+      | "set only one of them" `Text.isInfixOf` message -> Right ()
+      | otherwise -> Left ("the both-spellings update refusal names no exclusivity, got: " <> Text.unpack message)
+    other -> Left ("expected the both-spellings update refused, got: " <> show other)
+  case stored of
+    Just receipt -> unless (receipt.concurrency == Just 5) $ Left ("the refused update touched the row: " <> show receipt.concurrency)
+    other -> Left ("expected the stored limit untouched, got: " <> show other)
 
 -- | A queue carries a rate limit, and both clear at runtime like every
 -- other limit. Registration and update always persist the legacy priority

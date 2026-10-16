@@ -17,6 +17,9 @@ module DBOS.Transact.Queue
     queueOptionsToNewQueue,
     queueChangeToUpdate,
     validateQueueOptions,
+    reserved,
+    queueOptionsAfterChange,
+    changeBothSet,
     registerQueue,
     queue,
     listQueues,
@@ -46,7 +49,6 @@ import DBOS.SystemDB.Types
     queueIsLegacyPartitioned,
     queueResolvedLimits,
     secondsDuration,
-    durationAsMillis,
     durationIsZero,
   )
 import DBOS.Transact.Connection (withConnection)
@@ -72,10 +74,11 @@ data Queue = Queue
 
 -- | Queue limits as supplied at registration. Every default is unbounded,
 -- with one-second polling. 'globalConcurrency' is the supported spelling
--- for the fleet limit; 'concurrency' is its deprecated alias (explicit
--- wins), retained because both SDK oracles keep it. There is no priority
--- option: every queue dispatches in priority order, so registration always
--- persists the legacy column as true.
+-- for the fleet limit; 'concurrency' is its deprecated alias, retained
+-- because both SDK oracles keep it. The two spellings are mutually
+-- exclusive (Python @_queue.py@: setting both is refused). There is no
+-- priority option: every queue dispatches in priority order, so
+-- registration always persists the legacy column as true.
 data QueueOptions = QueueOptions
   { -- | Deprecated alias for 'globalConcurrency': explicit wins. Retained
     -- because both SDK oracles keep it. (A @DEPRECATED@ pragma would fire
@@ -106,8 +109,8 @@ defaultQueueOptions =
     }
 
 -- | A partial change. 'Leave' differs from 'Set Nothing': only the latter
--- clears an optional limit. The concurrency pair follows the options
--- precedence: an explicit 'globalConcurrency' wins over 'concurrency'.
+-- clears an optional limit. The concurrency pair is mutually exclusive, as
+-- on the options: naming both spellings in one change is refused.
 data QueueChange = QueueChange
   { -- | Deprecated alias for 'globalConcurrency', as on the options.
     concurrency :: Change (Maybe Int),
@@ -182,8 +185,9 @@ queueOptionsToNewQueue queueName options =
         (Nothing, Nothing, Nothing) -> False
         _ -> True
 
--- | The fleet limit the options mean: the explicit spelling wins over the
--- deprecated alias, as both SDK oracles resolve it.
+-- | The fleet limit the options mean. Only reached with at most one
+-- spelling set (validation refuses both): the explicit spelling takes
+-- precedence over the deprecated alias, as both SDK oracles resolve it.
 effectiveConcurrency :: QueueOptions -> Maybe Int
 effectiveConcurrency options = options.globalConcurrency <|> options.concurrency
 
@@ -216,12 +220,18 @@ queueChangeToUpdate change current =
   where
     maybeChanged (Set value) _ = value
     maybeChanged Leave oldValue = oldValue
-    -- The fleet-limit change the update means: the explicit spelling wins
-    -- over the deprecated alias, as both SDK oracles resolve it.
+    -- The fleet-limit change the update means. Only reached with at most
+    -- one spelling set (the change check refuses both): the explicit
+    -- spelling takes precedence over the deprecated alias.
     effectiveChange change = case (change.globalConcurrency, change.concurrency) of
       (Set value, _) -> Set value
       (Leave, Set value) -> Set value
       (Leave, Leave) -> Leave
+
+-- | Python's both-spellings refusal detail (@_queue.py:148-151@), shared by
+-- the registration check and the update change check.
+bothSpellingsDetail :: Text
+bothSpellingsDetail = "concurrency is deprecated in favor of global_concurrency; set only one of them"
 
 validateQueueOptions :: Text -> QueueOptions -> Either (TransactError.Error TransactError.EngineOnly) ()
 validateQueueOptions queueName options =
@@ -238,7 +248,8 @@ validateQueueOptions queueName options =
     fleet = effectiveConcurrency options
     firstInvalid =
       first
-        [ positive "concurrency" fleet,
+        [ bothSpellings options.concurrency options.globalConcurrency,
+          positive "concurrency" fleet,
           positive "worker_concurrency" options.workerConcurrency,
           ordered "worker_concurrency" "concurrency" options.workerConcurrency fleet,
           nonzeroDuration "polling_interval" options.pollingInterval,
@@ -249,8 +260,14 @@ validateQueueOptions queueName options =
           ordered "partition_worker_concurrency" "partition_concurrency" options.partitionWorkerConcurrency options.partitionConcurrency,
           ordered "partition_concurrency" "concurrency" options.partitionConcurrency fleet,
           ordered "partition_worker_concurrency" "worker_concurrency" options.partitionWorkerConcurrency options.workerConcurrency,
-          partitionRate options.partitionRateLimit options.rateLimit
+          ordered "partition_worker_concurrency" "concurrency" options.partitionWorkerConcurrency fleet
         ]
+    -- The fleet limit's two spellings are mutually exclusive (Python
+    -- @_queue.py@: "set only one of them"); judged before any bound, so a
+    -- doubly-spelled request reports exclusivity rather than a limit error.
+    bothSpellings alias explicit = case (alias, explicit) of
+      (Just _, Just _) -> Just ("concurrency", bothSpellingsDetail)
+      _ -> Nothing
     positive field = \case
       Just value | value < 1 -> Just (field, "must be at least 1, got " <> Text.pack (show value))
       _ -> Nothing
@@ -268,13 +285,6 @@ validateQueueOptions queueName options =
         | value.rateLimitLimit < 1 -> Just (field <> ".limit", "must be at least 1, got " <> Text.pack (show value.rateLimitLimit))
         | durationIsZero value.rateLimitPeriod -> Just (field <> ".period", "cannot be zero")
         | otherwise -> Nothing
-    partitionRate Nothing _ = Nothing
-    partitionRate _ Nothing = Nothing
-    partitionRate (Just partition) (Just global)
-      | toInteger partition.rateLimitLimit * durationAsMillis global.rateLimitPeriod
-          > toInteger global.rateLimitLimit * durationAsMillis partition.rateLimitPeriod =
-          Just ("partition_rate_limit", "must not exceed `rate_limit`")
-      | otherwise = Nothing
     first = foldr (\candidate rest -> candidate <|> rest) Nothing
     (<|>) (Just value) _ = Just value
     (<|>) Nothing other = other
@@ -311,11 +321,26 @@ listQueues dbos = do
     result <- withConnection executor.conn (\db -> SystemDB.listQueues db (Named [executor.identity.identityAppName]))
     pure (fmap (map queueFromRecord) result)
 
+-- | A change naming both fleet-limit spellings is refused with Python's
+-- message, before the merge: the write would otherwise collapse the pair
+-- onto the explicit spelling while validation judged the merged alias
+-- value. 'Set' counts as naming even when it clears ('Set Nothing');
+-- 'Leave' is absent.
+changeBothSet :: Text -> QueueChange -> Maybe (TransactError.Error TransactError.EngineOnly)
+changeBothSet queueName change = case (change.concurrency, change.globalConcurrency) of
+  (Set _, Set _) ->
+    Just
+      ( TransactError.ErrorConfig
+          ("queue `" <> queueName <> "`: invalid concurrency: " <> bothSpellingsDetail)
+      )
+  _ -> Nothing
+
 updateQueue :: (MonadMVar m)
             => DBOS m -> Text -> QueueChange -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
-updateQueue dbos queueName change = case reserved queueName of
-  Just refusal -> pure (Left refusal)
-  Nothing -> do
+updateQueue dbos queueName change
+  | Just refusal <- reserved queueName = pure (Left refusal)
+  | Just refusal <- changeBothSet queueName change = pure (Left refusal)
+  | otherwise = do
     withExecutor dbos "update a queue" $ \executor -> do
       stored <- withConnection executor.conn (\db -> SystemDB.getQueue db queueName)
       case stored of
@@ -399,8 +424,8 @@ resolveConflict executor UpdateIfLatestVersion = do
 queueOptionsAfterChange :: QueueChange -> Queue -> QueueOptions
 queueOptionsAfterChange change current =
   QueueOptions
-    { concurrency = apply change.concurrency current.concurrency,
-      globalConcurrency = applyEffective change current.concurrency,
+    { concurrency = mergedAlias,
+      globalConcurrency = mergedExplicit,
       workerConcurrency = apply change.workerConcurrency current.workerConcurrency,
       pollingInterval = apply change.pollingInterval current.pollingInterval,
       rateLimit = apply change.rateLimit current.rateLimit,
@@ -411,9 +436,13 @@ queueOptionsAfterChange change current =
   where
     apply Leave value = value
     apply (Set value) _ = value
-    -- The merged effective limit: a change on either spelling lands on the
-    -- explicit one, so validation below judges what the write will store.
-    applyEffective diff fallback = case (diff.globalConcurrency, diff.concurrency) of
-      (Set value, _) -> value
-      (Leave, Set value) -> value
-      (Leave, Leave) -> fallback
+    -- The merged spellings: a change touching either spelling supersedes
+    -- the stored effective limit, and the untouched spelling clears, so the
+    -- merged options name at most one spelling and validation below never
+    -- mistakes a single-spelling update for a both-spellings request. A
+    -- change naming both spellings keeps both, for the refusal below.
+    (mergedAlias, mergedExplicit) = case (change.concurrency, change.globalConcurrency) of
+      (Leave, Leave) -> (Nothing, current.concurrency)
+      (Set alias, Leave) -> (alias, Nothing)
+      (Leave, Set explicit) -> (Nothing, explicit)
+      (Set alias, Set explicit) -> (alias, explicit)

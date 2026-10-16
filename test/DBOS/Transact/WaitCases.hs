@@ -11,6 +11,7 @@
 -- their winners deterministically.
 module DBOS.Transact.WaitCases
   ( WaitFixture (..),
+    WaitExecFixture (..),
     wfRun,
     scenarioRefusal,
     scenarioWinnerLeft,
@@ -22,6 +23,11 @@ module DBOS.Transact.WaitCases
     scenarioJoinLast,
     scenarioEmptyAll,
     scenarioRepeated,
+    scenarioExecFirstEmpty,
+    scenarioExecAllEmpty,
+    scenarioExecFirstWinner,
+    scenarioExecAllSettled,
+    scenarioExecSingle,
     checkRefusal,
     checkWinnerLeft,
     checkJoinSettled,
@@ -32,12 +38,17 @@ module DBOS.Transact.WaitCases
     checkJoinLast,
     checkEmptyAll,
     checkRepeated,
+    checkExecFirstEmpty,
+    checkExecAllEmpty,
+    checkExecFirstWinner,
+    checkExecAllSettled,
+    checkExecSingle,
   )
 where
 
 import DBOS.Prelude
 import Data.Text qualified as Text
-import DBOS.SystemDB (StepRecord (..), WorkflowId (..))
+import DBOS.SystemDB (AwaitedOutcome (..), StepRecord (..), WorkflowId (..))
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact
   ( EngineOnly,
@@ -255,3 +266,97 @@ checkRepeated :: (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Erro
 checkRepeated (wid, first, outcome) = do
   unless (first == Right wid) $ Left ("expected the repeated id to win, got: " <> show first)
   unless (outcome == Right ()) $ Left ("expected the repeated join to complete, got: " <> show outcome)
+
+-- * Executor-level waits
+
+-- | What a stack must provide for executor-level waits: fresh workflow ids
+-- over initialized rows, settling rows, the running instance's two waits,
+-- and shutting the instance down. Unlike 'WaitFixture', these run outside
+-- any workflow: there is no step slot, so the empty first-wait surfaces
+-- the backend refusal ('SystemDatabase'/'InvalidInput') rather than the
+-- recorded 'InvalidArgument' the in-workflow form reports.
+data WaitExecFixture m = WaitExecFixture
+  { weFreshWorkflowId :: Text -> m WorkflowId,
+    weSettle :: WorkflowId -> m (),
+    weFirst :: [WorkflowId] -> m (Either (Error EngineOnly) WorkflowId),
+    weAll :: [WorkflowId] -> m (Either (Error EngineOnly) ()),
+    weSingle :: WorkflowId -> m (Either (Error EngineOnly) AwaitedOutcome),
+    weShutdown :: m ()
+  }
+
+-- | An executor-level first-wait over nothing is refused by the backend:
+-- outside a workflow there is no step slot to record into, so the
+-- 'InvalidInput' refusal surfaces as-is.
+scenarioExecFirstEmpty :: forall m. (Monad m) => WaitExecFixture m -> m (Either (Error EngineOnly) WorkflowId)
+scenarioExecFirstEmpty fx = do
+  outcome <- fx.weFirst []
+  fx.weShutdown
+  pure outcome
+
+-- | An executor-level all-wait over nothing is already satisfied.
+scenarioExecAllEmpty :: forall m. (Monad m) => WaitExecFixture m -> m (Either (Error EngineOnly) ())
+scenarioExecAllEmpty fx = do
+  outcome <- fx.weAll []
+  fx.weShutdown
+  pure outcome
+
+-- | The settled member wins an executor-level first-wait.
+scenarioExecFirstWinner :: forall m. (Monad m) => WaitExecFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId)
+scenarioExecFirstWinner fx = do
+  pending <- fx.weFreshWorkflowId "exec-first-a"
+  settled <- fx.weFreshWorkflowId "exec-first-b"
+  fx.weSettle settled
+  won <- fx.weFirst [pending, settled]
+  fx.weShutdown
+  pure (settled, won)
+
+-- | The empty first-wait is refused on the backend channel, naming the
+-- empty set.
+checkExecFirstEmpty :: Either (Error EngineOnly) WorkflowId -> Either String ()
+checkExecFirstEmpty outcome = case outcome of
+  Left (SystemDatabase err) -> case err of
+    SysDB.InvalidInput {field, detail} -> do
+      unless (field == "workflow_ids") $ Left ("expected the workflow_ids field, got: " <> show field)
+      unless (detail == "must name at least one workflow to wait for") $ Left ("expected the empty-set detail, got: " <> show detail)
+    otherErr -> Left ("expected InvalidInput, got: " <> show otherErr)
+  other -> Left ("expected the empty first-wait refused, got: " <> show other)
+
+-- | The empty all-wait completes at once.
+checkExecAllEmpty :: Either (Error EngineOnly) () -> Either String ()
+checkExecAllEmpty outcome =
+  unless (outcome == Right ()) $ Left ("expected the empty join to complete, got: " <> show outcome)
+
+-- | The settled member wins.
+checkExecFirstWinner :: (WorkflowId, Either (Error EngineOnly) WorkflowId) -> Either String ()
+checkExecFirstWinner (settled, won) =
+  unless (won == Right settled) $ Left ("expected the settled id to win, got: " <> show won)
+
+-- | An executor-level all-wait over settled workflows completes.
+scenarioExecAllSettled :: forall m. (Monad m) => WaitExecFixture m -> m (Either (Error EngineOnly) ())
+scenarioExecAllSettled fx = do
+  first <- fx.weFreshWorkflowId "exec-all-a"
+  second <- fx.weFreshWorkflowId "exec-all-b"
+  fx.weSettle first
+  fx.weSettle second
+  outcome <- fx.weAll [first, second]
+  fx.weShutdown
+  pure outcome
+
+-- | An executor-level single wait reports the settled outcome.
+scenarioExecSingle :: forall m. (Monad m) => WaitExecFixture m -> m (Either (Error EngineOnly) AwaitedOutcome)
+scenarioExecSingle fx = do
+  wid <- fx.weFreshWorkflowId "exec-one"
+  fx.weSettle wid
+  outcome <- fx.weSingle wid
+  fx.weShutdown
+  pure outcome
+
+-- | The settled all-wait completes.
+checkExecAllSettled :: Either (Error EngineOnly) () -> Either String ()
+checkExecAllSettled outcome =
+  unless (outcome == Right ()) $ Left ("expected the settled join to complete, got: " <> show outcome)
+
+-- | The settled outcome reads back with its output and no serialization.
+checkExecSingle :: Either (Error EngineOnly) AwaitedOutcome -> Either String ()
+checkExecSingle outcome =
+  unless (outcome == Right (AwaitedSucceeded (Just "null") Nothing)) $ Left ("expected the settled outcome, got: " <> show outcome)

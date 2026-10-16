@@ -8,6 +8,7 @@ module DBOS.Transact.Stream
     defaultReadStreamOptions,
     readStream,
     readStreamFrom,
+    readStreamOutside,
     writeStream,
     closeStream,
     toVectorStream,
@@ -25,6 +26,7 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), WorkflowRecord (WorkflowRecord, workflowRecordStatus), WorkflowStatus (..), WrittenBy (..), addTimeout, durationAsMillis, millisDuration, readStreamStepName, secondsDuration, streamClosedSentinel, streamClosedSerialization, timestampNow)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Checkpoint (StepPlacement (..), placeCall)
+import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx, stepId, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
@@ -61,11 +63,36 @@ readStream wctx wid key options = readStreamFrom wctx wid key 0 options
 
 readStreamFrom :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
                => WorkflowCtx exec m -> WorkflowId -> Text -> Int -> ReadStreamOptions -> m (StreamReader (Error EngineOnly) m value)
-readStreamFrom wctx wid key initialOffset options = do
+readStreamFrom wctx wid key initialOffset options =
+  readStreamWith (placeCall wctx) (withSystemDB wctx) (Just (WorkflowId (workflowId wctx))) wid key initialOffset options
+
+-- | The reader a client opens: the same state machine, a
+-- 'ClientConnection' placement (no counter to agree with, nothing is
+-- recorded), the client's own connection for database access, and no
+-- caller whose cancellation could end the wait. Mirrors Rust
+-- @Client::read_stream@, which shares @StreamReader@ with the workflow
+-- reader and differs only in what it passes as the source.
+readStreamOutside :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+                  => Connection m -> WorkflowId -> Text -> Int -> ReadStreamOptions -> m (StreamReader (Error EngineOnly) m value)
+readStreamOutside conn = readStreamWith (pure ClientConnection) (runSystemDB conn.connSysdb) Nothing
+
+-- | The one reader both callers build: the placement a pull stands at, how
+-- to reach the system database, and the caller whose cancellation ends a
+-- wait ('Nothing' from a client). The rest of the pull — buffering,
+-- replay, recording, the close sentinel — the placement itself decides.
+readStreamWith :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+               => m (StepPlacement exec m)
+               -> (forall a. (forall db. SystemDB.SystemDB db m => db -> m a) -> m a)
+               -> Maybe WorkflowId
+               -> WorkflowId -> Text -> Int -> ReadStreamOptions -> m (StreamReader (Error EngineOnly) m value)
+readStreamWith place runDb caller wid key initialOffset options = do
   state <- newMVar ReaderState {readerOffset = initialOffset, readerEnded = False, readerReplaying = True, readerBuffer = []}
-  pure (StreamReader (modifyMVar state (readNext wctx wid key options)))
+  pure (StreamReader (modifyMVar state (readNext wid key options)))
   where
-    readNext context streamWorkflow streamKey options' current
+    unwrapId :: WorkflowId -> Text
+    unwrapId (WorkflowId text) = text
+
+    readNext streamWorkflow streamKey options' current
       | current.readerEnded = pure (current, Right Nothing)
       | initialOffset < 0 = pure (current {readerEnded = True}, Left (InvalidArgument "read_stream" "the offset must not be negative"))
       | maybe False ((< 1) . durationAsMillis) options'.pollingInterval =
@@ -74,7 +101,7 @@ readStreamFrom wctx wid key initialOffset options = do
           -- One pull owns one placement: the id is taken here, at the call,
           -- and every wait slice below reuses it, so a replay finds the row
           -- where this pull recorded it. Mirrors Rust @StreamReader::next@.
-          placement <- placeCall context
+          placement <- place
           startedAt <- timestampNow
           drivePull placement startedAt current
       where
@@ -98,12 +125,20 @@ readStreamFrom wctx wid key initialOffset options = do
               case live.readerBuffer of
                 buffered@(_ : _) -> deliverBuffered placement startedAt live buffered
                 [] -> do
-                  caller <- withSystemDB context (\db -> SystemDB.getWorkflow db (WorkflowId (workflowId context)))
-                  case caller of
-                    Left err -> pure (live {readerEnded = True}, Left (SystemDatabase err))
-                    Right (Just WorkflowRecord {workflowRecordStatus = Cancelled}) ->
-                      pure (live {readerEnded = True}, Left (SystemDatabase (SystemDBError.WorkflowCancelled {workflowId = workflowId context})))
-                    _ -> do
+                  -- A workflow reader stops when its own workflow is
+                  -- cancelled; a client has no caller, so nothing to check.
+                  cancelled <- case caller of
+                    Nothing -> pure Nothing
+                    Just callerId -> do
+                      found <- runDb (\db -> SystemDB.getWorkflow db callerId)
+                      pure $ case found of
+                        Left err -> Just (SystemDatabase err)
+                        Right (Just WorkflowRecord {workflowRecordStatus = Cancelled}) ->
+                          Just (SystemDatabase (SystemDBError.WorkflowCancelled {workflowId = unwrapId callerId}))
+                        _ -> Nothing
+                  case cancelled of
+                    Just err -> pure (live {readerEnded = True}, Left err)
+                    Nothing -> do
                       let configuredPolling = fromMaybe (secondsDuration 1) options'.pollingInterval
                       (polling, deadline) <- case options'.timeout of
                         Just limit -> pure (configuredPolling, Just (fromMaybe startedAt (addTimeout startedAt limit)))
@@ -117,7 +152,7 @@ readStreamFrom wctx wid key initialOffset options = do
                           sliceStart <- timestampNow
                           let slice = millisDuration (fromIntegral (min 100 (durationAsMillis configuredPolling)))
                           pure (slice, Just (fromMaybe sliceStart (addTimeout sliceStart slice)))
-                      awaited <- withSystemDB context (\db -> SystemDB.awaitStreamValues db streamWorkflow streamKey live.readerOffset streamPageSize deadline polling)
+                      awaited <- runDb (\db -> SystemDB.awaitStreamValues db streamWorkflow streamKey live.readerOffset streamPageSize deadline polling)
                       case awaited of
                         Left err -> do
                           let readError = SystemDatabase err
@@ -125,7 +160,13 @@ readStreamFrom wctx wid key initialOffset options = do
                           pure (live {readerEnded = True}, either (Left . SystemDatabase) (const (Left readError)) recorded)
                         Right Types.TimedOut | isNothing options'.timeout -> drivePull placement startedAt live
                         Right Types.TimedOut -> do
-                          let timedOut = StreamTimeout (workflowId context) streamKey options'.timeout
+                          -- The reader's own workflow names the timeout: a
+                          -- workflow reader names itself, a client names the
+                          -- stream's workflow as Rust's reader does.
+                          let readerText = case caller of
+                                Just (WorkflowId callerView) -> callerView
+                                Nothing -> case streamWorkflow of WorkflowId streamView -> streamView
+                              timedOut = StreamTimeout readerText streamKey options'.timeout
                           recorded <- recordRead placement startedAt (OutcomeError (encodeErrorText timedOut)) (Just "rust_serde")
                           pure (live {readerEnded = True}, either (Left . SystemDatabase) (const (Left timedOut)) recorded)
                         Right Types.Ended -> do
@@ -161,8 +202,8 @@ readStreamFrom wctx wid key initialOffset options = do
           (values, []) -> values
           (values, close : _) -> values <> [close]
         replayRead placement currentState = case placement of
-          Recorded _ stepNo | currentState.readerReplaying -> do
-            found <- withSystemDB context (\db -> SystemDB.checkStep db (WorkflowId (workflowId context)) stepNo readStreamStepName)
+          Recorded readerWctx stepNo | currentState.readerReplaying -> do
+            found <- withSystemDB readerWctx (\db -> SystemDB.checkStep db (WorkflowId (workflowId readerWctx)) stepNo readStreamStepName)
             case found of
               Left err -> pure (Just (currentState {readerEnded = True}, Left (SystemDatabase err)))
               Right Nothing -> pure Nothing
@@ -180,9 +221,9 @@ readStreamFrom wctx wid key initialOffset options = do
                           Right value     -> pure (Just (currentState {readerOffset = currentState.readerOffset + 1}, Right (Just value)))
           _ -> pure Nothing
         recordRead placement startedAt outcome serialization = case placement of
-          Recorded _ stepNo -> do
+          Recorded readerWctx stepNo -> do
             completedAt <- timestampNow
-            withSystemDB context (\db -> SystemDB.recordStep db (WorkflowId (workflowId context)) stepNo readStreamStepName outcome serialization (Just (StepTiming startedAt completedAt)))
+            withSystemDB readerWctx (\db -> SystemDB.recordStep db (WorkflowId (workflowId readerWctx)) stepNo readStreamStepName outcome serialization (Just (StepTiming startedAt completedAt)))
           _ -> pure (Right ())
         isClose encoded = encoded.encodedValue == streamClosedSentinel && encoded.encodedSerialization == Just streamClosedSerialization
         decodeFailure codecError = case codecError of

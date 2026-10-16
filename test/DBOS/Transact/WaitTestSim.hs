@@ -17,11 +17,18 @@ import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import DBOS.SystemDB (NewWorkflow (..), Outcome (..), Submission (..), WorkflowId (..), newWorkflow, selectStepName)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
+import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, memLaunchOnWith, memSetApplication, newMemDB, simIdentity, simInstance)
+import DBOS.Transact (shutdown, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
 import DBOS.Transact.WaitCases
-  ( WaitFixture (..),
+  ( WaitExecFixture (..),
+    WaitFixture (..),
     checkCancelled,
     checkEmptyAll,
+    checkExecAllEmpty,
+    checkExecAllSettled,
+    checkExecFirstEmpty,
+    checkExecFirstWinner,
+    checkExecSingle,
     checkJoinLast,
     checkJoinSettled,
     checkRefusal,
@@ -32,6 +39,11 @@ import DBOS.Transact.WaitCases
     checkWinnerLeft,
     scenarioCancelled,
     scenarioEmptyAll,
+    scenarioExecAllEmpty,
+    scenarioExecAllSettled,
+    scenarioExecFirstEmpty,
+    scenarioExecFirstWinner,
+    scenarioExecSingle,
     scenarioJoinLast,
     scenarioJoinSettled,
     scenarioRefusal,
@@ -69,10 +81,35 @@ simWaitFixture = do
           SystemDB.checkStep mem wid 0 selectStepName >>= either (error . show) pure
       }
 
+-- | One launched instance per leaf over a fresh in-memory database: the
+-- executor-level waits run through the launched connection, and the leaf
+-- shuts the instance down inside the scenario.
+simWaitExecFixture :: forall s. IOSim s (WaitExecFixture (IOSim s))
+simWaitExecFixture = do
+  mem <- newMemDB
+  memSetApplication (Just "sim-app") mem
+  dbos <- simInstance
+  _ <- memLaunchOnWith mem simTracer dbos Nothing
+  pure
+    WaitExecFixture
+      { weFreshWorkflowId = \label -> do
+          let widText = "sim-waitexec-" <> label
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitExecTest"}) Nothing Fresh Nothing
+          case created of
+            Left err -> error (show err)
+            Right _ -> pure (WorkflowId widText),
+        weSettle = \wid ->
+          SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) >>= either (error . show) (const (pure ())),
+        weFirst = waitForFirstWorkflow dbos,
+        weAll = waitForWorkflows dbos,
+        weSingle = waitForWorkflow dbos,
+        weShutdown = shutdown dbos
+      }
+
 tests :: TestTree
 tests =
   testGroup
-    "In-workflow waits (Sim)"
+    "Waits (Sim)"
     [ simCase simWaitFixture "an empty first wait records its refusal and a replay reads it back" scenarioRefusal checkRefusal traceWaitSilent,
       simCase simWaitFixture "a recorded winner that left the set is refused" scenarioWinnerLeft checkWinnerLeft traceWaitSilent,
       simCase simWaitFixture "an all-wait completes over a settled workflow" scenarioJoinSettled checkJoinSettled traceWaitSilent,
@@ -82,7 +119,12 @@ tests =
       simCase simWaitFixture "a cancelled workflow counts as settled" scenarioCancelled checkCancelled traceWaitSilent,
       simCase simWaitFixture "join returns when the last workflow settles" scenarioJoinLast checkJoinLast traceWaitSilent,
       simCase simWaitFixture "an empty all-wait is satisfied and takes no step" scenarioEmptyAll checkEmptyAll traceWaitSilent,
-      simCase simWaitFixture "a repeated id is accepted by both waits" scenarioRepeated checkRepeated traceWaitSilent
+      simCase simWaitFixture "a repeated id is accepted by both waits" scenarioRepeated checkRepeated traceWaitSilent,
+      simCase simWaitExecFixture "an executor-level first-wait over nothing is refused" scenarioExecFirstEmpty checkExecFirstEmpty traceWaitSilent,
+      simCase simWaitExecFixture "an executor-level all-wait over nothing is satisfied" scenarioExecAllEmpty checkExecAllEmpty traceWaitSilent,
+      simCase simWaitExecFixture "an executor-level first-wait reports the settled member" scenarioExecFirstWinner checkExecFirstWinner traceWaitSilent,
+      simCase simWaitExecFixture "an executor-level all-wait over settled workflows completes" scenarioExecAllSettled checkExecAllSettled traceWaitSilent,
+      simCase simWaitExecFixture "an executor-level single wait reports the settled outcome" scenarioExecSingle checkExecSingle traceWaitSilent
     ]
 
 -- * Typed-event assertions (sim-only)

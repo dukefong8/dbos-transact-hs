@@ -158,6 +158,10 @@ waitTests =
         run (awaitWorkflowResult backend (WorkflowId "wf-1") (secondsDuration 1) True) @?= Right (AwaitedSucceeded (Just "mock-output") (Just "rust_serde")),
       testCase "awaitFirstWorkflowId answers the first id" $ do
         run (awaitFirstWorkflowId backend [WorkflowId "wf-1", WorkflowId "wf-2"] (secondsDuration 1)) @?= Right (WorkflowId "wf-1"),
+      -- Placeholder pin: the mock answers every call canned, so the empty
+      -- set gets the mock winner. The live refusal lives in
+      -- 'DBOS.SystemDB.PostgresTest' and the mirror refusal in the shared
+      -- executor-level wait cases (WaitCases).
       testCase "awaitFirstWorkflowId answers a placeholder for an empty set" $ do
         run (awaitFirstWorkflowId backend [] (secondsDuration 1)) @?= Right (WorkflowId "mock"),
       testCase "awaitWorkflowIds waits through" $ do

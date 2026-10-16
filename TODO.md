@@ -16,22 +16,41 @@ Step/HIGH, Queue/HIGH constraints against the port; tables in
 the 19-file uncommitted stack. Fix in this order, red-first where a pin
 holds the wrong behavior:
 
-- [ ] B1 queue over-validation: drop `partitionRate`'s cross-check in
+- [x] B1 queue over-validation: drop `partitionRate`'s cross-check in
       `validateQueueOptions` (`Queue.hs:252, 271-277`); Rust compares
       concurrency only (`queue.rs:455-461`). Repoint the pins at
       `QueueCases.hs:270` and `:349` to acceptance.
-- [ ] B2 both concurrency spellings: refuse `concurrency` +
+      Done 2026-10-16, uncommitted — plus the missing fourth bound
+      (`partition_worker_concurrency <= concurrency`, both oracles refuse;
+      new `incoherentTable` row pins it).
+- [x] B2 both concurrency spellings: refuse `concurrency` +
       `globalConcurrency` both-set with Python's message
       (`_queue.py:148-151`); flip `scenarioConcurrencySpellings`
       (`QueueCases.hs:414-441`).
-- [ ] B3 empty first-wait mirror: `MemSystemDB.awaitFirstWorkflowId []`
+      Done 2026-10-16, uncommitted — including the `queueOptionsAfterChange`
+      canonicalization (merged options name one spelling) and the
+      change-level both-set refusal, with the `scenarioConcurrencyUpdate`
+      migration case.
+- [x] B3 empty first-wait mirror: `MemSystemDB.awaitFirstWorkflowId []`
       refuses like live (`Backend.hs:2596`) instead of hanging
       (`IOSim.hs:1250`); annotate the mock placeholder pin
       (`IOSim.hs:186`, `IOSimTest.hs:161`); add the shared
       executor-level `waitForFirstWorkflow` empty-set case (also
       closes G5's wait coverage).
-- [ ] G1 `Duration` abstract from `DBOS.Transact` (`Transact.hs:188`);
+      Done 2026-10-16, uncommitted — three shared executor-level cases
+      (first-empty refusal on the `SystemDatabase`/`InvalidInput` channel,
+      all-empty satisfied, settled-member winner) in `WaitCases`, live+sim.
+- [x] G1 `Duration` abstract from `DBOS.Transact` (`Transact.hs:188`);
       keep `millisDuration`/`secondsDuration`, internal `(..)` stays.
+      Done 2026-10-16, uncommitted — the constructor is no longer exported
+      from the facade; no consumer used it raw.
+- [x] G5 executor-level wait coverage: shared first-wait winner,
+      empty-set refusal (paired with B3), and wait-all empty-is-satisfied
+      cases. Done 2026-10-16, uncommitted — five shared
+      `WaitExecFixture` cases (first empty refused on the
+      `SystemDatabase`/`InvalidInput` channel, all-empty satisfied,
+      settled-member first winner, all-settled completes, single wait
+      reports the settled outcome), live+sim.
 - [ ] Notes (dated, no behavior): G4 `_dbos_` prefix
       (`_queue.py:58`) vs exact-name-only here (`Queue.hs:366`, Rust
       `sysdb/mod.rs:21`); G6 observability query timeout, graceful
@@ -42,12 +61,21 @@ holds the wrong behavior:
 - [ ] G3 config: `configUseListenNotify`/`configMigrate`
       (`Config.hs:70-71`) are read nowhere — wire or mark deliberately
       inert (polling-only port; migrations out-of-band).
-- [ ] G2 client slices, one per commit: queue CRUD + `set_*`,
-      `wait_first`, `update_workflow_attributes`, `set_workflow_delay`,
+- [x] G2 client slices: queue CRUD + `set_*`, `wait_first`,
+      `update_workflow_attributes`, `set_workflow_delay`,
       `enqueue`/`enqueue_in_transaction`, `list_queued_workflows`,
       `read_stream`; client `register_queue` defaults `AlwaysUpdate`
       and refuses `UpdateIfLatestVersion` with `ErrorConfig`
-      (`queue.rs:640-660`).
+      (`queue.rs:640-660`). Done 2026-10-16, uncommitted —
+      `clientRegisterQueue`/`RetrieveQueue`/`UpdateQueue`/`DeleteQueue`
+      (reusing the engine's guards + validators), `clientWaitFirst`
+      (Python's non-empty/no-duplicate refusal), `clientUpdateWorkflowAttributes`,
+      `clientSetWorkflowDelay`, `clientListQueuedWorkflows`,
+      `clientReadStream`/`clientReadStreamFrom` (the shared reader
+      generalized to a `ClientConnection` placement via
+      `readStreamOutside`), `clientEnqueueWorkflowInTx` (+ Postgres
+      `enqueueInTx`). Remaining G6 items (schedules/rename exposure,
+      `set_latest_application_version` writer) stay with their notes.
 - [ ] Stack-review follow-ups: R1 empty fork input returns `Ok` with no
       validation on every layer now (engine early-`Right`, sim null guards
       matching the Postgres guards; shared refusal scenario pins both

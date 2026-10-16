@@ -27,10 +27,12 @@ module DBOS.Transact.Client
     EnqueueOptions (..),
     enqueueOptionsNew,
     enqueueOptionsOn,
-    enqueueClientWorkflow,
-    enqueueClientWorkflowWith,
-    retrieveClientWorkflow,
-    workflowStatusClient,
+    clientEnqueueWorkflow,
+    clientEnqueueWorkflowInTx,
+    clientEnqueueWorkflowWith,
+    clientRetrieveWorkflow,
+    clientWorkflowStatus,
+    clientWaitFirst,
     -- * Messages from outside
     clientSendMessage,
     clientSendMessages,
@@ -43,8 +45,17 @@ module DBOS.Transact.Client
     clientDeleteWorkflows,
     clientForkWorkflows,
     clientRewindWorkflows,
+    clientUpdateWorkflowAttributes,
+    clientSetWorkflowDelay,
     -- * Queues from outside
     clientListQueues,
+    clientListQueuedWorkflows,
+    clientReadStream,
+    clientReadStreamFrom,
+    clientRegisterQueue,
+    clientRetrieveQueue,
+    clientUpdateQueue,
+    clientDeleteQueue,
     -- * Versions from outside
     clientListApplicationVersions,
     clientLatestApplicationVersion,
@@ -54,7 +65,8 @@ module DBOS.Transact.Client
   )
 where
 
-import Data.Aeson (Value)
+import Data.Aeson (FromJSON, Value)
+import Data.List qualified as List
 import Data.Map.Strict (Map)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -65,17 +77,18 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (Applications (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewWorkflow (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, sysRewindOptions, timestampNow, validateSendKeys)
+import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, runSystemDB, withConnection)
 import DBOS.Transact.Error qualified as TransactError
-import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
+import DBOS.Transact.Handle (WorkflowHandle, WorkflowHandle (workflowId), pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
 import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Management (checkRewindOptions)
-import DBOS.Transact.Queue (Queue, queueFromRecord)
+import DBOS.Transact.Management (checkRewindOptions, setWorkflowDelay, updateWorkflowAttributes)
+import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
 import DBOS.Transact.Serialization (encodeAttributes)
-import DBOS.Transact.Workflow (Enqueue (..), enqueueNew, maxRecoveryAttempts, resolveEnqueueCollision, storedPriority, validateEnqueue)
+import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
+import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), enqueueNew, maxRecoveryAttempts, resolveEnqueueCollision, storedPriority, validateEnqueue)
 import Hasql.Transaction qualified as Tx
 import System.Environment (lookupEnv)
 
@@ -295,19 +308,19 @@ enqueueOptionsOn shape =
 -- | Enqueues a workflow by name, onto a queue, and hands back a polling
 -- handle to it. Asks for nothing else: the client's app name is stamped,
 -- no version is recorded, and the id is generated.
-enqueueClientWorkflow :: MonadSTM m
+clientEnqueueWorkflow :: MonadSTM m
                       => Client m -> Text -> Text -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
-enqueueClientWorkflow client workflowName queueName input =
-  enqueueClientWorkflowWith client workflowName (enqueueOptionsNew queueName) input
+clientEnqueueWorkflow client workflowName queueName input =
+  clientEnqueueWorkflowWith client workflowName (enqueueOptionsNew queueName) input
 
--- | 'enqueueClientWorkflow', with something to say about how. A call that
+-- | 'clientEnqueueWorkflow', with something to say about how. A call that
 -- names no version records none — which the dequeue admits only from the
 -- latest registered version — while a named version pins the row to
 -- executors running exactly that code. A deduplication collision is refused,
 -- unless the policy asks to join the holder instead.
-enqueueClientWorkflowWith :: MonadSTM m
+clientEnqueueWorkflowWith :: MonadSTM m
                           => Client m -> Text -> EnqueueOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
-enqueueClientWorkflowWith client workflowName options input = do
+clientEnqueueWorkflowWith client workflowName options input = do
   case validateEnqueue options.queue of
     Left err -> pure (Left err)
     Right () -> do
@@ -347,24 +360,97 @@ enqueueClientWorkflowWith client workflowName options input = do
     handle failMissing workflowText =
       pollingHandle client.conn workflowText failMissing
 
+-- | Enqueue a workflow with the caller's writes in one transaction: the
+-- status row, the input, and the caller's writes commit together or not
+-- at all, mirroring Python @enqueue_in_transaction@. The shape is
+-- validated up front — nothing runs on a refusal — and @ReturnExisting@
+-- is refused there: attaching would retry the insert, which a
+-- caller-owned transaction cannot survive (Python's rule). A stored rival
+-- condemns the whole transaction; an identical row is a no-op join. The
+-- returned handle is polling, and is only usable once the transaction
+-- commits.
+clientEnqueueWorkflowInTx :: Client IO -> Text -> Text -> Tx.Transaction () -> EnqueueOptions -> Maybe SerializedWorkflowValue -> IO (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle IO e))
+clientEnqueueWorkflowInTx client workflowName operation callerWrites options input =
+  case validateEnqueue options.queue of
+    Left err -> pure (Left err)
+    Right () -> case options.queue.duplicationPolicy of
+      ReturnExisting ->
+        pure (Left (TransactError.InvalidArgument "enqueue in transaction" "duplication_policy 'return-existing' is not supported by enqueue_in_transaction. Use enqueue instead."))
+      _ -> do
+        generated <- generatedWorkflowId client.conn
+        let shape = options.queue
+            workflowText = fromMaybe generated options.workflowId
+            serialization = case input >>= (.serializedSerialization) of
+              Just (Serialization name) -> Just name
+              Nothing -> Just (serializerName client.conn.connSerializer)
+            applicationName = case options.appName of
+              Just name -> Just name
+              Nothing -> client.conn.connAppName
+            new =
+              (newWorkflow workflowText)
+                { newWorkflowName = Just workflowName,
+                  newWorkflowClassName = options.className,
+                  newWorkflowConfigName = options.configName,
+                  newWorkflowInput = (.serializedText) <$> input,
+                  newWorkflowSerialization = serialization,
+                  newWorkflowQueueName = Just shape.name,
+                  newWorkflowDeduplicationId = shape.deduplicationId,
+                  newWorkflowPriority = storedPriority shape,
+                  newWorkflowQueuePartitionKey = shape.partitionKey,
+                  newWorkflowDelay = shape.delay,
+                  newWorkflowTimeout = options.timeout,
+                  newWorkflowDeadline = Nothing,
+                  newWorkflowAttributes = encodeAttributes options.attributes,
+                  newWorkflowExecutorId = Nothing,
+                  newWorkflowApplicationName = applicationName,
+                  newWorkflowApplicationVersion = options.appVersion
+                }
+        case validateNewWorkflow new of
+          Left err -> pure (Left (TransactError.SystemDatabase err))
+          Right () -> do
+            ownerXid <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
+            now <- timestampNow
+            composed <- withClientTransaction client operation (callerWrites >> Postgres.enqueueInTx new applicationName ownerXid now)
+            pure $ case composed of
+              Left err -> Left err
+              Right (Left sysErr) -> Left (TransactError.SystemDatabase sysErr)
+              Right (Right ()) -> Right (pollingHandle client.conn workflowText True)
+
 -- | A handle to a workflow that already exists, by id. Always polling, and
 -- never checked: the id is not read until the handle is used. The one
 -- handle that waits for a row to appear rather than reporting its absence.
-retrieveClientWorkflow :: Client m -> Text -> WorkflowHandle m e
-retrieveClientWorkflow client workflowId =
+clientRetrieveWorkflow :: Client m -> Text -> WorkflowHandle m e
+clientRetrieveWorkflow client workflowId =
   pollingHandle client.conn workflowId False
 
 -- | A workflow's status, or 'Nothing' if there is no such workflow. The
 -- one-shot read behind 'handleStatus', for a caller with an id and no
 -- handle.
-workflowStatusClient :: Monad m
+clientWorkflowStatus :: Monad m
                      => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe WorkflowStatus))
-workflowStatusClient client workflowId = do
+clientWorkflowStatus client workflowId = do
   result <- withConnection client.conn (\db -> SystemDB.getWorkflow db workflowId)
   pure $ case result of
     Left err            -> Left err
     Right Nothing       -> Right Nothing
     Right (Just record) -> Right (Just record.workflowRecordStatus)
+
+-- | Wait for the first of a set of handles to settle and hand back the
+-- winner. Mirrors Python @wait_first@: the set must be non-empty and
+-- duplicate-free, since the answer names one handle out of the set. An id
+-- naming no row is waited for, not reported, like every first-wait.
+clientWaitFirst :: (MonadDelay m, MonadTime m)
+                => Client m -> [WorkflowHandle m e] -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+clientWaitFirst client handles
+  | null handles = pure (Left (TransactError.InvalidArgument "wait_first" "handles must not be empty"))
+  | List.nub ids /= ids = pure (Left (TransactError.InvalidArgument "wait_first" "handles must not contain duplicate workflow IDs"))
+  | otherwise = do
+      winner <- withConnection client.conn (\db -> SystemDB.awaitFirstWorkflowId db (map WorkflowId ids) client.conn.connOutcomePollInterval)
+      pure $ case winner of
+        Left err -> Left err
+        Right (WorkflowId text) -> Right (clientRetrieveWorkflow client text)
+  where
+    ids = [h.workflowId | h <- handles]
 
 -- | Send one message to a workflow from outside, the caller unrecorded.
 clientSendMessage :: Monad m
@@ -431,7 +517,7 @@ clientForkWorkflows client forks options = do
 -- rewound datasource transactions are not re-executed through this path.
 -- For workflows that use datasources, rewind from a launched instance
 -- instead. Mirrors Rust @Client::rewind_with@, whose polling handle this
--- builds through 'retrieveClientWorkflow'.
+-- builds through 'clientRetrieveWorkflow'.
 clientRewindWorkflows :: Monad m
                       => Client m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 clientRewindWorkflows client workflowId@(WorkflowId workflowText) options =
@@ -441,7 +527,22 @@ clientRewindWorkflows client workflowId@(WorkflowId workflowText) options =
       result <- withConnection client.conn (\db -> SystemDB.rewindWorkflow db workflowId options.rewindStartStep (sysRewindOptions options) Nothing)
       case result of
         Left err -> pure (Left err)
-        Right () -> pure (Right (retrieveClientWorkflow client workflowText))
+        Right () -> pure (Right (clientRetrieveWorkflow client workflowText))
+
+-- | Replace a workflow's attributes from outside, or clear them when
+-- given 'Nothing'. The write lives in 'Management', as the engine's own
+-- update does; the backend replaces rather than merges (Rust parity —
+-- Python's @merge@ has no counterpart in either).
+clientUpdateWorkflowAttributes :: Monad m
+                               => Client m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+clientUpdateWorkflowAttributes client workflowId attributes =
+  updateWorkflowAttributes client.conn workflowId attributes
+
+-- | Move a delayed workflow's release from outside.
+clientSetWorkflowDelay :: Monad m
+                       => Client m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+clientSetWorkflowDelay client workflowId delay =
+  setWorkflowDelay client.conn workflowId delay
 
 -- | Every queue this client's application can see: its own, plus the
 -- unclaimed ones. A nameless client sees every queue. Mirrors the oracle's
@@ -452,6 +553,100 @@ clientListQueues :: Monad m
 clientListQueues client = do
   result <- withConnection client.conn (\db -> SystemDB.listQueues db Unset)
   pure (fmap (map queueFromRecord) result)
+
+-- | Register a queue from outside, or report the one already registered
+-- under the name. Mirrors Rust @Connection::register_queue@ with
+-- @app_version = None@: a client runs none of the application's code, so
+-- there is no version to weigh against the registered ones and
+-- 'UpdateIfLatestVersion' is refused with 'ErrorConfig' — while
+-- 'AlwaysUpdate' (Python's default) and 'NeverUpdate' write through. The
+-- row is re-read after the write, as Python re-reads it.
+clientRegisterQueue :: Monad m
+                    => Client m -> Text -> QueueOptions -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
+clientRegisterQueue client queueName options conflict = case reserved queueName of
+  Just refusal -> pure (Left refusal)
+  Nothing -> case validateQueueOptions queueName options of
+    Left err -> pure (Left err)
+    Right () -> case conflict of
+      UpdateIfLatestVersion ->
+        pure
+          ( Left
+              ( TransactError.ErrorConfig
+                  ( "registering queue `" <> queueName <> "`: `QueueConflict::UpdateIfLatestVersion` needs an application version to compare against, and a client has none; ask for `AlwaysUpdate` or `NeverUpdate`"
+                  )
+              )
+          )
+      AlwaysUpdate -> upsert UpdateExisting
+      NeverUpdate -> upsert LeaveExisting
+  where
+    upsert policy = do
+      let new = (queueOptionsToNewQueue queueName options) {newQueueApplicationName = client.conn.connAppName}
+      inserted <- withConnection client.conn (\db -> SystemDB.upsertQueue db new policy)
+      case inserted of
+        Left err -> pure (Left err)
+        Right _ -> do
+          result <- withConnection client.conn (\db -> SystemDB.getQueue db queueName)
+          pure $ case result of
+            Left err -> Left err
+            Right Nothing -> Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` was not returned after registration"))
+            Right (Just record) -> Right (queueFromRecord record)
+
+-- | The queue registered under a name from outside, or 'Nothing'.
+clientRetrieveQueue :: Monad m
+                    => Client m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe Queue))
+clientRetrieveQueue client queueName = do
+  result <- withConnection client.conn (\db -> SystemDB.getQueue db queueName)
+  pure (fmap (fmap queueFromRecord) result)
+
+-- | Change a registered queue's limits from outside, leaving what the
+-- change does not name. The same guards as the engine path: the reserved
+-- name, the both-spellings change, the legacy-partitioned row, and the
+-- merged validation — a client update cannot leave a queue in a state a
+-- registration would have refused.
+clientUpdateQueue :: Monad m
+                  => Client m -> Text -> QueueChange -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
+clientUpdateQueue client queueName change = case reserved queueName of
+  Just refusal -> pure (Left refusal)
+  Nothing -> case changeBothSet queueName change of
+    Just refusal -> pure (Left refusal)
+    Nothing -> do
+      stored <- withConnection client.conn (\db -> SystemDB.getQueue db queueName)
+      case stored of
+        Left err -> pure (Left err)
+        Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
+        Right (Just record) -> do
+          let touchesPartition =
+                change.partitionConcurrency /= Leave
+                  || change.partitionWorkerConcurrency /= Leave
+                  || change.partitionRateLimit /= Leave
+          if touchesPartition && queueIsLegacyPartitioned record
+            then
+              pure
+                ( Left
+                    ( TransactError.ErrorConfig
+                        ( "queue `" <> queueName <> "`: this queue is registered with the deprecated `partition_queue` flag, under which its queue-wide limits already apply per partition; re-register it with the per-partition limits instead"
+                        )
+                    )
+                )
+            else do
+              let currentQueue = queueFromRecord record
+                  desired = queueOptionsAfterChange change currentQueue
+              case validateQueueOptions queueName desired of
+                Left err -> pure (Left err)
+                Right () -> do
+                  let update = queueChangeToUpdate change currentQueue
+                  updated <- withConnection client.conn (\db -> SystemDB.updateQueue db queueName update (\_ _ -> Right ()))
+                  pure (queueFromRecord <$> updated)
+
+-- | Remove a queue's registration from outside. Removing one that is not
+-- registered is not an error.
+clientDeleteQueue :: Monad m
+                  => Client m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+clientDeleteQueue client queueName = case reserved queueName of
+  Just refusal -> pure (Left refusal)
+  Nothing -> do
+    result <- withConnection client.conn (\db -> SystemDB.deleteQueue db queueName)
+    pure (() <$ result)
 
 -- | The registered application versions.
 clientListApplicationVersions :: Monad m
@@ -479,12 +674,34 @@ clientPromoteVersion client version = do
   result <- withConnection client.conn (\db -> SystemDB.updateApplicationVersionTimestamp db version now Nothing)
   pure result
 
+-- | List queued workflows by filter from outside: the same filters as
+-- 'clientListWorkflows', with @queues-only@ forced — only rows carrying a
+-- queue are listed. Mirrors Python @list_queued_workflows@, which is
+-- 'list_workflows' with @queues_only=True@.
+clientListQueuedWorkflows :: Monad m
+                          => Client m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
+clientListQueuedWorkflows client filters = do
+  result <- withConnection client.conn (\db -> SystemDB.listWorkflows db (filters {workflowFilterQueuesOnly = True}) Nothing)
+  pure result
+
 -- | List workflows by filter from outside.
 clientListWorkflows :: Monad m
                     => Client m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 clientListWorkflows client filters = do
   result <- withConnection client.conn (\db -> SystemDB.listWorkflows db filters Nothing)
   pure result
+
+-- | Read one value's stream from the beginning, from outside the
+-- application. Nothing is checkpointed: a client has no workflow to record
+-- a read against. Mirrors Rust @Client::read_stream@.
+clientReadStream :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+                 => Client m -> WorkflowId -> Text -> ReadStreamOptions -> m (StreamReader (TransactError.Error TransactError.EngineOnly) m value)
+clientReadStream client workflowId key options = readStreamOutside client.conn workflowId key 0 options
+
+-- | 'clientReadStream', starting at an offset rather than the beginning.
+clientReadStreamFrom :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+                     => Client m -> WorkflowId -> Text -> Int -> ReadStreamOptions -> m (StreamReader (TransactError.Error TransactError.EngineOnly) m value)
+clientReadStreamFrom client = readStreamOutside client.conn
 
 -- | Reads one workflow's steps, outputs and errors included. Nothing is
 -- checkpointed: a client has no step counter of its own to agree with a

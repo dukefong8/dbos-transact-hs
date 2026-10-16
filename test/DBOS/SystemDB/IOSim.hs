@@ -183,6 +183,10 @@ instance SystemDB MockSystemDB (IOSim s) where
   getWorkflowChildren = \cases _ _ -> pure (Right [mockChildId])
   recordWorkflowOutcome = \cases _ _ _ -> pure (Right Recorded)
   awaitWorkflowResult = \cases _ _ _ _ -> pure (Right (AwaitedSucceeded (Just mockOutput) (Just mockSerialization)))
+  -- Placeholder, not a mirror: 'MockSystemDB' answers every call with a
+  -- canned value (see the module doc), so an empty first-wait gets the
+  -- mock winner instead of the live refusal. The 'MemSystemDB' mirror
+  -- refuses like Postgres; shared engine cases pin that refusal.
   awaitFirstWorkflowId = \cases
     _ [] _ -> pure (Right (WorkflowId "mock"))
     _ (first : _) _ -> pure (Right first)
@@ -1251,6 +1255,11 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               null scheduleFilter.scheduleFilterNamePrefixes || any (`Text.isPrefixOf` record.scheduleRecordName) scheduleFilter.scheduleFilterNamePrefixes
           ]
       )
+  -- An empty first-wait has no answer it could ever give, so it is
+  -- refused like the live backend ('Backend.awaitFirstWorkflowId'), not
+  -- parked forever: a poll over an empty set matches nothing, which would
+  -- hang this wait instead of failing it.
+  awaitFirstWorkflowId _ [] _ = pure (Left (invalidInput "workflow_ids" "must name at least one workflow to wait for"))
   awaitFirstWorkflowId db ids _duration = atomically $ do
     rows <- readTVar db.memRows
     case [wid | wid <- ids, Just row <- [Map.lookup (widTextOf wid) rows], isJust (memAwaited row)] of

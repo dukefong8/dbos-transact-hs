@@ -11,12 +11,13 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
+import Data.Vector.Fusion.Stream.Monadic qualified as Vector
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Hasql.Transaction qualified as Tx
-import DBOS.SystemDB (Applications (..), QueueRecord (..), VersionInfo (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
+import DBOS.SystemDB (Applications (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres qualified as Postgres
@@ -24,6 +25,7 @@ import DBOS.Transact
   (
     EngineOnly, Client,
     ClientConfig (..),
+    Change (..),
     CodecError,
     Config (..),
     DBOS,
@@ -35,20 +37,33 @@ import DBOS.Transact
     Error (..),
     IdempotencyKey (..),
     Queue (..),
+    QueueChange (..),
     QueueConflict (..),
+    QueueOptions (..),
     WorkflowCtx,
     SerializedWorkflowValue (..),
     SendMessage (..),
+    StreamReader,
     Topic (..),
     clientCancelWorkflows,
     clientConfigFromEnv,
     clientConfigNew,
     clientDeleteWorkflows,
+    clientDeleteQueue,
     clientForkWorkflows,
     clientGetEvent,
     clientLatestApplicationVersion,
     clientListApplicationVersions,
     clientListQueues,
+    clientListQueuedWorkflows,
+    clientReadStream,
+    clientReadStreamFrom,
+    clientRegisterQueue,
+    clientRetrieveQueue,
+    clientUpdateQueue,
+    clientUpdateWorkflowAttributes,
+    clientSetWorkflowDelay,
+    clientWaitFirst,
     clientListWorkflows,
     clientPromoteVersion,
     clientResumeWorkflows,
@@ -63,11 +78,14 @@ import DBOS.Transact
     configFromEnv,
     connectClient,
     decodeWorkflowValue,
+    defaultQueueChange,
     defaultQueueOptions,
+    defaultReadStreamOptions,
     defaultRewindOptions,
     encodeWorkflowValue,
-    enqueueClientWorkflowWith,
-    enqueueClientWorkflow,
+    clientEnqueueWorkflowInTx,
+    clientEnqueueWorkflowWith,
+    clientEnqueueWorkflow,
     enqueueNew,
     enqueueOptionsNew,
     enqueueOptionsOn,
@@ -78,7 +96,7 @@ import DBOS.Transact
     registerDataSource,
     registerWorkflow,
     registerQueue,
-    retrieveClientWorkflow,
+    clientRetrieveWorkflow,
     recv,
     runWorkflow,
     runStep,
@@ -87,11 +105,14 @@ import DBOS.Transact
     validateClientConfig,
     RewindOptions (rewindStartStep),
     WorkflowKey,
-    workflowStatusClient,
+    clientWorkflowStatus,
     WorkflowHandle (workflowId),
+    WorkflowDelay (..),
     recv,
     runStep,
-    setEvent)
+    setEvent,
+    toVectorStream,
+    writeStream)
 import DBOS.Transact.DatasourceCases (FakeDs (..), mkFakeDs)
 import DBOS.Transact.Datasource (DataSource (..))
 import DBOS.Transact.Datasource qualified as DSTx (Tx (Tx))
@@ -150,7 +171,7 @@ tests =
             -- claimed by the latest registered version, and this shared
             -- database always has a newer nameless row.
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- enqueueClientWorkflowWith client "double" options (Just (encodeWorkflowValue (21 :: Int)))
+            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (21 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right handle -> do
@@ -206,8 +227,8 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            first <- enqueueClientWorkflowWith client "double" options (Just (encodeWorkflowValue (21 :: Int)))
-            second <- enqueueClientWorkflowWith client "double" options (Just (encodeWorkflowValue (99 :: Int)))
+            first <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (21 :: Int)))
+            second <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (99 :: Int)))
             case (first, second) of
               (Right holder, Right joiner) -> do
                 joiner.workflowId @?= holder.workflowId
@@ -245,9 +266,9 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            let handle = retrieveClientWorkflow client workflowText
+            let handle = clientRetrieveWorkflow client workflowText
             handle.workflowId @?= workflowText
-            status <- workflowStatusClient client (WorkflowId workflowText)
+            status <- clientWorkflowStatus client (WorkflowId workflowText)
             case status of
               Right (Just _) -> pure ()
               other -> fail (show other),
@@ -259,7 +280,7 @@ tests =
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
           enqueued <-
-            enqueueClientWorkflowWith
+            clientEnqueueWorkflowWith
               client
               "no-such-function"
               (enqueueOptionsNew queueName) {workflowId = Just workflowText}
@@ -268,7 +289,7 @@ tests =
             Left err -> fail (show err)
             Right handle -> do
               handle.workflowId @?= workflowText
-              status <- workflowStatusClient client (WorkflowId workflowText)
+              status <- clientWorkflowStatus client (WorkflowId workflowText)
               case status of
                 Right (Just _) -> pure ()
                 other -> fail ("expected the unrunnable row to exist, got: " <> show other),
@@ -289,7 +310,7 @@ tests =
                 }
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          enqueued <- enqueueClientWorkflowWith client "double" options Nothing
+          enqueued <- clientEnqueueWorkflowWith client "double" options Nothing
           case enqueued of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -311,7 +332,7 @@ tests =
             workflowText = "hs-l2-client-nameless-id-" <> suffix
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          enqueued <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+          enqueued <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
           case enqueued of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -326,8 +347,8 @@ tests =
             workflowText = "hs-l2-client-idkey-id-" <> suffix
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          first <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
-          second <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+          first <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+          second <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
           case (first, second) of
             (Right holder, Right joiner) -> joiner.workflowId @?= holder.workflowId
             (Left err, _) -> fail ("the first enqueue failed: " <> show err)
@@ -339,7 +360,7 @@ tests =
         -- without invalidating the client, so a later call reconnects.
         closeClient client
         closeClient client
-        enqueued <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew "hs-l2-client-closed-q") Nothing
+        enqueued <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew "hs-l2-client-closed-q") Nothing
         case enqueued of
           Left err -> fail ("expected the pool to reconnect, got: " <> show err)
           Right _ -> pure (),
@@ -385,7 +406,7 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- enqueueClientWorkflowWith client "receiver" options Nothing
+            enqueued <- clientEnqueueWorkflowWith client "receiver" options Nothing
             handle <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -441,7 +462,7 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- enqueueClientWorkflowWith client "batcher" options Nothing
+            enqueued <- clientEnqueueWorkflowWith client "batcher" options Nothing
             batch <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -493,7 +514,7 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- enqueueClientWorkflowWith client "txreceiver" options Nothing
+            enqueued <- clientEnqueueWorkflowWith client "txreceiver" options Nothing
             receiver <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -777,7 +798,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            enqueued <- enqueueClientWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+            enqueued <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
             case enqueued of
               Left err -> fail (show err)
               Right _ -> pure ()
@@ -975,7 +996,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            enqueued <- enqueueClientWorkflow client "double" queueName (Just (encodeWorkflowValue (21 :: Int)))
+            enqueued <- clientEnqueueWorkflow client "double" queueName (Just (encodeWorkflowValue (21 :: Int)))
             handle <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -1013,7 +1034,375 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             waited <- clientGetEvent client (WorkflowId workflowText) "absent" (millisDuration 200)
-            waited @?= Right Nothing
+            waited @?= Right Nothing,
+      testCase "a client registers, reads, updates, and deletes a queue" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-qcrud-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-qcrud-q-" <> Text.take 12 suffix
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          registered <- clientRegisterQueue client queueName (defaultQueueOptions {globalConcurrency = Just 3}) AlwaysUpdate
+          receipt <- case registered of
+            Left err -> fail (show err)
+            Right receipt -> pure receipt
+          receipt.concurrency @?= Just 3
+          found <- clientRetrieveQueue client queueName
+          found @?= Right (Just receipt)
+          -- NeverUpdate leaves the stored limits standing.
+          leftAlone <- clientRegisterQueue client queueName (defaultQueueOptions {globalConcurrency = Just 9}) NeverUpdate
+          case leftAlone of
+            Left err -> fail (show err)
+            Right kept -> kept.concurrency @?= Just 3
+          updated <- clientUpdateQueue client queueName (defaultQueueChange {workerConcurrency = Set (Just 2)})
+          case updated of
+            Left err -> fail (show err)
+            Right receipt -> receipt.workerConcurrency @?= Just 2
+          deleted <- clientDeleteQueue client queueName
+          deleted @?= Right ()
+          gone <- clientRetrieveQueue client queueName
+          gone @?= Right Nothing,
+      testCase "a client is refused the version-guarded conflict" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-qconf-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-qconf-q-" <> Text.take 12 suffix
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          refused <- clientRegisterQueue client queueName defaultQueueOptions UpdateIfLatestVersion
+          case refused of
+            Left (ErrorConfig message)
+              | "application version" `Text.isInfixOf` message -> pure ()
+              | otherwise -> fail ("the conflict refusal names no version, got: " <> Text.unpack message)
+            other -> fail ("expected the version-guarded conflict refused, got: " <> show other),
+      testCase "a client cannot take the internal queue name" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-qres-" <> Text.take 12 suffix
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          refused <- clientRegisterQueue client "_dbos_internal_queue" defaultQueueOptions AlwaysUpdate
+          case refused of
+            Left (ErrorConfig message)
+              | "reserved" `Text.isInfixOf` message -> pure ()
+              | otherwise -> fail ("the reserved refusal names no reservation, got: " <> Text.unpack message)
+            other -> fail ("expected the reserved name refused, got: " <> show other),
+      testCase "a client waits for the first of its handles" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-wait-" <> Text.take 12 suffix
+            firstText = "hs-l2-client-wait-1-" <> suffix
+            secondText = "hs-l2-client-wait-2-" <> suffix
+            key = newWorkflowKey "double"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          _ <- runWf exec key (WorkflowId firstText) (Just (encodeWorkflowValue (1 :: Int)))
+          _ <- runWf exec key (WorkflowId secondText) (Just (encodeWorkflowValue (2 :: Int)))
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            let first = clientRetrieveWorkflow client firstText
+                second = clientRetrieveWorkflow client secondText
+            won <- clientWaitFirst client [first, second]
+            case won of
+              Left err -> fail (show err)
+              Right winner ->
+                assertBool ("expected a settled handle back, got: " <> Text.unpack winner.workflowId) (winner.workflowId `elem` [firstText, secondText]),
+      testCase "a client refuses an empty or duplicated wait" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-waitneg-" <> Text.take 12 suffix
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          empty <- clientWaitFirst client []
+          case empty of
+            Left (InvalidArgument operation _)
+              | operation == "wait_first" -> pure ()
+              | otherwise -> fail ("the empty wait names the wrong operation, got: " <> show operation)
+            other -> fail ("expected the empty wait refused, got: " <> show other)
+          let probe = clientRetrieveWorkflow client "never-existed"
+          duplicated <- clientWaitFirst client [probe, probe]
+          case duplicated of
+            Left (InvalidArgument _ detail)
+              | "duplicate" `Text.isInfixOf` detail -> pure ()
+              | otherwise -> fail ("the duplicated wait names no duplication, got: " <> Text.unpack detail)
+            other -> fail ("expected the duplicated wait refused, got: " <> show other),
+      testCase "a client replaces and clears workflow attributes" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-attrs-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-attrs-id-" <> suffix
+            key = newWorkflowKey "double"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          _ <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+              filters = defaultWorkflowFilter {workflowFilterWorkflowIds = [workflowText]}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            replaced <- clientUpdateWorkflowAttributes client (WorkflowId workflowText) (Just "{\"team\":\"red\"}")
+            replaced @?= Right ()
+            listed <- clientListWorkflows client filters
+            case listed of
+              Left err -> fail (show err)
+              -- jsonb normalizes the spacing on write; the pin holds the
+              -- canonical form, not the literal sent.
+              Right [record] -> record.workflowRecordAttributes @?= Just "{\"team\": \"red\"}"
+              Right records -> fail ("expected one listed row, got: " <> show (length records))
+            cleared <- clientUpdateWorkflowAttributes client (WorkflowId workflowText) Nothing
+            cleared @?= Right ()
+            relisted <- clientListWorkflows client filters
+            case relisted of
+              Left err -> fail (show err)
+              Right [record] -> record.workflowRecordAttributes @?= Nothing
+              Right records -> fail ("expected one relisted row, got: " <> show (length records)),
+      testCase "a client moves a delayed workflow's release" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-delay-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-delay-q-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-delay-id-" <> suffix
+            key = newWorkflowKey "double"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          _ <- launchClientExec dbos isolatedEnvironment
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            registeredQ <- clientRegisterQueue client queueName defaultQueueOptions AlwaysUpdate
+            case registeredQ of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            let options :: EnqueueOptions
+                options = (enqueueOptionsOn ((enqueueNew queueName) {delay = Just (secondsDuration 3600)})) {workflowId = Just workflowText}
+            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (1 :: Int)))
+            case enqueued of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            moved <- clientSetWorkflowDelay client (WorkflowId workflowText) (DelayFor (secondsDuration 1))
+            moved @?= Right ()
+            row <- readRow getBackend (WorkflowId workflowText)
+            case row.workflowRecordDelayUntil of
+              Just _ -> pure ()
+              Nothing -> fail "expected the moved release stamped on the row",
+      testCase "a client enqueue joins the caller's transaction atomically" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-enqtx-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-enqtx-q-" <> Text.take 12 suffix
+            table = "client_enqtx_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
+            key = newWorkflowKey "double"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            backend <- getBackend
+            bracket
+              (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
+              (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
+              (\_ -> do
+                enqueued <- clientEnqueueWorkflowInTx client "double" "enq-commit" (Tx.statement "row-1" (insertProbe table)) (enqueueOptionsNew queueName) (Just (encodeWorkflowValue (7 :: Int)))
+                handle <- case enqueued of
+                  Left err -> fail (show err)
+                  Right handle -> pure handle
+                counted <- Postgres.runSession backend "client-enqtx-probe" (Session.statement () (countProbe table))
+                counted @?= Right 1
+                row <- readRow getBackend (WorkflowId handle.workflowId)
+                row.workflowRecordStatus @?= Enqueued),
+      testCase "a repeated enqueue joins the existing row" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-enqtx2-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-enqtx2-q-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-enqtx2-id-" <> suffix
+            table = "client_enqtx2_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+            options :: EnqueueOptions
+            options = (enqueueOptionsNew queueName) {workflowId = Just workflowText}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          backend <- getBackend
+          bracket
+            (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
+            (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
+            (\_ -> do
+              first <- clientEnqueueWorkflowInTx client "double" "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
+              case first of
+                Left err -> fail (show err)
+                Right _ -> pure ()
+              second <- clientEnqueueWorkflowInTx client "double" "enq-repeat" (Tx.statement "row-2" (insertProbe table)) options Nothing
+              case second of
+                Left err -> fail (show err)
+                Right _ -> pure ()
+              counted <- Postgres.runSession backend "client-enqtx-probe" (Session.statement () (countProbe table))
+              counted @?= Right 2),
+      testCase "a conflicting enqueue condemns the caller's writes" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-enqtx3-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-enqtx3-q-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-enqtx3-id-" <> suffix
+            table = "client_enqtx3_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+            options :: EnqueueOptions
+            options = (enqueueOptionsNew queueName) {workflowId = Just workflowText}
+            rival :: EnqueueOptions
+            rival = (enqueueOptionsNew queueName) {workflowId = Just workflowText}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          backend <- getBackend
+          bracket
+            (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
+            (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
+            (\_ -> do
+              first <- clientEnqueueWorkflowInTx client "double" "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
+              case first of
+                Left err -> fail (show err)
+                Right _ -> pure ()
+              conflicted <- clientEnqueueWorkflowInTx client "rival" "enq-rival" (Tx.statement "row-2" (insertProbe table)) rival Nothing
+              case conflicted of
+                Left (SystemDatabase (SystemDBError.ConflictingWorkflow {})) -> pure ()
+                other -> fail ("expected the rival enqueue condemned, got: " <> show other)
+              counted <- Postgres.runSession backend "client-enqtx-probe" (Session.statement () (countProbe table))
+              counted @?= Right 1),
+      testCase "return-existing is refused before anything runs" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-enqtx4-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-enqtx4-q-" <> Text.take 12 suffix
+            table = "client_enqtx4_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+            options :: EnqueueOptions
+            options = (enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {duplicationPolicy = ReturnExisting, deduplicationId = Just "k"}}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          backend <- getBackend
+          bracket
+            (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
+            (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
+            (\_ -> do
+              refused <- clientEnqueueWorkflowInTx client "double" "enq-join" (Tx.statement "row-1" (insertProbe table)) options Nothing
+              case refused of
+                Left (InvalidArgument operation _)
+                  | operation == "enqueue in transaction" -> pure ()
+                  | otherwise -> fail ("the join refusal names the wrong operation, got: " <> show operation)
+                other -> fail ("expected return-existing refused, got: " <> show other)
+              counted <- Postgres.runSession backend "client-enqtx-probe" (Session.statement () (countProbe table))
+              counted @?= Right 0),
+      testCase "a client lists queued workflows only" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-qlist-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-qlist-q-" <> Text.take 12 suffix
+            plainText = "hs-l2-client-qlist-plain-" <> suffix
+            queuedText = "hs-l2-client-qlist-queued-" <> suffix
+            key = newWorkflowKey "double"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          _ <- runWf exec key (WorkflowId plainText) (Just (encodeWorkflowValue (1 :: Int)))
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            registeredQ <- clientRegisterQueue client queueName defaultQueueOptions AlwaysUpdate
+            case registeredQ of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            let options :: EnqueueOptions
+                options = (enqueueOptionsNew queueName) {workflowId = Just queuedText}
+            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (2 :: Int)))
+            case enqueued of
+              Left err -> fail (show err)
+              Right handle -> handle.workflowId @?= queuedText
+            queued <- clientListQueuedWorkflows client defaultWorkflowFilter
+            case queued of
+              Left err -> fail (show err)
+              Right records -> do
+                let ids = [wid | WorkflowRecord {workflowRecordId = wid} <- records]
+                assertBool ("expected the queued row listed, got: " <> show ids) (WorkflowId queuedText `elem` ids)
+                assertBool ("expected the plain row excluded, got: " <> show ids) (WorkflowId plainText `notElem` ids),
+      testCase "a client reads a workflow's stream without checkpointing" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-stream-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-stream-id-" <> suffix
+            key = newWorkflowKey "streamer"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
+            body value wctx = writeStream wctx "out" (show value)
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          _ <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (5 :: Int)))
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            reader <- clientReadStream client (WorkflowId workflowText) "out" defaultReadStreamOptions :: IO (StreamReader (Error EngineOnly) IO Text)
+            firstValue <- readHead reader
+            -- The producer is terminal, so the read past its single value ends.
+            secondValue <- readHead reader
+            firstValue @?= Right (Just "5")
+            secondValue @?= Right Nothing,
+      testCase "a client read refuses a negative offset" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-streamneg-" <> Text.take 12 suffix
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          reader <- clientReadStreamFrom client (WorkflowId ("hs-l2-client-streamneg-id-" <> suffix)) "out" (-1) defaultReadStreamOptions :: IO (StreamReader (Error EngineOnly) IO Text)
+          refused <- readHead reader
+          case refused of
+            Left (InvalidArgument operation _)
+              | operation == "read_stream" -> pure ()
+              | otherwise -> fail ("the offset refusal names the wrong operation, got: " <> show operation)
+            other -> fail ("expected the negative offset refused, got: " <> show other)
     ]
 
 -- * Engine-only driver aliases
@@ -1025,6 +1414,17 @@ runWf = runWorkflow
 
 resultWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 resultWf = handleResult
+
+-- | Pull one value from a stream reader through its vector adapter.
+readHead :: StreamReader (Error EngineOnly) IO Text -> IO (Either (Error EngineOnly) (Maybe Text))
+readHead reader = case toVectorStream reader of
+  Vector.Stream next initial -> do
+    outcome <- runExceptT (next initial)
+    pure $ case outcome of
+      Right (Vector.Yield value _) -> Right (Just value)
+      Right Vector.Done -> Right Nothing
+      Right (Vector.Skip _) -> Right Nothing
+      Left err -> Left err
 
 -- | Connects or fails the test with the engine error rendered.
 connectOrFail :: ClientConfig -> IO (Client IO)

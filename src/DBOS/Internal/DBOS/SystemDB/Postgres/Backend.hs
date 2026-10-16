@@ -56,6 +56,7 @@ module DBOS.SystemDB.Postgres.Backend
     sendMessagesSession,
     sendBatchInTx,
     sendMessageInTx,
+    enqueueInTx,
     legacySetEvent,
     setEventSession,
     takeNotificationSession,
@@ -104,7 +105,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Submission (Fresh), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -1283,8 +1284,8 @@ escapeLike = (<> "%") . Text.concatMap escape
 -- list. The owner identity and the clock reading are parameters because the
 -- oracle generates both *outside* the retry: an owner that changed between
 -- attempts would fail to recognise its own write.
-initParams :: PostgresSystemDB -> NewWorkflow -> WorkflowStatus -> Bool -> Bool -> Text -> Timestamp -> Statements.InitWorkflowParams
-initParams env new status queued claiming ownerXid now =
+initParams :: Maybe Text -> NewWorkflow -> WorkflowStatus -> Bool -> Bool -> Text -> Timestamp -> Statements.InitWorkflowParams
+initParams applicationName new status queued claiming ownerXid now =
   Statements.InitWorkflowParams
     { initParamWorkflowId = new.newWorkflowId,
       initParamStatus = workflowStatusText status,
@@ -1314,7 +1315,7 @@ initParams env new status queued claiming ownerXid now =
       initParamScheduleName = new.newWorkflowScheduleName,
       initParamDebounceDeadline = timestampToEpochMs <$> new.newWorkflowDebounceDeadline,
       initParamIsDebounced = new.newWorkflowIsDebounced,
-      initParamApplicationName = new.newWorkflowApplicationName <|> env.psdbApplicationName,
+      initParamApplicationName = new.newWorkflowApplicationName <|> applicationName,
       initParamIncrement = if claiming && not queued then 1 else 0,
       initParamClaiming = claiming
     }
@@ -2313,6 +2314,37 @@ sendBatchInTx messages serialization fallbacks sendToForks = do
               }
         )
 
+-- | Enqueue a workflow inside the caller's transaction: the status row and
+-- the input commit with the caller's writes or not at all. 'Client'
+-- applications compose through 'withClientTransaction' and
+-- 'clientEnqueueWorkflowInTx', which validate up front and refuse
+-- @ReturnExisting@ there (attaching would retry the insert, which a
+-- caller-owned transaction cannot do — Python's rule). A stored rival row
+-- condemns the whole transaction with the conflict; an identical row is a
+-- no-op join and commits. A deduplication-index violation escapes like any
+-- statement failure and aborts the caller's commit. Spent-budget parking
+-- and the queue-mismatch warning stay outside (they write and announce
+-- through channels a caller transaction cannot host); a fresh row never
+-- needs either.
+enqueueInTx :: NewWorkflow -> Maybe Text -> Text -> Timestamp -> Tx.Transaction (Either Error ())
+enqueueInTx new applicationName ownerXid now = do
+  let status = initialStatus new
+      queued = status == Enqueued || status == Delayed
+      claiming = claimsOwnership Fresh
+      params = initParams applicationName new status queued claiming ownerXid now
+  row <- Tx.statement () (Statements.initWorkflowStatement params)
+  when (row.owner_xid == Just ownerXid) $
+    void $
+      Tx.statement
+        (new.newWorkflowId, new.newWorkflowInput)
+        Statements.initWorkflowInputStatement
+  case initConflict new row of
+    Just err -> Tx.condemn >> pure (Left err)
+    -- An identical row is a no-op join: the input stays as recorded and
+    -- the caller's writes commit, as Python's identical re-init raises
+    -- nothing and hands back the existing id.
+    Nothing -> pure (Right ())
+
 -- | The foreign key on the destination is what catches an address that does
 -- not exist, so a message can never be left pointing at nothing.
 foreignKeyError :: Error -> Bool
@@ -2455,7 +2487,7 @@ instance SystemDB PostgresSystemDB IO where
               claiming = claimsOwnership submission
               parentText = unwrapWorkflowId caller.initCallerParentWorkflowId
               params =
-                (initParams env new status queued claiming ownerXid now)
+                (initParams env.psdbApplicationName new status queued claiming ownerXid now)
                   { Statements.initParamParentWorkflowId = Just parentText
                   }
           result <- runTransaction env "init_workflow" $ do
@@ -2518,7 +2550,7 @@ instance SystemDB PostgresSystemDB IO where
           let status = initialStatus new
               queued = status == Enqueued || status == Delayed
               claiming = claimsOwnership submission
-              params = initParams env new status queued claiming ownerXid now
+              params = initParams env.psdbApplicationName new status queued claiming ownerXid now
           -- The status row and the input commit together, so a crash can
           -- never leave one without the other; the input lands only when
           -- this attempt created the row.
