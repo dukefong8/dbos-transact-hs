@@ -2,8 +2,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | The queue-patterns demo's workflow bodies, ported from the Python
--- queue-patterns' @main.py@ (fair queueing and rate limiting; debouncing is
--- deferred — see @docs/adr/0027-queue-patterns-debouncer-deferred.md@).
+-- queue-patterns' @main.py@: fair queueing, rate limiting, and debouncing
+-- (the debouncer rides the facade seam of @docs/adr/0028-transact-debouncer.md@).
 --
 -- Fair queueing pairs two queues: the handler enqueues a concurrency-manager
 -- workflow onto the partitioned queue with the tenant as its partition key,

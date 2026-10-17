@@ -45,11 +45,15 @@ Decision, in parts:
 - Serde reuses `encodeWorkflowValue`/`decodeWorkflowValue` (Aeson ≡ SuperJSON).
 - Schema is verify-only: the `transaction_completion` table is checked, never migrated
   (ADR-0004 guardrail; mirrors TS `runMigrations:false`). Default isolation
-  `ReadCommitted`; the sweep ladder (`RepeatableRead`/`Serializable`) is copied only
-  if an app-pool claim ever needs it.
-- Deferred: `readOnly` fast-path, `pendingTransaction` for `select_step!` races,
-  `deleteCheckpoints` for rewind/completion. Each earns its own case when a
-  widget-track test needs it.
+  `Serializable` — Python's default, and what `transactionConfigDefault` has always
+  set (this bullet said `ReadCommitted` until 2026-10-17; corrected to the code).
+  The sweep ladder (`RepeatableRead`/`Serializable`) is copied only if an app-pool
+  claim ever needs it.
+- Deferred: `readOnly` fast-path, `pendingTransaction` for `select_step!` races.
+  Each earns its own case when a widget-track test needs it. (`deleteCheckpoints`
+  was listed here until 2026-10-17; it landed for rewind and completion —
+  `Datasource.hs:159`, `Datasource/Postgres.hs:205-211`, rewind `Instance.hs:408`,
+  completion `Workflow.hs:249-250,282,288`.)
 
 Prototypes (2026-10-02): P1 (`Proto.hs`, runghc, no DB) validated the loop semantics
 11/11 — replay-before-run, conflict adopt, backoff retry, refusal writes nothing,

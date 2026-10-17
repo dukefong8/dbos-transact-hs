@@ -111,7 +111,7 @@ pageView page =
   |]
 
 -- | The submit card per tab: fair takes a tenant, rate-limited takes none,
--- debouncer explains the deferral.
+-- debouncer takes a tenant key and an input.
 submitCard :: PatternsTab -> Html ()
 submitCard FairQueueTab =
   [hsx|

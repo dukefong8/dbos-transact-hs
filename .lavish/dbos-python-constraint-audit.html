@@ -82,6 +82,10 @@
   <p>State audited: <span class="mono">ad906e0</span> plus the 19-file uncommitted stack (uncommitted until
   <span class="mono">/review</span>). Read-only audit — no behavior changed by it. The tables below are the
   record; the actions live in <span class="mono">TODO.md</span>.</p>
+  <p><span class="badge b-ok">closed 2026-10-17</span> Every action landed: B1–B3, G1, G5 and the G2
+  client slices in <span class="mono">d33f436</span> (806/806, psql mirror, migrate 121→121); the
+  G3/G4/G6/G7 notes and R3 in the close-out slice after it. Each row below carries its decision; the
+  tables themselves stay as the audit found them.</p>
   <p><span class="badge b-bug">3 bugs</span><span class="badge b-gap">7 gaps</span><span class="badge b-ok">53 constraint rows classified</span><span class="badge b-note">3 stack-review follow-ups</span></p>
 </header>
 <main>
@@ -170,13 +174,13 @@
             <td><span class="id">G3</span></td>
             <td><span class="mono">configUseListenNotify</span> and <span class="mono">configMigrate</span> exist (defaulted <span class="mono">True</span>) but are read nowhere: the port polls (no LISTEN), and migrations are always out-of-band. Least-privilege verify-only launch and the pooler caveat are unexpressed.</td>
             <td class="ref">Config.hs:70–71, 91–92; no other reads (grep)</td>
-            <td>Decide per field: wire (<span class="mono">configMigrate=False</span> → verify-only, <span class="mono">configUseListenNotify=False</span> → accepted no-op) or document deliberately inert with a refusal for unsupported values.</td>
+            <td>Closed 2026-10-17: documented deliberately inert at the <span class="mono">Config</span> declaration — the port is polling-only, and migrations are out-of-band with launch verifying the ceiling instead (<span class="mono">acquirePostgresSystemDB</span>). The fields stay for one-to-one Rust <span class="mono">Config</span> fidelity.</td>
           </tr>
           <tr>
             <td><span class="id">G4</span></td>
             <td>Reserved queue names: the port refuses only the exact internal name <span class="mono">_dbos_internal_queue</span> (Rust parity), while Python reserves the whole <span class="mono">_dbos_</span> prefix.</td>
             <td class="ref">Queue.hs:366–374; Rust sysdb/mod.rs:21; Python _queue.py:58, 143–147</td>
-            <td>Record the dated divergence note (Rust exact-name wins per oracle rule) — do not widen the refusal without an oracle change.</td>
+            <td>Recorded 2026-10-17: exact-name refusal stays (Rust <span class="mono">queue.rs:657</span> speaks and wins); the <span class="mono">_dbos_</span> prefix guard is Python's alone, not widened without an oracle change.</td>
           </tr>
           <tr>
             <td><span class="id">G5</span></td>
@@ -188,13 +192,13 @@
             <td><span class="id">G6</span></td>
             <td>Python-only lifecycle items with no Rust counterpart, currently unrecorded: <span class="mono">observability_query_timeout_sec</span> (listing statement timeout), graceful <span class="mono">destroy</span> (Python waits for completion; the port's <span class="mono">shutdown</span> aborts at once and PENDING rows recover on relaunch), client schedules and <span class="mono">rename_application</span> exposure, <span class="mono">set_latest_application_version</span> writer variant (port has <span class="mono">promoteVersion</span> only).</td>
             <td class="ref">Instance.hs:214–237; Backend.hs:3522 (<span class="mono">renameApplication</span>); Client.hs export list</td>
-            <td>Dated notes deciding each: port now / document N/A / defer with the owning slice. <span class="mono">closeClient</span> stays documentation only (hasql-pool release contract).</td>
+            <td>Decided 2026-10-17: the query timeout is deferred with the management/listing slice; <span class="mono">destroy</span> keeps abort-then-recover; schedules need their own slice — the sysdb layer is complete but nothing exposes it, and Rust's <span class="mono">DBOS::create_schedule</span> makes that an unimplemented surface, not a divergence; <span class="mono">rename_application</span> defers with it; the version writer already exists as <span class="mono">clientPromoteVersion</span>, only Rust's <span class="mono">_for</span> override is missing. <span class="mono">closeClient</span> stays documentation only (hasql-pool release contract).</td>
           </tr>
           <tr>
             <td><span class="id">G7</span></td>
             <td>Doc drift: <span class="mono">IsolationLevel</span> claims to mirror "the levels both oracles expose" but Python offers three (<span class="mono">SERIALIZABLE</span> default, <span class="mono">REPEATABLE READ</span>, <span class="mono">READ COMMITTED</span>) while the port has four; ADR-0021 still says the default is <span class="mono">ReadCommitted</span>, code and Python say <span class="mono">Serializable</span>.</td>
             <td class="ref">Datasource.hs:84–89; docs/adr/0021-transactional-step-datasource.md:48; skill step-transactions.md</td>
-            <td>Dated notes: narrow the comment to the truth (Rust's ladder + Python's three), fix the ADR default.</td>
+            <td>Fixed 2026-10-17: the comment names the real provenance (TypeScript's four levels; Python's three with the <span class="mono">Serializable</span> default; Rust v0.5.0 has none), <span class="mono">Nothing</span> is documented as Python's explicit-none path, and ADR-0021's default is corrected in place to <span class="mono">Serializable</span>.</td>
           </tr>
         </tbody>
       </table>
@@ -236,27 +240,27 @@
           </tr>
           <tr>
             <td><span class="mono">use_listen_notify</span>: LISTEN/NOTIFY vs polling (1s fallback); do not change after DB creation; transaction-mode poolers need it off.</td>
-            <td><span class="badge b-gap">field inert</span></td>
-            <td><span class="badge b-gap">G3</span></td>
-            <td>Port is polling-only by design; the field exists but is read nowhere (<span class="mono">Config.hs:70, 91</span>). Pooler caveat holds trivially (no LISTEN registration to orphan).</td>
+            <td><span class="badge b-note">documented inert</span></td>
+            <td><span class="badge b-note">G3</span></td>
+            <td>Port is polling-only by design; the field is inert and now says so at the declaration. Closed 2026-10-17. Pooler caveat holds trivially (no LISTEN registration to orphan).</td>
           </tr>
           <tr>
             <td><span class="mono">run_migrations</span> least privilege: launch migrates, or verifies when disabled; behind-version fails, ahead-version accepted.</td>
-            <td><span class="badge b-gap">field inert</span></td>
-            <td><span class="badge b-gap">G3</span></td>
-            <td><span class="mono">configMigrate</span> read nowhere (<span class="mono">Config.hs:71, 92</span>); migrations are out-of-band via the Rust runner (ADR-0004 guardrail).</td>
+            <td><span class="badge b-note">documented inert</span></td>
+            <td><span class="badge b-note">G3</span></td>
+            <td><span class="mono">configMigrate</span> is inert and now documented at the declaration; migrations are out-of-band via the Rust runner (ADR-0004 guardrail) and launch verifies the ceiling. Closed 2026-10-17.</td>
           </tr>
           <tr>
             <td><span class="mono">observability_query_timeout_sec</span>: statement timeout for listing queries (Postgres; raises a query-timeout error).</td>
             <td><span class="badge b-gap">absent</span></td>
             <td><span class="badge b-gap">G6</span></td>
-            <td>Python-only (no Rust counterpart); the port's listing statements carry no timeout. Record decision.</td>
+            <td>Python-only (no Rust counterpart); the port's listing statements carry no timeout, as Rust's do. Deferred 2026-10-17 to the management/listing slice.</td>
           </tr>
           <tr>
             <td><span class="mono">destroy</span>: graceful teardown (completion timeout, optional registry drop); timed-out workflows cannot checkpoint after.</td>
-            <td><span class="badge b-gap">different shape</span></td>
+            <td><span class="badge b-note">recorded</span></td>
             <td><span class="badge b-gap">G6</span></td>
-            <td><span class="mono">shutdown</span> aborts tasks immediately and waits for unwinding; mid-run workflows stay PENDING and are recovered by the next launch (<span class="mono">Instance.hs:214–237</span>) — a deliberate contract, worth a dated note.</td>
+            <td><span class="mono">shutdown</span> aborts tasks immediately and waits for unwinding; mid-run workflows stay PENDING and are recovered by the next launch (<span class="mono">Instance.hs:214–237</span>) — a deliberate contract, kept (recorded 2026-10-17).</td>
           </tr>
           <tr>
             <td>FastAPI/async rules: sync DBOS calls raise inside a running loop; use <span class="mono">_async</span> variants; launch from lifespan or main.</td>
@@ -366,7 +370,7 @@
             <td>Listing queries bounded by a statement timeout (Postgres).</td>
             <td><span class="badge b-gap">absent</span></td>
             <td><span class="badge b-gap">G6</span></td>
-            <td>Same Python-only item as the lifecycle table; record the decision.</td>
+            <td>Same Python-only item as the lifecycle table; deferred 2026-10-17 with the management/listing slice.</td>
           </tr>
         </tbody>
       </table>
@@ -439,8 +443,8 @@
           <tr>
             <td>Isolation: Python's three levels, <span class="mono">SERIALIZABLE</span> default.</td>
             <td><span class="badge b-ok">CT+RT</span></td>
-            <td><span class="badge b-note">G7 note</span></td>
-            <td>Code default <span class="mono">Serializable</span> is correct per Python; comment overclaims "both oracles" and ADR-0021 still says <span class="mono">ReadCommitted</span> (<span class="mono">Datasource.hs:84–89</span>; ADR:48).</td>
+            <td><span class="badge b-ok">fixed</span></td>
+            <td>Code default <span class="mono">Serializable</span> is correct per Python; the comment now names the real provenance and ADR-0021 is corrected to <span class="mono">Serializable</span> (<span class="mono">Datasource.hs:84–89</span>; ADR:48).</td>
           </tr>
           <tr>
             <td><span class="mono">sql_session</span> only inside a transaction; undecorated functions via <span class="mono">run_tx_step</span>.</td>
@@ -489,8 +493,8 @@
           <tr>
             <td>Names starting with <span class="mono">_dbos_</span> are reserved.</td>
             <td><span class="badge b-note">RT (narrower)</span></td>
-            <td><span class="badge b-note">G4</span></td>
-            <td>Exact internal name refused (<span class="mono">Queue.hs:366–374</span>) matching Rust (<span class="mono">sysdb/mod.rs:21</span>); Python reserves the prefix (<span class="mono">_queue.py:58</span>). Recorded divergence.</td>
+            <td><span class="badge b-ok">recorded</span></td>
+            <td>Exact internal name refused (<span class="mono">Queue.hs:366–374</span>) matching Rust (<span class="mono">sysdb/mod.rs:21</span>); Python reserves the prefix (<span class="mono">_queue.py:58</span>). Recorded divergence, closed 2026-10-17 — Rust <span class="mono">queue.rs:657</span> speaks and wins.</td>
           </tr>
           <tr>
             <td><span class="mono">on_conflict</span>: <span class="mono">update_if_latest_version</span> (default) / <span class="mono">always_update</span> / <span class="mono">never_update</span>; legacy-flagged rows refused updates.</td>
@@ -579,20 +583,20 @@
     <h2>Recommended fix order</h2>
     <p class="sub">Smallest first, red-first where a test pins the wrong behavior. The actions are mirrored in <span class="mono">TODO.md</span>.</p>
     <ol class="order">
-      <li><strong>B1 + B2</strong> — queue validation: drop the rate cross-check, add the both-spellings refusal, flip the three pinning rows. One slice, both channels exercised by the same suite.</li>
-      <li><strong>B3 (+ the shared empty wait case from G5)</strong> — align <span class="mono">MemSystemDB</span> with live, annotate the mock pin, add executor-level wait cases. Closes the last sim/live mirror divergence known.</li>
-      <li><strong>G1</strong> — export <span class="mono">Duration</span> abstract from the facade. One-line surface change; no behavior.</li>
-      <li><strong>Dated notes: G4, G6, G7</strong> — record the reserved-prefix divergence, the Python-only lifecycle items, and the isolation doc drift. No behavior.</li>
-      <li><strong>G3 wiring decision</strong> — wire <span class="mono">configMigrate</span>/<span class="mono">configUseListenNotify</span> semantics or mark them deliberately inert.</li>
-      <li><strong>G2 client slices</strong> — queue CRUD + set_*, wait_first, attributes/delay, enqueue_in_transaction, list_queued_workflows, read_stream; each its own commit with the Rust client as the shape oracle.</li>
-      <li><strong>Stack-review follow-ups</strong> (from the code review of the uncommitted 19-file stack):
+      <li><span class="badge b-ok">done</span><strong>B1 + B2</strong> — queue validation: drop the rate cross-check, add the both-spellings refusal, flip the three pinning rows. One slice, both channels exercised by the same suite.</li>
+      <li><span class="badge b-ok">done</span><strong>B3 (+ the shared empty wait case from G5)</strong> — align <span class="mono">MemSystemDB</span> with live, annotate the mock pin, add executor-level wait cases. Closes the last sim/live mirror divergence known.</li>
+      <li><span class="badge b-ok">done</span><strong>G1</strong> — export <span class="mono">Duration</span> abstract from the facade. One-line surface change; no behavior.</li>
+      <li><span class="badge b-ok">done</span><strong>Dated notes: G4, G6, G7</strong> — record the reserved-prefix divergence, the Python-only lifecycle items, and the isolation doc drift. No behavior.</li>
+      <li><span class="badge b-ok">done</span><strong>G3 wiring decision</strong> — wire <span class="mono">configMigrate</span>/<span class="mono">configUseListenNotify</span> semantics or mark them deliberately inert.</li>
+      <li><span class="badge b-ok">done</span><strong>G2 client slices</strong> — queue CRUD + set_*, wait_first, attributes/delay, enqueue_in_transaction, list_queued_workflows, read_stream; each its own commit with the Rust client as the shape oracle.</li>
+      <li><span class="badge b-ok">done</span><strong>Stack-review follow-ups</strong> (from the code review of the uncommitted 19-file stack):
         <ul class="tight">
           <li><span class="mono">R1</span> — empty input + no caller should return <span class="mono">Ok</span> before option validation (Rust <span class="mono">postgres.rs:4152–4160</span>); the port's blanket <span class="mono">checkForkArgs</span> refuses (<span class="mono">Management.hs:192–217</span>).</li>
           <li><span class="mono">R2</span> — the <span class="mono">Management.hs:~216</span> comment "every engine entry point" overclaims: client entries call <span class="mono">SystemDB.forkWorkflows</span> directly.</li>
           <li><span class="mono">R3</span> — <span class="mono">coghcid.sh</span> moves out of the repo root (scratch space, per guardrails).</li>
         </ul>
       </li>
-      <li><strong>Close-out</strong> — full <span class="mono">cabal test all</span> + direct psql mirror against <span class="mono">$DBOS_DATABASE_URL</span> with the watcher idle; then <span class="mono">/review</span>.</li>
+      <li><span class="badge b-ok">done</span><strong>Close-out</strong> — full <span class="mono">cabal test all</span> + direct psql mirror against <span class="mono">$DBOS_DATABASE_URL</span> with the watcher idle; then <span class="mono">/review</span>.</li>
     </ol>
   </section>
 

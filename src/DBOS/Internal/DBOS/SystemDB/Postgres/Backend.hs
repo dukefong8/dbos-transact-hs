@@ -24,8 +24,6 @@ module DBOS.SystemDB.Postgres.Backend
     fetchQueueWorkerConcurrency,
     fetchQueueWorkerConcurrencySession,
     fetchRecvStepSession,
-    fetchWorkflowStatus,
-    fetchWorkflowStatusSession,
     fetchWorkflowStatuses,
     fetchWorkflowStatusesSession,
     legacyGetEvent,
@@ -134,22 +132,6 @@ type NotificationRaw =
        '("serialization", Maybe Text),
        '("consumed", Bool)
      ]
-
-fetchWorkflowStatusSession ::
-  WorkflowId ->
-  Session (Maybe WorkflowStatus)
-fetchWorkflowStatusSession (WorkflowId workflowId) = do
-  rawStatus <-
-    sqlQueryTypedSession [typedSql|
-      select status
-      from dbos.workflow_status
-      where workflow_uuid = ${workflowId}
-      limit 1
-    |]
-  -- The column is nullable in the schema, so the row cardinality (@Maybe@)
-  -- nests with the column nullability. A null status fails downstream as
-  -- @UnknownWorkflowStatus ""@ rather than crashing the row decode.
-  pure (join rawStatus >>= either (error . show) Just . parseWorkflowStatus)
 
 fetchNotificationSession ::
   MessageUUID ->
@@ -3677,13 +3659,6 @@ runDbOrFail pool session = do
   case result of
     Left err    -> throwIO (classifyUsageError err)
     Right value -> pure value
-
-fetchWorkflowStatus ::
-  Pool.Pool ->
-  WorkflowId ->
-  IO (Maybe WorkflowStatus)
-fetchWorkflowStatus pool workflowId =
-  runDbOrFail pool (fetchWorkflowStatusSession workflowId)
 
 fetchNotification ::
   Pool.Pool ->

@@ -2,6 +2,11 @@
 
 Date: 2026-10-07
 
+Superseded 2026-10-17 by ADR-0028: the facade exposes the debouncer
+(`Debouncer`, `debouncerNew`, `debounce`, `debounceInWorkflow`) and the
+queue-patterns demo's debouncer tab carries the real form. The decision below
+stands as the record of the deferral, not as live status.
+
 ## Context
 
 The Python queue-patterns demo (`dbos-demo-apps/python/queue-patterns/main.py`)

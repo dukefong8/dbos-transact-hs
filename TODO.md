@@ -51,16 +51,46 @@ holds the wrong behavior:
       `SystemDatabase`/`InvalidInput` channel, all-empty satisfied,
       settled-member first winner, all-settled completes, single wait
       reports the settled outcome), live+sim.
-- [ ] Notes (dated, no behavior): G4 `_dbos_` prefix
-      (`_queue.py:58`) vs exact-name-only here (`Queue.hs:366`, Rust
-      `sysdb/mod.rs:21`); G6 observability query timeout, graceful
-      destroy (`Instance.hs:214`), client schedules/rename exposure,
-      `set_latest_application_version` writer; G7 datasource comment
-      "levels both oracles expose" (`Datasource.hs:84-89`) and
-      ADR-0021's stale `ReadCommitted` default (code: `Serializable`).
-- [ ] G3 config: `configUseListenNotify`/`configMigrate`
-      (`Config.hs:70-71`) are read nowhere — wire or mark deliberately
-      inert (polling-only port; migrations out-of-band).
+- [x] Notes (dated, no behavior) — recorded 2026-10-17, nothing changed:
+  - G4 reserved queue names. The port refuses only the exact
+    `_dbos_internal_queue` (`Queue.hs:366-374`), matching Rust
+    (`sysdb/mod.rs:21`, `queue.rs:657`); Python reserves the whole `_dbos_`
+    prefix (`_queue.py:58`). Rust speaks and wins: exact-name refusal stays.
+  - G6 `observability_query_timeout_sec`: Python-only, no Rust counterpart.
+    The port's listing statements carry no statement timeout, as Rust's do —
+    deferred to the management/listing slice.
+  - G6 graceful `destroy`: Python waits for completion under a timeout; the
+    port's `shutdown` aborts tasks immediately and waits for unwinding
+    (`Instance.hs:214-237`), leaving mid-run workflows PENDING for the next
+    launch to recover. Deliberate contract, kept.
+  - G6 schedules: the sysdb layer is complete (`createSchedule` …
+    `deleteSchedule`, `applySchedules`, CallerStep-recorded, live+sim tested)
+    but nothing exposes it — no engine form of Rust's `DBOS::create_schedule`
+    / `apply_schedules` (`schedule.rs:434-489`), none of Python's client
+    schedule methods (`_client.py:1440-1787`). Rust speaks, so this is an
+    unimplemented surface rather than a divergence: own slice, next epic.
+  - G6 `rename_application` (`_client.py:1756`): Python-only, no Rust
+    counterpart. Deferred with that slice.
+  - G6 `set_latest_application_version`: already present as
+    `clientPromoteVersion` — the same stamp-through-owner-resolution body as
+    Rust (`client.rs:616`), scoped to the client's own application because
+    the backend fills the claimant when the name is `Nothing`
+    (`Backend.hs:3211-3223`). Missing only Rust's `_for` override
+    (`client.rs:648`); deferred with the client slice.
+  - G7 fixed: the `IsolationLevel` comment now names its provenance
+    (TypeScript's four-level `PGIsolationLevel` — the only oracle naming
+    `READ UNCOMMITTED`; Python's three-level literal with `Serializable` the
+    default; Rust v0.5.0 has no application-facing level) and states that
+    `Nothing` is Python's explicit-none path (a bare `BEGIN`). ADR-0021's
+    `ReadCommitted` default corrected in place to `Serializable`, dated.
+- [x] G3 config: `configUseListenNotify`/`configMigrate`
+      (`Config.hs:70-71`) are read nowhere — now documented as deliberately
+      inert at the `Config` declaration (2026-10-17): the port polls, so there
+      is no LISTEN/NOTIFY path to switch on, and migrations are out-of-band
+      (`make db-migrate`, ADR-0004) with launch verifying the schema instead
+      (`acquirePostgresSystemDB` -> `verifySystemDatabase`, ceiling `121`).
+      The fields stay for one-to-one Rust `Config` fidelity; the backend's own
+      `Config` already declares the same pair away (`Backend.hs:932-936`).
 - [x] G2 client slices: queue CRUD + `set_*`, `wait_first`,
       `update_workflow_attributes`, `set_workflow_delay`,
       `enqueue`/`enqueue_in_transaction`, `list_queued_workflows`,
@@ -74,18 +104,73 @@ holds the wrong behavior:
       `clientReadStream`/`clientReadStreamFrom` (the shared reader
       generalized to a `ClientConnection` placement via
       `readStreamOutside`), `clientEnqueueWorkflowInTx` (+ Postgres
-      `enqueueInTx`). Remaining G6 items (schedules/rename exposure,
-      `set_latest_application_version` writer) stay with their notes.
-- [ ] Stack-review follow-ups: R1 empty fork input returns `Ok` with no
+      `enqueueInTx`). The G6 items this left open are recorded in the notes
+      entry above (schedules need their own slice; the version writer already
+      exists as `clientPromoteVersion`).
+- [x] Stack-review follow-ups: R1 empty fork input returns `Ok` with no
       validation on every layer now (engine early-`Right`, sim null guards
       matching the Postgres guards; shared refusal scenario pins both
       empty verdicts plus the two zero-count announcements in the sim
-      trace) — done 2026-10-16, uncommitted; R2 comment narrowed to
+      trace) — done 2026-10-16; R2 comment narrowed to
       launched-instance entries (client forks call the backends directly)
-      — done 2026-10-16, uncommitted; R3 `coghcid.sh` moves out
-      of the repo root.
-- [ ] Close-out: full `cabal test all` + direct psql mirror against
-      `$DBOS_DATABASE_URL` with the watcher idle; then `/review`.
+      — done 2026-10-16; R3 `coghcid.sh` and the `proto/queue-proofs` probe
+      moved to the gitignored `.tmp/` (2026-10-17) — nothing in the tree
+      referenced either, and `.gitignore` now carries `.tmp/`.
+- [x] Close-out: full `cabal test all` + direct psql mirror against
+      `$DBOS_DATABASE_URL` with the watcher idle, `make db-migrate` 121->121 —
+      green 2026-10-17 and landed as `d33f436` (committed directly at the
+      user's request; `/review` not run on that slice).
+
+## Ground-truth verification (2026-10-17)
+
+Re-checked the "open item" list against the code rather than the docs. Three
+recorded follow-ups were stale and are corrected in place; one stands:
+
+- ADR-0021's deferred list named `deleteCheckpoints` for rewind/completion — it
+  landed (`Datasource.hs:159`; `Datasource/Postgres.hs:205-211`; rewind
+  `Instance.hs:408`; completion `Workflow.hs:249-250,282,288`). Still deferred:
+  `readOnly` fast-path, `pendingTransaction`. ADR-0021 line 52 corrected.
+- Completion clearing covers the child workflow and the fire-and-forget start
+  too: the clearance rides the task spawner (`Workflow.hs:121,352,670`; a child
+  runs under its parent's spawner, `:818-822`), while kills and control ends
+  keep rows on purpose (`:241-248`). Superseded by `ad906e0`;
+  `docs/transactional-step-todo.md` follow-up closed.
+- The widget store drops its rows on completion as Python does; the
+  exactly-once instrument reads an append-only commit log
+  (`WidgetCases.hs:584-602`), same `ad906e0` — `docs/widget-store-port-todo.md`
+  corrected.
+- Still open by design (accepted limitation, R1): the captured-instance escape.
+  A step body holding a captured `DBOS`/`Executor`/`Client` can start/enqueue
+  with no `insideAStep` guard (`Instance.hs:252-255,266-279`,
+  `Client.hs:311-373`).
+
+## Debouncer + changelog deferrals, re-checked (2026-10-17)
+
+The two items picked off the open list were already landed; only the records
+were stale:
+
+- **Queue-patterns debouncer (ADR-0027) — done.** The facade exposes
+  `DBOS.Transact.Debouncer` (`Debouncer`, `debouncerNew`, `debounce`,
+  `debounceInWorkflow`), the demo wires `Route.DebouncerSubmitAction` ->
+  `Handler.submitDebounced` -> `debounce`, and the dual-stack suite is
+  `DebouncerTest`/`DebouncerTestSim` (ADR-0028, 5 live cases). ADR-0027 is
+  marked superseded (dated note); the stale "debouncing is deferred" comments
+  in `QueuePatterns/Workflows.hs` and `View.hs` and the "message-based"
+  wording in the demo README are corrected.
+- **CHANGELOG "Deferred, recorded" list — mostly stale (dated correction
+  added).** `fetchOperationCheckpoint` and the `OperationCheckpointStore` seam
+  no longer exist; the bulk status read reports `Malformed` instead of failing
+  the batch; `enqueueWorkflow` carries inputs and the acting application
+  (name/version/id, `Workflow.hs` `workflowNewWorkflow`); polling reads retry
+  through `withRetry` (`Backend.hs:2450-2457`); and payload bodies are opaque
+  cross-language by the interop contract, so the `portable_json` sleep tag
+  being unread is by design.
+- **Closed:** the last decode-crash item — the *unused* singular
+  `fetchWorkflowStatus`/`fetchWorkflowStatusSession` (`error . show` on an
+  unknown status spelling; no callers in `src`, `test`, or `demo-apps`; no Rust
+  counterpart — Rust's `get_workflow` maps to the class's `getWorkflow`) is
+  removed from `Backend.hs`, and the plan's out-of-scope decode note is folded
+  closed. Verified `cabal build all` + `cabal test all` + the psql mirror.
 
 ## Locked decisions (do not relitigate without new evidence)
 

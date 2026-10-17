@@ -25,8 +25,11 @@ Parity evaluation: `docs/transactional-step-parity.md`.
       created-before-launch rule), thawed on failed launch/shutdown;
       `runWorkflow`/`runWorkflowRef` clear the finished workflow's
       checkpoints best-effort. Live test: duplicate refused, rows 1→0.
-      Follow-up (recorded): child-workflow completions and `startWorkflowRef`
-      fire-and-forget starts do not clear yet
+      Follow-up (closed 2026-10-17 by `ad906e0`): child-workflow completions
+      and the fire-and-forget `startWorkflow` start clear too — the clearance
+      rides the task spawner (`Workflow.hs:121,352,670`; a child runs under its
+      parent's spawner, `:818-822`), while kills and control ends keep rows on
+      purpose (`:241-248`)
 - [x] Outside-workflow entry (`runTxOutside`: same retry loop,
       nothing checkpointed, nothing announced, silent trace)
 - [x] Ownership check: executor-gated adoption (`checkOwner` — missing or

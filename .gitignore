@@ -2,6 +2,7 @@ dist-newstyle/
 rust-migrate/target/
 .haskell.hoo
 .build/
+.tmp/
 .ghc.environment.*
 .agent/
 .claude/

@@ -59,6 +59,13 @@ serializerName :: Serializer -> Text
 serializerName RustSerde = "rust_serde"
 
 -- | The application's configuration.
+--
+-- Two fields exist for Rust @Config@ fidelity but are inert in this port:
+-- @configUseListenNotify@ (the port polls — there is no LISTEN/NOTIFY path
+-- to switch on) and @configMigrate@ (ADR-0004: the Rust runner owns
+-- migrations and launch verifies the schema instead, so the port always
+-- behaves as the oracle does with it off). The Postgres backend's own
+-- @Config@ declares the same pair away for the same reasons.
 data Config = Config
   { configAppName :: Text,
     configDatabaseUrl :: Text,

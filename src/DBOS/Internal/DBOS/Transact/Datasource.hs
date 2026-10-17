@@ -80,9 +80,13 @@ import GHC.Stack (HasCallStack)
 import Hasql.Statement qualified as Statement
 import System.Log.FastLogger (ToLogStr (..))
 
--- | The isolation of the application transaction. Mirrors the levels both
--- oracles expose; an unspecified level runs 'Serializable', the Python
--- default, so callers opt into weaker levels explicitly.
+-- | The isolation of the application transaction. The four levels are
+-- TypeScript's @PGIsolationLevel@ set — the only oracle that names
+-- @READ UNCOMMITTED@; Python's @IsolationLevel@ literal is the three-level
+-- subset without it, and Rust v0.5.0 exposes no application-facing isolation
+-- level at all. 'transactionConfigDefault' names 'Serializable', the Python
+-- default; 'Nothing' is Python's explicit-none path, leaving the level to the
+-- database (a bare @BEGIN@).
 data IsolationLevel
   = ReadUncommitted
   | ReadCommitted

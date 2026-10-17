@@ -12,8 +12,8 @@ are ported:
   `concurrency-queue` (concurrency 5), and awaits it.
 - **Rate limiting**: `rate-limited-queue` with `RateLimit 2 / 10s`; the
   workflow is the same 5s durable sleep.
-- **Debouncing**: the new `DBOS.Transact.Debouncer` seam (ADR-0028),
-  message-based like the Python `Debouncer`: first call per tenant key wins
+- **Debouncing**: the `DBOS.Transact.Debouncer` seam (ADR-0028), a sysdb
+  bounce like the Python/TypeScript oracles: first call per tenant key wins
   the internal-queue slot, later calls replace its inputs, and the workflow
   fires 5s after inputs go quiet with the last input.
 

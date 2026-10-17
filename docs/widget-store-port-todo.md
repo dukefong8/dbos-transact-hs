@@ -103,11 +103,12 @@ The mirror table in the report lines up, phase for phase:
 | replay after crash | `step.replay` (outer checkpoint; ids 1–5 incl. sleeps) | `TransactionReplaying update_order_progress (1), (3)` |
 | completion | `workflow.complete` | `WorkflowCompleted` |
 
-Two documented storage differences, no behavioral difference: the checkpoint
-table name (`widget_store.transaction_completion` vs
-`dbos.datasource_outputs`), and Python dropping a workflow's checkpoint rows
-on completion while the port keeps them (clearing started workflows is the
-recorded follow-up).
+One documented storage difference, no behavioral difference: the checkpoint
+table name (`widget_store.transaction_completion` vs `dbos.datasource_outputs`).
+The port drops a finished workflow's checkpoint rows on completion just as
+Python does (corrected 2026-10-17, `ad906e0`); the exactly-once instrument
+therefore reads an append-only commit log (`WidgetCases.hs:584-602`) rather
+than the table.
 
 ### Browser-run evidence
 
