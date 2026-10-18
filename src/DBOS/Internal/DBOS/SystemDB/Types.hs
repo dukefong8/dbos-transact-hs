@@ -96,6 +96,9 @@ module DBOS.SystemDB.Types
     claimsOwnership,
     resolveWorkflowDelay,
     isValidApplicationName,
+    ApplicationName,
+    parseApplicationName,
+    renderApplicationName,
     renameFromApplication,
     defaultRenameBatchSize,
     defaultRenameBatching,
@@ -130,6 +133,7 @@ module DBOS.SystemDB.Types
     deleteScheduleStepName,
     streamClosedSentinel,
     streamClosedSerialization,
+    isStreamClosed,
     dequeueSweepCap,
     secondsDuration,
     millisDuration,
@@ -547,6 +551,35 @@ isValidApplicationName name =
         || c == '-'
         || c == '_'
 
+-- | An application name the oracle would accept: 3 to 256 characters of
+-- lowercase letters, digits, dashes and underscores. Opaque — the constructor
+-- is not exported, so only 'parseApplicationName' builds one and a name a
+-- rename would refuse cannot reach the API at all. Rust applies the same
+-- predicate at its one validating entry point (@rename_application@,
+-- @sysdb/postgres.rs:7338@); its type there is a @String@, so for Rust it
+-- stays a runtime refusal. See ADR-0037.
+newtype ApplicationName = ApplicationName Text
+  deriving stock (Eq, Show)
+
+-- | The stored text of a name that could be built: a total inverse of
+-- 'parseApplicationName' over the values that can exist.
+renderApplicationName :: ApplicationName -> Text
+renderApplicationName (ApplicationName name) = name
+
+-- | Checks a candidate against 'isValidApplicationName' and, on success, is
+-- the only way to build an 'ApplicationName'. Refuses on the oracle's
+-- @new_name@ field with its message verbatim (which says 30 where the rule
+-- allows 256).
+parseApplicationName :: Text -> Either Error ApplicationName
+parseApplicationName name
+  | isValidApplicationName name = Right (ApplicationName name)
+  | otherwise =
+      Left
+        ( invalidInput
+            "new_name"
+            "must be 3 to 30 characters of lowercase letters, digits, dashes and underscores"
+        )
+
 -- | Which rows a rename moves. A sum type rather than a name plus a flag:
 -- naming no application while adopting nothing selects no rows at all.
 -- Mirrors Rust @RenameFrom@.
@@ -704,6 +737,13 @@ streamClosedSentinel = "\"__DBOS_STREAM_CLOSED__\""
 -- @STREAM_CLOSED_SERIALIZATION@.
 streamClosedSerialization :: Text
 streamClosedSerialization = "portable_json"
+
+-- | Whether a stream row's @(value, serialization)@ pair is the close mark.
+-- The one recognizer for the pair, so the two columns cannot be compared
+-- apart. Mirrors Rust @is_stream_closed@ (@sysdb/mod.rs:49@).
+isStreamClosed :: Text -> Maybe Text -> Bool
+isStreamClosed value serialization =
+  value == streamClosedSentinel && serialization == Just streamClosedSerialization
 
 -- | Cap on the partitioned-dequeue sweep. Mirrors
 -- @PARTITIONED_DEQUEUE_SWEEP_CAP@.

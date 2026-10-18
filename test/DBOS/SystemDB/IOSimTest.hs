@@ -61,6 +61,7 @@ import DBOS.SystemDB
     newQueue,
     newSchedule,
     newWorkflow,
+    parseApplicationName,
     secondsDuration,
     timestampFromEpochMs,
     zeroRowCounts)
@@ -145,7 +146,8 @@ workflowTests =
       testCase "deleteWorkflows counts the ids it deleted" $ do
         run (deleteWorkflows backend [WorkflowId "wf-1", WorkflowId "wf-2"] False Nothing) @?= Right 2,
       testCase "renameApplication reports zero row counts" $ do
-        run (renameApplication backend (RenameApplication "app") "target" Unbatched) @?= Right zeroRowCounts
+        let target = either (error . show) id (parseApplicationName "target")
+        run (renameApplication backend (RenameApplication "app") target Unbatched) @?= Right zeroRowCounts
     ]
 
 -- * Waits

@@ -56,8 +56,12 @@ IO-only cases (running list):
 - "a foreign error is converted at the boundary" — the body performs real IO (the foreign charge call), which the simulator cannot run.
 - "select reports the first workflow to settle, not the first started" — first-to-settle timing is wall-clock-bound.
 - "a queued workflow with a legacy input runs with it" — the fixture rewrites the row through raw SQL into the pre-109 shape (input moved into the status column, payload-table row dropped); `MemSystemDB` keeps no separate `workflow_input` table to rewrite.
+- "a workflow's step rows carry the owner and a fork's copies carry it too" — the assertion reads `operation_outputs.application_name`, a column no ported type carries (Rust's step listing omits it), but which another SDK's `step_owners` reads through the cross-language schema contract; the sim store mirrors the ported step type, so it cannot build the value without inventing a field (`test/DBOS/Transact/ManagementTest.hs:702`).
+- "an identity read reaches a peer's row while an unset list stays scoped" — the peer's row belongs to a second application, which the sim fixture cannot build (its store keys rows by id alone, with no owner) (`test/DBOS/Transact/ManagementTest.hs:741`).
+- "a claim skips another application's queued rows" — the peer's rows belong to a second application, which the sim fixture cannot build; dequeue and recovery are the two ways a row gets picked up, and both collide across applications by default, so only ownership separates them (`test/DBOS/Transact/ManagementTest.hs:826`).
+- "a rewind above a close keeps the close sentinel" — live-only by slice decision (2026-10-18), not a simulator limit: `MemSystemDB`'s rewind implements the sentinel filter, so the sim could run it; the management slice ships its new cases live-only for now (`test/DBOS/Transact/ManagementCases.hs:1939`).
 
-Recorded 2026-10-01; extended 2026-10-01 (same-tree marking).
+Recorded 2026-10-01; extended 2026-10-01 (same-tree marking); extended 2026-10-18 (application-name ownership slice).
 
 Sim-only cases (running list):
 

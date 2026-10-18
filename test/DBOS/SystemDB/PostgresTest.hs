@@ -65,6 +65,7 @@ import DBOS.SystemDB
     WorkflowRecord (..),
     WorkflowStatus (..),
     ApplicationRowCounts (..),
+    ApplicationName,
     QueueRecord (..),
     QueueUpdate (..),
     RenameBatching (..),
@@ -84,6 +85,7 @@ import DBOS.SystemDB
     newSchedule,
     millisDuration,
     newWorkflow,
+    parseApplicationName,
     secondsDuration,
     sleepStepName,
     streamClosedSentinel,
@@ -194,6 +196,12 @@ withBackend getBackend action = getBackend >>= action
 -- | A workflow id no other test can hold.
 freshWorkflowId :: IO Text
 freshWorkflowId = UUID.toText <$> UUID.V4.nextRandom
+
+-- | The validated rename target the API takes. Fails the test when the name a
+-- case built does not satisfy the oracle's rule; a case that means to pin that
+-- refusal calls 'parseApplicationName' directly.
+renameTarget :: Text -> IO ApplicationName
+renameTarget name = either (fail . show) pure (parseApplicationName name)
 
 -- | A stored row: the @NOT NULL@ columns plus whatever the read tests need
 -- to exercise. The @init_workflow@ port (P7.3) replaces this once it lands.
@@ -1009,6 +1017,31 @@ listTests getBackend =
           other @?= [unclaimed]
           anyRows <- sort <$> scoped named defaultWorkflowFilter {workflowFilterApplications = AnyApplication}
           anyRows @?= sort [claimed, unclaimed],
+      testCase "an id is an address while a prefix stays a search" $ do
+        unique <- freshWorkflowId
+        let mineName = unique <> "-app"
+            theirsName = unique <> "-theirs-app"
+            mine = Just mineName
+            owned = unique <> "-owned"
+            peer = unique <> "-peer"
+            nobody = unique <> "-nobody"
+        withBackendAs getBackend Nothing $ \bare -> do
+          _ <- runSession bare "fixture" (insertFixture (defaultFixture owned) {fixtureApplication = mine})
+          _ <- runSession bare "fixture" (insertFixture (defaultFixture peer) {fixtureApplication = Just theirsName})
+          _ <- runSession bare "fixture" (insertFixture (defaultFixture nobody))
+          named <- fromPool bare.psdbPool 8 (defaultSettings {settingsApplicationName = mine}) nullTracer
+          -- A prefix is a search, not an address, so it stays scoped to the
+          -- caller's own rows plus the unclaimed ones.
+          let stem = defaultWorkflowFilter {workflowFilterWorkflowIdPrefixes = [unique]}
+          search <- sort <$> idsOf named stem
+          search @?= sort [owned, nobody]
+          -- An id is a global address, so a peer's workflow answers by id
+          -- rather than pretending it does not exist.
+          byId <- idsOf named defaultWorkflowFilter {workflowFilterWorkflowIds = [peer]}
+          byId @?= [peer]
+          -- Naming an application still narrows an id-keyed read.
+          narrowed <- idsOf named defaultWorkflowFilter {workflowFilterWorkflowIds = [peer], workflowFilterApplications = Named [mineName]}
+          narrowed @?= [],
       testCase "queues-only and parented flags narrow" $ do
         unique <- freshWorkflowId
         let queued = unique <> "-queued"
@@ -1716,7 +1749,8 @@ renameTests getBackend =
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture inFlight) {fixtureApplication = Just appName}
           _ <- insertFixtureChecked env (defaultFixture settled) {fixtureApplication = Just appName, fixtureStatus = "SUCCESS"}
-          counts <- renameApplication env (RenameApplication appName) newName Unbatched
+          target <- renameTarget newName
+          counts <- renameApplication env (RenameApplication appName) target Unbatched
           counts @?= Right (ApplicationRowCounts 0 0 0 2 0)
           live <- getWorkflow env (WorkflowId inFlight)
           case live of
@@ -1734,7 +1768,8 @@ renameTests getBackend =
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unclaimed)
           _ <- insertFixtureChecked env (defaultFixture owned) {fixtureApplication = Just "other-app"}
-          counts <- renameApplication env RenameUnclaimed newName Unbatched
+          unclaimedTarget <- renameTarget newName
+          counts <- renameApplication env RenameUnclaimed unclaimedTarget Unbatched
           case counts of
             Right rowCounts -> assertBool "the unclaimed row moved" (rowCounts.rowCountWorkflows >= 1)
             other -> fail ("expected counts, got: " <> show other)
@@ -1749,19 +1784,19 @@ renameTests getBackend =
             ids = [unique <> "-" <> Text.pack (show n) | n <- [1 :: Int, 2, 3]]
         withBackend getBackend $ \env -> do
           _ <- traverse_ (\wid -> insertFixtureChecked env (defaultFixture wid) {fixtureApplication = Just appName, fixtureStatus = "SUCCESS"}) ids
-          counts <- renameApplication env (RenameApplication appName) newName (Batched 2)
+          batchedTarget <- renameTarget newName
+          counts <- renameApplication env (RenameApplication appName) batchedTarget (Batched 2)
           case counts of
             Right rowCounts -> rowCounts.rowCountWorkflows @?= 3
             other -> fail ("expected counts, got: " <> show other),
-      testCase "an invalid name and the same name are refused" $ do
+      testCase "an invalid name is refused where it is parsed, and the same one by the backend" $ do
         unique <- freshWorkflowId
         let appName = "app-" <> Text.take 8 unique
+        parseApplicationName "UPPER"
+          @?= Left (invalidInput "new_name" "must be 3 to 30 characters of lowercase letters, digits, dashes and underscores")
         withBackend getBackend $ \env -> do
-          invalid <- renameApplication env (RenameApplication appName) "UPPER" Unbatched
-          case invalid of
-            Left (InvalidInput {}) -> pure ()
-            other -> fail ("expected InvalidInput, got: " <> show other)
-          same <- renameApplication env (RenameApplication appName) appName Unbatched
+          sameTarget <- renameTarget appName
+          same <- renameApplication env (RenameApplication appName) sameTarget Unbatched
           case same of
             Left (InvalidInput {}) -> pure ()
             other -> fail ("expected InvalidInput, got: " <> show other)
@@ -2419,19 +2454,32 @@ recoveryTests getBackend =
           case found of
             Right (Just record) -> assertBool "the attribute is stored" (maybe False (Text.isInfixOf "k") record.workflowRecordAttributes)
             other -> fail ("expected record, got: " <> show other),
-      testCase "a recovery sweep enqueues only the dead executor's rows" $ do
+      testCase "a recovery sweep enqueues only the dead executor's own rows" $ do
         unique <- freshWorkflowId
         dead <- freshWorkflowId
         alive <- freshWorkflowId
+        peer <- freshWorkflowId
+        legacy <- freshWorkflowId
         let deadExecutor = "dead-" <> unique
             aliveExecutor = "alive-" <> unique
-        withBackend getBackend $ \env -> do
-          _ <- insertFixtureChecked env (defaultFixture dead) {fixtureExecutor = Just deadExecutor, fixtureVersion = Just "v1"}
-          _ <- insertFixtureChecked env (defaultFixture alive) {fixtureExecutor = Just aliveExecutor, fixtureVersion = Just "v1"}
+            mine = "mine-" <> Text.take 8 unique
+            theirs = "theirs-" <> Text.take 8 unique
+        withBackendAs getBackend (Just mine) $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture dead) {fixtureExecutor = Just deadExecutor, fixtureVersion = Just "v1", fixtureApplication = Just mine}
+          _ <- insertFixtureChecked env (defaultFixture alive) {fixtureExecutor = Just aliveExecutor, fixtureVersion = Just "v1", fixtureApplication = Just mine}
+          -- Another application's row at the same executor and version, as
+          -- recovery collides across applications by default; an unclaimed row
+          -- belongs to every application.
+          _ <- insertFixtureChecked env (defaultFixture peer) {fixtureExecutor = Just deadExecutor, fixtureVersion = Just "v1", fixtureApplication = Just theirs}
+          _ <- insertFixtureChecked env (defaultFixture legacy) {fixtureExecutor = Just deadExecutor, fixtureVersion = Just "v1"}
           swept <- reenqueueForRecovery env [deadExecutor] "v1" "_dbos_internal_queue"
           case swept of
-            Right [recovered] -> recovered @?= WorkflowId dead
-            other -> fail ("expected one id, got: " <> show other)
+            Right recovered -> do
+              length recovered @?= 2
+              assertBool "our own row is recovered" (WorkflowId dead `elem` recovered)
+              assertBool "the unclaimed row is recovered" (WorkflowId legacy `elem` recovered)
+              assertBool "the peer's row is not ours to recover" (WorkflowId peer `notElem` recovered)
+            other -> fail ("expected the owned and unclaimed rows, got: " <> show other)
           found <- getWorkflow env (WorkflowId dead)
           case found of
             Right (Just record) -> do
@@ -2442,6 +2490,12 @@ recoveryTests getBackend =
           untouched <- getWorkflow env (WorkflowId alive)
           case untouched of
             Right (Just record) -> record.workflowRecordStatus @?= Pending
+            other -> fail ("expected record, got: " <> show other)
+          leftAlone <- getWorkflow env (WorkflowId peer)
+          case leftAlone of
+            Right (Just record) -> do
+              record.workflowRecordStatus @?= Pending
+              record.workflowRecordApplicationName @?= Just theirs
             other -> fail ("expected record, got: " <> show other)
           none <- reenqueueForRecovery env [] "v1" "_dbos_internal_queue"
           none @?= Right []

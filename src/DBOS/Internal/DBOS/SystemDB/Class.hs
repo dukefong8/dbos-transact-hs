@@ -105,7 +105,7 @@ class Monad m => SystemDB db m where
   setScheduleStatus :: db -> Text -> ScheduleStatus -> Maybe (WorkflowId, Int) -> m (Either Error ())
   updateScheduleLastFiredAt :: db -> Text -> Timestamp -> m (Either Error ())
   deleteSchedule :: db -> Text -> Maybe (WorkflowId, Int) -> m (Either Error ())
-  renameApplication :: db -> RenameFrom -> Text -> RenameBatching -> m (Either Error ApplicationRowCounts)
+  renameApplication :: db -> RenameFrom -> ApplicationName -> RenameBatching -> m (Either Error ApplicationRowCounts)
   recordChildWorkflow :: db -> WorkflowId -> WorkflowId -> Int -> Text -> Maybe Timestamp -> m (Either Error ())
   checkChildResult :: db -> WorkflowId -> Int -> m (Either Error (Maybe StepRecord))
   checkChildResult db parent step = checkStep db parent step getResultStepName

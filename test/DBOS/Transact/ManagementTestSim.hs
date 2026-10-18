@@ -60,6 +60,7 @@ import DBOS.Transact.ManagementCases
     checkBulkFork,
     checkForkRefusals,
     checkForkPartitioned,
+    checkForkInheritsOwner,
     checkAttributes,
     checkAttributesInWorkflow,
     checkDelayRelease,
@@ -97,6 +98,7 @@ import DBOS.Transact.ManagementCases
     scenarioBulkFork,
     scenarioForkRefusals,
     scenarioForkPartitioned,
+    scenarioForkInheritsOwner,
     scenarioAttributes,
     scenarioAttributesInWorkflow,
     scenarioDelayRelease,
@@ -166,6 +168,7 @@ tests =
       simCase simMgmtFixture "forking from the beginning runs the workflow again under a new id" scenarioForkFromBeginning checkForkFromBeginning traceForkFromBeginning,
       simCase simMgmtFixture "a fork takes the id it is given" scenarioForkTakesIdAndQueue checkForkTakesIdAndQueue traceForkTakesIdAndQueue,
       simCase simMgmtFixture "forking from a chosen step replays the steps below it" scenarioForkFromStep checkForkFromStep traceForkFromStep,
+      simCase simMgmtFixture "a fork inherits the owner of the workflow it was forked from" scenarioForkInheritsOwner checkForkInheritsOwner traceForkInheritsOwner,
       simCase simMgmtFixture "forking from the last failure restarts at the failed step" scenarioForkFromFailure checkForkFromFailure traceForkFromFailure,
       simCase simMgmtFixture "bulk cancel and resume hand back every id" scenarioBulkCancelResume checkBulkCancelResume traceBulkCancelResume,
       simCase simMgmtFixture "bulk forking hands back one new id per source, in order" scenarioBulkFork checkBulkFork traceBulkFork,
@@ -179,7 +182,7 @@ tests =
       simCase simMgmtFixture "rewind refusals name their cause and write nothing" scenarioRewindRefusals checkRewindRefusals traceRewindRefusals,
       simCase simMgmtFixture "a rewind at the first step undoes the run" scenarioRewindUndoCut checkRewindUndoCut traceRewindUndoCut,
       simCase simMgmtFixture "a rewind keeps what fell below the cut" scenarioRewindKeepBelowCut checkRewindKeepBelowCut traceRewindKeepBelowCut,
-      simCase simMgmtFixture "a rewind names the queue and version the re-run gets" scenarioRewindQueueVersion checkRewindQueueVersion traceRewindQueueVersion,
+      simCase simMgmtFixture "a rewind names the queue, partition key and version the re-run gets" scenarioRewindQueueVersion checkRewindQueueVersion traceRewindQueueVersion,
       simCase simMgmtFixture "a workflow rewinding another as its step runs once" scenarioRewindInWorkflow checkRewindInWorkflow traceRewindInWorkflow,
       simCase simMgmtFixture "a direct rewind naming its caller records the call" scenarioRewindCallerStep checkRewindCallerStep traceRewindCallerStep,
       simCase simMgmtFixture "a rewound parent replays to its child and adopts it" scenarioRewindAdoptsChild checkRewindAdoptsChild traceRewindAdoptsChild,
@@ -466,6 +469,14 @@ traceForkPartitioned :: forall a. SimTrace a -> IO ()
 traceForkPartitioned tr = do
   selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-fork-key-src-sim"]
   selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-mgmt-fork-key-src-sim-fork"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The owned source runs and the chosen fork is announced; the fork itself
+-- never runs -- the case asserts the rows' owner, not the run.
+traceForkInheritsOwner :: forall a. SimTrace a -> IO ()
+traceForkInheritsOwner tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-fork-owner-src-sim"]
+  selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-mgmt-fork-owner-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | The tagged run completes; updates and searches are silent.

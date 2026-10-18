@@ -325,21 +325,70 @@ tests =
               budget @?= Just (secondsDuration 30)
               assertBool "attributes are stored" (attributes /= Nothing)
               status @?= Delayed,
-      testCase "a nameless client writes unclaimed rows" $ do
+      testCase "a nameless client writes unclaimed rows, which the app claims when it runs them" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
-            queueName = "hs-l2-client-nameless-q-" <> Text.take 12 suffix
-            workflowText = "hs-l2-client-nameless-id-" <> suffix
-        clientConfig0 <- clientConfigFromEnv
-        bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          enqueued <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
-          case enqueued of
+            appName = "hs-l2-client-adopt-" <> Text.take 12 suffix
+            appVersion = "hs-l2-client-adopt-version-" <> suffix
+            executorId = "hs-l2-client-adopt-executor-" <> suffix
+            unpolledQueue = "hs-l2-client-nameless-q-" <> Text.take 12 suffix
+            adoptedQueue = "hs-l2-client-adopt-q-" <> Text.take 12 suffix
+            unpolledText = "hs-l2-client-nameless-id-" <> suffix
+            adoptedText = "hs-l2-client-adopt-id-" <> suffix
+            key = newWorkflowKey "adopt"
+        config0 <- configFromEnv appName
+        -- The driven dequeue and the background supervisor sweep this case's
+        -- queue only, not every fixture queue on the shared database.
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [adoptedQueue]}
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value _ = pure (Right value)
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          _ <- launchClientExec dbos isolatedEnvironment
+          queueRegistered <- registerQueue dbos adoptedQueue defaultQueueOptions AlwaysUpdate
+          case queueRegistered of
             Left err -> fail (show err)
             Right _ -> pure ()
-          row <- readRow getBackend (WorkflowId workflowText)
-          case row of
-            WorkflowRecord {workflowRecordApplicationName = application} ->
-              application @?= Nothing,
+          clientConfig0 <- clientConfigFromEnv
+          bracket (connectOrFail clientConfig0) closeClient $ \client -> do
+            -- A queue nobody polls, so the row stays exactly as written.
+            unpolled <-
+              clientEnqueueWorkflowWith
+                client
+                "adopt"
+                (enqueueOptionsNew unpolledQueue) {workflowId = Just unpolledText}
+                (Just (encodeWorkflowValue (7 :: Int)))
+            case unpolled of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            unclaimed <- readRow getBackend (WorkflowId unpolledText)
+            unclaimed.workflowRecordApplicationName @?= Nothing
+            -- On the queue the app polls, the row the client wrote unclaimed is
+            -- claimed by the application that runs it, so the unclaimed
+            -- partition drains on its own. Pinned to the app's version: an
+            -- unversioned row is only claimed by the latest registered version,
+            -- and this shared database always has a newer nameless row.
+            adopted <-
+              clientEnqueueWorkflowWith
+                client
+                "adopt"
+                ((enqueueOptionsNew adoptedQueue) {workflowId = Just adoptedText, appVersion = Just appVersion})
+                (Just (encodeWorkflowValue (7 :: Int)))
+            case adopted of
+              Left err -> fail (show err)
+              Right handle -> do
+                _ <- dequeueWorkflows dbos
+                result <- resultWf handle
+                case result of
+                  Right (Just stored) -> do
+                    let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
+                    assertEqual "the app ran the client's enqueue" (Right 7) decoded
+                  other -> fail (show other)
+                claimed <- readRow getBackend (WorkflowId adoptedText)
+                claimed.workflowRecordApplicationName @?= Just appName,
       testCase "the workflow id is an idempotency key" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)

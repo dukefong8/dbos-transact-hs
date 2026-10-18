@@ -41,6 +41,7 @@ module DBOS.Transact.ManagementCases
     scenarioBulkFork,
     scenarioForkRefusals,
     scenarioForkPartitioned,
+    scenarioForkInheritsOwner,
     scenarioAttributes,
     scenarioAttributesInWorkflow,
     scenarioDelayRelease,
@@ -49,6 +50,7 @@ module DBOS.Transact.ManagementCases
     scenarioRewindRefusals,
     scenarioRewindUndoCut,
     scenarioRewindKeepBelowCut,
+    scenarioRewindKeepStreamClose,
     scenarioRewindQueueVersion,
     scenarioRewindInWorkflow,
     scenarioRewindCallerStep,
@@ -76,6 +78,7 @@ module DBOS.Transact.ManagementCases
     checkBulkFork,
     checkForkRefusals,
     checkForkPartitioned,
+    checkForkInheritsOwner,
     checkAttributes,
     checkAttributesInWorkflow,
     checkDelayRelease,
@@ -84,6 +87,7 @@ module DBOS.Transact.ManagementCases
     checkRewindRefusals,
     checkRewindUndoCut,
     checkRewindKeepBelowCut,
+    checkRewindKeepStreamClose,
     checkRewindQueueVersion,
     checkRewindInWorkflow,
     checkRewindCallerStep,
@@ -100,7 +104,7 @@ import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import GHC.Stack (HasCallStack)
-import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NotificationRecord (..), QueueName (..), SerializedWorkflowValue (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, internalQueueName)
+import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NotificationRecord (..), QueueName (..), Serialization (..), SerializedWorkflowValue (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, internalQueueName, streamClosedSentinel, streamClosedSerialization)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
   ( CodecError,
@@ -912,6 +916,45 @@ scenarioForkTakesIdAndQueue fx = do
     row <- fx.mfReadRow (WorkflowId forkedText)
     pure (forkedText, row.workflowRecordQueueName, decoded)
 
+-- | A workflow's row carries the application that ran it, and a fork's row
+-- inherits that owner rather than starting unclaimed. Mirrors Python's
+-- @test_steps_carry_owner_and_forks_inherit_it@ at the row level.
+scenarioForkInheritsOwner :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                          => MgmtFixture m ->
+                             m (Maybe Text, Maybe Text, Text)
+scenarioForkInheritsOwner fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "owned"
+        sourceText = "hs-l2-mgmt-fork-owner-src-" <> suffix
+        forkedText = "hs-l2-mgmt-fork-owner-" <> suffix
+        sourceId = WorkflowId sourceText
+    refE <- registerWorkflowRef dbos key plusOneBody
+    case refE of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key sourceId (Just (encodeWorkflowValue (3 :: Int)))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    parentRow <- fx.mfReadRow sourceId
+    forked <-
+      forkWorkflows
+        dbos
+        [(forkNew sourceText) {forkForkedId = Just forkedText}]
+        defaultForkOptions
+    case forked of
+      Left err -> throwIO (userError (show err))
+      Right [WorkflowId text] | text == forkedText -> pure ()
+      other -> throwIO (userError ("expected the chosen fork id, got: " <> show other))
+    forkRow <- fx.mfReadRow (WorkflowId forkedText)
+    pure
+      ( parentRow.workflowRecordApplicationName,
+        forkRow.workflowRecordApplicationName,
+        fx.mfIdentity.identityAppName
+      )
+
 -- | Forking from a chosen step replays the steps below it: the fork runs only
 -- the steps at or above the fork point. Returns the fork's step names.
 scenarioForkFromStep :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
@@ -1019,6 +1062,14 @@ checkForkTakesIdAndQueue (forkedText, queue, decoded) = do
   checkEq True (not (Text.null forkedText))
   checkEq (Just "_dbos_internal_queue") queue
   checkEq 4 decoded
+
+-- | The source and its fork are both owned by the launching application, and
+-- the fork inherits the owner instead of starting unclaimed.
+checkForkInheritsOwner :: (Maybe Text, Maybe Text, Text) -> Either String ()
+checkForkInheritsOwner (parentOwner, forkOwner, appName) = do
+  checkEq (Just appName) parentOwner
+  checkEq (Just appName) forkOwner
+  checkEq parentOwner forkOwner
 
 -- | Bulk cancel and resume hand back every id, in any order: two queued runs
 -- are cancelled and resumed, and both ids come back from each call. Returns
@@ -1227,9 +1278,13 @@ scenarioAttributes fx = do
         widText = "hs-l2-mgmt-attributes-" <> suffix
         wid = WorkflowId widText
         tenant = "acme-" <> suffix
-        full = "{\"tenant\":\"" <> tenant <> "\",\"tier\":\"gold\"}"
+        -- The tier carries the suffix too: the live fixture's backend holds no
+        -- application name, so an attribute search over the shared database is
+        -- unscoped, and a literal tier would match a parallel case's row.
+        tier = "gold-" <> suffix
+        full = "{\"tenant\":\"" <> tenant <> "\",\"tier\":\"" <> tier <> "\"}"
         tenantOnly = "{\"tenant\":\"" <> tenant <> "\"}"
-        tierOnly = "{\"tier\":\"gold\"}"
+        tierOnly = "{\"tier\":\"" <> tier <> "\"}"
     regE <- registerWorkflow dbos key zeroBody
     case regE of
       Left err -> throwIO (userError (show err))
@@ -1285,7 +1340,7 @@ scenarioAttributesInWorkflow fx = do
         callerKey = newWorkflowKey "attributes-caller"
         targetText = "hs-l2-mgmt-attributes-target-" <> suffix
         callerText = "hs-l2-mgmt-attributes-caller-" <> suffix
-        replacement = "{\"tenant\":\"acme-" <> suffix <> "\",\"tier\":\"gold\"}"
+        replacement = "{\"tenant\":\"acme-" <> suffix <> "\",\"tier\":\"gold-" <> suffix <> "\"}"
         callerBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         callerBody target wctx = do
           replaced <- updateWorkflowAttributesInWorkflow wctx (WorkflowId target) (Just replacement)
@@ -1862,10 +1917,76 @@ checkRewindKeepBelowCut (messages, eventHit, values, stepIds, status) = do
   checkEq True (all (< 5) stepIds)
   checkEq Enqueued status
 
--- | The rewind names the queue and version the re-run gets: the row
--- carries them, the counters clear, and the history from the cut is gone.
+-- | A body that writes one stream entry and then closes the stream. The close
+-- is a step, so whether its sentinel is the discarded run's to undo depends on
+-- where the cut falls.
+streamCloseBody :: forall exec m. (MonadSTM m)
+                => () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+streamCloseBody () wctx = do
+  wrote <- writeStream wctx "out" ("v" :: Text)
+  case wrote of
+    Left err -> pure (Left err)
+    Right () -> do
+      closed <- closeStream wctx "out"
+      pure $ case closed of
+        Left err -> Left err
+        Right () -> Right "done"
+
+-- | Rewound above the close, the close's step survives the cut, so the
+-- sentinel stands with the entry and a reader meeting it still ends. Mirrors
+-- the third cut in Python's @test_rewind_reopens_a_closed_stream@.
+--
+-- IO only: the management slice skips its sim half by decision (2026-10-18),
+-- so this case is wired into 'ManagementTest' alone.
+scenarioRewindKeepStreamClose :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                              => MgmtFixture m -> m [Text]
+scenarioRewindKeepStreamClose fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "rewind-stream-close"
+        widText = "hs-l2-mgmt-rewind-stream-close-" <> suffix
+        wid = WorkflowId widText
+    registered <- registerWorkflow dbos key streamCloseBody
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    -- Written (step 0) and closed (step 1) are both below the cut.
+    rewound <- rewindWorkflows dbos wid (defaultRewindOptions {rewindStartStep = 2})
+    case rewound of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    entries <- runSystemDB fx.mfSystemDB (\db -> SystemDB.getAllStreamEntries db wid)
+    case entries of
+      Left err -> throwIO (userError (show err))
+      Right rows -> pure [row.streamValue | row <- rows]
+
+-- | The entry the run wrote stands, and so does the close's sentinel: the cut
+-- fell above the close, so nothing replays it.
+checkRewindKeepStreamClose :: [Text] -> Either String ()
+checkRewindKeepStreamClose values =
+  checkEq
+    ( map
+        (.serializedText)
+        [ encodeWorkflowValue ("v" :: Text),
+          SerializedWorkflowValue
+            { serializedText = streamClosedSentinel,
+              serializedSerialization = Just (Serialization streamClosedSerialization)
+            }
+        ]
+    )
+    values
+
+-- | The rewind names the queue, partition key and version the re-run
+-- gets: the row carries them, the counters clear, and the history from
+-- the cut is gone. Mirrors Python's
+-- @test_rewind_onto_a_queue_with_a_partition_key@.
 scenarioRewindQueueVersion :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-                           => MgmtFixture m -> m (WorkflowStatus, Maybe Text, Maybe Text, Int64, [Int])
+                           => MgmtFixture m -> m (WorkflowStatus, Maybe Text, Maybe Text, Maybe Text, Int64, [Int])
 scenarioRewindQueueVersion fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
@@ -1880,7 +2001,7 @@ scenarioRewindQueueVersion fx = do
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
-    rewound <- rewindWorkflow dbos wid (defaultRewindOptions {rewindStartStep = 0, rewindQueueName = Just "custom-q", rewindApplicationVersion = Just "v9"})
+    rewound <- rewindWorkflow dbos wid (defaultRewindOptions {rewindStartStep = 0, rewindQueueName = Just "custom-q", rewindQueuePartitionKey = Just "pk-1", rewindApplicationVersion = Just "v9"})
     case rewound of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -1892,16 +2013,19 @@ scenarioRewindQueueVersion fx = do
     pure
       ( row.workflowRecordStatus,
         row.workflowRecordQueueName,
+        row.workflowRecordQueuePartitionKey,
         row.workflowRecordApplicationVersion,
         row.workflowRecordRecoveryAttempts,
         stepIds
       )
 
--- | The chosen queue and version land on the row; the cut clears all steps.
-checkRewindQueueVersion :: (WorkflowStatus, Maybe Text, Maybe Text, Int64, [Int]) -> Either String ()
-checkRewindQueueVersion (status, queue, version, attempts, stepIds) = do
+-- | The chosen queue, partition key and version land on the row; the cut
+-- clears all steps.
+checkRewindQueueVersion :: (WorkflowStatus, Maybe Text, Maybe Text, Maybe Text, Int64, [Int]) -> Either String ()
+checkRewindQueueVersion (status, queue, partitionKey, version, attempts, stepIds) = do
   checkEq Enqueued status
   checkEq (Just "custom-q") queue
+  checkEq (Just "pk-1") partitionKey
   checkEq (Just "v9") version
   checkEq 0 attempts
   checkEq [] stepIds

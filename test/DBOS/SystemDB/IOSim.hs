@@ -117,6 +117,7 @@ import DBOS.SystemDB
     closeStreamStepName,
     streamClosedSentinel,
     streamClosedSerialization,
+    isStreamClosed,
     setEventStepName,
     timestampFromEpochMs,
     timestampNow,
@@ -882,7 +883,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 memRecordRecvStep db wid stepId recvStepName Nothing
                 pure (Right Nothing)
   writeStream db wid@(WorkflowId widText) stepId key value serialization writtenBy = do
-    let stepName = if value == streamClosedSentinel && serialization == Just streamClosedSerialization then closeStreamStepName else writeStreamStepName
+    let stepName = if isStreamClosed value serialization then closeStreamStepName else writeStreamStepName
     replay <- case writtenBy of
       Step -> pure (Right Nothing)
       Workflow -> checkStep db wid stepId stepName
@@ -1773,8 +1774,7 @@ memRewind db wid cut sysOpts caller = do
                 events' = foldr (\(key, value) acc -> Map.insert key value acc) (foldr Map.delete events [(wid, key) | key <- cutKeys]) restored
                 isClose entry =
                   entry.streamStepId >= cut
-                    && entry.streamValue == streamClosedSentinel
-                    && entry.streamSerialization == Just streamClosedSerialization
+                    && isStreamClosed entry.streamValue entry.streamSerialization
                 streams' = Map.mapWithKey (\(w, _) entries -> if w == wid then filter (not . isClose) entries else entries) streams
                 steps' = Map.filterWithKey (\(w, step) _ -> w /= wid || step < cut) steps
                 history' = Map.filterWithKey (\(w, _, step) _ -> w /= wid || step < cut) history

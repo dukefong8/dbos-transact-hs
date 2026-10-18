@@ -17,10 +17,16 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
+import Hasql.Decoders qualified as Decoders
+import Hasql.Encoders qualified as Encoders
+import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import DBOS.SystemDB
-  ( AwaitedOutcome (..),
+  ( Applications (..),
+    AwaitedOutcome (..),
     Fork (..),
     NewWorkflow (..),
+    QueueName (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
     Submission (..),
@@ -32,6 +38,7 @@ import DBOS.SystemDB
     defaultWorkflowFilter,
     forkNew,
     getWorkflow,
+    internalQueueName,
     newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
@@ -63,11 +70,14 @@ import DBOS.Transact
     deleteWorkflowsInWorkflow,
     encodeWorkflowValue,
     enqueueWorkflow,
+    forkWorkflows,
     forkWorkflowsInWorkflow,
+    getWorkflowStatus,
     handleResult,
     handleStatus,
     launchWithEnvironment,
     listWorkflowSteps,
+    listWorkflows,
     listWorkflowsInWorkflow,
     newDBOS,
     newWorkflowKey,
@@ -92,6 +102,7 @@ import DBOS.Transact
     startChildWorkflow)
 import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Instance (dequeueWorkflows)
 import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
 import DBOS.SystemDB.Retry (uuidEntropy)
@@ -111,6 +122,7 @@ import DBOS.Transact.ManagementCases
     checkBulkFork,
     checkForkRefusals,
     checkForkPartitioned,
+    checkForkInheritsOwner,
     checkAttributes,
     checkAttributesInWorkflow,
     checkDelayRelease,
@@ -119,6 +131,7 @@ import DBOS.Transact.ManagementCases
     checkRewindRefusals,
     checkRewindUndoCut,
     checkRewindKeepBelowCut,
+    checkRewindKeepStreamClose,
     checkRewindQueueVersion,
     checkRewindInWorkflow,
     checkRewindCallerStep,
@@ -150,6 +163,7 @@ import DBOS.Transact.ManagementCases
     scenarioBulkFork,
     scenarioForkRefusals,
     scenarioForkPartitioned,
+    scenarioForkInheritsOwner,
     scenarioAttributes,
     scenarioAttributesInWorkflow,
     scenarioDelayRelease,
@@ -158,6 +172,7 @@ import DBOS.Transact.ManagementCases
     scenarioRewindRefusals,
     scenarioRewindUndoCut,
     scenarioRewindKeepBelowCut,
+    scenarioRewindKeepStreamClose,
     scenarioRewindQueueVersion,
     scenarioRewindInWorkflow,
     scenarioRewindCallerStep,
@@ -209,12 +224,14 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from the beginning runs the workflow again under a new id" scenarioForkFromBeginning checkForkFromBeginning,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a fork takes the id it is given" scenarioForkTakesIdAndQueue checkForkTakesIdAndQueue,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from a chosen step replays the steps below it" scenarioForkFromStep checkForkFromStep,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a fork inherits the owner of the workflow it was forked from" scenarioForkInheritsOwner checkForkInheritsOwner,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "bulk cancel and resume hand back every id" scenarioBulkCancelResume checkBulkCancelResume,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a finished workflow rewound to its second step runs again under the same id" scenarioRewindRunsAgain checkRewindRunsAgain,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "rewind refusals name their cause and write nothing" scenarioRewindRefusals checkRewindRefusals,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewind at the first step undoes the run" scenarioRewindUndoCut checkRewindUndoCut,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewind keeps what fell below the cut" scenarioRewindKeepBelowCut checkRewindKeepBelowCut,
-      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewind names the queue and version the re-run gets" scenarioRewindQueueVersion checkRewindQueueVersion,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewind above a close keeps the close sentinel" scenarioRewindKeepStreamClose checkRewindKeepStreamClose,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewind names the queue, partition key and version the re-run gets" scenarioRewindQueueVersion checkRewindQueueVersion,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow rewinding another as its step runs once" scenarioRewindInWorkflow checkRewindInWorkflow,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a direct rewind naming its caller records the call" scenarioRewindCallerStep checkRewindCallerStep,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a rewound parent replays to its child and adopts it" scenarioRewindAdoptsChild checkRewindAdoptsChild,
@@ -681,7 +698,211 @@ tests =
         case listed of
           Right [StepRecord {stepRecordStepId = sid, stepRecordStepName = name}] ->
             (sid, name) @?= (0, "DBOS.fork_workflow")
-          other -> fail ("expected the empty batch at step zero, got: " <> show other)
+          other -> fail ("expected the empty batch at step zero, got: " <> show other),
+      -- IO only: the assertion reads @operation_outputs.application_name@, a
+      -- column no ported type carries (Rust's step listing omits it too), but
+      -- which the cross-language schema contract another SDK's @step_owners@
+      -- reads. The sim store mirrors the ported step type, so it cannot build
+      -- the value without inventing a field.
+      testCase "a workflow's step rows carry the owner and a fork's copies carry it too" $
+        withInstance "mgmt-step-owner" $ \dbos suffix -> do
+          let key = newWorkflowKey "owned-step"
+              sourceText = "hs-l1-mgmt-step-owner-" <> suffix
+              forkedText = "hs-l1-mgmt-step-owner-fork-" <> suffix
+              appName = "hs-l2-mgmt-step-owner-" <> Text.take 16 suffix
+              body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+              body () wctx = do
+                recorded <- runStep wctx "a_step" (const (pure (8 :: Int)))
+                pure (fmap (const 8) recorded)
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchOrFail dbos
+          ran <- runWf exec key (WorkflowId sourceText) (Just (encodeWorkflowValue ()))
+          case ran of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          sourceOwners <- stepOwners getBackend (WorkflowId sourceText)
+          sourceOwners @?= [Just appName]
+          -- Forking from above the step copies its row: the copy inherits the
+          -- source's owner rather than being re-stamped or left unclaimed.
+          forked <-
+            forkWorkflows
+              dbos
+              [(forkNew sourceText) {forkForkedId = Just forkedText, forkStartStep = 1}]
+              defaultForkOptions
+          case forked of
+            Left err -> fail (show err)
+            Right [WorkflowId text] -> text @?= forkedText
+            other -> fail ("expected the chosen fork id, got: " <> show other)
+          forkedOwners <- stepOwners getBackend (WorkflowId forkedText)
+          forkedOwners @?= [Just appName],
+      -- IO only: the peer's row belongs to a second application, which the sim
+      -- fixture cannot build (its store keys rows by id alone, with no owner).
+      testCase "an identity read reaches a peer's row while an unset list stays scoped" $
+        withInstance "mgmt-read-scope" $ \dbosA suffix -> do
+          let key = newWorkflowKey "peer-workflow"
+              appAName = "hs-l2-mgmt-read-scope-" <> Text.take 16 suffix
+              appBName = "hs-l2-mgmt-read-peer-" <> Text.take 16 suffix
+              ownText = "hs-l1-mgmt-read-mine-" <> suffix
+              peerText = "hs-l1-mgmt-read-peer-" <> suffix
+              queueA = "hs-l1-mgmt-read-q-a-" <> Text.take 12 suffix
+              queueB = "hs-l1-mgmt-read-q-b-" <> Text.take 12 suffix
+              input = Just (encodeWorkflowValue (1 :: Int))
+              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+              body value _ = pure (Right value)
+          registeredA <- registerWorkflow dbosA key body
+          case registeredA of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          _ <- launchOrFail dbosA
+          queuedA <- registerQueue dbosA queueA defaultQueueOptions AlwaysUpdate
+          case queuedA of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          own <- enqueueWorkflow dbosA key (WorkflowId ownText) input queueA
+          case own of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          -- The peer runs the same code under another application name. It is
+          -- narrowed to its own queue so its sweep stays away from ours.
+          baseB <- configFromEnv appBName
+          let configB =
+                baseB
+                  { configAppVersion = Just ("hs-l2-peer-version-" <> suffix),
+                    configExecutorId = Just ("hs-l2-peer-executor-" <> suffix),
+                    configListenQueues = Just [queueB]
+                  }
+          bracket (newDBOS configB) shutdown $ \dbosB -> do
+            registeredB <- registerWorkflow dbosB key body
+            case registeredB of
+              Left err -> fail (show err)
+              Right () -> pure ()
+            _ <- launchOrFail dbosB
+            queuedB <- registerQueue dbosB queueB defaultQueueOptions AlwaysUpdate
+            case queuedB of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            peer <- enqueueWorkflow dbosB key (WorkflowId peerText) input queueB
+            case peer of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            -- An ID-keyed read is an address: it reaches the peer's row.
+            byId <- listWorkflows dbosA (defaultWorkflowFilter {workflowFilterWorkflowIds = [peerText]})
+            case byId of
+              Left err -> fail (show err)
+              Right [WorkflowRecord {workflowRecordId = foundId, workflowRecordApplicationName = owner}] -> do
+                foundId @?= WorkflowId peerText
+                owner @?= Just appBName
+              other -> fail ("expected the peer's row, got: " <> show other)
+            -- The unset filter stays scoped to this application's own rows.
+            scoped <- listWorkflows dbosA (defaultWorkflowFilter {workflowFilterNames = ["peer-workflow"]})
+            case scoped of
+              Left err -> fail (show err)
+              Right records -> do
+                assertBool "our own row is listed" (WorkflowId ownText `elem` map (.workflowRecordId) records)
+                assertBool "the peer's row is scoped out" (WorkflowId peerText `notElem` map (.workflowRecordId) records)
+            -- Naming an application narrows even an ID-keyed read.
+            narrowed <-
+              listWorkflows
+                dbosA
+                ( defaultWorkflowFilter
+                    { workflowFilterWorkflowIds = [peerText],
+                      workflowFilterApplications = Named [appAName]
+                    }
+                )
+            narrowed @?= Right []
+            statusA <- getWorkflowStatus dbosA (WorkflowId peerText)
+            assertBool "the status read reaches a peer's row" (statusA /= Nothing)
+            retrieved <- retrieveWorkflow dbosA (WorkflowId peerText)
+            case retrieved of
+              Left err -> fail (show err)
+              Right retrievedHandle -> do
+                throughHandle <- handleStatus retrievedHandle
+                case throughHandle of
+                  Right (Just _) -> pure ()
+                  other -> fail ("expected the peer's status through the handle, got: " <> show other),
+      -- IO only: the peer's rows belong to a second application, which the sim
+      -- fixture cannot build. Dequeue and recovery are the two ways a row gets
+      -- picked up; both collide across applications by default, so only
+      -- ownership separates them.
+      testCase "a claim skips another application's queued rows" $
+        withInstance "mgmt-claim-scope" $ \dbosA suffix -> do
+          let key = newWorkflowKey "claimable"
+              appBName = "hs-l2-mgmt-claim-peer-" <> Text.take 16 suffix
+              sharedQueue = "hs-l1-mgmt-claim-shared-" <> Text.take 12 suffix
+              peerQueue = "hs-l1-mgmt-claim-qb-" <> Text.take 12 suffix
+              mineText = "hs-l1-mgmt-claim-mine-" <> suffix
+              myInternalText = "hs-l1-mgmt-claim-mine-int-" <> suffix
+              peerNamedText = "hs-l1-mgmt-claim-peer-" <> suffix
+              peerInternalText = "hs-l1-mgmt-claim-peer-int-" <> suffix
+              internalText = case internalQueueName of QueueName name -> name
+              input = Just (encodeWorkflowValue (1 :: Int))
+              body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+              body value _ = pure (Right value)
+          registeredA <- registerWorkflow dbosA key body
+          case registeredA of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          _ <- launchOrFail dbosA
+          queuedA <- registerQueue dbosA sharedQueue defaultQueueOptions AlwaysUpdate
+          case queuedA of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          mineNamed <- enqueueWorkflow dbosA key (WorkflowId mineText) input sharedQueue
+          case mineNamed of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          mineInternal <- enqueueWorkflow dbosA key (WorkflowId myInternalText) input internalText
+          case mineInternal of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          baseB <- configFromEnv appBName
+          let configB =
+                baseB
+                  { configAppVersion = Just ("hs-l2-peer-version-" <> suffix),
+                    configExecutorId = Just ("hs-l2-peer-executor-" <> suffix),
+                    configListenQueues = Just [peerQueue]
+                  }
+          bracket (newDBOS configB) shutdown $ \dbosB -> do
+            registeredB <- registerWorkflow dbosB key body
+            case registeredB of
+              Left err -> fail (show err)
+              Right () -> pure ()
+            _ <- launchOrFail dbosB
+            queuedB <- registerQueue dbosB peerQueue defaultQueueOptions AlwaysUpdate
+            case queuedB of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            -- The peer's rows name our registered queue and the internal one,
+            -- which every application sweeps. A peer does not need the queue
+            -- registered: the name is written on the row.
+            peerNamed <- enqueueWorkflow dbosB key (WorkflowId peerNamedText) input sharedQueue
+            case peerNamed of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            peerInternal <- enqueueWorkflow dbosB key (WorkflowId peerInternalText) input internalText
+            case peerInternal of
+              Left err -> fail (show err)
+              Right _ -> pure ()
+            claimed <- dequeueWorkflows dbosA
+            case claimed of
+              Left err -> fail (show err)
+              Right ids -> do
+                assertBool "the peer's named row is not ours to claim" (WorkflowId peerNamedText `notElem` ids)
+                assertBool "the peer's internal-queue row is not ours to claim" (WorkflowId peerInternalText `notElem` ids)
+            -- Our own work on both queues still runs.
+            forM_ [mineText, myInternalText] $ \wid -> do
+              awaited <- waitForWorkflow dbosA (WorkflowId wid)
+              case awaited of
+                Right (SystemDB.AwaitedSucceeded _ _) -> pure ()
+                other -> fail ("expected " <> Text.unpack wid <> " to run, got: " <> show other)
+            -- The peer's named-queue row is untouched, still owned by the peer:
+            -- nobody else could take it, and the peer does not poll that queue.
+            peerRow <- readRow getBackend (WorkflowId peerNamedText)
+            peerRow.workflowRecordStatus @?= Enqueued
+            peerRow.workflowRecordApplicationName @?= Just appBName
     ]
 
 -- * Engine-only driver aliases
@@ -725,7 +946,7 @@ acquireSuiteBackend = do
 -- racing a running peer (tasty runs groups in parallel; names are unique per
 -- case). The framed 'ManagementCases' scenarios register no queue rows.
 suiteQueuePrefixes :: [Text]
-suiteQueuePrefixes = ["hs-l2-mgmt-fork-queue-", "hs-l2-mgmt-run-", "hs-l2-delayed-work-"]
+suiteQueuePrefixes = ["hs-l2-mgmt-fork-queue-", "hs-l2-mgmt-run-", "hs-l2-delayed-work-", "hs-l1-mgmt-"]
 
 -- | Delete this suite's fixture queues after the group finishes: the shared
 -- database keeps a queue row per run, and every unscoped sweep pays one claim
@@ -785,6 +1006,22 @@ readRow getBackend wid = do
   case found of
     Right (Just record) -> pure record
     _ -> fail "expected the workflow row to exist"
+
+-- | The application that wrote each of a workflow's @operation_outputs@ rows,
+-- in step order: the owner column, read raw. No ported step type carries it
+-- (Rust's step listing omits it too), but the column is part of the
+-- cross-language schema contract another SDK's @step_owners@ reads.
+stepOwners :: IO Postgres.PostgresSystemDB -> WorkflowId -> IO [Maybe Text]
+stepOwners getBackend (WorkflowId workflowText) = do
+  backend <- getBackend
+  found <-
+    Postgres.runSession backend "step owners" $
+      Session.statement workflowText $
+        Statement.preparable
+          "select application_name from dbos.operation_outputs where workflow_uuid = $1 order by function_id"
+          (Encoders.param (Encoders.nonNullable Encoders.text))
+          (Decoders.rowList (Decoders.column (Decoders.nullable Decoders.text)))
+  either (fail . show) pure found
 
 freshSuffix :: IO Text
 freshSuffix = Text.pack . UUID.toString <$> UUID.V4.nextRandom

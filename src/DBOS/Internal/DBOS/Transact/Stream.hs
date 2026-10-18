@@ -23,7 +23,7 @@ import Data.Vector.Fusion.Stream.Monadic qualified as Vector
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), WorkflowRecord (WorkflowRecord, workflowRecordStatus), WorkflowStatus (..), WrittenBy (..), addTimeout, durationAsMillis, millisDuration, readStreamStepName, secondsDuration, streamClosedSentinel, streamClosedSerialization, timestampNow)
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), WorkflowRecord (WorkflowRecord, workflowRecordStatus), WorkflowStatus (..), WrittenBy (..), addTimeout, durationAsMillis, isStreamClosed, millisDuration, readStreamStepName, secondsDuration, streamClosedSentinel, streamClosedSerialization, timestampNow)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Checkpoint (StepPlacement (..), placeCall)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
@@ -225,7 +225,7 @@ readStreamWith place runDb caller wid key initialOffset options = do
             completedAt <- timestampNow
             withSystemDB readerWctx (\db -> SystemDB.recordStep db (WorkflowId (workflowId readerWctx)) stepNo readStreamStepName outcome serialization (Just (StepTiming startedAt completedAt)))
           _ -> pure (Right ())
-        isClose encoded = encoded.encodedValue == streamClosedSentinel && encoded.encodedSerialization == Just streamClosedSerialization
+        isClose encoded = isStreamClosed encoded.encodedValue encoded.encodedSerialization
         decodeFailure codecError = case codecError of
           CodecNotJson _ input       -> Deserialization "stream value" ("invalid JSON: " <> input)
           CodecTypeMismatch _ detail -> Deserialization "stream value" (Text.pack detail)

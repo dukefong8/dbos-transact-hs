@@ -103,7 +103,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Submission (Fresh), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isTerminal, isValidApplicationName, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Submission (Fresh), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isTerminal, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -2894,7 +2894,7 @@ instance SystemDB PostgresSystemDB IO where
     completedAt <- timestampNow
     let widText = unwrap wid
         stepName =
-          if value == streamClosedSentinel && serialization == Just streamClosedSerialization
+          if isStreamClosed value serialization
             then closeStreamStepName
             else writeStreamStepName
         recordParams =
@@ -3534,33 +3534,32 @@ instance SystemDB PostgresSystemDB IO where
         result <- runSession env "delete_schedule" (Session.statement name Statements.deleteScheduleStatement)
         pure (() <$ result)
   renameApplication env source newName batching
-    | not (isValidApplicationName newName) =
-        pure (Left (invalidInput "new_name" "must be 3 to 30 characters of lowercase letters, digits, dashes and underscores"))
-    | renameFromApplication source == Just newName =
-        pure (Left (invalidInput "new_name" ("\"" <> newName <> "\" already holds that name")))
+    | renameFromApplication source == Just (renderApplicationName newName) =
+        pure (Left (invalidInput "new_name" ("\"" <> renderApplicationName newName <> "\" already holds that name")))
     | batching == Batched 0 =
         pure (Left (invalidInput "batching" "a batch must hold at least one workflow"))
     | otherwise = do
         let renamedFrom = renameFromApplication source
+            targetName = renderApplicationName newName
         inFlight <-
           runTransaction
             env
             "rename_application"
             ( do
-                queues <- Tx.statement (newName, renamedFrom) (Statements.renameRowsStatement "dbos.queues" source "")
-                schedules <- Tx.statement (newName, renamedFrom) (Statements.renameRowsStatement "dbos.workflow_schedules" source "")
-                versions <- Tx.statement (newName, renamedFrom) (Statements.renameRowsStatement "dbos.application_versions" source "")
+                queues <- Tx.statement (targetName, renamedFrom) (Statements.renameRowsStatement "dbos.queues" source "")
+                schedules <- Tx.statement (targetName, renamedFrom) (Statements.renameRowsStatement "dbos.workflow_schedules" source "")
+                versions <- Tx.statement (targetName, renamedFrom) (Statements.renameRowsStatement "dbos.application_versions" source "")
                 workflows <-
                   Tx.statement
-                    (newName, renamedFrom)
+                    (targetName, renamedFrom)
                     (Statements.renameRowsStatement "dbos.workflow_status" source " and status in ('PENDING', 'ENQUEUED', 'DELAYED')")
                 pure (queues, schedules, versions, workflows)
             )
         case inFlight of
           Left err -> pure (Left err)
           Right (queues, schedules, versions, workflows) -> do
-            terminal <- renameInBatches env "dbos.workflow_status" source newName batching
-            steps <- renameInBatches env "dbos.operation_outputs" source newName batching
+            terminal <- renameInBatches env "dbos.workflow_status" source targetName batching
+            steps <- renameInBatches env "dbos.operation_outputs" source targetName batching
             pure $ case (terminal, steps) of
               (Left err, _) -> Left err
               (_, Left err) -> Left err

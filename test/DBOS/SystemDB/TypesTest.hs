@@ -8,7 +8,7 @@ where
 import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
-import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), Submission (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, newQueue, newSchedule, newWorkflow, outcomeStatus, parseScheduleStatus, pauseScheduleStepName, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, renameFromApplication, resolveWorkflowDelay, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
+import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), Submission (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, newQueue, newSchedule, newWorkflow, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, renameFromApplication, renderApplicationName, resolveWorkflowDelay, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
 import DBOS.Transact
   (
   IdempotencyKey (..),
@@ -288,6 +288,13 @@ engineTests =
         streamClosedSentinel @?= "\"__DBOS_STREAM_CLOSED__\""
         streamClosedSerialization @?= "portable_json"
         dequeueSweepCap @?= 8192,
+      testCase "the close mark is the sentinel under its own label, nothing else" $ do
+        isStreamClosed streamClosedSentinel (Just streamClosedSerialization) @?= True
+        -- The pair travels together: the sentinel under another label is a
+        -- value a producer wrote, not a close.
+        isStreamClosed streamClosedSentinel (Just "rust_serde") @?= False
+        isStreamClosed streamClosedSentinel Nothing @?= False
+        isStreamClosed "\"v\"" (Just streamClosedSerialization) @?= False,
       testCase "a partial update leaves fields alone by default" $ do
         defaultChange @?= (Leave :: Change Int)
         changeSet (Set 3 :: Change Int) @?= Just 3
@@ -309,6 +316,12 @@ engineTests =
           @?= [True, True, True]
         (isValidApplicationName <$> ["", "ab", "ABC", "has space", "wörk", Text.replicate 257 "a"])
           @?= [False, False, False, False, False, False],
+      testCase "a validated application name is the only way to build one" $ do
+        -- Parsing is the constructor; rendering reads it back.
+        (renderApplicationName <$> parseApplicationName "demo-queue") @?= Right "demo-queue"
+        -- The refusal keeps the oracle's field and message verbatim.
+        parseApplicationName "UPPER"
+          @?= Left (invalidInput "new_name" "must be 3 to 30 characters of lowercase letters, digits, dashes and underscores"),
       testCase "a rename names its source application" $
         (renameFromApplication <$> [RenameApplication "a", RenameApplicationAndUnclaimed "a", RenameUnclaimed])
           @?= [Just "a", Just "a", Nothing],
