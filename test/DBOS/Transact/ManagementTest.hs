@@ -42,10 +42,10 @@ import DBOS.SystemDB
     newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
     EngineOnly,
-    CodecError,
     Config (..),
     DBOS,
     Executor,
@@ -54,21 +54,25 @@ import DBOS.Transact
     Error (..),
     QueueConflict (..),
     StartOptions (..),
+    StepInfo (..),
+    StepOutcome (..),
+    StepOutput (..),
+    StepFailure (..),
+    PortableWorkflowError (..),
     WorkflowHandle (workflowId),
     WorkflowKey,
     WorkflowRef,
     cancelWorkflowsInWorkflow,
     clientCancelWorkflows,
     clientConfigFromEnv,
-    clientListWorkflowSteps,
+    ListWorkflowStepsOptions (..),
+    defaultListWorkflowStepsOptions,
     closeClient,
     configFromEnv,
     connectClient,
-    decodeWorkflowValue,
     defaultQueueOptions,
     defaultRewindOptions,
     deleteWorkflowsInWorkflow,
-    encodeWorkflowValue,
     enqueueWorkflow,
     forkWorkflows,
     forkWorkflowsInWorkflow,
@@ -76,7 +80,6 @@ import DBOS.Transact
     handleResult,
     handleStatus,
     launchWithEnvironment,
-    listWorkflowSteps,
     listWorkflows,
     listWorkflowsInWorkflow,
     newDBOS,
@@ -102,11 +105,13 @@ import DBOS.Transact
     startChildWorkflow)
 import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Instance (dequeueWorkflows)
+import DBOS.Transact.Instance (dequeueWorkflows, listWorkflowSteps)
+import DBOS.Transact.Client (clientListWorkflowSteps, clientListWorkflowStepsWith)
 import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
 import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.Transact.ContextTest (connOver)
+import DBOS.Transact.Management (stepInfoFromRecord)
 import DBOS.Transact.ManagementCases
   ( MgmtFixture (..),
     checkCancelMissing,
@@ -146,6 +151,8 @@ import DBOS.Transact.ManagementCases
     checkResumeOntoQueue,
     checkRetrieve,
     checkListSteps,
+    checkListStepsWithoutOutputs,
+    checkListStepsPaging,
     checkListStepsInWorkflow,
     checkSingular,
     checkUnlaunched,
@@ -187,6 +194,8 @@ import DBOS.Transact.ManagementCases
     scenarioResumeOntoQueue,
     scenarioRetrieve,
     scenarioListSteps,
+    scenarioListStepsWithoutOutputs,
+    scenarioListStepsPaging,
     scenarioListStepsInWorkflow,
     scenarioSingular,
     scenarioUnlaunched,
@@ -219,6 +228,8 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "deleting a workflow removes its row" scenarioDelete checkDelete,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow can be retrieved by id" scenarioRetrieve checkRetrieve,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow's steps list in execution order" scenarioListSteps checkListSteps,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a step listing can leave the outputs out" scenarioListStepsWithoutOutputs checkListStepsWithoutOutputs,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a step listing pages in step order" scenarioListStepsPaging checkListStepsPaging,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an in-workflow step listing is itself a step" scenarioListStepsInWorkflow checkListStepsInWorkflow,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "the singular wrappers move one workflow each" scenarioSingular checkSingular,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from the beginning runs the workflow again under a new id" scenarioForkFromBeginning checkForkFromBeginning,
@@ -257,7 +268,7 @@ tests =
               dbos
               key
               wid
-              (Just (encodeWorkflowValue ("hello" :: Text)))
+              (Just (encodeWorkflowInput ("hello" :: Text)))
               ("from-" <> suffix)
           case enqueued of
             Left err -> fail (show err)
@@ -290,7 +301,7 @@ tests =
               exec
               key
               wid
-              (Just (encodeWorkflowValue ("hs-l2-mgmt-self-" <> suffix :: Text)))
+              (Just (encodeWorkflowInput ("hs-l2-mgmt-self-" <> suffix :: Text)))
           case ran of
             Left err -> assertBool ("the refusal did not reach the caller: " <> show err) ("cannot delete itself" `Text.isInfixOf` Text.pack (show err))
             Right _ -> fail "the workflow deleted itself"
@@ -315,7 +326,7 @@ tests =
           childRef <- registerRefOrFail dbos childKey childBody
           let parentBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
               parentBody root wctx = do
-                started <- startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue root))
+                started <- startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput root))
                 case started of
                   Left err -> pure (Left err)
                   Right _ -> void <$> takeMVar observed
@@ -329,7 +340,7 @@ tests =
               exec
               parentKey
               (WorkflowId rootText)
-              (Just (encodeWorkflowValue (rootText :: Text)))
+              (Just (encodeWorkflowInput (rootText :: Text)))
           case ran of
             Left err -> assertBool ("the refusal did not reach the caller: " <> show err) ("cannot delete itself" `Text.isInfixOf` Text.pack (show err))
             Right _ -> fail "the child deleted the tree it was in"
@@ -383,7 +394,7 @@ tests =
               exec
               operatorKey
               (WorkflowId operatorText)
-              (Just (encodeWorkflowValue (targetText :: Text)))
+              (Just (encodeWorkflowInput (targetText :: Text)))
           case ran of
             Right (Just stored) -> do
               let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
@@ -432,11 +443,11 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchOrFail dbos
-          ranSource <- runWf exec sourceKey (WorkflowId sourceText) (Just (encodeWorkflowValue (21 :: Int)))
+          ranSource <- runWf exec sourceKey (WorkflowId sourceText) (Just (encodeWorkflowInput (21 :: Int)))
           case ranSource of
             Right _ -> pure ()
             other -> fail ("expected the source to run, got: " <> show other)
-          first <- try (runWf exec operatorKey (WorkflowId operatorText) (Just (encodeWorkflowValue (sourceText :: Text)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+          first <- try (runWf exec operatorKey (WorkflowId operatorText) (Just (encodeWorkflowInput (sourceText :: Text)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
           case first of
             Left exception -> assertBool "the crash escapes" ("forked then crashed" `Text.isInfixOf` Text.pack (show exception))
             Right other -> fail ("expected the crash, got: " <> show other)
@@ -491,11 +502,11 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchOrFail dbos
-          ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowValue (21 :: Int)))
+          ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowInput (21 :: Int)))
           case ranTarget of
             Right _ -> pure ()
             other -> fail ("expected the target to run, got: " <> show other)
-          first <- try (runWf exec operatorKey (WorkflowId operatorText) (Just (encodeWorkflowValue (targetText :: Text)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+          first <- try (runWf exec operatorKey (WorkflowId operatorText) (Just (encodeWorkflowInput (targetText :: Text)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
           case first of
             Left exception -> assertBool "the crash escapes" ("rewound then crashed" `Text.isInfixOf` Text.pack (show exception))
             Right other -> fail ("expected the crash, got: " <> show other)
@@ -513,7 +524,7 @@ tests =
             other -> fail ("expected the recovery to finish, got: " <> show other)
           listed <- listWorkflowSteps dbos (WorkflowId operatorText)
           case listed of
-            Right records -> map (.stepRecordStepName) records @?= ["DBOS.rewind_workflow"]
+            Right records -> map (.stepInfoName) records @?= ["DBOS.rewind_workflow"]
             other -> fail ("expected one recorded rewind step, got: " <> show other),
       testCase "resume puts a cancelled workflow on a queue that runs it" $
         withInstance "mgmt-resume-run" $ \dbos suffix -> do
@@ -563,7 +574,7 @@ tests =
               exec
               operatorKey
               (WorkflowId operatorText)
-              (Just (encodeWorkflowValue (targetText :: Text)))
+              (Just (encodeWorkflowInput (targetText :: Text)))
           case ran of
             Right _ -> pure ()
             other -> fail ("expected the operator to run, got: " <> show other)
@@ -634,7 +645,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchOrFail dbos
-          ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+          ran <- runWf exec key wid (Just (encodeWorkflowInput ()))
           case ran of
             Right _ -> pure ()
             other -> fail ("expected the workflow to run, got: " <> show other)
@@ -647,7 +658,64 @@ tests =
                 case listed of
                   Left err -> fail (show err)
                   Right records ->
-                    [record.stepRecordStepName | record <- records] @?= ["one", "two"],
+                    [record.stepInfoName | record <- records] @?= ["one", "two"]
+                paged <- clientListWorkflowStepsWith client wid defaultListWorkflowStepsOptions {limit = Just 1, offset = Just 1}
+                case paged of
+                  Left err -> fail (show err)
+                  Right records ->
+                    [record.stepInfoName | record <- records] @?= ["two"]
+                without <- clientListWorkflowStepsWith client wid defaultListWorkflowStepsOptions {loadOutput = False}
+                case without of
+                  Left err -> fail (show err)
+                  Right records ->
+                    mapM_
+                      (\record -> record.stepInfoOutcome @?= StepOutcomeNotLoaded)
+                      records,
+      testCase "a foreign step payload is an explicit undecodable outcome" $ do
+        let base =
+              StepRecord
+                { stepRecordWorkflowId = WorkflowId "wf-foreign",
+                  stepRecordStepId = 0,
+                  stepRecordStepName = "foreign",
+                  stepRecordOutput = Nothing,
+                  stepRecordError = Nothing,
+                  stepRecordChildWorkflowId = Nothing,
+                  stepRecordSerialization = Just "py_pickle",
+                  stepRecordStartedAt = Nothing,
+                  stepRecordCompletedAt = Nothing
+                }
+            expectedOutput = CodecUnknownSerialization "step output" "py_pickle"
+            expectedError = CodecUnknownSerialization "step error" "py_pickle"
+        case stepInfoFromRecord defaultListWorkflowStepsOptions (base {stepRecordOutput = Just "gARLAy4="}) of
+          StepInfo {stepInfoOutcome = StepOutcomeSucceeded (PayloadUndecodable found)} ->
+            found @?= expectedOutput
+          other -> fail ("expected an undecodable output outcome, got: " <> show other)
+        case stepInfoFromRecord defaultListWorkflowStepsOptions (base {stepRecordError = Just "gARLAy4="}) of
+          StepInfo {stepInfoOutcome = StepOutcomeFailed (FailureUndecodable found)} ->
+            found @?= expectedError
+          other -> fail ("expected an undecodable error outcome, got: " <> show other),
+      testCase "an unfinished row and a legacy tagged error are distinct outcomes" $ do
+        let base =
+              StepRecord
+                { stepRecordWorkflowId = WorkflowId "wf-outcomes",
+                  stepRecordStepId = 0,
+                  stepRecordStepName = "outcome",
+                  stepRecordOutput = Nothing,
+                  stepRecordError = Nothing,
+                  stepRecordChildWorkflowId = Nothing,
+                  stepRecordSerialization = Just "portable_json",
+                  stepRecordStartedAt = Nothing,
+                  stepRecordCompletedAt = Nothing
+                }
+            legacy = base {stepRecordError = Just "{\"WorkflowFailed\":{\"workflowId\":\"wf-outcomes\",\"message\":\"boom\"}}"}
+        (stepInfoFromRecord defaultListWorkflowStepsOptions base).stepInfoOutcome
+          @?= StepOutcomePending
+        case stepInfoFromRecord defaultListWorkflowStepsOptions legacy of
+          StepInfo {stepInfoOutcome = StepOutcomeFailed (FailurePortable PortableWorkflowError {portableWorkflowErrorName = name, portableWorkflowErrorMessage = message})} ->
+            (name, message) @?= ("WorkflowFailed", "the workflow wf-outcomes failed: boom")
+          other -> fail ("expected a legacy tagged error to project its name and message, got: " <> show other)
+        (stepInfoFromRecord defaultListWorkflowStepsOptions {loadOutput = False} legacy).stepInfoOutcome
+          @?= StepOutcomeNotLoaded,
       testCase "a refused management call spends no step id" $ do
         backend <- getBackend
         fresh <- freshSuffix
@@ -719,7 +787,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchOrFail dbos
-          ran <- runWf exec key (WorkflowId sourceText) (Just (encodeWorkflowValue ()))
+          ran <- runWf exec key (WorkflowId sourceText) (Just (encodeWorkflowInput ()))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -749,7 +817,7 @@ tests =
               peerText = "hs-l1-mgmt-read-peer-" <> suffix
               queueA = "hs-l1-mgmt-read-q-a-" <> Text.take 12 suffix
               queueB = "hs-l1-mgmt-read-q-b-" <> Text.take 12 suffix
-              input = Just (encodeWorkflowValue (1 :: Int))
+              input = Just (encodeWorkflowInput (1 :: Int))
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body value _ = pure (Right value)
           registeredA <- registerWorkflow dbosA key body
@@ -838,7 +906,7 @@ tests =
               peerNamedText = "hs-l1-mgmt-claim-peer-" <> suffix
               peerInternalText = "hs-l1-mgmt-claim-peer-int-" <> suffix
               internalText = case internalQueueName of QueueName name -> name
-              input = Just (encodeWorkflowValue (1 :: Int))
+              input = Just (encodeWorkflowInput (1 :: Int))
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body value _ = pure (Right value)
           registeredA <- registerWorkflow dbosA key body
@@ -913,10 +981,10 @@ tests =
 -- for the compiler to guess. Local copies are deliberate — this module
 -- carries only the aliases it uses, and a sibling test module repeats
 -- the ones it needs.
-runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
-startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
+startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
 startWfRef = startWorkflow
 
 retrieveWf :: DBOS IO -> WorkflowId -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))

@@ -18,7 +18,6 @@
 -- layer differs, the WidgetSim precedent).
 module DBOS.Transact.OutboxCases
   ( TxFault (..),
-    Envelope (..),
     OutboxFixture (..),
     atomicBody,
     notifyBody,
@@ -46,12 +45,12 @@ module DBOS.Transact.OutboxCases
 where
 
 import Data.Aeson (Value (..), decodeStrict)
-import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KeyMap
 import DBOS.Prelude
 import DBOS.SystemDB (WorkflowFilter (..), WorkflowRecord (..), defaultWorkflowFilter)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError)
+import DBOS.Transact.Serialization (decodeWorkflowValue, CodecError (..))
 import DBOS.Transact
 import DBOS.Transact.Connection (SomeSystemDB, runSystemDB)
 import DBOS.Transact.Instance (dequeueWorkflows)
@@ -131,27 +130,18 @@ atomicBody ds insertOp markOp noteSent takeFail (cust, item, qty) wctx = do
         Left err -> pure (Left err)
         Right _ -> runTxStep ds txMarkCfg wctx (\sctx tx -> markOp tx oid >> pure (Right oid))
 
--- | A notification envelope accepting both input shapes: the bare tuple
--- the engine records for direct runs, and the @positionalArgs@ object the
--- SQL enqueue path writes (mirroring the demo's @NotifyEnvelope@).
-newtype Envelope = Envelope
-  { envelopeArgs :: (Int, Text, Text)
-  }
-
-instance Aeson.FromJSON Envelope where
-  parseJSON v = (Envelope <$> Aeson.parseJSON v) <|> Aeson.withObject "Envelope" (\o -> Envelope <$> o Aeson..: "positionalArgs") v
-
 -- | The enqueued notification body (shared): send step, then mark-sent
--- transaction. The envelope arrives as recorded inputs.
+-- transaction. The engine unwraps the portable argument envelope before the
+-- body runs, so the triple arrives as the recorded input itself.
 notifyBody :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
            => DataSource m ->
               (Tx m -> Int -> m ()) ->
               m () ->
               m Bool ->
-              Envelope ->
+              (Int, Text, Text) ->
               WorkflowCtx exec m ->
               m (Either (Error EngineOnly) ())
-notifyBody ds markOp noteSent takeFail (Envelope args) wctx = do
+notifyBody ds markOp noteSent takeFail args wctx = do
   let (oid, _cust, _item) = args
   flight <- runStep wctx "send_notification" (\_ -> do
     failed <- takeFail

@@ -103,7 +103,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Submission (Fresh), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isTerminal, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Submission (Fresh), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isTerminal, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, streamClosedSerialization, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -152,9 +152,9 @@ fetchNotificationSession (MessageUUID messageUUID) =
   |]
 
 -- | Highest applied migration version. The ceiling this port tracks is 121
--- (ranges 1–47 + 100–121); a higher value means the Rust corpus moved and the
--- pinned queries must be re-verified. The single-column table selects as a
--- full-table model, decoded by the instance below.
+-- (ranges 1–47 + 100–121); a higher value means a newer SDK (Python/TS
+-- 122–123) has migrated the shared database, which launch tolerates. The
+-- pinned queries are verified against 121. Decoded by the instance below.
 newtype DbosMigration = DbosMigration Int64
   deriving stock (Eq, Show)
 
@@ -1065,9 +1065,12 @@ withPostgresSystemDB :: Config -> SomeTracer IO -> (PostgresSystemDB -> IO a) ->
 withPostgresSystemDB config tracer =
   bracket (acquirePostgresSystemDB config tracer) releasePostgresSystemDB
 
--- | Reads back the highest applied migration and requires the ceiling this
--- port tracks (114). A higher value means the Rust corpus moved and the
--- pinned queries must be re-verified.
+-- | Reads back the highest applied migration and requires at least the
+-- ceiling this port tracks (121). A higher value means a newer SDK (Python/TS
+-- 122–123) has migrated the shared database; the oracle's runner tolerates
+-- that too, so launch does. A lower value is a schema the port cannot read and
+-- is refused. The pinned queries are verified against 121; a database ahead
+-- still has to pass the live suites.
 verifySystemDatabase :: PostgresSystemDB -> IO (Either Error ())
 verifySystemDatabase env = do
   result <- runSession env "verify" migrationVersionSession
@@ -1076,20 +1079,20 @@ verifySystemDatabase env = do
     Right Nothing ->
       Left (Backend (BackendError "the system database has no migrations applied" Nothing Permanent))
     Right (Just (DbosMigration version))
-      | version == migrationCeiling -> Right ()
+      | version >= migrationCeiling -> Right ()
       | otherwise ->
           Left
             ( Backend
                 ( BackendError
-                    ("the system database is at migration " <> Text.pack (show version) <> ", expected " <> Text.pack (show migrationCeiling))
+                    ("the system database is at migration " <> Text.pack (show version) <> ", expected at least " <> Text.pack (show migrationCeiling))
                     Nothing
                     Permanent
                 )
             )
 
 -- | The migration ceiling this port tracks (ranges 1–47 + 100–121). A
--- higher value means the Rust corpus moved and the pinned queries must be
--- re-verified.
+-- higher value is a newer SDK's shared-database migration; 'verifySystemDatabase'
+-- accepts it, but the pinned queries are verified against this ceiling.
 migrationCeiling :: Int64
 migrationCeiling = 121
 
@@ -1340,8 +1343,8 @@ initConflict new row =
 -- differing queue is only a warning (the stored queue wins), a spent
 -- recovery budget parks the workflow — a write, so it happens before the
 -- error — and another owner's row is recorded but not claimed.
-finishInit :: PostgresSystemDB -> NewWorkflow -> Maybe Int64 -> Bool -> Text -> Statements.WorkflowInitRaw -> IO (Either Error WorkflowInitResult)
-finishInit env new maxRecoveryAttempts claiming ownerXid row =
+finishInit :: PostgresSystemDB -> NewWorkflow -> Maybe Int64 -> Bool -> Text -> Maybe (Maybe Text) -> Statements.WorkflowInitRaw -> IO (Either Error WorkflowInitResult)
+finishInit env new maxRecoveryAttempts claiming ownerXid existing row =
   case row.status of
     Nothing -> pure (Left (Malformed ("workflow " <> new.newWorkflowId <> " has a null status")))
     Just raw -> case parseWorkflowStatus raw of
@@ -1371,6 +1374,7 @@ finishInit env new maxRecoveryAttempts claiming ownerXid row =
                           initResultRecoveryAttempts = recoveryAttempts,
                           initResultDeadline = timestampFromEpochMs <$> row.workflow_deadline_epoch_ms,
                           initResultSerialization = row.serialization,
+                          initResultExistingInput = existing,
                           initResultShouldExecute = not (ownerDiffers && not claiming && row.owner_xid /= Nothing)
                         }
                   )
@@ -1452,7 +1456,7 @@ checkpointSleep env kind wid stepId duration = do
                   stepId
                   sleepStepName
                   (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
-                  (Just portableJson)
+                  (Just portableJsonSerialization)
                   (Just (StepTiming startedAt completedAt))
 
           case recorded of
@@ -1731,7 +1735,7 @@ debounceCallerTx app callerWid callerText callerStep startedAt completedAt reque
                     recordStepStepName = debounceStepName,
                     recordStepOutput = Just (decodeUtf8 (LBS.toStrict (Aeson.encode debounce))),
                     recordStepError = Nothing,
-                    recordStepSerialization = Just portableJson,
+                    recordStepSerialization = Just portableJsonSerialization,
                     recordStepStartedAt = Just (timestampToEpochMs startedAt),
                     recordStepCompletedAt = Just completedAt,
                     recordStepApplicationName = app,
@@ -1768,6 +1772,9 @@ instance Aeson.ToJSON ScheduleRecord where
         "workflow_class_name" Aeson..= record.scheduleRecordWorkflowClassName,
         "expression" Aeson..= record.scheduleRecordExpression,
         "status" Aeson..= record.scheduleRecordStatus,
+        -- A schedule's context is a 'Value': 'toJSON' has already collapsed
+        -- a non-finite float to null/+inf/-inf, so it is stored that way
+        -- rather than refused (ADR-0039).
         "context" Aeson..= record.scheduleRecordContext,
         "last_fired_at" Aeson..= record.scheduleRecordLastFiredAt,
         "automatic_backfill" Aeson..= record.scheduleRecordAutomaticBackfill,
@@ -1854,7 +1861,7 @@ runCallerStep env stepName callerWid callerStep startedAt work = do
                         recordStepStepName = stepName,
                         recordStepOutput = Just (decodeUtf8 (LBS.toStrict (Aeson.encode value))),
                         recordStepError = Nothing,
-                        recordStepSerialization = Just portableJson,
+                        recordStepSerialization = Just portableJsonSerialization,
                         recordStepStartedAt = Just (timestampToEpochMs startedAt),
                         recordStepCompletedAt = Just completedAt,
                         recordStepApplicationName = env.psdbApplicationName,
@@ -2352,13 +2359,6 @@ pollForMessage env subscription workflowId topic deadline = do
           waitForWakeup subscription (min remaining getEventPollInterval)
           pollForMessage env subscription workflowId topic deadline
 
--- | The encoding this layer uses for values it produces itself: a sleep's
--- wake time is a plain number written and read by the system database, so it
--- is stored legibly rather than in whatever the workflow chose. Mirrors
--- Rust @PORTABLE_JSON@.
-portableJson :: Text
-portableJson = "portable_json"
-
 -- | The wake time a recorded sleep holds, which every execution must agree
 -- on. A sleep with no recorded output, or one that is not epoch
 -- milliseconds, is 'Malformed'. Mirrors Rust @decode_wake_time@.
@@ -2496,6 +2496,13 @@ instance SystemDB PostgresSystemDB IO where
                 Tx.statement
                   (new.newWorkflowId, new.newWorkflowInput)
                   Statements.initWorkflowInputStatement
+            -- A fresh start that found an unowned row runs the row's input,
+            -- not the one this caller offered. Read it in the claiming
+            -- transaction, as Rust's init_workflow does.
+            existing <-
+              if row.owner_xid == Nothing && not claiming
+                then Just <$> Tx.statement new.newWorkflowId Statements.initWorkflowStoredInputStatement
+                else pure Nothing
             case (initConflict new row, stored) of
               (Just err, _) -> do
                 -- The stored row is another workflow's: nothing this call
@@ -2503,7 +2510,7 @@ instance SystemDB PostgresSystemDB IO where
                 Tx.condemn
                 pure (Left err)
               (Nothing, Just childId)
-                | childId == new.newWorkflowId -> pure (Right (row, stored))
+                | childId == new.newWorkflowId -> pure (Right (row, stored, existing))
               (Nothing, _) -> do
                 -- A rival execution owns this parent step: roll the child row
                 -- and the step back rather than leave them pointing at each
@@ -2523,7 +2530,7 @@ instance SystemDB PostgresSystemDB IO where
                     )
               | otherwise -> pure (Left err)
             Right (Left conflict) -> pure (Left conflict)
-            Right (Right (row, _stored)) -> finishInit env new maxRecoveryAttempts claiming ownerXid row
+            Right (Right (row, _stored, existing)) -> finishInit env new maxRecoveryAttempts claiming ownerXid existing row
       Nothing -> case validateNewWorkflow new of
         Left err -> pure (Left err)
         Right () -> do
@@ -2543,7 +2550,12 @@ instance SystemDB PostgresSystemDB IO where
                 Tx.statement
                   (new.newWorkflowId, new.newWorkflowInput)
                   Statements.initWorkflowInputStatement
-            pure row
+            -- See the caller branch: an unowned existing row keeps its input.
+            existing <-
+              if row.owner_xid == Nothing && not claiming
+                then Just <$> Tx.statement new.newWorkflowId Statements.initWorkflowStoredInputStatement
+                else pure Nothing
+            pure (row, existing)
           case result of
             Left err
               | queueDeduplicated new err ->
@@ -2556,7 +2568,7 @@ instance SystemDB PostgresSystemDB IO where
                           }
                     )
               | otherwise -> pure (Left err)
-            Right row -> finishInit env new maxRecoveryAttempts claiming ownerXid row
+            Right (row, existing) -> finishInit env new maxRecoveryAttempts claiming ownerXid existing row
   getWorkflow env wid = do
     result <- runSession env "get_workflow" (Statements.getWorkflowSession widText)
     pure (result >>= traverse workflowRecordFromRow)
@@ -2832,7 +2844,7 @@ instance SystemDB PostgresSystemDB IO where
                           recordStepStepName = rewindStepName,
                           recordStepOutput = Nothing,
                           recordStepError = Just (decodeUtf8 (LBS.toStrict (Aeson.encode err))),
-                          recordStepSerialization = Nothing,
+                          recordStepSerialization = Just portableJsonSerialization,
                           recordStepStartedAt = Just (timestampToEpochMs timing.stepTimingStartedAt),
                           recordStepCompletedAt = Just (timestampToEpochMs completedAt),
                           recordStepApplicationName = Nothing,

@@ -27,6 +27,7 @@ import DBOS.Transact.HandleTest qualified as HandleTest
 import DBOS.Transact.HandleTestSim qualified as HandleSim
 import DBOS.Transact.IdentityTest qualified as IdentityTest
 import DBOS.Transact.InstanceTest qualified as InstanceTest
+import DBOS.Transact.InteropTest qualified as InteropTest
 import DBOS.Transact.LoggerTest qualified as Logger
 import DBOS.Transact.ManagementTest qualified as ManagementTest
 import DBOS.Transact.ManagementTestSim qualified as ManagementSim
@@ -92,8 +93,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty HandleSim.tests
 --- $> tasty IdentityTest.tests
 --- $> tasty InstanceTest.tests
--- $> tasty ManagementTest.tests
--- $> tasty ManagementSim.tests
+--- $> tasty ManagementTest.tests
+--- $> tasty ManagementSim.tests
 --- $> tasty MessageTest.tests
 --- $> tasty MessageSim.tests
 --- $> tasty OutboxTest.tests
@@ -103,6 +104,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SelectTest.tests
 --- $> tasty SelectSim.tests
 --- $> tasty SerializationTest.tests
+-- $> tasty InteropTest.tests
 --- $> tasty SimTest.tests
 --- $> tasty SleepTest.tests
 --- $> tasty SleepSim.tests
@@ -113,7 +115,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty WaitTest.tests
 --- $> tasty WaitSim.tests
 --- $> tasty WorkflowTest.tests
---- $> tasty WorkflowSim.tests
+-- $> tasty WorkflowSim.tests
 main :: IO ()
 main = defaultMain tests
 
@@ -168,6 +170,7 @@ tests =
     , HandleTest.tests
     , IdentityTest.tests
     , InstanceTest.tests
+    , InteropTest.tests
     , ManagementTest.tests
     , MessageTest.tests
     , OutboxTest.tests

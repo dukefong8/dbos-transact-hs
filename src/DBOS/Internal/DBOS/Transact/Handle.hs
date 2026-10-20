@@ -97,7 +97,7 @@ handleStatus :: Monad m
 handleStatus handle = do
   result <- runSystemDB handle.conn.connSysdb (\db -> SystemDB.getWorkflow db (WorkflowId handle.workflowId))
   pure $ case result of
-    Left err            -> Left (TransactError.SystemDatabase err)
+    Left err            -> Left (TransactError.fromSystemDB err)
     Right Nothing       -> Right Nothing
     Right (Just record) -> Right (Just record.workflowRecordStatus)
 
@@ -168,7 +168,7 @@ driveAwait wctx handle placement =
       let parent = WorkflowId (workflowId wctx')
       checked <- runSystemDB handle.conn.connSysdb (\db -> SystemDB.checkChildResult db parent stepId')
       case checked of
-        Left err -> pure (Left (TransactError.SystemDatabase err))
+        Left err -> pure (Left (TransactError.fromSystemDB err))
         Right (Just recorded) -> pure (adoptRecordedAwait wctx' handle stepId' recorded)
         Right Nothing -> do
           startedAt <- timestampNow
@@ -225,7 +225,7 @@ settleOutcome handle = case handle.provenance of
     awaited <-
       runSystemDB handle.conn.connSysdb (\db -> SystemDB.awaitWorkflowResult db (WorkflowId handle.workflowId) handle.conn.connOutcomePollInterval failMissing)
     pure $ case awaited of
-      Left err -> Left (TransactError.SystemDatabase err)
+      Left err -> Left (TransactError.fromSystemDB err)
       Right (AwaitedSucceeded output serialization) -> Right (SettledSucceeded output serialization)
       Right (AwaitedFailed message _) -> Right (SettledFailed (decodedRecordedError handle.workflowId message))
       Right AwaitedCancelled -> Right SettledCancelled
@@ -245,7 +245,7 @@ settledResult workflowText settled =
     SettledCancelled -> Left (TransactError.AwaitedWorkflowCancelled {workflowId = workflowText})
     SettledParked attempts ->
       Left
-        ( TransactError.SystemDatabase
+        ( TransactError.fromSystemDB
             ( SystemDBError.ErrorMaxRecoveryAttemptsExceeded
                 { workflowId = workflowText,
                   limit = attempts
@@ -280,7 +280,7 @@ recordAwait wctx handle stepId' startedAt completedAt settled =
   where
     parent = WorkflowId (workflowId wctx)
     record outcome =
-      fmap (either (Left . TransactError.SystemDatabase) Right) $
+      fmap (either (Left . TransactError.fromSystemDB) Right) $
         runSystemDB handle.conn.connSysdb $ \db ->
           SystemDB.recordChildResult
             db
@@ -311,7 +311,7 @@ adoptRecordedAwait wctx handle stepId' recorded =
                 )
     mismatched ->
       Left
-        ( TransactError.SystemDatabase
+        ( TransactError.fromSystemDB
             ( SystemDBError.UnexpectedStep
                 { workflowId = workflowId wctx,
                   stepId = stepId',
@@ -323,11 +323,8 @@ adoptRecordedAwait wctx handle stepId' recorded =
             )
         )
 
--- | A recorded failure text decoded back into the caller's channel, with
--- the oracle's fallback for a payload that cannot be decoded (a row written
--- by older code): the workflow is reported failed with the raw text.
+-- | A recorded failure text decoded back into the caller's channel. The
+-- shared decoder keeps another SDK's portable @name: message@ when the payload
+-- does not fit this caller's error type, and the raw text otherwise.
 decodedRecordedError :: FromJSON e => Text -> Text -> TransactError.Error e
-decodedRecordedError workflowText message =
-  case TransactError.decodeErrorText message of
-    Right err -> err
-    Left _ -> TransactError.WorkflowFailed {workflowId = workflowText, message = message}
+decodedRecordedError = TransactError.decodeRecordedError

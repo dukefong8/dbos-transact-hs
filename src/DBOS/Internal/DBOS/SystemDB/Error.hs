@@ -11,16 +11,20 @@ module DBOS.SystemDB.Error
     invalidInput,
     renderError,
     renderBackendError,
+    encodePortableError,
+    decodePortableError,
     shouldRecord,
   )
 where
 
 import DBOS.Prelude
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, withText, (.:), (.=))
+import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value (..), eitherDecodeStrict', encode, fromJSON, object, withObject, withText, (.:), (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
+import Data.ByteString.Lazy qualified as LBS
 import Data.Int (Int64)
 import Data.Text qualified as Text
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 
 -- | What went wrong talking to the system database. Names match the Rust
     -- @Error@ variants exactly, and the id payloads are plain 'Text' — the
@@ -30,6 +34,10 @@ import Data.Text qualified as Text
 data Error
   = Backend BackendError
   | Malformed Text
+  | -- | A recorded value carries a tag this process cannot read. Reported,
+    -- never guessed: decoding bytes as another encoding would hand a replay
+    -- a value the first run never saw. Mirrors Rust @UnknownSerialization@.
+    UnknownSerialization {name :: Text}
   | ConflictingWorkflow {workflowId :: Text, detail :: Text}
   | ConcurrentRecv {workflowId :: Text, topic :: Maybe Text}
   | InvalidInput {field :: Text, detail :: Text}
@@ -76,6 +84,7 @@ instance ToJSON Error where
   toJSON = \case
     Backend err -> tagged "Backend" (toJSON err)
     Malformed message -> tagged "Malformed" (toJSON message)
+    UnknownSerialization {name} -> tagged "UnknownSerialization" (object ["name" .= name])
     ConflictingWorkflow {workflowId, detail} -> tagged "ConflictingWorkflow" (object ["workflow_id" .= workflowId, "detail" .= detail])
     ConcurrentRecv {workflowId, topic} -> tagged "ConcurrentRecv" (object ["workflow_id" .= workflowId, "topic" .= topic])
     InvalidInput {field, detail} -> tagged "InvalidInput" (object ["field" .= field, "detail" .= detail])
@@ -100,6 +109,7 @@ instance FromJSON Error where
     [(tag, payload)] -> case Key.toText tag of
       "Backend" -> Backend <$> parseJSON payload
       "Malformed" -> Malformed <$> parseJSON payload
+      "UnknownSerialization" -> withObject "UnknownSerialization" (\o -> UnknownSerialization <$> o .: "name") payload
       "ConflictingWorkflow" -> withObject "ConflictingWorkflow" (\o -> ConflictingWorkflow <$> o .: "workflow_id" <*> o .: "detail") payload
       "ConcurrentRecv" -> withObject "ConcurrentRecv" (\o -> ConcurrentRecv <$> o .: "workflow_id" <*> o .: "topic") payload
       "InvalidInput" -> withObject "InvalidInput" (\o -> InvalidInput <$> o .: "field" <*> o .: "detail") payload
@@ -158,6 +168,7 @@ renderError err =
   case err of
     Backend backend -> "system database error: " <> renderBackendError backend
     Malformed message -> "unexpected value in the system database: " <> message
+    UnknownSerialization {name = tag} -> "serialization " <> tag <> " is not available"
     ConflictingWorkflow {workflowId = wid, detail = why} ->
       "workflow " <> wid <> " already exists: " <> why
     ConcurrentRecv {workflowId = wid, topic = Nothing} ->
@@ -204,6 +215,47 @@ renderBackendError backend =
     Just code -> backend.backendMessage <> " (" <> code <> ")"
     Nothing   -> backend.backendMessage
 
+-- | The portable error record other SDKs read: @{name, message, data}@. The
+-- sysdb layer writes it for a recorded caller outcome, which has no @Error e@
+-- channel to reach the engine codec.
+encodePortableError :: Error -> Text
+encodePortableError err =
+  decodeUtf8 . LBS.toStrict . encode $
+    object
+      [ "name" .= portableErrorName err,
+        "message" .= renderError err,
+        "data" .= toJSON err
+      ]
+
+portableErrorName :: Error -> Text
+portableErrorName err = case toJSON err of
+  Object fields -> case KeyMap.toList fields of
+    [(tag, _)] -> Key.toText tag
+    _ -> "Error"
+  _ -> "Error"
+
+-- | Read the portable record back. A foreign record without a payload this
+-- build can decode keeps its @name: message@ text; a bare tagged envelope
+-- (a legacy row) still decodes as itself.
+decodePortableError :: Text -> Either Text Error
+decodePortableError text =
+  case eitherDecodeStrict' (encodeUtf8 text) of
+    Left message -> Left (Text.pack message)
+    Right (Object fields)
+      | Just name <- KeyMap.lookup "name" fields,
+        Just message <- KeyMap.lookup "message" fields ->
+          case KeyMap.lookup "data" fields of
+            Just structured -> case fromJSON structured of
+              Success err -> Right err
+              Error _ -> Left (textOf name <> ": " <> textOf message)
+            Nothing -> Left (textOf name <> ": " <> textOf message)
+    Right value -> case fromJSON value of
+      Success err -> Right err
+      Error message -> Left (Text.pack message)
+  where
+    textOf (String value) = value
+    textOf value = decodeUtf8 (LBS.toStrict (encode value))
+
 -- | Whether a failure is an answer worth recording against a caller's
 -- step: re-asking in the same state gets the same reply, so a replay
 -- stays on the branch the original run took. Control failures —
@@ -216,6 +268,7 @@ shouldRecord :: Error -> Bool
 shouldRecord err = case err of
   Backend _ -> False
   Malformed _ -> False
+  UnknownSerialization {} -> False
   ConflictingWorkflow {} -> True
   ConcurrentRecv {} -> False
   InvalidInput {} -> True

@@ -56,7 +56,7 @@ import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx (wctxConn), workflowId)
 import DBOS.Transact.Error qualified as TransactError
-import DBOS.Transact.Serialization (CodecError, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 
 -- | What 'checkSelect' found: a winner already recorded, or a race still
 -- to run. Two states rather than an 'Option' beside a loose index, so the
@@ -133,28 +133,30 @@ checkSelect wctx branches = do
           parent = WorkflowId (workflowId wctx')
       checked <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db parent stepId' selectStepStepName)
       case checked of
-        Left err -> pure (Left (TransactError.SystemDatabase err))
+        Left err -> pure (Left (TransactError.fromSystemDB err))
         Right Nothing -> pure (Right (Fresh (Recording placement startedAt)))
         Right (Just recorded) ->
           case decodeWorkflowValue "the branch that won a select" (Just (SerializedWorkflowValue (fromMaybe "" recorded.stepRecordOutput) (Serialization <$> recorded.stepRecordSerialization))) :: Either CodecError Int of
-            Left _ ->
-              pure
-                ( Left
-                    ( TransactError.SystemDatabase
-                        ( SystemDBError.UnexpectedStep
-                            { workflowId = workflowId wctx',
-                              stepId = stepId',
-                              expected = "a recorded select winner",
-                              recorded = "a select row with no decodable winner"
-                            }
-                        )
-                    )
-                )
+            Left err -> case codecUnknownTag err of
+              Just tag -> pure (Left (TransactError.UnknownSerialization {name = tag}))
+              Nothing ->
+                pure
+                  ( Left
+                      ( TransactError.fromSystemDB
+                          ( SystemDBError.UnexpectedStep
+                              { workflowId = workflowId wctx',
+                                stepId = stepId',
+                                expected = "a recorded select winner",
+                                recorded = "a select row with no decodable winner"
+                              }
+                          )
+                      )
+                  )
             Right winner
               | winner >= branchCount branches ->
                   pure
                     ( Left
-                        ( TransactError.SystemDatabase
+                        ( TransactError.fromSystemDB
                             ( SystemDBError.UnexpectedStep
                                 { workflowId = workflowId wctx',
                                   stepId = stepId',
@@ -192,7 +194,7 @@ recordSelect recording winner = case recording.recordingPlacement of
           (OutcomeOutput (Just encoded.serializedText))
           (serialization <|> Just (serializerName conn.connSerializer))
           timing
-    pure (either (Left . TransactError.SystemDatabase) Right written)
+    pure (either (Left . TransactError.fromSystemDB) Right written)
   _ -> pure (Right ())
 
 -- | Takes a control signal out of the winning branch's slot, if that is
@@ -273,7 +275,7 @@ selectStepOn wctx arms = do
       [] ->
         pure
           ( Left
-              ( TransactError.SystemDatabase
+              ( TransactError.fromSystemDB
                   ( SystemDBError.UnexpectedStep
                       { workflowId = workflowId wctx,
                         stepId = replayedStep,

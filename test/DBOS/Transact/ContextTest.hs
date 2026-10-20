@@ -156,7 +156,7 @@ connOver backend tracer = do
   instanceId <- uuidWorkflowId
   newConnection
     (SomeSystemDB backend)
-    RustSerde
+    PortableJson
     (Just "test-app")
     (secondsDuration 1)
     OwnerApplication

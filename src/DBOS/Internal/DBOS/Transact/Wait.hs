@@ -25,7 +25,7 @@ import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), selectStepName, timestampNow)
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
-import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Connection (Connection (..), withConnection)
 import DBOS.Transact.Context (WorkflowCtx (wctxConn, wctxTracer), nextStepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
@@ -64,7 +64,7 @@ selectWorkflow wctx workflowIds = do
   stepId' <- nextStepId wctx
   checked <- withSystemDB wctx (\db -> SystemDB.checkStep db workflowId' stepId' selectStepName)
   case checked of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left (TransactError.fromSystemDB err))
     Right (Just recorded) ->
       case recorded.stepRecordError of
         -- The only refusal this call records is the empty set, so a replay
@@ -81,7 +81,9 @@ selectWorkflow wctx workflowIds = do
                     Either CodecError Text
                 )
               of
-              Left err -> pure (Left (TransactError.Deserialization "select_workflow" (codecMessage err)))
+              Left err -> pure (Left (case codecUnknownTag err of
+                Just tag -> TransactError.UnknownSerialization {name = tag}
+                Nothing -> TransactError.Deserialization "select_workflow" (codecErrorText err)))
               Right winner ->
                 if WorkflowId winner `elem` workflowIds
                   then do
@@ -90,7 +92,7 @@ selectWorkflow wctx workflowIds = do
                   else
                     pure
                       ( Left
-                          ( TransactError.SystemDatabase
+                          ( TransactError.fromSystemDB
                               SystemDBError.UnexpectedStep
                                 { workflowId = workflowText,
                                   stepId = stepId',
@@ -114,7 +116,7 @@ selectWorkflow wctx workflowIds = do
         else do
           winner <- withSystemDB wctx (\db -> SystemDB.awaitFirstWorkflowId db workflowIds interval)
           case winner of
-            Left err -> pure (Left (TransactError.SystemDatabase err))
+            Left err -> pure (Left (TransactError.fromSystemDB err))
             Right winnerId@(WorkflowId winnerText') -> do
               completedAt <- timestampNow
               let encoded = encodeWorkflowValue winnerText'
@@ -129,10 +131,6 @@ selectWorkflow wctx workflowIds = do
                   )
               pure (Right winnerId)
   where
-    codecMessage err =
-      case err of
-        CodecNotJson _ input -> "invalid JSON: " <> input
-        CodecTypeMismatch _ detail -> Text.pack detail
     summarize ids =
       "[" <> Text.intercalate ", " [text | WorkflowId text <- ids] <> "]"
 
@@ -144,7 +142,7 @@ joinWorkflows :: (MonadSTM m, MonadDelay m, MonadTime m)
 joinWorkflows wctx workflowIds = do
   let interval = wctx.wctxConn.connOutcomePollInterval
   result <- withSystemDB wctx (\db -> SystemDB.awaitWorkflowIds db workflowIds interval)
-  pure (either (Left . TransactError.SystemDatabase) Right result)
+  pure (either (Left . TransactError.fromSystemDB) Right result)
 
 waitForWorkflow :: (MonadMVar m, MonadDelay m, MonadTime m)
                 => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) AwaitedOutcome)

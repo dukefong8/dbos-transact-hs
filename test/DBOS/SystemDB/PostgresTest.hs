@@ -3,6 +3,7 @@
 module DBOS.SystemDB.PostgresTest (tests, streamTests) where
 
 import DBOS.Prelude
+import DBOS.SystemDB.Error (decodePortableError)
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
@@ -46,6 +47,7 @@ import DBOS.SystemDB
     SendMessage (..),
     SerializedWorkflowValue (..),
     Serialization (..),
+    portableJsonSerialization,
     NotificationRecord (..),
     AwaitedStream (..),
     Topic (..),
@@ -93,6 +95,7 @@ import DBOS.SystemDB
     timestampNow,
     timestampToEpochMs,
   )
+import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Postgres
   ( Config (..),
     DbosMigration (..),
@@ -144,6 +147,14 @@ tests =
       pollingTests,
       classifyTests,
       configTests,
+      testCase "a step listing without outputs leaves the payload columns out of the SQL" $ do
+        let onSql = Statements.listStepsSql True
+            offSql = Statements.listStepsSql False
+        assertBool "the default reads both payload columns" ("output, error" `Text.isInfixOf` onSql)
+        assertBool "the metadata listing does not select output" (not (", output" `Text.isInfixOf` offSql))
+        assertBool "the metadata listing does not select error" (not (", error" `Text.isInfixOf` offSql))
+        assertBool "the listing pages in step order" ("order by function_id" `Text.isInfixOf` offSql)
+        assertBool "limit and offset are bound" ("limit $2 offset $3" `Text.isInfixOf` offSql),
       lifecycleTests getBackend,
       schemaTests getBackend,
       workflowTests getBackend,
@@ -578,7 +589,10 @@ lifecycleTests getBackend =
       testCase "runs a session through the pool" $
         withBackend getBackend $ \env -> do
           result <- runSession env "probe" migrationVersionSession
-          result @?= Right (Just (DbosMigration 121)),
+          case result of
+            Right (Just (DbosMigration version)) ->
+              assertBool ("expected at least migration 121, got: " <> show version) (version >= 121)
+            other -> fail ("expected an applied migration version, got: " <> show other),
       testCase "rejects a non-dbos schema" $
         withBackend getBackend $ \env -> do
           outcome <- try (fromPool env.psdbPool 8 (defaultSettings {settingsSchema = "other"}) nullTracer)
@@ -630,6 +644,34 @@ schemaTests getBackend =
         withBackend getBackend $ \env -> do
           columns <- probeSchemaColumns env "notifications"
           assertBool "notifications contract columns are present" (all (`elem` columns) requiredNotificationsColumns),
+      testCase "the stream and event notify triggers are gone" $
+        withBackend getBackend $ \env -> do
+          triggers <-
+            probeSchemaNames
+              env
+              "schema-triggers"
+              "select t.tgname::text from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'dbos' and c.relname in ('streams', 'workflow_events') and not t.tgisinternal order by t.tgname"
+          functions <-
+            probeSchemaNames
+              env
+              "schema-functions"
+              "select p.proname::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'dbos' and p.proname in ('streams_function', 'workflow_events_function') order by p.proname"
+          assertBool ("streams/workflow_events triggers are gone, got: " <> show triggers) (null triggers)
+          assertBool ("streams/workflow_events trigger functions are gone, got: " <> show functions) (null functions),
+      testCase "the notifications notify trigger remains" $
+        withBackend getBackend $ \env -> do
+          triggers <-
+            probeSchemaNames
+              env
+              "schema-notify-triggers"
+              "select t.tgname::text from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'dbos' and c.relname = 'notifications' and not t.tgisinternal order by t.tgname"
+          functions <-
+            probeSchemaNames
+              env
+              "schema-notify-functions"
+              "select p.proname::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'dbos' and p.proname = 'notifications_function' order by p.proname"
+          assertBool ("the notifications trigger remains, got: " <> show triggers) ("dbos_notifications_trigger" `elem` triggers)
+          assertBool ("the notifications function remains, got: " <> show functions) ("notifications_function" `elem` functions),
       testCase "the migrated enqueue function writes inputs to the payload table" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
@@ -679,6 +721,18 @@ probeSchemaColumns env table = do
   case result of
     Left err -> fail (show err)
     Right columns -> pure columns
+
+-- | One text column from a schema-catalog query. Labels the session so a
+-- failure names the probe that asked.
+probeSchemaNames :: PostgresSystemDB -> Text -> Text -> IO [Text]
+probeSchemaNames env label sql = do
+  result <-
+    runSession env label $
+      Session.statement () $
+        Statement.preparable sql Encoders.noParams (Decoders.rowList (Decoders.column (Decoders.nonNullable Decoders.text)))
+  case result of
+    Left err -> fail (show err)
+    Right names -> pure names
 
 expectedTables :: [Text]
 expectedTables =
@@ -796,6 +850,36 @@ workflowTests getBackend =
           rewoundNew @?= Right ()
           checkRewound env legacyOnly
           checkRewound env newOnly,
+      testCase "a caller step replays by its tag and an unreadable tag is refused" $ do
+        base <- freshWorkflowId
+        let caller = base <> "-caller"
+            target = base <> "-target"
+            callerStep = 0
+        withBackend getBackend $ \env -> do
+          -- A fresh caller and an active target: the refusal is recordable,
+          -- so the rewind writes the caller's step.
+          _ <- runSession env "fixture" (seedPayloadRow caller "PENDING" (Nothing, Nothing, Nothing) (Nothing, Nothing, Nothing))
+          _ <- runSession env "fixture" (seedPayloadRow target "ENQUEUED" (Nothing, Nothing, Nothing) (Nothing, Nothing, Nothing))
+          first <- rewindWorkflow env (WorkflowId target) 0 (SysRewindOptions Nothing Nothing Nothing) (Just (WorkflowId caller, callerStep))
+          first @?= Left (WorkflowNotRewindable {workflowId = target, status = "ENQUEUED"})
+          steps <- listSteps env (WorkflowId caller) True Nothing Nothing Nothing
+          case steps of
+            Left err -> fail (show err)
+            Right [record] -> do
+              record.stepRecordSerialization @?= Just portableJsonSerialization
+              case record.stepRecordError of
+                Just text ->
+                  decodePortableError text
+                    @?= Right (WorkflowNotRewindable {workflowId = target, status = "ENQUEUED"})
+                Nothing -> fail "expected the caller error to be recorded"
+            other -> fail ("expected one caller step, got: " <> show other)
+          -- The recorded portable error replays as itself.
+          second <- rewindWorkflow env (WorkflowId target) 0 (SysRewindOptions Nothing Nothing Nothing) (Just (WorkflowId caller, callerStep))
+          second @?= Left (WorkflowNotRewindable {workflowId = target, status = "ENQUEUED"})
+          -- A tag this build cannot read is refused, never decoded.
+          _ <- runSession env "fixture" (Session.script ("update dbos.operation_outputs set serialization = 'pickle' where workflow_uuid = '" <> caller <> "' and function_id = 0"))
+          third <- rewindWorkflow env (WorkflowId target) 0 (SysRewindOptions Nothing Nothing Nothing) (Just (WorkflowId caller, callerStep))
+          third @?= Left (UnknownSerialization {name = "pickle"}),
       testCase "returns Nothing for a missing id" $ do
         wid <- freshWorkflowId
         withBackend getBackend $ \env -> do
@@ -2532,6 +2616,24 @@ initTests getBackend =
               assertBool "the owner is stamped" (record.workflowRecordOwnerXid /= Nothing)
               assertBool "creation is stamped" (record.workflowRecordCreatedAt /= timestampFromEpochMs 0)
             other -> fail ("expected record, got: " <> show other),
+      testCase "a fresh start on an unowned row runs the row's input and tag" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureStatus = "PENDING", fixtureOwnerXid = Nothing, fixtureInput = Just "{\"positionalArgs\":[21],\"namedArgs\":{}}", fixtureSerialization = Just "portable_json"}
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowName = Just "fixture", newWorkflowInput = Just "{\"positionalArgs\":[99],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Nothing Fresh Nothing
+          case started of
+            Left err -> fail ("expected a start, got: " <> show err)
+            Right startedResult -> do
+              startedResult.initResultExistingInput @?= Just (Just "{\"positionalArgs\":[21],\"namedArgs\":{}}")
+              startedResult.initResultSerialization @?= Just "portable_json"
+              startedResult.initResultShouldExecute @?= True,
+      testCase "a fresh insert carries no existing input" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "{\"positionalArgs\":[1],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Nothing Fresh Nothing
+          case started of
+            Left err -> fail ("expected a start, got: " <> show err)
+            Right startedResult -> startedResult.initResultExistingInput @?= Nothing,
       testCase "a queued start is enqueued and not counted" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do

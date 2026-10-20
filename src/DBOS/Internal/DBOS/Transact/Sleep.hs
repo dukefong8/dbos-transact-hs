@@ -68,7 +68,7 @@ driveSleep wctx duration placement =
       let workflowId' = WorkflowId (workflowId wctx')
       recordedWake <- withSystemDB wctx' (\db -> SystemDB.recordSleep db workflowId' stepId' duration)
       case recordedWake of
-        Left err -> pure (Left (TransactError.SystemDatabase err))
+        Left err -> pure (Left (TransactError.fromSystemDB err))
         Right wakeAt -> do
           now <- timestampNow
           let remainingMillis = max 0 (timestampToEpochMs wakeAt - timestampToEpochMs now)

@@ -30,6 +30,9 @@ where
 import DBOS.Prelude
 import DBOS.SystemDB (Timestamp (..), WorkflowRecord (..), debounceStepName)
 import DBOS.SystemDB qualified as SystemDB
+import DBOS.Transact (StepInfo (..), defaultListWorkflowStepsOptions)
+import DBOS.Transact.Management (stepInfoFromRecord)
+import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
 import DBOS.Transact.Instance (dequeueWorkflows)
 
@@ -47,7 +50,7 @@ data DebouncerFixture m = DebouncerFixture
     dbFreshTag :: Text -> m Text,
     dbFreshWid :: Text -> m WorkflowId,
     dbReadRow :: WorkflowId -> m (Maybe WorkflowRecord),
-    dbListSteps :: WorkflowId -> m [StepRecord],
+    dbListSteps :: WorkflowId -> m [StepInfo],
     dbUserRuns :: m Int,
     dbUserOutputs :: m [Text],
     dbAwaitUser :: WorkflowId -> m (Maybe WorkflowStatus)
@@ -74,7 +77,7 @@ scenarioFirstDebounceDelays :: forall m. (MonadFork m, MonadMask m, MonadMVar m,
 scenarioFirstDebounceDelays fx = do
   tag <- fx.dbFreshTag "debounce-first"
   let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
-  debounced <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 3) (Just (encodeWorkflowValue ("one" :: Text)))
+  debounced <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 3) (Just (encodeWorkflowInput ("one" :: Text)))
   userWid <- case debounced of
     Right joined -> pure (WorkflowId joined.workflowId)
     Left err -> throwIO (userError ("expected the first debounce to create a row, got: " <> show err))
@@ -111,12 +114,12 @@ scenarioSecondDebounceCoalesces fx = do
   tag <- fx.dbFreshTag "debounce-coalesce"
   let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
       period = secondsDuration 4
-  firstBounce <- debounce fx.dbDBOS fx.dbTargetRef def tag period (Just (encodeWorkflowValue ("one" :: Text)))
+  firstBounce <- debounce fx.dbDBOS fx.dbTargetRef def tag period (Just (encodeWorkflowInput ("one" :: Text)))
   wid1 <- case firstBounce of
     Right joined -> pure (WorkflowId joined.workflowId)
     Left err -> throwIO (userError ("expected the first debounce to create a row, got: " <> show err))
   delay1 <- readDelay wid1
-  secondBounce <- debounce fx.dbDBOS fx.dbTargetRef def tag period (Just (encodeWorkflowValue ("two" :: Text)))
+  secondBounce <- debounce fx.dbDBOS fx.dbTargetRef def tag period (Just (encodeWorkflowInput ("two" :: Text)))
   wid2 <- case secondBounce of
     Right joined -> pure (WorkflowId joined.workflowId)
     Left err -> throwIO (userError ("expected the second debounce to join the row, got: " <> show err))
@@ -157,7 +160,7 @@ scenarioForeignHolderRefused fx = do
   _ <- case (planted :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) of
     Right _ -> pure ()
     Left err -> throwIO (userError ("expected the foreign row planted, got: " <> show err))
-  debounced <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 3) (Just (encodeWorkflowValue ("one" :: Text)))
+  debounced <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 3) (Just (encodeWorkflowInput ("one" :: Text)))
   refused <- case debounced of
     Left (SystemDatabase SystemDB.QueueDeduplicated {}) -> pure True
     Left err -> throwIO (userError ("expected a deduplication refusal, got: " <> show err))
@@ -182,7 +185,7 @@ scenarioInWorkflowDebounceRecordsStep :: forall m. (MonadFork m, MonadMask m, Mo
 scenarioInWorkflowDebounceRecordsStep fx = do
   tag <- fx.dbFreshTag "debounce-in-workflow"
   parentWid <- fx.dbFreshWid "debounce-in-workflow"
-  (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow fx.dbExecutor (newWorkflowKey "debounce-parent") parentWid (Just (encodeWorkflowValue tag))
+  (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow fx.dbExecutor (newWorkflowKey "debounce-parent") parentWid (Just (encodeWorkflowInput tag))
   userText <- case ran of
     Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
       Right text -> pure text
@@ -194,7 +197,7 @@ scenarioInWorkflowDebounceRecordsStep fx = do
   userStatus <- fx.dbAwaitUser userWid
   outputs <- fx.dbUserOutputs
   runs <- fx.dbUserRuns
-  let namesBounce = any (== debounceStepName) (map (.stepRecordStepName) steps)
+  let namesBounce = any (== debounceStepName) (map (.stepInfoName) steps)
   pure (fmap (.workflowRecordStatus) row, namesBounce, userStatus, outputs, runs)
 
 -- | The parent records the bounce step and the user runs once.
@@ -220,12 +223,12 @@ scenarioTimeoutCapsExtension :: forall m. (MonadFork m, MonadMask m, MonadMVar m
 scenarioTimeoutCapsExtension fx = do
   tag <- fx.dbFreshTag "debounce-timeout"
   let def = debouncerNew {debouncerQueueName = Just fx.dbForeignQueue, debouncerTimeout = Just (secondsDuration 2)}
-  firstBounce <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 5) (Just (encodeWorkflowValue ("one" :: Text)))
+  firstBounce <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 5) (Just (encodeWorkflowInput ("one" :: Text)))
   wid <- case firstBounce of
     Right joined -> pure (WorkflowId joined.workflowId)
     Left err -> throwIO (userError ("expected the first debounce to create a row, got: " <> show err))
   threadDelay 1000000
-  secondBounce <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 5) (Just (encodeWorkflowValue ("two" :: Text)))
+  secondBounce <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 5) (Just (encodeWorkflowInput ("two" :: Text)))
   _ <- case secondBounce of
     Right joined | WorkflowId joined.workflowId == wid -> pure ()
     Right joined -> throwIO (userError ("expected the capped bounce to join, got: " <> show joined.workflowId))

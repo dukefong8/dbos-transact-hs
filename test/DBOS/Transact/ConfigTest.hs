@@ -24,7 +24,7 @@ tests =
   testGroup
     "Configuration"
     [ testCase "the serializer names itself as the column records it" $ do
-        serializerName (configNew "app" "postgres://x").configSerializer @?= "rust_serde",
+        serializerName (configNew "app" "postgres://x").configSerializer @?= "portable_json",
       testCase "validation reports a missing url by the name of the variable that sets it" $ do
         let config = configNew "app" ""
         case validateConfig config of

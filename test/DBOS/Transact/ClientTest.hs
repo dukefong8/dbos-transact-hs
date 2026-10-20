@@ -21,12 +21,12 @@ import DBOS.SystemDB (Applications (..), QueueRecord (..), VersionInfo (..), Wor
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
     EngineOnly, Client,
     ClientConfig (..),
     Change (..),
-    CodecError,
     Config (..),
     DBOS,
     Executor,
@@ -51,7 +51,6 @@ import DBOS.Transact
     clientDeleteWorkflows,
     clientDeleteQueue,
     clientForkWorkflows,
-    clientGetEvent,
     clientLatestApplicationVersion,
     clientListApplicationVersions,
     clientListQueues,
@@ -77,12 +76,10 @@ import DBOS.Transact
     closeClient,
     configFromEnv,
     connectClient,
-    decodeWorkflowValue,
     defaultQueueChange,
     defaultQueueOptions,
     defaultReadStreamOptions,
     defaultRewindOptions,
-    encodeWorkflowValue,
     clientEnqueueWorkflowInTx,
     clientEnqueueWorkflowWith,
     clientEnqueueWorkflow,
@@ -118,6 +115,7 @@ import DBOS.Transact.Datasource (DataSource (..))
 import DBOS.Transact.Datasource qualified as DSTx (Tx (Tx))
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Instance (dequeueWorkflows)
+import DBOS.Transact.Client (clientGetEventSerialized)
 import DBOS.Transact.Workflow (storedPriority, validateEnqueue)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
@@ -140,6 +138,8 @@ tests =
           Left err ->
             assertBool "names the variable" ("DBOS_DATABASE_URL" `Text.isInfixOf` Text.pack (show err))
           Right () -> fail "expected the empty url to be refused",
+      testCase "the client's listen default matches Rust and the field stays inert" $
+        (clientConfigNew "postgresql://x").useListenNotify @?= False,
       testCase "a client enqueues by name and the app runs it" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -171,7 +171,7 @@ tests =
             -- claimed by the latest registered version, and this shared
             -- database always has a newer nameless row.
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (21 :: Int)))
+            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (21 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right handle -> do
@@ -227,8 +227,8 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            first <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (21 :: Int)))
-            second <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (99 :: Int)))
+            first <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (21 :: Int)))
+            second <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (99 :: Int)))
             case (first, second) of
               (Right holder, Right joiner) -> do
                 joiner.workflowId @?= holder.workflowId
@@ -259,7 +259,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -360,7 +360,7 @@ tests =
                 client
                 "adopt"
                 (enqueueOptionsNew unpolledQueue) {workflowId = Just unpolledText}
-                (Just (encodeWorkflowValue (7 :: Int)))
+                (Just (encodeWorkflowInput (7 :: Int)))
             case unpolled of
               Left err -> fail (show err)
               Right _ -> pure ()
@@ -376,7 +376,7 @@ tests =
                 client
                 "adopt"
                 ((enqueueOptionsNew adoptedQueue) {workflowId = Just adoptedText, appVersion = Just appVersion})
-                (Just (encodeWorkflowValue (7 :: Int)))
+                (Just (encodeWorkflowInput (7 :: Int)))
             case adopted of
               Left err -> fail (show err)
               Right handle -> do
@@ -573,7 +573,7 @@ tests =
               (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
               (\_ -> do
                 fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
-                composed <- clientSendMessagesInTx client "probe-commit" (do _ <- Tx.statement "row-1" (insertProbe table); Tx.statement "row-2" (insertProbe table)) [SendMessage (WorkflowId receiver.workflowId) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "rust_serde") [fallback] False
+                composed <- clientSendMessagesInTx client "probe-commit" (do _ <- Tx.statement "row-1" (insertProbe table); Tx.statement "row-2" (insertProbe table)) [SendMessage (WorkflowId receiver.workflowId) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "portable_json") [fallback] False
                 composed @?= Right ()
                 counted <- Postgres.runSession backend "client-tx-probe" (Session.statement () (countProbe table))
                 counted @?= Right 2
@@ -623,7 +623,7 @@ tests =
             (\_ -> do
               fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
               let keyed destination = SendMessage destination (encodeWorkflowValue ("hello" :: Text)) (Just topic) (Just (IdempotencyKey "dup-key"))
-              refused <- clientSendMessagesInTx client "probe-validation" (Tx.statement "row-1" (insertProbe table)) [keyed (WorkflowId ("client-tx-a-" <> suffix)), keyed (WorkflowId ("client-tx-b-" <> suffix))] (Just "rust_serde") [fallback, fallback] False
+              refused <- clientSendMessagesInTx client "probe-validation" (Tx.statement "row-1" (insertProbe table)) [keyed (WorkflowId ("client-tx-a-" <> suffix)), keyed (WorkflowId ("client-tx-b-" <> suffix))] (Just "portable_json") [fallback, fallback] False
               refused @?= Left (SystemDatabase (SystemDBError.InvalidInput {field = "idempotency_key", detail = "dup-key is used by more than one message"}))
               counted <- Postgres.runSession backend "client-tx-probe" (Session.statement () (countProbe table))
               counted @?= Right 0),
@@ -642,7 +642,7 @@ tests =
             (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
             (\_ -> do
               fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
-              aborted <- clientSendMessagesInTx client "probe-fk" (Tx.statement "row-1" (insertProbe table)) [SendMessage (WorkflowId ("client-tx-nowhere-" <> suffix)) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "rust_serde") [fallback] False
+              aborted <- clientSendMessagesInTx client "probe-fk" (Tx.statement "row-1" (insertProbe table)) [SendMessage (WorkflowId ("client-tx-nowhere-" <> suffix)) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "portable_json") [fallback] False
               case aborted of
                 Left _ -> pure ()
                 Right _ -> fail "expected the foreign key to abort the transaction"
@@ -667,7 +667,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -685,7 +685,7 @@ tests =
               (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
               (\_ -> do
                 fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
-                composed <- clientSendMessageInTx client "probe-forks" (Tx.statement "row-1" (insertProbe table)) (SendMessage (WorkflowId workflowText) (encodeWorkflowValue ("hello" :: Text)) (Just topic) (Just (IdempotencyKey "fork-key"))) (Just "rust_serde") fallback True
+                composed <- clientSendMessageInTx client "probe-forks" (Tx.statement "row-1" (insertProbe table)) (SendMessage (WorkflowId workflowText) (encodeWorkflowValue ("hello" :: Text)) (Just topic) (Just (IdempotencyKey "fork-key"))) (Just "portable_json") fallback True
                 composed @?= Right ()
                 notified <- Postgres.runSession backend "client-tx-probe" (Session.statement topicName countTopic)
                 notified @?= Right 2),
@@ -705,7 +705,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -742,7 +742,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue ()))
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput ()))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -785,14 +785,14 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            found <- clientGetEvent client (WorkflowId workflowText) "greeting" (millisDuration 100)
+            found <- clientGetEventSerialized client (WorkflowId workflowText) "greeting" (millisDuration 100)
             case found of
               Right (Just stored) -> do
                 let decoded = decodeWorkflowValue "event" (Just stored) :: Either CodecError Text
@@ -814,7 +814,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -871,7 +871,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          ran <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (21 :: Int)))
           case ran of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -1016,8 +1016,8 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          _ <- runWf exec key (WorkflowId firstText) (Just (encodeWorkflowValue (1 :: Int)))
-          _ <- runWf exec key (WorkflowId secondText) (Just (encodeWorkflowValue (2 :: Int)))
+          _ <- runWf exec key (WorkflowId firstText) (Just (encodeWorkflowInput (1 :: Int)))
+          _ <- runWf exec key (WorkflowId secondText) (Just (encodeWorkflowInput (2 :: Int)))
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
@@ -1045,7 +1045,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            enqueued <- clientEnqueueWorkflow client "double" queueName (Just (encodeWorkflowValue (21 :: Int)))
+            enqueued <- clientEnqueueWorkflow client "double" queueName (Just (encodeWorkflowInput (21 :: Int)))
             handle <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -1082,7 +1082,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            waited <- clientGetEvent client (WorkflowId workflowText) "absent" (millisDuration 200)
+            waited <- clientGetEventSerialized client (WorkflowId workflowText) "absent" (millisDuration 200)
             waited @?= Right Nothing,
       testCase "a client registers, reads, updates, and deletes a queue" $ do
         fresh <- UUID.V4.nextRandom
@@ -1156,8 +1156,8 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          _ <- runWf exec key (WorkflowId firstText) (Just (encodeWorkflowValue (1 :: Int)))
-          _ <- runWf exec key (WorkflowId secondText) (Just (encodeWorkflowValue (2 :: Int)))
+          _ <- runWf exec key (WorkflowId firstText) (Just (encodeWorkflowInput (1 :: Int)))
+          _ <- runWf exec key (WorkflowId secondText) (Just (encodeWorkflowInput (2 :: Int)))
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
@@ -1204,7 +1204,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          _ <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (1 :: Int)))
+          _ <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (1 :: Int)))
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
               filters = defaultWorkflowFilter {workflowFilterWorkflowIds = [workflowText]}
@@ -1251,7 +1251,7 @@ tests =
               Right _ -> pure ()
             let options :: EnqueueOptions
                 options = (enqueueOptionsOn ((enqueueNew queueName) {delay = Just (secondsDuration 3600)})) {workflowId = Just workflowText}
-            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (1 :: Int)))
+            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (1 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right _ -> pure ()
@@ -1285,7 +1285,7 @@ tests =
               (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
               (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
               (\_ -> do
-                enqueued <- clientEnqueueWorkflowInTx client "double" "enq-commit" (Tx.statement "row-1" (insertProbe table)) (enqueueOptionsNew queueName) (Just (encodeWorkflowValue (7 :: Int)))
+                enqueued <- clientEnqueueWorkflowInTx client "double" "enq-commit" (Tx.statement "row-1" (insertProbe table)) (enqueueOptionsNew queueName) (Just (encodeWorkflowInput (7 :: Int)))
                 handle <- case enqueued of
                   Left err -> fail (show err)
                   Right handle -> pure handle
@@ -1391,7 +1391,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          _ <- runWf exec key (WorkflowId plainText) (Just (encodeWorkflowValue (1 :: Int)))
+          _ <- runWf exec key (WorkflowId plainText) (Just (encodeWorkflowInput (1 :: Int)))
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
@@ -1401,7 +1401,7 @@ tests =
               Right _ -> pure ()
             let options :: EnqueueOptions
                 options = (enqueueOptionsNew queueName) {workflowId = Just queuedText}
-            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowValue (2 :: Int)))
+            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (2 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right handle -> handle.workflowId @?= queuedText
@@ -1428,7 +1428,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchClientExec dbos isolatedEnvironment
-          _ <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (5 :: Int)))
+          _ <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (5 :: Int)))
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
@@ -1458,7 +1458,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 resultWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))

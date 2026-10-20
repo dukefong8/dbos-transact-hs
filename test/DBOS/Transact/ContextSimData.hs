@@ -40,7 +40,7 @@ mockStreamBody :: Text
 mockStreamBody = "mock-stream"
 
 mockEvent :: EventRecord
-mockEvent = EventRecord {eventKey = "mock-key", eventValue = "\"mock\"", eventSerialization = Just "rust_serde"}
+mockEvent = EventRecord {eventKey = "mock-key", eventValue = "\"mock\"", eventSerialization = Just "portable_json"}
 
 mockNotification :: NotificationRecord
 mockNotification =
@@ -48,7 +48,7 @@ mockNotification =
     { notificationRecordMessageUuid = "mock-message-uuid",
       notificationRecordTopic = Nothing,
       notificationRecordMessage = "\"mock\"",
-      notificationRecordSerialization = Just "rust_serde",
+      notificationRecordSerialization = Just "portable_json",
       notificationRecordCreatedAt = mockTimestamp,
       notificationRecordConsumed = False
     }
@@ -59,6 +59,6 @@ mockStreamRecord =
     { streamKey = "mock-key",
       streamOffset = 0,
       streamValue = "\"mock\"",
-      streamSerialization = Just "rust_serde",
+      streamSerialization = Just "portable_json",
       streamStepId = 0
     }

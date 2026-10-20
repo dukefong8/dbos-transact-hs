@@ -101,6 +101,8 @@ module and none in the sim tree.
 7. **Cross-language interop — open.** Python `test_interop.py`; no end-to-end
    envelope / status / error round-trip against another SDK. The boundary is
    enforced structurally (Rust corpus, `TypesTest`, `cross-language-schema-interop.md`).
+   Owner slices: `TODO.md` S1/S2 (read by tag + `portable_json`), with its
+   phase P as the cross-read gate; S2 also unblocks this gap's oracle.
 8. **Observability query timeout — deferred.** Python-only; Rust's listing
    statements carry no timeout either (TODO.md G6).
 9. **Streaming breadth — open.** Notifier / LISTEN-NOTIFY (the port polls by

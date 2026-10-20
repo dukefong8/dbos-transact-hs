@@ -23,7 +23,6 @@ module Outbox.Workflows
     orderIdEventKey,
     sentStatus,
     notifyDelay,
-    NotifyEnvelope (..),
 
     -- * Bodies
     placeOrderWorkflow,
@@ -33,7 +32,6 @@ where
 
 import Control.Monad.Class.MonadTimer (threadDelay)
 import Control.Monad.Except (ExceptT (..), runExceptT)
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import DBOS.Transact (DataSource, EngineOnly, Error, IsolationLevel (..), StepCtx, TransactionConfig (..), Tx (..), WorkflowCtx, logInfo, runStep, runTxStep, setEvent)
@@ -76,24 +74,11 @@ namedStep name = TransactionConfig {txName = Just name, txIsolation = Just Seria
 -- | An order as the workflows carry it: customer, item, quantity.
 type OrderInput = (Text, Text, Int)
 
--- | A notification as the enqueued consumer carries it: order id, customer, item.
+-- | A notification as the enqueued consumer carries it: order id, customer,
+-- item. The engine unwraps the portable @{positionalArgs, namedArgs}@
+-- envelope written by @dbos.enqueue_workflow@ before the body runs, so the
+-- body takes the triple itself, as the Python framework passes it.
 type NotifyInput = (Int, Text, Text)
-
--- | The input envelope @dbos.enqueue_workflow@ writes: positional arguments
--- under @positionalArgs@, named arguments under @namedArgs@. The Python
--- framework unwraps this before calling the workflow; the Haskell engine
--- reads the stored input as-is, so the consumer takes the envelope and
--- extracts the triple itself. @namedArgs@ is always empty here and ignored.
-newtype NotifyEnvelope = NotifyEnvelope
-  { notifyArgs :: NotifyInput
-  }
-  deriving stock (Eq, Show)
-
-instance FromJSON NotifyEnvelope where
-  parseJSON = withObject "NotifyEnvelope" $ \o -> NotifyEnvelope <$> o .: "positionalArgs"
-
-instance ToJSON NotifyEnvelope where
-  toJSON (NotifyEnvelope args) = object ["positionalArgs" .= args, "namedArgs" .= object []]
 
 -- * Bodies
 
@@ -124,10 +109,10 @@ placeOrderWorkflow ds (customer, item, quantity) wctx = runExceptT $ do
 sendNotificationWorkflow ::
   forall exec.
   DataSource IO ->
-  NotifyEnvelope ->
+  NotifyInput ->
   WorkflowCtx exec IO ->
   IO (Either (Error EngineOnly) ())
-sendNotificationWorkflow ds (NotifyEnvelope (orderId, customer, item)) wctx = runExceptT $ do
+sendNotificationWorkflow ds (orderId, customer, item) wctx = runExceptT $ do
   ExceptT (runStep wctx "send_order_notification" (sendNotification orderId customer item))
   ExceptT (runTxStep ds (namedStep "update_notification_status") wctx (\sctx (Tx run) -> Right <$> run (setNotificationStatusStatement sentStatus (Id orderId)) ()))
 

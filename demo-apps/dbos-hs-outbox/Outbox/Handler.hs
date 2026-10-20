@@ -22,7 +22,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.Transact (Duration, EngineOnly, Error, IsolationLevel (..), StartOptions (..), TransactionConfig (..), Tx (..), WorkflowId (..), encodeWorkflowValue, getWorkflowEvent, runTxOutside, secondsDuration, startWorkflow, startOptionsDefault, toDataSource)
+import DBOS.Transact (Duration, EngineOnly, Error, IsolationLevel (..), StartOptions (..), TransactionConfig (..), Tx (..), WorkflowId (..), encodeWorkflowInput, getWorkflowEvent, runTxOutside, secondsDuration, startWorkflow, startOptionsDefault, toDataSource)
 import Demo.Http (RouteHandler, runAppOr500, throwRouteError)
 import Hasql.Session qualified as Session
 import IHP.TypedSql.Id (Id' (..))
@@ -52,7 +52,7 @@ placeOrderAtomic app customer item quantity = do
   case started of
     Left err -> throwRouteError status500 (textBody ("start failed: " <> Text.pack (show err)))
     Right wid -> do
-      found <- liftIO (getWorkflowEvent app.obDbos wid orderIdEventKey orderEventTimeout)
+      found <- liftIO (getWorkflowEvent app.obDbos wid orderIdEventKey orderEventTimeout :: IO (Either (Error EngineOnly) (Maybe Text)))
       case found of
         Left err -> throwRouteError status500 (textBody ("event wait failed: " <> Text.pack (show err)))
         Right _ -> getOrders app
@@ -72,7 +72,7 @@ placeOrderEnqueued app customer item quantity = do
 startPlaceOrder :: OutboxApp -> Text -> Text -> Int -> IO (Either (Error EngineOnly) WorkflowId)
 startPlaceOrder app customer item quantity = runExceptT $ do
   wid <- liftIO (WorkflowId <$> UUID.toText <$> UUID.V4.nextRandom)
-  let input = Just (encodeWorkflowValue (customer, item, quantity))
+  let input = Just (encodeWorkflowInput (customer, item, quantity))
       options = startOptionsDefault {startWorkflowId = Just wid}
   _ <- ExceptT (startWorkflow app.obExec app.obPlaceOrder options input)
   pure wid

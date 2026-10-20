@@ -31,22 +31,23 @@ import Data.Maybe (fromMaybe)
 import Control.Monad.Class.MonadTime (getMonotonicTimeNSec)
 import Control.Monad.IO.Class (liftIO)
 import Prelude
-import DBOS.SystemDB (Change (..), SendMessage (..), millisDuration)
 import DBOS.Transact
   ( DBOS,
     EngineOnly,
+    Error,
     Queue (..),
     QueueChange (..),
-    SerializedWorkflowValue (..),
+    SendMessage (..),
     StartOptions (..),
     WorkflowId (..),
-    decodeWorkflowValue,
     WorkflowRef,
-    enqueueWorkflow,
+    Change (..),
     encodeWorkflowValue,
+    enqueueWorkflow,
     fetchWorkflowStatuses,
     getWorkflowEvent,
     listWorkflowIdsByName,
+    millisDuration,
     newWorkflowKey,
     queue,
     startWorkflow,
@@ -101,10 +102,8 @@ getWorkflowProgress app task = do
 
 lastStepOf :: StarterApp -> Text -> IO Int
 lastStepOf app task = do
-  stored <- getWorkflowEvent app.staDbos (WorkflowId task) stepsEventKey (millisDuration 0)
-  pure (fromMaybe 0 (do
-    recorded <- either (const Nothing) id stored
-    either (const Nothing) Just (decodeWorkflowValue "result" (Just recorded))))
+  stored <- (getWorkflowEvent app.staDbos (WorkflowId task) stepsEventKey (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Int)))
+  pure (fromMaybe 0 (either (const Nothing) id stored))
 
 startWorkflowRoute :: StarterApp -> Text -> RouteHandler ()
 startWorkflowRoute app taskId = do
@@ -164,8 +163,8 @@ getEventsStatus app = do
   where
     readKey Nothing key = pure EventKey {ekKey = key, ekValue = Nothing}
     readKey (Just workflowId) key = do
-      stored <- getWorkflowEvent app.staDbos workflowId key (millisDuration 0)
-      pure EventKey {ekKey = key, ekValue = either (const Nothing) (>>= decodeToText) stored}
+      stored <- (getWorkflowEvent app.staDbos workflowId key (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Text)))
+      pure EventKey {ekKey = key, ekValue = either (const Nothing) id stored}
 
 -- | 'startOrder' with the id rendered as text, for the non-HTMX response.
 startOrderText :: StarterApp -> RouteHandler Text
@@ -192,12 +191,12 @@ readEvent app key = do
     Nothing -> pure ReadResult {rrKey = key, rrValue = Nothing, rrWaitedMs = 0}
     Just workflowId -> do
       started <- liftIO getMonotonicTimeNSec
-      stored <- liftIO (getWorkflowEvent app.staDbos workflowId key (millisDuration eventReadTimeoutMs))
+      stored <- liftIO (getWorkflowEvent app.staDbos workflowId key (millisDuration eventReadTimeoutMs) :: IO (Either (Error EngineOnly) (Maybe Text)))
       finished <- liftIO getMonotonicTimeNSec
       pure
         ReadResult
           { rrKey = key,
-            rrValue = either (const Nothing) (>>= decodeToText) stored,
+            rrValue = either (const Nothing) id stored,
             rrWaitedMs = fromIntegral ((finished - started) `div` 1000000)
           }
 
@@ -210,8 +209,8 @@ getApprovals app = do
   liftIO (traverse readApproval ids)
   where
     readApproval workflowId@(WorkflowId text) = do
-      stored <- getWorkflowEvent app.staDbos workflowId decisionEventKey (millisDuration 0)
-      pure ApprovalRow {arWorkflowId = text, arDecision = either (const Nothing) (>>= decodeToText) stored}
+      stored <- (getWorkflowEvent app.staDbos workflowId decisionEventKey (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Text)))
+      pure ApprovalRow {arWorkflowId = text, arDecision = either (const Nothing) id stored}
 
 startApproval :: StarterApp -> RouteHandler WorkflowId
 startApproval app = liftIO (startBackground app app.staRefs.starterApprovalRef =<< freshId "approval")
@@ -241,11 +240,6 @@ respondAllApprovals app decision = do
   pure (length waiting)
 
 -- * Helpers
-
-decodeToText :: SerializedWorkflowValue -> Maybe Text
-decodeToText stored = case decodeWorkflowValue "result" (Just stored) of
-  Right text -> Just text
-  Left _ -> Nothing
 
 fetchQueueWorkerConcurrency :: DBOS IO -> Text -> IO (Maybe Int)
 fetchQueueWorkerConcurrency dbos name = do

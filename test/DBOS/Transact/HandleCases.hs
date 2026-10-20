@@ -32,8 +32,9 @@ where
 import DBOS.Prelude
 import DBOS.SystemDB (NewWorkflow (..), SerializedWorkflowValue (..), Submission (..), WorkflowId (..), WorkflowStatus (..), getResultStepName, initWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
+import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
-  ( CodecError,
+  (
     Config (..),
     DBOS,
     EngineOnly,
@@ -41,12 +42,10 @@ import DBOS.Transact
     Executor,
     Serializer (..),
     WorkflowCtx,
-    WorkflowHandle (..),
+    WorkflowHandle (workflowId),
     WorkflowKey,
     awaitChild,
-    decodeWorkflowValue,
     deleteWorkflows,
-    encodeWorkflowValue,
     handleResult,
     handleStatus,
     newDBOS,
@@ -126,7 +125,7 @@ mkHandleFixture config identity connApp nameScheme genId genEntropy sysdb tracer
       instanceId <- genId
       newConnection
         sysdb
-        RustSerde
+        PortableJson
         (Just connApp)
         (secondsDuration 1)
         OwnerApplication
@@ -150,7 +149,7 @@ registerDouble dbos = do
 -- error channel pins to 'EngineOnly' once instead of at each call site.
 -- Local copies are deliberate: this module carries only the aliases it uses.
 runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-      => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+      => Executor m -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 retrieveWf :: forall m. (MonadMVar m)
@@ -177,7 +176,7 @@ scenarioRetrieveStatus fx = do
     wid <- fx.hfFreshId "handle-id"
     let WorkflowId widText = wid
         key = newWorkflowKey "double"
-    ran <- runWf exec key wid (Just (encodeWorkflowValue (21 :: Int)))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput (21 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -200,7 +199,7 @@ scenarioResultAdopts fx = do
     exec <- fx.hfLaunch dbos
     wid <- fx.hfFreshId "handle-res-id"
     let key = newWorkflowKey "double"
-    ran <- runWf exec key wid (Just (encodeWorkflowValue (21 :: Int)))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput (21 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -232,7 +231,7 @@ scenarioFailError fx = do
       Right () -> pure ()
     exec <- fx.hfLaunch dbos
     wid <- fx.hfFreshId "handle-fail-id"
-    ran <- runWf exec key wid (Just (encodeWorkflowValue (1 :: Int)))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput (1 :: Int)))
     case ran of
       Left _ -> pure ()
       Right other -> throwIO (userError ("expected the run to fail, got: " <> show other))
@@ -261,7 +260,7 @@ scenarioDeletedAbsent fx = do
       Right () -> pure ()
     exec <- fx.hfLaunch dbos
     wid <- fx.hfFreshId "handle-del-id"
-    ran <- runWf exec key wid (Just (encodeWorkflowValue (1 :: Int)))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput (1 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -290,7 +289,7 @@ scenarioDropHandle fx = do
     exec <- fx.hfLaunch dbos
     wid <- fx.hfFreshId "handle-drop-id"
     let key = newWorkflowKey "double"
-    worker <- async (runWf exec key wid (Just (encodeWorkflowValue (21 :: Int))))
+    worker <- async (runWf exec key wid (Just (encodeWorkflowInput (21 :: Int))))
     -- Retrieved and immediately dropped while the run is in flight.
     _ <- retrieveWf dbos wid
     outcome <- wait worker
@@ -322,7 +321,7 @@ scenarioScopedAwait fx = do
     registerDouble dbos
     exec <- fx.hfLaunch dbos
     let key = newWorkflowKey "double"
-    ran <- runWf exec key childWid (Just (encodeWorkflowValue (21 :: Int)))
+    ran <- runWf exec key childWid (Just (encodeWorkflowInput (21 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()

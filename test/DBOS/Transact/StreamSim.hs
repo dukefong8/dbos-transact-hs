@@ -96,7 +96,7 @@ tests =
       testCase "closeStream succeeds against the mock SystemDB" $
         run (closeStream backend (WorkflowId "wf-1") 0 "key" Workflow) @?= Right (),
       testCase "readStreamValues returns values and producer status" $
-        run (readStreamValues backend (WorkflowId "wf-1") "key" 0 1) @?= Right (StreamRead Pending [EncodedValue "mock-stream" (Just "rust_serde")]),
+        run (readStreamValues backend (WorkflowId "wf-1") "key" 0 1) @?= Right (StreamRead Pending [EncodedValue "mock-stream" (Just "portable_json")]),
       testCase "getAllStreamEntries returns mock entries" $ do
         let result = run (getAllStreamEntries backend (WorkflowId "wf-1"))
         case result of

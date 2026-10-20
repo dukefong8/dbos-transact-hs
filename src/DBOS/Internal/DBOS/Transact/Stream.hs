@@ -23,13 +23,13 @@ import Data.Vector.Fusion.Stream.Monadic qualified as Vector
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), WorkflowRecord (WorkflowRecord, workflowRecordStatus), WorkflowStatus (..), WrittenBy (..), addTimeout, durationAsMillis, isStreamClosed, millisDuration, readStreamStepName, secondsDuration, streamClosedSentinel, streamClosedSerialization, timestampNow)
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), WorkflowRecord (WorkflowRecord, workflowRecordStatus), WorkflowStatus (..), WrittenBy (..), addTimeout, durationAsMillis, isStreamClosed, millisDuration, portableJsonSerialization, readStreamStepName, secondsDuration, streamClosedSentinel, streamClosedSerialization, timestampNow)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Checkpoint (StepPlacement (..), placeCall)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx, stepId, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
-import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 
 data ReadStreamOptions = ReadStreamOptions
   { pollingInterval :: Maybe Duration,
@@ -156,7 +156,7 @@ readStreamWith place runDb caller wid key initialOffset options = do
                       case awaited of
                         Left err -> do
                           let readError = SystemDatabase err
-                          recorded <- recordRead placement startedAt (OutcomeError (encodeErrorText readError)) (Just "rust_serde")
+                          recorded <- recordRead placement startedAt (OutcomeError (encodeErrorText readError)) (Just portableJsonSerialization)
                           pure (live {readerEnded = True}, either (Left . SystemDatabase) (const (Left readError)) recorded)
                         Right Types.TimedOut | isNothing options'.timeout -> drivePull placement startedAt live
                         Right Types.TimedOut -> do
@@ -167,7 +167,7 @@ readStreamWith place runDb caller wid key initialOffset options = do
                                 Just (WorkflowId callerView) -> callerView
                                 Nothing -> case streamWorkflow of WorkflowId streamView -> streamView
                               timedOut = StreamTimeout readerText streamKey options'.timeout
-                          recorded <- recordRead placement startedAt (OutcomeError (encodeErrorText timedOut)) (Just "rust_serde")
+                          recorded <- recordRead placement startedAt (OutcomeError (encodeErrorText timedOut)) (Just portableJsonSerialization)
                           pure (live {readerEnded = True}, either (Left . SystemDatabase) (const (Left timedOut)) recorded)
                         Right Types.Ended -> do
                           recorded <- recordRead placement startedAt (OutcomeOutput (Just streamClosedSentinel)) (Just streamClosedSerialization)
@@ -226,9 +226,9 @@ readStreamWith place runDb caller wid key initialOffset options = do
             withSystemDB readerWctx (\db -> SystemDB.recordStep db (WorkflowId (workflowId readerWctx)) stepNo readStreamStepName outcome serialization (Just (StepTiming startedAt completedAt)))
           _ -> pure (Right ())
         isClose encoded = isStreamClosed encoded.encodedValue encoded.encodedSerialization
-        decodeFailure codecError = case codecError of
-          CodecNotJson _ input       -> Deserialization "stream value" ("invalid JSON: " <> input)
-          CodecTypeMismatch _ detail -> Deserialization "stream value" (Text.pack detail)
+        decodeFailure codecError = case codecUnknownTag codecError of
+          Just tag -> UnknownSerialization {name = tag}
+          Nothing -> Deserialization "stream value" (codecErrorText codecError)
 
 writeStream :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (Either (Error EngineOnly) ())
 writeStream wctx key value = do

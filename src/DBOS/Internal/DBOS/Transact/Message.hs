@@ -24,7 +24,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
-import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextStepId, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
@@ -105,7 +105,7 @@ sendWith wctx destination value options = do
         pure (Just (WorkflowId workflowText, stepId'))
   written <- withSystemDB wctx (\db -> SystemDB.sendMessage db message serialization caller sendToForks)
   pure $ case written of
-    Left err -> Left (TransactError.SystemDatabase err)
+    Left err -> Left (TransactError.fromSystemDB err)
     Right () -> Right ()
 
 -- | Send many messages in one transaction: all or none. The batch is
@@ -149,7 +149,7 @@ sendBulkWith wctx messages options = do
             }
     plainSend wctx' encodedMessages serialization caller = do
       written <- withSystemDB wctx' (\db -> SystemDB.sendMessages db encodedMessages serialization caller (options.forks == ForksInclude))
-      pure (either (Left . TransactError.SystemDatabase) Right written)
+      pure (either (Left . TransactError.fromSystemDB) Right written)
 
 -- | Consume the oldest matching message, waiting up to the polling duration.
 -- It is checkpointed as a read plus timeout so replay returns the same
@@ -174,17 +174,15 @@ recv wctx topic timeout = do
             Just (Topic name) -> Just name
       found <- withSystemDB wctx (\db -> SystemDB.recv db workflowId' stepId' timeoutStepId topicText timeout)
       pure $ case found of
-        Left err -> Left (TransactError.SystemDatabase err)
+        Left err -> Left (TransactError.fromSystemDB err)
         Right Nothing -> Right Nothing
         Right (Just encoded) ->
           case decodeWorkflowValue "message" (Just (storedValue encoded)) of
-            Left err -> Left (TransactError.Deserialization "message" (codecMessage err))
+            Left err -> Left (case codecUnknownTag err of
+              Just tag -> TransactError.UnknownSerialization {name = tag}
+              Nothing -> TransactError.Deserialization "message" (codecErrorText err))
             Right value -> Right (Just value)
   where
-    codecMessage err =
-      case err of
-        CodecNotJson _ input -> "invalid JSON: " <> input
-        CodecTypeMismatch _ detail -> Text.pack detail
     storedValue encoded =
       SerializedWorkflowValue
         { serializedText = encoded.encodedValue,

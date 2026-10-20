@@ -316,12 +316,8 @@ sources![
     (40, "40_add_attributes.sql", Applies::Always),
     (41, "41_add_schedule_name.sql", Applies::Always),
     (42, "42_add_debounce_columns.sql", Applies::Always),
-    (43, "43_drop_streams_trigger.sql", Applies::WhenNotify),
-    (
-        44,
-        "44_drop_workflow_events_trigger.sql",
-        Applies::WhenNotify
-    ),
+    (43, "43_drop_streams_trigger.sql", Applies::Postgres),
+    (44, "44_drop_workflow_events_trigger.sql", Applies::Postgres),
     (45, "45_add_partition_dequeue_index.sql", Applies::Always),
     (46, "46_add_partition_dequeue_index_v2.sql", Applies::Always),
     (47, "47_drop_partition_dequeue_index.sql", Applies::Always),
@@ -519,7 +515,8 @@ pub struct Migration {
 
 /// Assembles the ordered migration list for a dialect and configuration.
 ///
-/// Seven migrations vary, and the variance lives here rather than in the files:
+/// Ten migrations vary. The variance is declared with each file, as its [`Applies`], or added
+/// here:
 ///
 /// - **1** gains its LISTEN/NOTIFY half only when notifications are on and supported.
 /// - **10** carries a guard ([`MIGRATION_10_PK_PROBE`]) instead of being conditional.
@@ -529,7 +526,11 @@ pub struct Migration {
 /// - **28** drops a constraint PostgreSQL exposes as a constraint and CockroachDB as an index.
 /// - **38** appends a PostgreSQL-only `search_path` tail.
 /// - **39** installs a trigger, so it follows the same gate as 1's notify half.
-/// - **105** replaces the function 38 defined, and appends the same `search_path` tail.
+/// - **43** and **44** drop the triggers 39 and 1 installed, on every PostgreSQL database. Not
+///   gated on notifications: a database migrated while they were on has the triggers even if
+///   this process has them off.
+/// - **105** and **113** each replace the function 38 defined, and append the same `search_path`
+///   tail.
 ///
 /// A migration that does not apply renders empty rather than being dropped: versions are
 /// positional, so removing one would renumber everything after it.
@@ -537,8 +538,8 @@ pub struct Migration {
 /// TODO(dbos-team): UPSTREAM item 15. `use_listen_notify` decides both how *this process* waits and
 /// whether the *database* gets its NOTIFY triggers — and the second is permanent and shared. A
 /// database migrated with it off has no triggers, so a Go peer, which has no such config and always
-/// LISTENs on Postgres (`dialect.go`), waits out every `recv` timeout in silence. Rust gates here
-/// because Python and Java do; whether any of them should is the question.
+/// LISTENs on Postgres (`dialect.go`), waits out every `recv` timeout in silence. 1, 20 and 39 are
+/// still gated; whether any migration should be is the question.
 pub fn build_migrations(schema: &str, dialect: Dialect, use_listen_notify: bool) -> Vec<Migration> {
     let quoted = quote_identifier(schema);
     // CockroachDB has no LISTEN/NOTIFY, so asking for it there is asking for nothing.
@@ -633,15 +634,22 @@ mod tests {
             );
         }
 
-        // 39, 43 and 44 install and drop triggers that exist only under LISTEN/NOTIFY.
-        for version in [39, 43, 44] {
+        // 39 installs a trigger that exists only under LISTEN/NOTIFY.
+        assert!(!pg_notify[&39].is_empty(), "39 applies with notify");
+        assert!(pg_plain[&39].is_empty(), "39 is a no-op without");
+
+        // 43 and 44 drop triggers a database may have gained while notify was on, so they run on
+        // every PostgreSQL database whether or not this process listens. CockroachDB never had
+        // the triggers.
+        for version in [43, 44] {
             assert!(
-                !pg_notify[&version].is_empty(),
-                "{version} applies with notify"
+                pg_plain[&version].contains("DROP TRIGGER"),
+                "{version} applies without notify"
             );
+            assert_eq!(pg_plain[&version], pg_notify[&version]);
             assert!(
-                pg_plain[&version].is_empty(),
-                "{version} is a no-op without"
+                crdb[&version].is_empty(),
+                "{version} is a no-op on CockroachDB"
             );
         }
 

@@ -32,6 +32,7 @@ module DBOS.Transact.Client
     clientEnqueueWorkflowWith,
     clientRetrieveWorkflow,
     clientWorkflowStatus,
+    clientWorkflowRecord,
     clientWaitFirst,
     -- * Messages from outside
     clientSendMessage,
@@ -39,6 +40,7 @@ module DBOS.Transact.Client
     clientSendMessageInTx,
     clientSendMessagesInTx,
     clientGetEvent,
+    clientGetEventSerialized,
     -- * Lifecycle from outside
     clientCancelWorkflows,
     clientResumeWorkflows,
@@ -62,6 +64,9 @@ module DBOS.Transact.Client
     clientPromoteVersion,
     clientListWorkflows,
     clientListWorkflowSteps,
+    clientListWorkflowStepsWith,
+    clientListWorkflowStepsSerialized,
+    clientListWorkflowStepsSerializedWith,
   )
 where
 
@@ -77,16 +82,16 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Submission (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
+import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Submission (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, runSystemDB, withConnection)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, WorkflowHandle (workflowId), pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
 import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Management (checkRewindOptions, setWorkflowDelay, updateWorkflowAttributes)
+import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
 import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
-import DBOS.Transact.Serialization (encodeAttributes)
+import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
 import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
 import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), enqueueNew, maxRecoveryAttempts, resolveEnqueueCollision, storedPriority, validateEnqueue)
 import Hasql.Transaction qualified as Tx
@@ -102,6 +107,10 @@ data ClientConfig = ClientConfig
     maxConnections       :: Word,
     schema               :: Text,
     serializer           :: Serializer,
+    -- | Accepted for Rust @ClientConfig@ fidelity. The port polls and has no
+    -- listener, so this field is inert. Rust defaults it to false (#101): a
+    -- listener pointed at executors that do not push waits out the
+    -- 60-second fallback.
     useListenNotify      :: Bool,
     pollingConcurrency   :: Maybe Word,
     outcomePollInterval  :: Maybe Duration,
@@ -118,8 +127,8 @@ clientConfigNew databaseUrl =
       databaseUrl = databaseUrl,
       maxConnections = 5,
       schema = "dbos",
-      serializer = RustSerde,
-      useListenNotify = True,
+      serializer = PortableJson,
+      useListenNotify = False,
       pollingConcurrency = Nothing,
       outcomePollInterval = Nothing,
       notificationCoalesce = Nothing
@@ -186,7 +195,7 @@ connectClient config =
     Right () -> do
       acquired <- try (Postgres.acquirePostgresSystemDB backendConfig nullTracer) :: IO (Either SystemDBError.Error PostgresSystemDB)
       case acquired of
-        Left err -> pure (Left (TransactError.SystemDatabase err))
+        Left err -> pure (Left (TransactError.fromSystemDB err))
         Right backend ->
           bracketOnError (pure backend) Postgres.releasePostgresSystemDB $ \systemDB -> do
             Postgres.activatePostgresSystemDB systemDB
@@ -245,7 +254,7 @@ withClientTransaction client operation action = case client.clientTxRunner of
   Nothing -> pure (Left (TransactError.InvalidArgument "client transaction" "the client backend cannot run caller transactions"))
   Just (ClientTxRunner run) -> do
     result <- run operation action
-    pure (either (Left . TransactError.SystemDatabase) Right result)
+    pure (either (Left . TransactError.fromSystemDB) Right result)
 
 -- | Send a batch with the caller's writes in one transaction: the writes run
 -- first, then the sends, all in the caller's commit. The batch is validated
@@ -255,15 +264,15 @@ withClientTransaction client operation action = case client.clientTxRunner of
 clientSendMessagesInTx :: Client IO -> Text -> Tx.Transaction () -> [SendMessage] -> Maybe Text -> [Text] -> Bool -> IO (Either (TransactError.Error TransactError.EngineOnly) ())
 clientSendMessagesInTx client operation callerWrites messages serialization fallbacks sendToForks =
   case validateSendKeys messages of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left (TransactError.fromSystemDB err))
     Right ()
       | length fallbacks /= length messages ->
-          pure (Left (TransactError.SystemDatabase (SystemDBError.invalidInput "fallbacks" "one fallback id per message")))
+          pure (Left (TransactError.fromSystemDB (SystemDBError.invalidInput "fallbacks" "one fallback id per message")))
       | otherwise -> runExceptT $ do
           composed <- ExceptT (withClientTransaction client operation (callerWrites >> Postgres.sendBatchInTx messages serialization fallbacks sendToForks))
           -- The piece condemns on its own refusal, so a 'Left' here already
           -- rolled the caller writes back; map it out rather than swallowing it.
-          ExceptT (pure (first TransactError.SystemDatabase composed))
+          ExceptT (pure (first TransactError.fromSystemDB composed))
 
 -- | Send one message with the caller's writes in one transaction, as
 -- 'clientSendMessagesInTx' sends a batch.
@@ -309,7 +318,7 @@ enqueueOptionsOn shape =
 -- handle to it. Asks for nothing else: the client's app name is stamped,
 -- no version is recorded, and the id is generated.
 clientEnqueueWorkflow :: MonadSTM m
-                      => Client m -> Text -> Text -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+                      => Client m -> Text -> Text -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 clientEnqueueWorkflow client workflowName queueName input =
   clientEnqueueWorkflowWith client workflowName (enqueueOptionsNew queueName) input
 
@@ -319,7 +328,7 @@ clientEnqueueWorkflow client workflowName queueName input =
 -- executors running exactly that code. A deduplication collision is refused,
 -- unless the policy asks to join the holder instead.
 clientEnqueueWorkflowWith :: MonadSTM m
-                          => Client m -> Text -> EnqueueOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+                          => Client m -> Text -> EnqueueOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 clientEnqueueWorkflowWith client workflowName options input = do
   case validateEnqueue options.queue of
     Left err -> pure (Left err)
@@ -327,7 +336,7 @@ clientEnqueueWorkflowWith client workflowName options input = do
       generated <- generatedWorkflowId client.conn
       let shape = options.queue
           workflowText = fromMaybe generated options.workflowId
-          serialization = case input >>= (.serializedSerialization) of
+          serialization = case rawInput >>= (.serializedSerialization) of
             Just (Serialization name) -> Just name
             Nothing                   -> Just (serializerName client.conn.connSerializer)
           applicationName = case options.appName of
@@ -338,7 +347,7 @@ clientEnqueueWorkflowWith client workflowName options input = do
               { newWorkflowName = Just workflowName,
                 newWorkflowClassName = options.className,
                 newWorkflowConfigName = options.configName,
-                newWorkflowInput = (.serializedText) <$> input,
+                newWorkflowInput = (.serializedText) <$> rawInput,
                 newWorkflowSerialization = serialization,
                 newWorkflowQueueName = Just shape.name,
                 newWorkflowDeduplicationId = shape.deduplicationId,
@@ -357,6 +366,7 @@ clientEnqueueWorkflowWith client workflowName options input = do
         Right _  -> pure (Right (handle True workflowText))
         Left err -> resolveEnqueueCollision client.conn shape workflowText err
   where
+    rawInput = unWorkflowInput <$> input
     handle failMissing workflowText =
       pollingHandle client.conn workflowText failMissing
 
@@ -369,7 +379,7 @@ clientEnqueueWorkflowWith client workflowName options input = do
 -- condemns the whole transaction; an identical row is a no-op join. The
 -- returned handle is polling, and is only usable once the transaction
 -- commits.
-clientEnqueueWorkflowInTx :: Client IO -> Text -> Text -> Tx.Transaction () -> EnqueueOptions -> Maybe SerializedWorkflowValue -> IO (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle IO e))
+clientEnqueueWorkflowInTx :: Client IO -> Text -> Text -> Tx.Transaction () -> EnqueueOptions -> Maybe WorkflowInput -> IO (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle IO e))
 clientEnqueueWorkflowInTx client workflowName operation callerWrites options input =
   case validateEnqueue options.queue of
     Left err -> pure (Left err)
@@ -379,8 +389,9 @@ clientEnqueueWorkflowInTx client workflowName operation callerWrites options inp
       _ -> do
         generated <- generatedWorkflowId client.conn
         let shape = options.queue
+            rawInput = unWorkflowInput <$> input
             workflowText = fromMaybe generated options.workflowId
-            serialization = case input >>= (.serializedSerialization) of
+            serialization = case rawInput >>= (.serializedSerialization) of
               Just (Serialization name) -> Just name
               Nothing -> Just (serializerName client.conn.connSerializer)
             applicationName = case options.appName of
@@ -391,7 +402,7 @@ clientEnqueueWorkflowInTx client workflowName operation callerWrites options inp
                 { newWorkflowName = Just workflowName,
                   newWorkflowClassName = options.className,
                   newWorkflowConfigName = options.configName,
-                  newWorkflowInput = (.serializedText) <$> input,
+                  newWorkflowInput = (.serializedText) <$> rawInput,
                   newWorkflowSerialization = serialization,
                   newWorkflowQueueName = Just shape.name,
                   newWorkflowDeduplicationId = shape.deduplicationId,
@@ -406,14 +417,14 @@ clientEnqueueWorkflowInTx client workflowName operation callerWrites options inp
                   newWorkflowApplicationVersion = options.appVersion
                 }
         case validateNewWorkflow new of
-          Left err -> pure (Left (TransactError.SystemDatabase err))
+          Left err -> pure (Left (TransactError.fromSystemDB err))
           Right () -> do
             ownerXid <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
             now <- timestampNow
             composed <- withClientTransaction client operation (callerWrites >> Postgres.enqueueInTx new applicationName ownerXid now)
             pure $ case composed of
               Left err -> Left err
-              Right (Left sysErr) -> Left (TransactError.SystemDatabase sysErr)
+              Right (Left sysErr) -> Left (TransactError.fromSystemDB sysErr)
               Right (Right ()) -> Right (pollingHandle client.conn workflowText True)
 
 -- | A handle to a workflow that already exists, by id. Always polling, and
@@ -434,6 +445,13 @@ clientWorkflowStatus client workflowId = do
     Left err            -> Left err
     Right Nothing       -> Right Nothing
     Right (Just record) -> Right (Just record.workflowRecordStatus)
+
+-- | The full row, matching Python's @retrieve_workflow(...).get_status()@ and
+-- @get_workflow@; the payload columns stay raw with their tags.
+clientWorkflowRecord :: Monad m
+                     => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe WorkflowRecord))
+clientWorkflowRecord client workflowId =
+  withConnection client.conn (\db -> SystemDB.getWorkflow db workflowId)
 
 -- | Wait for the first of a set of handles to settle and hand back the
 -- winner. Mirrors Python @wait_first@: the set must be non-empty and
@@ -474,15 +492,35 @@ clientSendMessages client messages = do
   pure written
 
 -- | Read another workflow's event from outside, waiting up to the duration.
-clientGetEvent :: (MonadDelay m, MonadTime m)
-               => Client m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe SerializedWorkflowValue))
-clientGetEvent client workflowId key wait = do
+-- The raw, tag-preserving form: nothing is decoded, so a foreign tag is
+-- handed back for the caller to inspect.
+clientGetEventSerialized :: (MonadDelay m, MonadTime m)
+                         => Client m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe SerializedWorkflowValue))
+clientGetEventSerialized client workflowId key wait = do
   found <- withConnection client.conn (\db -> SystemDB.getEvent db workflowId key wait Nothing)
   pure $ case found of
     Left err -> Left err
     Right Nothing -> Right Nothing
     Right (Just encoded) ->
       Right (Just (SerializedWorkflowValue encoded.encodedValue (Serialization <$> encoded.encodedSerialization)))
+
+-- | 'clientGetEventSerialized' decoded into the caller's type by the row's
+-- tag — the Rust/TypeScript client shape. A foreign tag is reported as
+-- @UnknownSerialization@; a bad body as @Deserialization@, matching the
+-- in-workflow read.
+clientGetEvent :: (FromJSON value, MonadDelay m, MonadTime m)
+               => Client m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
+clientGetEvent client workflowId key wait = do
+  found <- clientGetEventSerialized client workflowId key wait
+  pure $ case found of
+    Left err -> Left err
+    Right Nothing -> Right Nothing
+    Right (Just stored) ->
+      case decodeWorkflowValue "event value" (Just stored) of
+        Left err -> Left (case codecUnknownTag err of
+          Just tag -> TransactError.UnknownSerialization {name = tag}
+          Nothing -> TransactError.Deserialization "event value" (codecErrorText err))
+        Right value -> Right (Just value)
 
 -- | Cancel workflows from outside.
 clientCancelWorkflows :: Monad m
@@ -703,12 +741,33 @@ clientReadStreamFrom :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, M
                      => Client m -> WorkflowId -> Text -> Int -> ReadStreamOptions -> m (StreamReader (TransactError.Error TransactError.EngineOnly) m value)
 clientReadStreamFrom client = readStreamOutside client.conn
 
--- | Reads one workflow's steps, outputs and errors included. Nothing is
--- checkpointed: a client has no step counter of its own to agree with a
--- workflow's, and an id with no row lists nothing rather than failing.
--- Mirrors Rust @Client::list_workflow_steps@.
+-- | Reads one workflow's steps with their outputs and errors decoded into
+-- the typed 'StepInfo' view. The raw Rust-shaped listing remains available
+-- internally as 'clientListWorkflowStepsSerialized'.
 clientListWorkflowSteps :: Monad m
-                        => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
-clientListWorkflowSteps client workflowId = do
-  result <- withConnection client.conn (\db -> SystemDB.listSteps db workflowId True Nothing Nothing Nothing)
+                        => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
+clientListWorkflowSteps client workflowId =
+  clientListWorkflowStepsWith client workflowId defaultListWorkflowStepsOptions
+
+-- | 'clientListWorkflowSteps' with the listing's options: choose whether to
+-- read the payload columns, and page in step order.
+clientListWorkflowStepsWith :: Monad m
+                            => Client m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
+clientListWorkflowStepsWith client workflowId options = do
+  listed <- clientListWorkflowStepsSerializedWith client workflowId options
+  pure (map (stepInfoFromRecord options) <$> listed)
+
+-- | The raw, tag-preserving step listing: outputs stay encoded and carry
+-- their @serialization@ tag. Internal to the port; apps use
+-- 'clientListWorkflowSteps'.
+clientListWorkflowStepsSerialized :: Monad m
+                                  => Client m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+clientListWorkflowStepsSerialized client workflowId =
+  clientListWorkflowStepsSerializedWith client workflowId defaultListWorkflowStepsOptions
+
+-- | The raw listing with options. Internal to the port.
+clientListWorkflowStepsSerializedWith :: Monad m
+                                      => Client m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+clientListWorkflowStepsSerializedWith client workflowId options = do
+  result <- withConnection client.conn (\db -> SystemDB.listSteps db workflowId options.loadOutput options.limit options.offset Nothing)
   pure result

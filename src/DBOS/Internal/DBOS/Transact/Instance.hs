@@ -34,6 +34,9 @@ module DBOS.Transact.Instance
     enqueueWorkflow,
     retrieveWorkflow,
     getWorkflowEvent,
+    getWorkflowEventSerialized,
+    getAllEvents,
+    getWorkflowRecord,
     sendWorkflowMessage,
     sendWorkflowMessages,
     listWorkflowIdsByName,
@@ -54,16 +57,23 @@ module DBOS.Transact.Instance
     dequeueWorkflows,
     updateWorkflowAttributes,
     listWorkflowSteps,
+    listWorkflowStepsWith,
+    listWorkflowStepsSerialized,
+    listWorkflowStepsSerializedWith,
     listWorkflows,
+    listQueuedWorkflows,
   )
 where
 
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON, Value)
 import Data.Int (Int64)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, forkNew, Topic, WorkflowDelay (..), WorkflowFilter (..), VersionInfo (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
+import DBOS.SystemDB.Types (Applications, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
+import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, unWorkflowInput)
 import DBOS.Transact.Config (Config (..))
 import DBOS.Transact.Config qualified as Config
 import DBOS.Transact.Connection (Connection (..), releaseConnection, acquireConnection, withConnection)
@@ -74,7 +84,7 @@ import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Identity (Environment, Identity (..), readEnvironment, resolve)
 import DBOS.Transact.Logger (SomeTracer, acquireLoggerBackend, ioTracer, runTracer)
 import DBOS.Transact.Management qualified as Management
-import DBOS.Transact.Management (ManagementEvent (..))
+import DBOS.Transact.Management (ManagementEvent (..), StepInfo)
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
 import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, snapshotDatasources, thawDataSourceRegistry)
 import DBOS.Transact.Datasource qualified as Datasource (registerDataSource)
@@ -233,7 +243,7 @@ shutdown dbos =
         releaseConnection executor.conn
 
 runWorkflow :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
-            => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+            => Executor m -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflow executor key workflowId input = do
   outcome <-
     runRegisteredWorkflow
@@ -243,28 +253,28 @@ runWorkflow executor key workflowId input = do
       executor.workflows
       key
       workflowId
-      input
+      (unWorkflowInput <$> input)
       executor.datasources
   pure outcome
 
 -- | Starts the referenced workflow via the launched executor: what
 -- @WorkflowRef::start_with@ becomes when the call site holds a reference.
 startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-              => Executor m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+              => Executor m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflow executor ref options input =
-  Workflow.startWorkflow executor.tasks executor.conn executor.identity executor.workflows ref options input executor.datasources
+  Workflow.startWorkflow executor.tasks executor.conn executor.identity executor.workflows ref options (unWorkflowInput <$> input) executor.datasources
 
 -- | Runs the referenced workflow via the launched executor and waits: a
 -- start followed by an await under the same id.
 runWorkflowRef :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
-               => Executor m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+               => Executor m -> WorkflowRef m e -> RunOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflowRef executor ref options input = do
   outcome <-
-    Workflow.runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options input executor.datasources
+    Workflow.runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options (unWorkflowInput <$> input) executor.datasources
   pure outcome
 
 enqueueWorkflow :: (MonadMVar m)
-                => DBOS m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
+                => DBOS m -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
 enqueueWorkflow dbos key workflowId input queueName = do
   withExecutor dbos "enqueue a workflow" $ \executor ->
     case lookupSnapshotWorkflow key executor.workflows of
@@ -275,7 +285,7 @@ enqueueWorkflow dbos key workflowId input queueName = do
           executor.identity
           key
           workflowId
-          input
+          (unWorkflowInput <$> input)
           queueName
 
 dequeueWorkflows :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
@@ -348,12 +358,37 @@ listWorkflows :: (MonadMVar m)
 listWorkflows dbos filters = do
   withExecutor dbos "list workflows" $ \executor -> Management.listWorkflows executor.conn filters
 
--- | Reads one workflow's steps in execution order, outputs and errors
--- included; an id with no row lists nothing rather than failing.
+-- | The shortcut Python calls @list_queued_workflows@: the same filter with
+-- the queue-only narrowing applied.
+listQueuedWorkflows :: (MonadMVar m)
+                    => DBOS m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
+listQueuedWorkflows dbos filters = listWorkflows dbos (filters {workflowFilterQueuesOnly = True})
+
+-- | Reads one workflow's steps in execution order with outputs and errors
+-- decoded; an id with no row lists nothing rather than failing.
 listWorkflowSteps :: (MonadMVar m)
-                  => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
-listWorkflowSteps dbos workflowId = do
-  withExecutor dbos "list a workflow's steps" $ \executor -> Management.listWorkflowSteps executor.conn workflowId
+                  => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
+listWorkflowSteps dbos workflowId =
+  listWorkflowStepsWith dbos workflowId Management.defaultListWorkflowStepsOptions
+
+-- | 'listWorkflowSteps' with the listing's options.
+listWorkflowStepsWith :: (MonadMVar m)
+                      => DBOS m -> WorkflowId -> Management.ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
+listWorkflowStepsWith dbos workflowId options = do
+  withExecutor dbos "list a workflow's steps" $ \executor -> Management.listWorkflowStepsWith executor.conn workflowId options
+
+-- | The raw Rust-shaped step listing. Internal to the port; apps use
+-- 'listWorkflowSteps'.
+listWorkflowStepsSerialized :: (MonadMVar m)
+                            => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+listWorkflowStepsSerialized dbos workflowId =
+  listWorkflowStepsSerializedWith dbos workflowId Management.defaultListWorkflowStepsOptions
+
+-- | The raw listing with options. Internal to the port.
+listWorkflowStepsSerializedWith :: (MonadMVar m)
+                                => DBOS m -> WorkflowId -> Management.ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+listWorkflowStepsSerializedWith dbos workflowId options = do
+  withExecutor dbos "list a workflow's steps" $ \executor -> Management.listWorkflowStepsSerializedWith executor.conn workflowId options
 
 -- | Cancels one workflow, children skipped: the singular of
 -- 'cancelWorkflows'. Mirrors Rust @DBOS::cancel@.
@@ -391,7 +426,7 @@ forkWorkflow dbos workflowId from options = do
     Just point -> forkFrom dbos [workflowId] point options
   case forked of
     Left err         -> pure (Left err)
-    Right []         -> pure (Left (TransactError.SystemDatabase (SystemDBError.InvalidInput {field = "fork", detail = "the fork produced no workflow"})))
+    Right []         -> pure (Left (TransactError.fromSystemDB (SystemDBError.InvalidInput {field = "fork", detail = "the fork produced no workflow"})))
     Right (newId : _) -> retrieveWorkflow dbos newId
 
 -- | Rewinds a workflow in place, keeping its id: the datasource
@@ -407,7 +442,7 @@ rewindWorkflows dbos workflowId options =
     sources <- snapshotDatasources dbos.dbos_datasources
     outcomes <- traverse (\source -> source.dsDeleteCheckpoints workflowId options.rewindStartStep) sources
     case sequence outcomes of
-      Left backendErr -> pure (Left (TransactError.SystemDatabase (SystemDBError.Backend backendErr)))
+      Left backendErr -> pure (Left (TransactError.fromSystemDB (SystemDBError.Backend backendErr)))
       Right _ -> Management.rewindWorkflows executor.conn workflowId options
 
 -- | Rewinds one workflow and hands back its handle. Mirrors Rust
@@ -427,10 +462,27 @@ getWorkflowStatus dbos workflowId = lookup workflowId <$> fetchWorkflowStatuses 
 
 -- | Read another workflow's event from outside a workflow, waiting up to
 -- the duration (zero is a poll). Nothing is checkpointed: there is no caller
--- to record against, which is what makes this the outside-caller surface.
-getWorkflowEvent :: (MonadMVar m, MonadDelay m, MonadTime m)
-                 => DBOS m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe SerializedWorkflowValue))
+-- to record against. The typed form decodes by the row's tag; a foreign tag
+-- is @UnknownSerialization@ and a bad body @Deserialization@.
+getWorkflowEvent :: (FromJSON value, MonadMVar m, MonadDelay m, MonadTime m)
+                 => DBOS m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
 getWorkflowEvent dbos workflowId key wait = do
+  found <- getWorkflowEventSerialized dbos workflowId key wait
+  pure $ case found of
+    Left err -> Left err
+    Right Nothing -> Right Nothing
+    Right (Just stored) ->
+      case decodeWorkflowValue "event value" (Just stored) of
+        Left err -> Left (case codecUnknownTag err of
+          Just tag -> TransactError.UnknownSerialization {name = tag}
+          Nothing -> TransactError.Deserialization "event value" (codecErrorText err))
+        Right value -> Right (Just value)
+
+-- | The raw, tag-preserving outside read. Internal to the port; apps use
+-- 'getWorkflowEvent'.
+getWorkflowEventSerialized :: (MonadMVar m, MonadDelay m, MonadTime m)
+                           => DBOS m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe SerializedWorkflowValue))
+getWorkflowEventSerialized dbos workflowId key wait = do
   withExecutor dbos "read an event" $ \executor -> do
     found <- withConnection executor.conn (\db -> SystemDB.getEvent db workflowId key wait Nothing)
     pure $ case found of
@@ -438,6 +490,34 @@ getWorkflowEvent dbos workflowId key wait = do
       Right Nothing -> Right Nothing
       Right (Just encoded) ->
         Right (Just (SerializedWorkflowValue encoded.encodedValue (Serialization <$> encoded.encodedSerialization)))
+
+-- | Every event of a workflow as key -> latest value, decoded by each
+-- event's tag. The outside-caller form of Python's @get_all_events@; duplicate
+-- keys resolve to the last row, matching the oracle's dict construction.
+getAllEvents :: (MonadMVar m)
+             => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) (Map Text Value))
+getAllEvents dbos workflowId = do
+  withExecutor dbos "read all events" $ \executor -> do
+    found <- withConnection executor.conn (\db -> SystemDB.getAllEvents db workflowId)
+    pure $ case found of
+      Left err -> Left err
+      Right records -> Map.fromList <$> traverse decode records
+  where
+    decode record =
+      case (decodeWorkflowValue "event value" (Just (SerializedWorkflowValue record.eventValue (Serialization <$> record.eventSerialization))) :: Either CodecError Value) of
+        Left err -> Left (case codecUnknownTag err of
+          Just tag -> TransactError.UnknownSerialization {name = tag}
+          Nothing -> TransactError.Deserialization "event value" (codecErrorText err))
+        Right value -> Right (record.eventKey, value)
+
+-- | The full row, not just the status enum: Python's @retrieve_workflow(...)
+-- .get_status()@ / @get_workflow@ shape. The payload columns are raw text and
+-- their tags; decode them with the serialization codec.
+getWorkflowRecord :: (MonadMVar m)
+                  => DBOS m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe WorkflowRecord))
+getWorkflowRecord dbos workflowId = do
+  withExecutor dbos "get workflow" $ \executor ->
+    withConnection executor.conn (\db -> SystemDB.getWorkflow db workflowId)
 
 -- | Send one message to a workflow from outside, the caller unrecorded.
 sendWorkflowMessage :: (MonadMVar m)
@@ -587,7 +667,7 @@ startExecutor config' identity' workflowsSnapshot sources tracer releaseTracer =
     runTracer tracer EngineNoWorkflows
   acquired <- try (acquireConnection config' identity' tracer) :: IO (Either SystemDBError.Error (Connection IO))
   case acquired of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left (TransactError.fromSystemDB err))
     Right conn' -> do
       tasks' <- newTasks
       pure

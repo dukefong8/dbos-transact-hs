@@ -9,11 +9,11 @@ module QueuePatterns.Run (start) where
 
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DBOS.SystemDB (RateLimit (..))
 import DBOS.Transact
   ( Config (..),
     QueueConflict (..),
     QueueOptions (..),
+    RateLimit (..),
     configFromEnv,
     defaultQueueOptions,
     launch,

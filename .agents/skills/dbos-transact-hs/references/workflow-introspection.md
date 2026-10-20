@@ -11,11 +11,11 @@ Inside: `workflowId` reads the current id. Outside: `retrieveWorkflow` fetches o
 
 ```haskell
 wid <- workflowId wctx
-Right statuses <- fetchWorkflowStatuses exec [wid]
-Right records  <- listWorkflows exec workflowFilter
-Right steps    <- listWorkflowSteps exec wid          -- [StepRecord], execution order
+Right statuses <- fetchWorkflowStatuses dbos [wid]
+Right records  <- listWorkflows dbos workflowFilter
+Right steps    <- listWorkflowSteps dbos wid          -- [StepInfo], execution order
 ```
 
 Handles: `handleStatus` / `handleResult` poll a `WorkflowHandle`; `pollingHandle` builds one from an id. `selectWorkflow` / `waitForWorkflow` / `waitForFirstWorkflow` / `waitForWorkflows` / `joinWorkflows` coordinate fan-out.
 
-Difference from TS: TS `listWorkflows` / `listWorkflowSteps` / `handle.getStatus`. Haskell splits status fetch (`fetchWorkflowStatuses`), listing (`listWorkflows`), and step listing: `listWorkflowSteps` outside a workflow, `listWorkflowStepsInWorkflow` from a body (records itself as the step `DBOS.listWorkflowSteps`, so a replay reads the recorded snapshot), `clientListWorkflowSteps` from a client (records nothing). Steps carry the raw recorded `StepRecord` fields (`stepRecordStepName`, `stepRecordStepId`, `stepRecordOutput`, ...) rather than TS's decoded `StepInfo`.
+Difference from TS: TS `listWorkflows` / `listWorkflowSteps` / `handle.getStatus`. Haskell splits status fetch (`fetchWorkflowStatuses`), listing (`listWorkflows`), and step listing: `listWorkflowSteps` outside a workflow, `listWorkflowStepsInWorkflow` from a body (records itself as the step `DBOS.listWorkflowSteps`, so a replay reads the recorded snapshot), `clientListWorkflowSteps` from a client (records nothing). Every listing returns the typed `StepInfo` (`stepInfoName`, `stepInfoId`, `stepInfoOutcome`): `StepOutcomeNotLoaded` when `loadOutput = False`, `StepOutcomePending` for an unfinished row with no payload, `StepOutcomeSucceeded` with `PayloadAbsent`/`PayloadDecoded`/`PayloadUndecodable`, or `StepOutcomeFailed` with a portable or undecodable error. The Rust-shaped `StepRecord` row is internal to the engine and tests.

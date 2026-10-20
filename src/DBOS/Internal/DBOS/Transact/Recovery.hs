@@ -62,7 +62,7 @@ reenqueueForRecovery conn executorId applicationVersion = do
   result <-
     runSystemDB conn.connSysdb (\db -> SystemDB.reenqueueForRecovery db [executorId] applicationVersion recoveryQueue)
   case result of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left (TransactError.fromSystemDB err))
     Right recovered -> do
       runTracer conn.connTracer (EngineRecovered (length recovered))
       pure (Right recovered)

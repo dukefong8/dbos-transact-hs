@@ -40,8 +40,7 @@ import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text, pack)
 import Data.Word (Word64)
-import DBOS.SystemDB (Topic (..), millisDuration)
-import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowCtx, WorkflowRef, newWorkflowKey, recv, registerWorkflow, registerWorkflowRef, runStep, setEvent, sleepStep)
+import DBOS.Transact (DBOS, EngineOnly, Error, Topic (..), WorkflowCtx, WorkflowRef, millisDuration, newWorkflowKey, recv, registerWorkflow, registerWorkflowRef, runStep, setEvent, sleepStep)
 import Prelude
 
 -- * Durations and keys

@@ -516,11 +516,11 @@ dequeuePass tasks conn identity workflows listenQueues datasources = do
   passStart <- getCurrentTime
   transitioned <- runSystemDB conn.connSysdb (\db -> SystemDB.transitionDelayedWorkflows db)
   case transitioned of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left (TransactError.fromSystemDB err))
     Right _ -> do
       listed <- runSystemDB conn.connSysdb (\db -> SystemDB.listQueues db Unset)
       case listed of
-        Left err -> pure (Left (TransactError.SystemDatabase err))
+        Left err -> pure (Left (TransactError.fromSystemDB err))
         Right records -> do
           running <- newRunning
           let internalName = case internalQueueName of QueueName name -> name

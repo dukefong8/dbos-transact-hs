@@ -43,7 +43,7 @@ mockOutput = "mock-output"
 
 -- | The serialization mock payloads claim.
 mockSerialization :: Text
-mockSerialization = "rust_serde"
+mockSerialization = "portable_json"
 
 mockQueue :: Text -> QueueRecord
 mockQueue name =

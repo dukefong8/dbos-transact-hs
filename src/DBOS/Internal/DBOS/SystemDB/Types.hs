@@ -131,6 +131,7 @@ module DBOS.SystemDB.Types
     pauseScheduleStepName,
     resumeScheduleStepName,
     deleteScheduleStepName,
+    portableJsonSerialization,
     streamClosedSentinel,
     streamClosedSerialization,
     isStreamClosed,
@@ -733,10 +734,17 @@ deleteScheduleStepName = "DBOS.delete_schedule"
 streamClosedSentinel :: Text
 streamClosedSentinel = "\"__DBOS_STREAM_CLOSED__\""
 
+-- | The one payload tag this port writes. Portable JSON is plain JSON: the
+-- cross-SDK wire format shared with Python and TypeScript. Every payload
+-- column (inputs, results, errors, events, messages, streams) is tagged with
+-- it; legacy @rust_serde@ rows stay readable as native JSON.
+portableJsonSerialization :: Text
+portableJsonSerialization = "portable_json"
+
 -- | The serialization label stored with the sentinel. Mirrors Rust
 -- @STREAM_CLOSED_SERIALIZATION@.
 streamClosedSerialization :: Text
-streamClosedSerialization = "portable_json"
+streamClosedSerialization = portableJsonSerialization
 
 -- | Whether a stream row's @(value, serialization)@ pair is the close mark.
 -- The one recognizer for the pair, so the two columns cannot be compared
@@ -1607,6 +1615,12 @@ data WorkflowInitResult = WorkflowInitResult
     initResultRecoveryAttempts :: Int64,
     initResultDeadline         :: Maybe Timestamp,
     initResultSerialization    :: Maybe Text,
+    -- | The input the row already held, where a fresh start runs a row it did
+    -- not create (one no attempt owns): @Just Nothing@ for a row with no
+    -- input, @Nothing@ otherwise. A fresh start that finds an existing row
+    -- must run what the row holds, not what the caller offered; recovery and
+    -- dequeue already read the input with the row.
+    initResultExistingInput    :: Maybe (Maybe Text),
     initResultShouldExecute    :: Bool
   }
   deriving stock (Eq, Show)

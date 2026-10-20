@@ -27,19 +27,38 @@ module DBOS.Transact.Management
     rewindWorkflowsInWorkflow,
     updateWorkflowAttributes,
     listWorkflows,
+    ListWorkflowStepsOptions (..),
+    defaultListWorkflowStepsOptions,
+    StepInfo (..),
+    StepOutcome (..),
+    StepOutput (..),
+    StepFailure (..),
+    PortableWorkflowError (..),
+    stepInfoFromRecord,
     listWorkflowSteps,
+    listWorkflowStepsWith,
     listWorkflowStepsInWorkflow,
+    listWorkflowStepsWithInWorkflow,
+    listWorkflowStepsSerialized,
+    listWorkflowStepsSerializedWith,
+    listWorkflowStepsSerializedInWorkflow,
+    listWorkflowStepsSerializedWithInWorkflow,
     listWorkflowsInWorkflow,
   )
 where
 
+import Data.Aeson (Value (..), eitherDecodeStrict')
+import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Int (Int64)
+import Data.Text.Encoding (encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Fork (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), StepRecord, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
+import DBOS.SystemDB.Types (Fork (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
 import DBOS.Transact.Connection (Connection (..), withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, stepStatusId, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
+import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue)
 import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
 import System.Log.FastLogger (ToLogStr (..))
 
@@ -397,7 +416,7 @@ updateWorkflowAttributesInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, 
                                    => WorkflowCtx exec m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 updateWorkflowAttributesInWorkflow wctx workflowId attributes =
   case validateAttributes attributes of
-    Left err -> pure (Left (TransactError.SystemDatabase err))
+    Left err -> pure (Left (TransactError.fromSystemDB err))
     Right () ->
       runStepWith
         stepOptionsDefault
@@ -416,27 +435,210 @@ listWorkflows conn filters = do
   result <- withConnection conn (\db -> SystemDB.listWorkflows db filters Nothing)
   pure result
 
--- | Reads one workflow's steps in execution order, outputs and errors
--- included; an id with no row lists nothing rather than failing. Mirrors
--- Rust @DBOS::list_workflow_steps@; the in-workflow form wraps this read
--- as a step.
+-- | What a step listing may leave out or page. Mirrors Rust
+-- @ListWorkflowStepsOptions@. With 'loadOutput' off the payload columns are
+-- not read at all, so every step reports 'StepOutcomeNotLoaded' whatever it
+-- recorded.
+data ListWorkflowStepsOptions = ListWorkflowStepsOptions
+  { loadOutput :: Bool,
+    limit      :: Maybe Int64,
+    offset     :: Maybe Int64
+  }
+  deriving stock (Eq, Show)
+
+-- | Read every step with its payload: the listing's historical default.
+defaultListWorkflowStepsOptions :: ListWorkflowStepsOptions
+defaultListWorkflowStepsOptions =
+  ListWorkflowStepsOptions
+    { loadOutput = True,
+      limit = Nothing,
+      offset = Nothing
+    }
+
+-- | A portable error record as another SDK writes it. Kept separate from the
+-- port's typed 'TransactError.Error' because a client listing has no workflow
+-- error type to decode into.
+data PortableWorkflowError = PortableWorkflowError
+  { portableWorkflowErrorName    :: Text,
+    portableWorkflowErrorMessage :: Text,
+    portableWorkflowErrorCode    :: Maybe Value,
+    portableWorkflowErrorData    :: Maybe Value
+  }
+  deriving stock (Eq, Show)
+
+-- | What a step's output column says. The states are distinct: the step
+-- recorded none, it decoded, or it exists but this build cannot read it.
+data StepOutput
+  = PayloadAbsent
+  | PayloadDecoded Value
+  | PayloadUndecodable CodecError
+  deriving stock (Eq, Show)
+
+-- | What a step's error column says. A portable record survives structured;
+-- a native/unknown tag or a malformed body is reported, never guessed.
+data StepFailure
+  = FailurePortable PortableWorkflowError
+  | FailureUndecodable CodecError
+  deriving stock (Eq, Show)
+
+data StepOutcome
+  = -- | With 'loadOutput' off the payload columns were never read, so no
+    -- outcome is known.
+    StepOutcomeNotLoaded
+  | -- | The row is not finished: neither an error nor an output is recorded
+    -- and the completed-at column is still empty (a foreign in-flight step).
+    StepOutcomePending
+  | StepOutcomeSucceeded StepOutput
+  | StepOutcomeFailed StepFailure
+  deriving stock (Eq, Show)
+
+-- | The typed view of a 'StepRecord': the Rust row stays the storage shape;
+-- this is the decoded API shape.
+data StepInfo = StepInfo
+  { stepInfoWorkflowId   :: WorkflowId,
+    stepInfoId           :: Int,
+    stepInfoName         :: Text,
+    stepInfoOutcome      :: StepOutcome,
+    stepInfoChild        :: Maybe WorkflowId,
+    stepInfoStartedAt    :: Maybe Timestamp,
+    stepInfoCompletedAt  :: Maybe Timestamp
+  }
+  deriving stock (Eq, Show)
+
+-- | Project a raw Rust-shaped row into the typed view. Error takes precedence
+-- when a malformed row carries both columns; the schema's own outcome is
+-- one-or-the-other.
+stepInfoFromRecord :: ListWorkflowStepsOptions -> StepRecord -> StepInfo
+stepInfoFromRecord options record =
+  StepInfo
+    { stepInfoWorkflowId = record.stepRecordWorkflowId,
+      stepInfoId = record.stepRecordStepId,
+      stepInfoName = record.stepRecordStepName,
+      stepInfoOutcome = outcome,
+      stepInfoChild = record.stepRecordChildWorkflowId,
+      stepInfoStartedAt = record.stepRecordStartedAt,
+      stepInfoCompletedAt = record.stepRecordCompletedAt
+    }
+  where
+    outcome
+      | not options.loadOutput = StepOutcomeNotLoaded
+      | Just errorText <- record.stepRecordError = StepOutcomeFailed (decodeStepFailure record.stepRecordSerialization errorText)
+      | Just outputText <- record.stepRecordOutput = StepOutcomeSucceeded (decodeStepOutput record.stepRecordSerialization outputText)
+      | Nothing <- record.stepRecordCompletedAt = StepOutcomePending
+      | otherwise = StepOutcomeSucceeded PayloadAbsent
+
+decodeStepOutput :: Maybe Text -> Text -> StepOutput
+decodeStepOutput tag text =
+  case decodeWorkflowValue "step output" (Just (SerializedWorkflowValue text (Serialization <$> tag))) of
+    Right value -> PayloadDecoded value
+    Left err -> PayloadUndecodable err
+
+decodeStepFailure :: Maybe Text -> Text -> StepFailure
+decodeStepFailure tag text
+  | Just name <- tag, name `notElem` ["", "rust_serde", "portable_json"] =
+      FailureUndecodable (CodecUnknownSerialization "step error" name)
+  | otherwise =
+      case decodePortableWorkflowError text of
+        Right err -> FailurePortable err
+        -- A legacy tagged envelope or another SDK's record still carries its
+        -- name and message, even when this port has no matching error type.
+        Left codec -> case TransactError.recordedErrorView text of
+          Just (name, message, structured) ->
+            FailurePortable
+              PortableWorkflowError
+                { portableWorkflowErrorName = name,
+                  portableWorkflowErrorMessage = message,
+                  portableWorkflowErrorCode = Nothing,
+                  portableWorkflowErrorData = structured
+                }
+          Nothing -> FailureUndecodable codec
+
+decodePortableWorkflowError :: Text -> Either CodecError PortableWorkflowError
+decodePortableWorkflowError text =
+  case eitherDecodeStrict' (encodeUtf8 text) of
+    Left _ -> Left (CodecNotJson "step error" text)
+    Right (Object fields) ->
+      case (KeyMap.lookup "name" fields, KeyMap.lookup "message" fields) of
+        (Just (String name), Just (String message)) ->
+          Right
+            PortableWorkflowError
+              { portableWorkflowErrorName = name,
+                portableWorkflowErrorMessage = message,
+                portableWorkflowErrorCode = KeyMap.lookup "code" fields,
+                portableWorkflowErrorData = KeyMap.lookup "data" fields
+              }
+        _ -> Left (CodecTypeMismatch "step error" "the portable error needs string name and message")
+    Right _ -> Left (CodecTypeMismatch "step error" "the portable error must be an object")
+
+-- | Reads one workflow's steps in execution order with their outputs and
+-- errors decoded. The raw Rust-shaped listing remains available internally as
+-- 'listWorkflowStepsSerialized'.
 listWorkflowSteps :: Monad m
-                  => Connection m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
-listWorkflowSteps conn workflowId = do
-  result <- withConnection conn (\db -> SystemDB.listSteps db workflowId True Nothing Nothing Nothing)
+                  => Connection m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
+listWorkflowSteps conn workflowId =
+  listWorkflowStepsWith conn workflowId defaultListWorkflowStepsOptions
+
+-- | 'listWorkflowSteps' with the listing's options.
+listWorkflowStepsWith :: Monad m
+                      => Connection m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
+listWorkflowStepsWith conn workflowId options = do
+  listed <- listWorkflowStepsSerializedWith conn workflowId options
+  pure (map (stepInfoFromRecord options) <$> listed)
+
+-- | The raw Rust-shaped listing, outputs and errors encoded with their tag.
+listWorkflowStepsSerialized :: Monad m
+                            => Connection m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+listWorkflowStepsSerialized conn workflowId =
+  listWorkflowStepsSerializedWith conn workflowId defaultListWorkflowStepsOptions
+
+-- | The raw listing with options.
+listWorkflowStepsSerializedWith :: Monad m
+                                => Connection m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+listWorkflowStepsSerializedWith conn workflowId options = do
+  result <- withConnection conn (\db -> SystemDB.listSteps db workflowId options.loadOutput options.limit options.offset Nothing)
   pure result
 
--- | Lists a workflow's steps as a step of the calling workflow, under
--- the cross-SDK name, so a replayed listing reads the snapshot the first
--- execution saw. Same leaf rule as every in-workflow call.
+-- | Lists a workflow's steps as a step of the calling workflow, under the
+-- cross-SDK name, so a replayed listing reads the snapshot the first
+-- execution saw. The checkpoint records the row list together with the
+-- 'loadOutput' flag it was read with, so a replay re-projects the typed view
+-- from the bytes the first execution actually read rather than from the
+-- replayed call's options.
+listWorkflowStepsWithInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                                => WorkflowCtx exec m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
+listWorkflowStepsWithInWorkflow wctx workflowId options = do
+  snapshot <- listWorkflowStepsSnapshotInWorkflow wctx workflowId options
+  pure (fmap (\(loaded, rows) -> map (stepInfoFromRecord options {loadOutput = loaded}) rows) snapshot)
+
+-- | 'listWorkflowStepsWithInWorkflow' with the default options.
 listWorkflowStepsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
-                            => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+                            => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
 listWorkflowStepsInWorkflow wctx workflowId =
+  listWorkflowStepsWithInWorkflow wctx workflowId defaultListWorkflowStepsOptions
+
+-- | The raw in-workflow listing: the checkpoint records the Rust-shaped step
+-- rows and the flag they were read with.
+listWorkflowStepsSerializedWithInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                                         => WorkflowCtx exec m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+listWorkflowStepsSerializedWithInWorkflow wctx workflowId options =
+  fmap (fmap snd) (listWorkflowStepsSnapshotInWorkflow wctx workflowId options)
+
+-- | The raw in-workflow listing with default options.
+listWorkflowStepsSerializedInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                                     => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
+listWorkflowStepsSerializedInWorkflow wctx workflowId =
+  listWorkflowStepsSerializedWithInWorkflow wctx workflowId defaultListWorkflowStepsOptions
+
+-- | The checkpointed listing step: records @(loadOutput, rows)@ so a replay
+-- re-projects the typed view from the bytes the first execution read.
+listWorkflowStepsSnapshotInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                                    => WorkflowCtx exec m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (Bool, [StepRecord]))
+listWorkflowStepsSnapshotInWorkflow wctx workflowId options =
   runStepWith
     stepOptionsDefault
     wctx
     listStepsStepName
-    (\_ -> listWorkflowSteps conn workflowId)
+    (\_ -> fmap (fmap (\rows -> (options.loadOutput, rows))) (listWorkflowStepsSerializedWith conn workflowId options))
   where
     conn = wctx.wctxConn
 

@@ -18,19 +18,23 @@ module DBOS.Transact.Error
     liftEngine,
     renderTransactError,
     controlOf,
+    fromSystemDB,
     Failure (..),
     failureOf,
     failureError,
     encodeErrorText,
     decodeErrorText,
+    decodeRecordedError,
+    recordedErrorView,
   )
 where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value (..), eitherDecodeStrict', encode, fromJSON, object, withObject, (.:), (.=))
+import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text (pack, unpack)
-import Data.Text.Encoding (decodeUtf8)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Duration, durationAsMillis)
@@ -80,6 +84,12 @@ data Error e
     ErrorSerialization {what :: Text, message :: Text}
   | -- | A serialized workflow input, result, or failure could not be decoded.
     Deserialization {what :: Text, message :: Text}
+  | -- | A row carries a serialization tag this build cannot read. Reported
+    -- rather than guessed. It is an outcome like any other: Rust's
+    -- @Error::control@ has no arm for it, so a step/event/stream read that
+    -- meets one records it; only a workflow-input decode maps it to a control
+    -- signal. Mirrors Rust @UnknownSerialization@.
+    UnknownSerialization {name :: Text}
   | -- | The SystemDB rejected an engine operation.
     SystemDatabase SystemDBError.Error
   | -- | A previously recorded operation failed with an untyped message.
@@ -136,6 +146,7 @@ mapApplication f = \case
   AlreadyRegistered key -> AlreadyRegistered key
   ErrorSerialization what message -> ErrorSerialization what message
   Deserialization what message -> Deserialization what message
+  UnknownSerialization {name} -> UnknownSerialization {name}
   SystemDatabase err -> SystemDatabase err
   StepFailed step message -> StepFailed step message
   NotRegistered key -> NotRegistered key
@@ -165,6 +176,14 @@ absurd impossible = case impossible of {}
 renderTransactError :: Show e => Error e -> Text
 renderTransactError = \case
   ErrorApplication err -> pack (show err)
+  other -> renderErrorWithoutApplication other
+
+-- | The prose every constructor but the application's own payload shares.
+-- 'renderTransactError' adds the payload's 'Show'; the portable error
+-- encoder uses this so it does not acquire a 'Show' constraint.
+renderErrorWithoutApplication :: Error e -> Text
+renderErrorWithoutApplication = \case
+  ErrorApplication _ -> "the workflow failed with an application error"
   ErrorConfig detail -> "invalid configuration: " <> detail
   NotLaunched operation -> "cannot " <> operation <> " before DBOS is launched"
   InsideStep operation -> operation <> " cannot be called from within a step"
@@ -172,6 +191,7 @@ renderTransactError = \case
   AlreadyRegistered key -> "a workflow is already registered as " <> key
   ErrorSerialization what message -> "could not serialize the workflow " <> what <> ": " <> message
   Deserialization what message -> "could not deserialize the workflow " <> what <> ": " <> message
+  UnknownSerialization {name} -> "serialization " <> name <> " is not available"
   SystemDatabase err -> SystemDBError.renderError err
   StepFailed step message -> "the step " <> step <> " failed: " <> message
   NotRegistered key -> "no workflow is registered as " <> key
@@ -204,10 +224,10 @@ instance ToJSON EngineOnly where
 instance FromJSON EngineOnly where
   parseJSON _ = fail "the engine-only error channel holds no application failure"
 
--- | The recorded form of an error: the whole envelope, serialized, exactly
--- as the error column holds it and a replay reads it. Mirrors the serde
--- round-trip the oracle's test pins ("an application error is held as
--- itself, so it comes back as itself").
+-- | The structured form of an error: the whole tagged envelope, which the
+-- portable record carries in its @data@ field and a replay decodes. Mirrors
+-- the serde round-trip the oracle's test pins ("an application error is held
+-- as itself, so it comes back as itself").
 instance ToJSON e => ToJSON (Error e) where
   toJSON = \case
     ErrorApplication err -> tagged "ErrorApplication" (toJSON err)
@@ -218,6 +238,7 @@ instance ToJSON e => ToJSON (Error e) where
     AlreadyRegistered key -> tagged "AlreadyRegistered" (object ["key" .= key])
     ErrorSerialization what message -> tagged "ErrorSerialization" (object ["what" .= what, "message" .= message])
     Deserialization what message -> tagged "Deserialization" (object ["what" .= what, "message" .= message])
+    UnknownSerialization {name} -> tagged "UnknownSerialization" (object ["name" .= name])
     SystemDatabase err -> tagged "SystemDatabase" (toJSON err)
     StepFailed step message -> tagged "StepFailed" (object ["step" .= step, "message" .= message])
     NotRegistered key -> tagged "NotRegistered" (object ["key" .= key])
@@ -250,6 +271,7 @@ instance FromJSON e => FromJSON (Error e) where
       "AlreadyRegistered"     -> withObject "AlreadyRegistered" (\o -> AlreadyRegistered <$> o .: "key") payload
       "ErrorSerialization"         -> withObject "ErrorSerialization" (\o -> ErrorSerialization <$> o .: "what" <*> o .: "message") payload
       "Deserialization"       -> withObject "Deserialization" (\o -> Deserialization <$> o .: "what" <*> o .: "message") payload
+      "UnknownSerialization"  -> withObject "UnknownSerialization" (\o -> UnknownSerialization <$> o .: "name") payload
       "SystemDatabase"        -> SystemDatabase <$> parseJSON payload
       "StepFailed"                 -> withObject "StepFailed" (\o -> StepFailed <$> o .: "step" <*> o .: "message") payload
       "NotRegistered" -> withObject "NotRegistered" (\o -> NotRegistered <$> o .: "key") payload
@@ -269,13 +291,22 @@ instance FromJSON e => FromJSON (Error e) where
 
 -- | The oracle's @Error::control@: a cancellation, an interruption and
 -- every system-database failure are signals about the execution, not
--- statements about what the workflow computed. Everything else is an
--- outcome and gets recorded.
+-- statements about what the workflow computed. Everything else — including
+-- 'UnknownSerialization' — is an outcome and gets recorded.
 controlOf :: Error e -> Maybe (Error EngineOnly)
 controlOf = \case
   SystemDatabase err -> Just (SystemDatabase err)
   Interrupted workflowId -> Just (Interrupted workflowId)
   _ -> Nothing
+
+-- | Lift a system-database failure into a caller's channel. An unknown tag is
+-- the same variant on both sides, so a caller matching on it sees one shape
+-- wherever the row was read; everything else stays 'SystemDatabase'. Mirrors
+-- Rust @Error::from_sysdb@.
+fromSystemDB :: SystemDBError.Error -> Error e
+fromSystemDB = \case
+  SystemDBError.UnknownSerialization {name} -> UnknownSerialization {name}
+  err -> SystemDatabase err
 
 -- | How an erased workflow failed. Mirrors Rust @Failure@: the recorded
 -- envelope, which a replay decodes, or an engine control signal, which is
@@ -295,20 +326,108 @@ failureOf err = case controlOf err of
 
 -- | Decode a recorded failure back into a caller's channel. A payload that
 -- cannot be decoded — a row written by older code — falls back to
--- 'WorkflowFailed' carrying the raw payload, as the oracle does.
+-- 'WorkflowFailed'. Another SDK's portable record keeps its
+-- @name: message@ text; a payload that is not an error this build can read
+-- keeps the raw text.
 failureError :: FromJSON e => Text -> Failure -> Error e
 failureError workflowText failure = case failure of
   FailureControl engine -> liftEngine engine
-  FailureRecorded payload -> case decodeErrorText payload of
+  FailureRecorded payload -> decodeRecordedError workflowText payload
+
+-- | The recorded-failure fallback shared by 'failureError' and the handle
+-- reads. A payload this caller's channel cannot decode still reports the
+-- portable @name: message@ when it is another SDK's record, and the raw text
+-- otherwise, instead of discarding the human message.
+decodeRecordedError :: FromJSON e => Text -> Text -> Error e
+decodeRecordedError workflowText payload =
+  case decodeErrorText payload of
     Right err -> err
-    Left _    -> WorkflowFailed {workflowId = workflowText, message = payload}
-
--- | Encode an error as the error column holds it.
-encodeErrorText :: ToJSON e => Error e -> Text
-encodeErrorText = decodeUtf8 . LBS.toStrict . encode
-
--- | Decode an error column back into the caller's channel.
-decodeErrorText :: FromJSON e => Text -> Either Text (Error e)
-decodeErrorText = first pack . eitherDecodeStrict' . encodeUtf8
+    Left _    -> WorkflowFailed {workflowId = workflowText, message = fallbackText payload}
   where
-    first f = either (Left . f) Right
+    fallbackText text = case jsonValue text of
+      Just value -> case portableRecordOf value of
+        Just (name, message, _) -> name <> ": " <> message
+        Nothing -> text
+      Nothing -> text
+
+-- | Encode an error as the error column holds it: the portable error record
+-- other SDKs read (@{name, message, data}@), with the port's structured
+-- @Error@ envelope in @data@ so a replay reconstructs the original
+-- constructor. Python's portable errors carry @code@ too; the port has no
+-- code to add.
+encodeErrorText :: ToJSON e => Error e -> Text
+encodeErrorText err =
+  decodeUtf8 . LBS.toStrict . encode $
+    object
+      [ "name" .= portableErrorName err,
+        "message" .= portableMessage err,
+        "data" .= toJSON err
+      ]
+
+-- | The record's human message. An application failure uses the payload's
+-- text when it is a JSON string — the common @ErrorApplication Text@ case —
+-- and its JSON encoding otherwise; the wire encoder has no 'Show' constraint
+-- to spend.
+portableMessage :: ToJSON e => Error e -> Text
+portableMessage err = case err of
+  ErrorApplication value -> case toJSON value of
+    String text -> text
+    _ -> decodeUtf8 (LBS.toStrict (encode value))
+  other -> renderErrorWithoutApplication other
+
+-- | The constructor spelling used as the portable record's name. The tagged
+-- envelope has exactly one key: the constructor.
+portableErrorName :: ToJSON e => Error e -> Text
+portableErrorName err = case toJSON err of
+  Object fields -> case KeyMap.toList fields of
+    [(tag, _)] -> Key.toText tag
+    _ -> "Error"
+  _ -> "Error"
+
+-- | Decode an error column back into the caller's channel. A portable record
+-- decodes through its @data@ payload; a record without a matching payload
+-- (another language's) keeps its @name: message@ text. A legacy tagged
+-- envelope decodes as itself.
+decodeErrorText :: FromJSON e => Text -> Either Text (Error e)
+decodeErrorText payload =
+  case jsonValue payload of
+    Nothing -> Left payload
+    Just value -> case portableRecordOf value of
+      Just (name, message, Just structured) ->
+        case fromJSON structured of
+          Success err -> Right err
+          Error _ -> Left (name <> ": " <> message)
+      Just (name, message, Nothing) -> Left (name <> ": " <> message)
+      Nothing ->
+        case fromJSON value of
+          Success err -> Right err
+          Error message -> Left (pack message)
+
+-- | The portable view of a recorded error for a reader with no error type of
+-- its own (a step listing): the portable record's @name@, @message@ and
+-- optional @data@, or a legacy tagged envelope decoded as 'Value' and rendered
+-- through its own name and message. @Nothing@ when the payload is not an error
+-- this build can read.
+recordedErrorView :: Text -> Maybe (Text, Text, Maybe Value)
+recordedErrorView text = do
+  value <- jsonValue text
+  case portableRecordOf value of
+    Just (name, message, structured) -> Just (name, message, structured)
+    Nothing -> case (fromJSON value :: Result (Error Value)) of
+      Success err -> Just (portableErrorName err, portableMessage err, Just (toJSON err))
+      Error _ -> Nothing
+
+jsonValue :: Text -> Maybe Value
+jsonValue text = case eitherDecodeStrict' (encodeUtf8 text) of
+  Right value -> Just value
+  Left _ -> Nothing
+
+portableRecordOf :: Value -> Maybe (Text, Text, Maybe Value)
+portableRecordOf (Object fields)
+  | Just name <- KeyMap.lookup "name" fields,
+    Just message <- KeyMap.lookup "message" fields =
+      Just (textOf name, textOf message, KeyMap.lookup "data" fields)
+  where
+    textOf (String text) = text
+    textOf value = decodeUtf8 (LBS.toStrict (encode value))
+portableRecordOf _ = Nothing

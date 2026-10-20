@@ -23,6 +23,7 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (WorkflowRecord (..))
 import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.Transact.Serialization (encodeWorkflowInput)
 import DBOS.Transact
 import DBOS.Transact.Connection (SomeSystemDB (..))
 import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
@@ -200,7 +201,7 @@ withOutboxFixture getBackend getTracer body = do
       markOp (Tx run) oid = run markStmt (fromIntegral oid)
       atomicWf :: forall exec. (Text, Text, Int) -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
       atomicWf = atomicBody ds insertOp markOp (atomically (modifyTVar sentVar (+ 1))) consumeSendFail
-      notifyWf :: forall exec. Envelope -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
+      notifyWf :: forall exec. (Int, Text, Text) -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
       notifyWf = notifyBody ds markOp (atomically (modifyTVar sentVar (+ 1))) consumeSendFail
   atomicRef <- registerWorkflowRef dbos atomicKey atomicWf >>= either (fail . show) pure
   notifyRef <- registerWorkflowRef dbos notifyKey notifyWf >>= either (fail . show) pure
@@ -224,7 +225,7 @@ withOutboxFixture getBackend getTracer body = do
             obArmSendFail = \n -> atomically (writeTVar sendFailsVar n),
             obConsumeSendFail = consumeSendFail,
             obConsumeTxFault = consumeTxFault,
-            obRunAtomic = \wid cust item qty -> runWorkflow exec atomicKey wid (Just (encodeWorkflowValue (cust, item, qty))),
+            obRunAtomic = \wid cust item qty -> runWorkflow exec atomicKey wid (Just (encodeWorkflowInput (cust, item, qty))),
             obPlaceEnqueued = placeEnqueued ds insertOp enqueueOp,
             obOrderIds = \tag -> do
               found <- runAppSession pool (Session.statement tag orderIdsStmt)

@@ -13,18 +13,18 @@
 module DBOS.Transact.OutboxTestSim (tests) where
 
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
-import Data.Aeson qualified as Aeson
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowRecord (..), newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowRecord (..), newWorkflow, portableJsonSerialization)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
 import DBOS.SystemDB.Error qualified as SysErr
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB)
+import DBOS.Transact.Serialization (encodeWorkflowInput, unWorkflowInput)
 import DBOS.Transact
 import DBOS.Transact.Workflow (maxRecoveryAttempts)
 import DBOS.Transact.Datasource (RecordedOutcome (..), TransactionEvent (..))
@@ -157,16 +157,16 @@ simOutboxFixture = do
           TxThrowDb -> throwIO (SysErr.Backend (SysErr.BackendError "outbox sim: db failure after insert" Nothing SysErr.Permanent))
           TxOk -> pure oid
       enqueueOp _tx oid cust = do
-        -- Inputs mirror the SQL path's stored shape (positionalArgs object),
-        -- which 'matchCustomer' parses; rows carry the launch identity
-        -- (sim-app/0.0.0), which the version-scoped claim requires.
+        -- Inputs use the same portable envelope the SQL path writes, which
+        -- 'matchCustomer' parses from the raw row; rows carry the launch
+        -- identity (sim-app/0.0.0), which the version-scoped claim requires.
         let widText = "sim-enq-" <> Text.pack (show oid)
-            input = encodeWorkflowValue (Aeson.object ["positionalArgs" Aeson..= (oid, cust, ("Widget B" :: Text)), "namedArgs" Aeson..= Aeson.object []])
+            input = unWorkflowInput (encodeWorkflowInput (oid, cust, ("Widget B" :: Text)))
             row =
               (newWorkflow widText)
                 { newWorkflowName = Just "send_notification_workflow",
                   newWorkflowInput = Just input.serializedText,
-                  newWorkflowSerialization = Nothing,
+                  newWorkflowSerialization = Just portableJsonSerialization,
                   newWorkflowQueueName = Just "ob-notify-q",
                   newWorkflowExecutorId = Nothing,
                   newWorkflowApplicationName = Just "sim-app",
@@ -184,7 +184,7 @@ simOutboxFixture = do
       noteSent = atomically (modifyTVar storeVar (\store -> store {simSent = store.simSent + 1}))
       atomicWf :: forall exec. (Text, Text, Int) -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)
       atomicWf = atomicBody ds insertOp markOp noteSent consumeSendFail
-      notifyWf :: forall exec. Envelope -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) ())
+      notifyWf :: forall exec. (Int, Text, Text) -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) ())
       notifyWf = notifyBody ds markOp noteSent consumeSendFail
   atomicRef <- registerWorkflowRef dbos atomicKey atomicWf >>= either (fail . show) pure
   notifyRef <- registerWorkflowRef dbos notifyKey notifyWf >>= either (fail . show) pure
@@ -218,7 +218,7 @@ simOutboxFixture = do
         obArmSendFail = \n -> atomically (writeTVar sendFailsVar n),
         obConsumeSendFail = consumeSendFail,
         obConsumeTxFault = consumeTxFault,
-        obRunAtomic = \wid cust item qty -> runWorkflow exec atomicKey wid (Just (encodeWorkflowValue (cust, item, qty))),
+        obRunAtomic = \wid cust item qty -> runWorkflow exec atomicKey wid (Just (encodeWorkflowInput (cust, item, qty))),
         obPlaceEnqueued = placeEnqueued ds insertOp enqueueOp,
         obOrderIds = \tag -> do
           store <- readTVarIO storeVar

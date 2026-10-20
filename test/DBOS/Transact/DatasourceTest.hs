@@ -19,6 +19,7 @@ import Data.Int (Int64)
 import Data.Text qualified as Text
 import DBOS.SystemDB qualified as SysDB
 import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.Transact.Serialization (encodeWorkflowValue)
 import DBOS.Transact
   ( AppDataSource,
     DataSource (..),
@@ -33,7 +34,6 @@ import DBOS.Transact
     acquireAppDataSource,
     acquireAppDataSourceIn,
     configNew,
-    encodeWorkflowValue,
     newDBOS,
     releaseAppDataSource,
     runAppSession,
@@ -125,7 +125,7 @@ dsConnOver backend = do
   instanceId <- uuidWorkflowId
   newConnection
     (SomeSystemDB backend)
-    RustSerde
+    PortableJson
     (Just "test-app")
     (secondsDuration 1)
     OwnerApplication

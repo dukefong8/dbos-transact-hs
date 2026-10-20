@@ -6,7 +6,8 @@ module DBOS.SystemDB.ErrorTest
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (BackendError (..), BackendErrorKind (..), Error (..), renderBackendError, renderError)
+import DBOS.SystemDB (BackendError (..), BackendErrorKind (..), Error (..), renderBackendError, renderError, shouldRecord)
+import DBOS.SystemDB.Error (decodePortableError, encodePortableError)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 
@@ -23,6 +24,14 @@ tests =
       testCase "renders an unreadable stored value" $
         renderError (Malformed "status XYZ")
           @?= "unexpected value in the system database: status XYZ",
+      testCase "renders an unreadable serialization tag" $
+        renderError (UnknownSerialization {name = "pickle"})
+          @?= "serialization pickle is not available",
+      testCase "an unknown tag is control, never recorded" $
+        shouldRecord (UnknownSerialization {name = "pickle"}) @?= False,
+      testCase "a portable error record round trips" $
+        decodePortableError (encodePortableError (UnexpectedStep {workflowId = "wf", stepId = 2, expected = "b", recorded = "a"}))
+          @?= Right (UnexpectedStep {workflowId = "wf", stepId = 2, expected = "b", recorded = "a"}),
       testCase "renders a reused workflow id" $
         renderError (ConflictingWorkflow {workflowId = "wf", detail = "different function"})
           @?= "workflow wf already exists: different function",

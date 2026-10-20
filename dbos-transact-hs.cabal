@@ -51,6 +51,9 @@ common commons
 
 library dbos-transact-internals
   import: commons
+  -- Private to this package: the public library's facade and the test suite
+  -- may depend on it; demo-apps must use the public `dbos-transact-hs`
+  -- library only.
   visibility: private
   hs-source-dirs: src/DBOS/Internal
   exposed-modules:

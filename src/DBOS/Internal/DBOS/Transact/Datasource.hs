@@ -75,7 +75,7 @@ import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), f
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import GHC.Stack (HasCallStack)
 import Hasql.Statement qualified as Statement
 import System.Log.FastLogger (ToLogStr (..))
@@ -391,16 +391,13 @@ unexpectedTransaction (WorkflowId widText) expected stepId recorded =
 replayRecorded :: (FromJSON a, FromJSON e) => Text -> RecordedOutcome -> Either (Error e) a
 replayRecorded stepName = \case
   RecordedOutput text -> case decodeWorkflowValue "result" (Just (SerializedWorkflowValue text Nothing)) of
-    Left err    -> Left (Deserialization "result" (codecMessage err))
+    Left err    -> Left (case codecUnknownTag err of
+      Just tag -> UnknownSerialization {name = tag}
+      Nothing -> Deserialization "result" (codecErrorText err))
     Right value -> Right value
   RecordedError text -> case decodeErrorText text of
     Left _    -> Left (StepFailed stepName ("recorded transaction error is not decodable: " <> text))
     Right err -> Left err
-  where
-    codecMessage err =
-      case err of
-        CodecNotJson _ input       -> "invalid JSON: " <> input
-        CodecTypeMismatch _ detail -> pack detail
 
 -- | A backend failure as a control signal: recorded nowhere, so the row
 -- stays pending and recovery re-runs. Mirrors the step runner's mapping.

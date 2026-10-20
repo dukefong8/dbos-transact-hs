@@ -17,6 +17,8 @@ module DBOS.Transact.WorkflowCases
     JoinOutcome (..),
     scenarioJoinTakesId,
     scenarioFreshJoinPolls,
+    scenarioQueuedStartPolls,
+    scenarioNonFinite,
     scenarioAwaitRecorded,
     scenarioStaleAwaitRefused,
     scenarioAwaitInsideStep,
@@ -60,6 +62,8 @@ module DBOS.Transact.WorkflowCases
     checkRegisteredResult,
     checkJoinTakesId,
     checkFreshJoinPolls,
+    checkQueuedStartPolls,
+    checkNonFinite,
     checkAwaitRecorded,
     checkStaleAwaitRefused,
     checkAwaitInsideStep,
@@ -113,15 +117,18 @@ module DBOS.Transact.WorkflowCases
 where
 
 import DBOS.Prelude
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, toJSON)
+import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Text.Encoding (encodeUtf8)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.SystemDB (AwaitedOutcome (..), NewWorkflow (..), StepRecord (..), Submission (..), WorkflowId (..), WorkflowRecord (..), Timestamp (..), addTimeout, getWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
+import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
-    EngineOnly, CodecError,
+    EngineOnly,
     Config (..),
     Error (..),
     RunOptions (..),
@@ -130,7 +137,6 @@ import DBOS.Transact
     SelectArm (..),
     SerializedWorkflowValue (..),
     StartOptions (..),
-    WorkflowHandle (..),
     Timeout (..),
     DBOS,
     WorkflowCtx,
@@ -142,8 +148,6 @@ import DBOS.Transact
     WorkflowStatus (..),
     awaitChild,
     defaultQueueOptions,
-    decodeWorkflowValue,
-    encodeWorkflowValue,
     enqueueNew,
     handleResult,
     handleStatus,
@@ -174,7 +178,7 @@ import DBOS.Transact
   )
 import DBOS.Transact.Logger (SomeTracer (..))
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Handle (Provenance (..))
+import DBOS.Transact.Handle (Provenance (..), WorkflowHandle (..))
 import DBOS.Transact.Error (decodeErrorText)
 import DBOS.Transact.Instance (dequeueWorkflows, launchOn, launchOnWithQueues)
 import DBOS.Transact.Workflow (resolveTimeoutDeadline, runOptionsToStartOptions, timeoutBudget)
@@ -275,7 +279,7 @@ scenarioRegisteredRecordsResult fx = do
       Right () -> pure ()
     exec <- fx.wfLaunch dbos
     wid <- fx.wfFreshId "wf-double"
-    (result :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec key wid (Just (encodeWorkflowValue (21 :: Int)))
+    (result :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec key wid (Just (encodeWorkflowInput (21 :: Int)))
     decoded <- case result of
       Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
         Right n -> pure n
@@ -308,7 +312,7 @@ mkWfFixture config identity connApp nameScheme genId genEntropy sysdb tracer = d
         instanceId <- genId
         newConnection
           sysdb
-          RustSerde
+          PortableJson
           (Just connApp)
           (secondsDuration 1)
           OwnerApplication
@@ -492,6 +496,82 @@ scenarioFreshJoinPolls fx = do
       other -> throwIO (userError ("expected the local await to resolve, got: " <> show other))
     pure (label firstHandle, label joinHandle, label retrieveHandle, decoded)
 
+-- | A queued row belongs to its queue: a plain start of the same id joins it
+-- through a polling handle and must not execute the body, because only a
+-- dequeue claim can move the row out of ENQUEUED and record an outcome.
+-- Returns the second handle's provenance, the row's status, and the steps the
+-- body would have taken.
+scenarioQueuedStartPolls :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                         => WfFixture m ->
+                            m (Text, WorkflowStatus, [StepRecord])
+scenarioQueuedStartPolls fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    let key = newWorkflowKey "queued-start"
+        body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        body () wctx = do
+          stepped <- runStep wctx "ran" (const (pure ()))
+          case stepped of
+            Left err   -> pure (Left err)
+            Right ()   -> pure (Right 7)
+    registered <- registerWorkflowRef dbos key body
+    ref <- case registered of
+      Left err -> throwIO (userError (show err))
+      Right r  -> pure r
+    -- Listen only to a queue nobody uses, so the queued row below is never
+    -- swept by this instance's supervisor.
+    exec <- fx.wfLaunchWithQueues (Just ["queued-start-unwatched"]) dbos
+    wid <- fx.wfFreshId "queued-start"
+    let WorkflowId widText = wid
+        queueName = "queued-start-q-" <> widText
+        enqueueOpts = startOptionsDefault {startWorkflowId = Just (WorkflowId widText), startQueue = Just (enqueueNew queueName)}
+        joinOpts = startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}
+        label :: WorkflowHandle m EngineOnly -> Text
+        label (WorkflowHandle _ _ provenance') = case provenance' of
+          Local _   -> "local"
+          Polling{} -> "polling"
+    (enqueuedE :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <- startWorkflow exec ref enqueueOpts Nothing
+    _ <- case enqueuedE of
+      Left err -> throwIO (userError (show err))
+      Right _  -> pure ()
+    (joinedE :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <- startWorkflow exec ref joinOpts Nothing
+    joined <- case joinedE of
+      Left err -> throwIO (userError (show err))
+      Right h  -> pure h
+    row <- fx.wfReadRow wid
+    steps <- fx.wfListSteps wid
+    pure (label joined, maybe Pending (\r -> r.workflowRecordStatus) row, steps)
+
+-- | Non-finite floats through the engine: a @-Infinity@ argument, a step-like
+-- result holding @+Infinity@ and @NaN@. Returns the decoded tuple plus the
+-- stored input/output text so the caller can pin aeson's spelling.
+scenarioNonFinite :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                  => WfFixture m ->
+                     m ((Double, Double, Double), Maybe Text, Maybe Text)
+scenarioNonFinite fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    let key = newWorkflowKey "extremes"
+        body :: forall exec. Double -> WorkflowCtx exec m -> m (Either (Error EngineOnly) (Double, Double, Double))
+        body low _ = pure (Right (low, 1 / 0, 0 / 0))
+    registered <- registerWorkflowRef dbos key body
+    ref <- case registered of
+      Left err -> throwIO (userError (show err))
+      Right r  -> pure r
+    exec <- fx.wfLaunch dbos
+    wid <- fx.wfFreshId "non-finite"
+    (startedE :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
+      startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just wid}) (Just (encodeWorkflowInput (-1 / 0 :: Double)))
+    started <- case startedE of
+      Left err -> throwIO (userError (show err))
+      Right h  -> pure h
+    settled <- awaitSettled started
+    decoded <- case settled of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError (Double, Double, Double) of
+        Right triple -> pure triple
+        Left err     -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the non-finite run to settle, got: " <> show other))
+    row <- fx.wfReadRow wid
+    pure (decoded, (.workflowRecordInput) =<< row, (.workflowRecordOutput) =<< row)
+
 -- | Awaiting a child is recorded as a step: the parent starts the child
 -- and awaits it, so the parent's history holds the start and a
 -- @DBOS.get_result@ checkpoint naming the child. Returns the decoded
@@ -564,7 +644,7 @@ scenarioChildIdsInBuildOrder fx = do
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
           (started :: [Either (Error EngineOnly) (WorkflowHandle m EngineOnly)]) <-
-            mapM (\n -> startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))) [1, 2, 3]
+            mapM (\n -> startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput (n :: Int)))) [1, 2, 3]
           case sequence started of
             Left err -> pure (Left err)
             Right handles -> do
@@ -681,7 +761,7 @@ scenarioStepsTaken fx = do
     exec <- fx.wfLaunch dbos
     wid <- fx.wfFreshId "steps-listed-id"
     (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
-      runWorkflow exec key wid (Just (encodeWorkflowValue (21 :: Int)))
+      runWorkflow exec key wid (Just (encodeWorkflowInput (21 :: Int)))
     steps <- fx.wfListSteps wid
     pure (ran, steps)
 
@@ -770,7 +850,7 @@ scenarioAttributes fx = do
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (0 :: Int)))
+            startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput (0 :: Int)))
           case started of
             Left err -> pure (Left err)
             Right handle -> do
@@ -833,7 +913,7 @@ scenarioAppErrorRoundtrip fx = do
     exec <- fx.wfLaunch dbos
     wid <- fx.wfFreshId "app-err-id"
     (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
-      runWorkflow exec key wid (Just (encodeWorkflowValue (21 :: Int)))
+      runWorkflow exec key wid (Just (encodeWorkflowInput (21 :: Int)))
     pure ran
 
 -- | A database failure is not the workflow outcome: the backend error
@@ -968,7 +1048,7 @@ scenarioPlainStepAtStart fx = do
           putMVar entered ()
           takeMVar gate
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (1 :: Int)))
+            startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput (1 :: Int)))
           case started of
             Left err -> pure (Left err)
             Right _ -> pure (Right 0)
@@ -982,7 +1062,7 @@ scenarioPlainStepAtStart fx = do
         derivedText = parentText <> "-0"
     worker <-
       async
-        ( runWorkflow exec parentKey wid (Just (encodeWorkflowValue (0 :: Int))) ::
+        ( runWorkflow exec parentKey wid (Just (encodeWorkflowInput (0 :: Int))) ::
             m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
         )
     enteredOk <- timeout 15000000 (takeMVar entered)
@@ -1024,7 +1104,7 @@ scenarioDerivedChildAdopted fx = do
     let parentBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         parentBody _ wctx = do
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
+            startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput (21 :: Int)))
           pure ((.workflowId) <$> started)
     parentReg <- registerWorkflow dbos parentKey parentBody
     case parentReg of
@@ -1034,7 +1114,7 @@ scenarioDerivedChildAdopted fx = do
     wid <- fx.wfFreshId "child-parent"
     let WorkflowId parentText = wid
         childText = parentText <> "-0"
-    (first :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowValue (0 :: Int)))
+    (first :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowInput (0 :: Int)))
     _ <- case first of
       Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
         Right _ -> pure ()
@@ -1043,7 +1123,7 @@ scenarioDerivedChildAdopted fx = do
     -- The child start detaches the child onto the executor; the replay
     -- adopts the recorded id instead of starting another.
     settled <- waitForWorkflow dbos (WorkflowId childText)
-    (replayed :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowValue (0 :: Int)))
+    (replayed :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowInput (0 :: Int)))
     pure (childText, [], Right [], settled, replayed)
 
 -- | The assigned-id variant: the child was started under a chosen id, so
@@ -1070,21 +1150,21 @@ scenarioAssignedChildAdopted fx = do
         parentBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         parentBody _ wctx = do
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow wctx childRef (startOptionsDefault {startWorkflowId = Just (WorkflowId chosenText)}) (Just (encodeWorkflowValue (21 :: Int)))
+            startChildWorkflow wctx childRef (startOptionsDefault {startWorkflowId = Just (WorkflowId chosenText)}) (Just (encodeWorkflowInput (21 :: Int)))
           pure ((.workflowId) <$> started)
     parentReg <- registerWorkflow dbos parentKey parentBody
     case parentReg of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.wfLaunch dbos
-    (first :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowValue (0 :: Int)))
+    (first :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowInput (0 :: Int)))
     _ <- case first of
       Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
         Right _ -> pure ()
         Left err -> throwIO (userError (show err))
       other -> throwIO (userError ("expected the parent's child id, got: " <> show other))
     settled <- waitForWorkflow dbos (WorkflowId chosenText)
-    (replayed :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowValue (0 :: Int)))
+    (replayed :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowInput (0 :: Int)))
     chosenRow <- fx.wfReadRow (WorkflowId chosenText)
     derivedRow <- fx.wfReadRow (WorkflowId derivedText)
     pure (chosenText, [], Right [], settled, replayed, chosenRow, derivedRow)
@@ -1133,7 +1213,7 @@ scenarioFanout fx = do
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
           (started :: [Either (Error EngineOnly) (WorkflowHandle m EngineOnly)]) <-
-            mapM (\n -> startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))) [0, 1, 2]
+            mapM (\n -> startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput (n :: Int)))) [0, 1, 2]
           case sequence started of
             Left err -> pure (Left err)
             Right handles -> do
@@ -1177,7 +1257,7 @@ scenarioUnawaitedChild fx = do
     let parentBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
         parentBody _ wctx = do
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
+            startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput (21 :: Int)))
           case started of
             Left err -> pure (Left err)
             Right _ -> pure (Right ())
@@ -1190,7 +1270,7 @@ scenarioUnawaitedChild fx = do
     let WorkflowId parentText = wid
         childText = parentText <> "-0"
     (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
-      runWorkflow exec parentKey wid (Just (encodeWorkflowValue (0 :: Int)))
+      runWorkflow exec parentKey wid (Just (encodeWorkflowInput (0 :: Int)))
     steps <- fx.wfListSteps wid
     found <- waitForWorkflow dbos (WorkflowId childText)
     childRow <- fx.wfReadRow (WorkflowId childText)
@@ -1245,7 +1325,7 @@ scenarioLiftChildError fx = do
     let WorkflowId billText = billWid
         shipText = billText <> "-0"
     ran <-
-      runWorkflowRef exec billRef (runOptionsDefault {runWorkflowId = Just (WorkflowId billText)}) (Just (encodeWorkflowValue ()))
+      runWorkflowRef exec billRef (runOptionsDefault {runWorkflowId = Just (WorkflowId billText)}) (Just (encodeWorkflowInput ()))
     childRow <- fx.wfReadRow (WorkflowId shipText)
     pure (ran, childRow)
 
@@ -1283,7 +1363,7 @@ scenarioCaptureChildRefused fx = do
       Right () -> pure ()
     exec <- fx.wfLaunch dbos
     wid <- fx.wfFreshId "childleaf-captured-parent"
-    (result :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowValue (0 :: Int)))
+    (result :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowInput (0 :: Int)))
     steps <- fx.wfListSteps wid
     pure (result, steps)
 
@@ -1317,7 +1397,7 @@ scenarioChildInsideStepRefused fx = do
       Right () -> pure ()
     exec <- fx.wfLaunch dbos
     wid <- fx.wfFreshId "childleaf-parent"
-    (result :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowValue (0 :: Int)))
+    (result :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow exec parentKey wid (Just (encodeWorkflowInput (0 :: Int)))
     steps <- fx.wfListSteps wid
     pure (result, steps)
 
@@ -1591,7 +1671,7 @@ scenarioScopedBody fx = do
     exec <- fx.wfLaunch dbos
     wid <- fx.wfFreshId "scoped-body-wf"
     (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <-
-      runWorkflow exec key wid (Just (encodeWorkflowValue (21 :: Int)))
+      runWorkflow exec key wid (Just (encodeWorkflowInput (21 :: Int)))
     decoded <- case ran of
       Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
         Right value -> pure (Right value)
@@ -1804,7 +1884,7 @@ scenarioStepIdPairs fx = do
         parentBody () wctx = do
           let pair n = do
                 (startedPair :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-                  startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (n :: Int)))
+                  startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput (n :: Int)))
                 case startedPair of
                   Left err -> pure (Left err)
                   Right wfHandle -> do
@@ -2137,9 +2217,20 @@ checkRegisteredResult (n, row)
   | row.workflowRecordStatus /= Success = Left ("expected the row SUCCESS, got: " <> show row.workflowRecordStatus)
   | row.workflowRecordName /= Just "double" = Left ("expected the workflow name double, got: " <> show row.workflowRecordName)
   | row.workflowRecordOutput /= Just "42" = Left ("expected the output 42, got: " <> show row.workflowRecordOutput)
-  | row.workflowRecordInput /= Just "21" = Left ("expected the input 21, got: " <> show row.workflowRecordInput)
-  | row.workflowRecordSerialization /= Just "rust_serde" = Left ("expected rust_serde, got: " <> show row.workflowRecordSerialization)
+  | not (portableInputEnvelope [toJSON (21 :: Int)] row.workflowRecordInput) = Left ("expected the portable input envelope for 21, got: " <> show row.workflowRecordInput)
+  | row.workflowRecordSerialization /= Just "portable_json" = Left ("expected portable_json, got: " <> show row.workflowRecordSerialization)
   | otherwise = Right ()
+
+-- | A workflow input is the portable envelope with these positional values
+-- and no named ones.
+portableInputEnvelope :: [Value] -> Maybe Text -> Bool
+portableInputEnvelope positional (Just text) =
+  case eitherDecodeStrict (encodeUtf8 text) of
+    Right (Object fields) ->
+      KeyMap.lookup "positionalArgs" fields == Just (toJSON positional)
+        && KeyMap.lookup "namedArgs" fields == Just (Object KeyMap.empty)
+    _ -> False
+portableInputEnvelope _ Nothing = False
 
 -- | One id, one execution: both callers read the run and the handles
 -- name the same workflow.
@@ -2160,6 +2251,29 @@ checkFreshJoinPolls (firstLabel, joinLabel, retrieveLabel, n)
   | joinLabel /= "polling" = Left ("expected a polling handle for the join, got: " <> show joinLabel)
   | retrieveLabel /= "polling" = Left ("expected a polling handle from retrieve, got: " <> show retrieveLabel)
   | n /= 7 = Left ("expected the local handle to read 7, got: " <> show n)
+  | otherwise = Right ()
+
+-- | A plain start of a queued row joins it: polling handle, row stays
+-- ENQUEUED, and the body never ran a step.
+checkQueuedStartPolls :: (Text, WorkflowStatus, [StepRecord]) -> Either String ()
+checkQueuedStartPolls (joinLabel, status, steps)
+  | joinLabel /= "polling" = Left ("expected a polling handle for a queued join, got: " <> show joinLabel)
+  | status /= Enqueued = Left ("expected the queued row to stay ENQUEUED, got: " <> show status)
+  | not (null steps) = Left ("expected the queued body not to run, got steps: " <> show (map (.stepRecordStepName) steps))
+  | otherwise = Right ()
+
+-- | The stored spelling is aeson's, not Rust's: @-inf@/@+inf@ as strings and
+-- NaN as @null@; the decoded tuple still reads the infinities.
+checkNonFinite :: ((Double, Double, Double), Maybe Text, Maybe Text) -> Either String ()
+checkNonFinite ((low, high, nan), inputText, outputText)
+  | not (isInfinite low) || low > 0 = Left ("expected the argument to read -Infinity, got: " <> show low)
+  | not (isInfinite high) || high < 0 = Left ("expected the result to read +Infinity, got: " <> show high)
+  | not (isNaN nan) = Left ("expected the result NaN to read back as NaN, got: " <> show nan)
+  | Just text <- inputText, not ("\"-inf\"" `Text.isInfixOf` text) =
+      Left ("expected the stored argument to spell -inf, got: " <> Text.unpack text)
+  | Just text <- outputText,
+    not (all (`Text.isInfixOf` text) ["\"-inf\"", "\"+inf\"", "null"]) =
+      Left ("expected the stored result to spell -inf/+inf/null, got: " <> Text.unpack text)
   | otherwise = Right ()
 
 -- | The parent history holds the start and its recorded await.

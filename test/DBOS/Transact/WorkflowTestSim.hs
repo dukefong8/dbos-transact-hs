@@ -55,6 +55,8 @@ import DBOS.Transact.WorkflowCases
     checkDeclinedDeadline,
     checkFanout,
     checkFreshJoinPolls,
+    checkQueuedStartPolls,
+    checkNonFinite,
     checkJoinHeldKey,
     checkEnqueuedChildReplays,
     checkJoinTakesId,
@@ -101,6 +103,8 @@ import DBOS.Transact.WorkflowCases
     scenarioDeclinedDeadline,
     scenarioFanout,
     scenarioFreshJoinPolls,
+    scenarioQueuedStartPolls,
+    scenarioNonFinite,
     scenarioJoinHeldKey,
     scenarioEnqueuedChildReplays,
     scenarioJoinTakesId,
@@ -147,6 +151,8 @@ tests =
       testCase "timeouts, options, and child ids compose without a database" timeoutOptionsCase,
       simCase simWfFixture "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId traceJoinTakesId,
       simCase simWfFixture "a fresh start is local and a join polls" scenarioFreshJoinPolls checkFreshJoinPolls traceFreshJoinPolls,
+      simCase simWfFixture "a queued row is joined, not run, by a plain start" scenarioQueuedStartPolls checkQueuedStartPolls traceQueuedStartPolls,
+      simCase simWfFixture "non-finite floats store aeson's spelling and read back" scenarioNonFinite checkNonFinite traceNonFinite,
       simCase simWfFixture "awaiting a child is recorded as a step" scenarioAwaitRecorded checkAwaitRecorded traceAwaitRecorded,
       simCase simWfFixture "a recorded await of another workflow is refused" scenarioStaleAwaitRefused checkStaleAwaitRefused traceStaleAwaitRefused,
       simCase simWfFixture "awaiting a child inside a step is covered by that step" scenarioAwaitInsideStep checkAwaitInsideStep traceAwaitInsideStep,
@@ -292,6 +298,16 @@ traceJoinTakesId tr = do
 traceFreshJoinPolls :: forall a. SimTrace a -> IO ()
 traceFreshJoinPolls tr = do
   selectTraceEventsDynamic tr @?= [WorkflowAlreadyOwned "sim-local-id", WorkflowCompleted "sim-local-id"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+traceQueuedStartPolls :: forall a. SimTrace a -> IO ()
+traceQueuedStartPolls tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowEnqueued "sim-queued-start" "queued-start-q-sim-queued-start", WorkflowAlreadyOwned "sim-queued-start"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+traceNonFinite :: forall a. SimTrace a -> IO ()
+traceNonFinite tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "sim-non-finite"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 traceAwaitRecorded :: forall a. SimTrace a -> IO ()

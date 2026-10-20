@@ -37,7 +37,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.SystemDB.Types (SerializedWorkflowValue)
-import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError (..), codecUnknownTag, decodeWorkflowInput, encodeWorkflowValue)
 import DBOS.Transact.Context (WorkflowCtx)
 import DBOS.Transact.Error qualified as TransactError
 
@@ -139,19 +139,22 @@ registerTypedWorkflow :: forall argument result e m. (FromJSON argument, ToJSON 
                       => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 registerTypedWorkflow registry key body =
   registerErasedWorkflow registry key $ ErasedWorkflow $ \input wctx ->
-    case decodeWorkflowValue "argument" input of
-      Left err -> pure (Left (TransactError.failureOf (codecError "argument" err)))
+    case decodeWorkflowInput "argument" input of
+      Left err -> pure (Left (TransactError.FailureControl (codecError "argument" err :: TransactError.Error TransactError.EngineOnly)))
       Right argument -> do
         result <- body argument wctx
         pure $ case result of
           Left err -> Left (TransactError.failureOf err)
           Right value -> Right (Just (encodeWorkflowValue value))
   where
-    codecError :: Text -> CodecError -> TransactError.Error e
+    codecError :: Text -> CodecError -> TransactError.Error engine
     codecError what err =
-      case err of
-        CodecNotJson _ input -> TransactError.Deserialization what input
-        CodecTypeMismatch _ message -> TransactError.Deserialization what (Text.pack message)
+      case codecUnknownTag err of
+        Just tag -> TransactError.UnknownSerialization {name = tag}
+        Nothing -> case err of
+          CodecNotJson _ input -> TransactError.Deserialization what input
+          CodecTypeMismatch _ message -> TransactError.Deserialization what (Text.pack message)
+          CodecUnknownSerialization _ tag -> TransactError.UnknownSerialization {name = tag}
 
 -- | The mutable set of registrations. Its lock protects both the map and
 -- whether launch has frozen it, so insertion cannot slip past a snapshot.

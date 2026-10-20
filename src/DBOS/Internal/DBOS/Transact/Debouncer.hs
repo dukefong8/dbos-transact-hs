@@ -34,6 +34,7 @@ import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), pollingHandle)
 import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor, startWorkflow)
 import DBOS.Transact.Registry (WorkflowKey (..), WorkflowRef (..), refName, registryInstanceId)
+import DBOS.Transact.Serialization (WorkflowInput (..), unWorkflowInput)
 import DBOS.Transact.Workflow (Enqueue (..), Timeout (..), StartOptions (..), childWorkflowId, enqueueNew, startChildWorkflow, startOptionsDefault)
 
 -- | What to debounce: which queue the user workflow finally runs on, how
@@ -71,7 +72,7 @@ debounce :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
             Debouncer ->
             Text ->
             Duration ->
-            Maybe SerializedWorkflowValue ->
+            Maybe WorkflowInput ->
             m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 debounce dbos userRef def key period input = do
   withExecutor dbos "debounce a workflow" $ \exec -> case checkPeriod period of
@@ -80,6 +81,7 @@ debounce dbos userRef def key period input = do
       pinned <- generatedWorkflowId exec.conn
       bounceLoop exec pinned Nothing
   where
+    rawInput = unWorkflowInput <$> input
     bounceLoop exec pinned caller = do
       now <- timestampNow
       case addTimeout now period of
@@ -95,7 +97,7 @@ debounce dbos userRef def key period input = do
               BounceRaise ->
                 pure
                   ( Left
-                      ( TransactError.SystemDatabase
+                      ( TransactError.fromSystemDB
                           (SystemDBError.QueueDeduplicated {workflowId = pinned, queueName = queueName, deduplicationId = dedupKey})
                       )
                   )
@@ -116,8 +118,8 @@ debounce dbos userRef def key period input = do
           debounceRequestQueueName = queueName,
           debounceRequestDeduplicationId = dedupKey,
           debounceRequestDelayUntil = delayUntil,
-          debounceRequestInputs = (.serializedText) <$> input,
-          debounceRequestSerialization = Just (inputSerialization exec.conn input),
+          debounceRequestInputs = (.serializedText) <$> rawInput,
+          debounceRequestSerialization = Just (inputSerialization exec.conn rawInput),
           debounceRequestApplicationName = targetApp exec
         }
     queueName = case def.debouncerQueueName of
@@ -138,7 +140,7 @@ debounceInWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
                       Debouncer ->
                       Text ->
                       Duration ->
-                      Maybe SerializedWorkflowValue ->
+                      Maybe WorkflowInput ->
                       m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 debounceInWorkflow wctx userRef def key period input = do
   stepped <- insideAStep wctx
@@ -162,6 +164,7 @@ debounceInWorkflow wctx userRef def key period input = do
                     caller = Just (WorkflowId parentText, stepId)
                 bounceLoop conn pinned caller
   where
+    rawInput = unWorkflowInput <$> input
     bounceLoop conn pinned caller = do
       now <- timestampNow
       case addTimeout now period of
@@ -177,7 +180,7 @@ debounceInWorkflow wctx userRef def key period input = do
               BounceRaise ->
                 pure
                   ( Left
-                      ( TransactError.SystemDatabase
+                      ( TransactError.fromSystemDB
                           (SystemDBError.QueueDeduplicated {workflowId = pinned, queueName = queueName, deduplicationId = dedupKey})
                       )
                   )
@@ -194,8 +197,8 @@ debounceInWorkflow wctx userRef def key period input = do
           debounceRequestQueueName = queueName,
           debounceRequestDeduplicationId = dedupKey,
           debounceRequestDelayUntil = delayUntil,
-          debounceRequestInputs = (.serializedText) <$> input,
-          debounceRequestSerialization = Just (inputSerialization conn input),
+          debounceRequestInputs = (.serializedText) <$> rawInput,
+          debounceRequestSerialization = Just (inputSerialization conn rawInput),
           debounceRequestApplicationName = targetApp conn
         }
     queueName = case def.debouncerQueueName of

@@ -14,7 +14,7 @@ import DBOS.Transact
     EngineOnly,
     Error (..),
   )
-import DBOS.Transact.Error (controlOf, decodeErrorText, encodeErrorText, liftEngine, mapApplication)
+import DBOS.Transact.Error (Failure (..), controlOf, decodeErrorText, encodeErrorText, failureOf, fromSystemDB, liftEngine, mapApplication)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -48,7 +48,15 @@ tests =
             failed = ErrorApplication (CardDeclined {attempts = 1})
         assertBool "a cancellation is control" (controlOf cancelled /= Nothing)
         assertBool "an interruption is control" (controlOf interrupted /= Nothing)
+        assertBool "an unknown serialization is not control" (controlOf (UnknownSerialization {name = "pickle"}) == Nothing)
+        failureOf (UnknownSerialization {name = "pickle"} :: Error CardDeclined)
+          @?= FailureRecorded (encodeErrorText (UnknownSerialization {name = "pickle"} :: Error CardDeclined))
         controlOf failed @?= Nothing,
+      testCase "an unknown tag lifts to the same engine variant" $ do
+        fromSystemDB (SystemDB.UnknownSerialization {name = "pickle"})
+          @?= (UnknownSerialization {name = "pickle"} :: Error CardDeclined)
+        fromSystemDB (SystemDB.Malformed "bad")
+          @?= (SystemDatabase (SystemDB.Malformed "bad") :: Error CardDeclined),
       testCase "re-targeting recurses into the nested retry errors" $ do
         let err = MaxStepRetriesExceeded {step = "s", attempts = 2, errors = [ErrorApplication (CardDeclined {attempts = 1})]} :: Error CardDeclined
         mapApplication (const "boom") err
@@ -63,6 +71,7 @@ tests =
                 AlreadyLaunched {operation = "op"},
                 AlreadyRegistered {key = "k"},
                 Deserialization {what = "in", message = "bad"},
+                UnknownSerialization {name = "pickle"},
                 NotRegistered {key = "k"},
                 WorkflowClaimLost {workflowId = "wf"},
                 WorkflowFailed {workflowId = "wf", message = "bad"}

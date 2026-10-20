@@ -27,7 +27,7 @@ where
 
 import DBOS.Prelude
 import Data.Text qualified as Text
-import DBOS.SystemDB.Types (Duration, durationIsZero, secondsDuration)
+import DBOS.SystemDB.Types (Duration, durationIsZero, portableJsonSerialization, secondsDuration)
 import DBOS.Transact.Error (EngineOnly, Error (..))
 import System.Environment (lookupEnv)
 
@@ -50,13 +50,15 @@ appDatabaseUrlFromEnv = do
   url <- lookupEnv (Text.unpack appDatabaseUrlEnv)
   pure (Text.pack <$> url >>= \t -> if Text.null t then Nothing else Just t)
 
--- | How payloads are encoded.
-data Serializer = RustSerde
+-- | How payloads are encoded. The port has one codec: portable JSON, the
+-- cross-SDK wire format. The type stays for Rust @Config@ fidelity (its
+-- serializer selector), but there is no native variant to choose.
+data Serializer = PortableJson
   deriving stock (Eq, Show)
 
 -- | Names the encoding for a stored row.
 serializerName :: Serializer -> Text
-serializerName RustSerde = "rust_serde"
+serializerName PortableJson = portableJsonSerialization
 
 -- | The application's configuration.
 --
@@ -94,7 +96,7 @@ configNew appName databaseUrl =
       configSchema = "dbos",
       configExecutorId = Nothing,
       configAppVersion = Nothing,
-      configSerializer = RustSerde,
+      configSerializer = PortableJson,
       configUseListenNotify = True,
       configMigrate = True,
       configPollingConcurrency = Nothing,

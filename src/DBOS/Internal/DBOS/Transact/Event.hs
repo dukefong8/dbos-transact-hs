@@ -18,7 +18,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), getEventStepName, setEventStepName)
-import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextStepId, stepCtxBoundary, withSystemDB, workflowId)
@@ -70,7 +70,7 @@ driveSetEvent wctx key value placement =
                 serialization
           )
       pure $ case written of
-        Left err -> Left (TransactError.SystemDatabase err)
+        Left err -> Left (TransactError.fromSystemDB err)
         Right () -> Right ()
 
 -- | Read an event of another workflow, waiting up to the polling duration.
@@ -111,17 +111,15 @@ getEvent wctx destination key timeout = do
 adoptEventValue :: FromJSON value
                 => Either Error (Maybe EncodedValue) -> Either (TransactError.Error e) (Maybe value)
 adoptEventValue found = case found of
-  Left err -> Left (TransactError.SystemDatabase err)
+  Left err -> Left (TransactError.fromSystemDB err)
   Right Nothing -> Right Nothing
   Right (Just encoded) ->
     case decodeWorkflowValue "event value" (Just (toStoredValue encoded)) of
-      Left err -> Left (TransactError.Deserialization "event value" (codecMessage err))
+      Left err -> Left (case codecUnknownTag err of
+        Just tag -> TransactError.UnknownSerialization {name = tag}
+        Nothing -> TransactError.Deserialization "event value" (codecErrorText err))
       Right value -> Right (Just value)
   where
-    codecMessage err =
-      case err of
-        CodecNotJson _ input -> "invalid JSON: " <> input
-        CodecTypeMismatch _ detail -> Text.pack detail
     toStoredValue encoded =
       SerializedWorkflowValue
         { serializedText = encoded.encodedValue,

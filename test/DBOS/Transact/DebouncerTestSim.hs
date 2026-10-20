@@ -14,7 +14,9 @@ import Data.Text qualified as Text
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOnWith, newMemDB, simInstance)
+import DBOS.Transact.Serialization (encodeWorkflowInput)
 import DBOS.Transact
+import DBOS.Transact.Management (stepInfoFromRecord)
 import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
 import DBOS.Transact.DebouncerCases
 import DBOS.Transact.Recovery (EngineEvent (..))
@@ -66,7 +68,7 @@ simDebouncerFixture = do
   -- case runs it, passing its tag as input.
   let parentBody :: forall exec. Text -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
       parentBody tag wctx = do
-        debounced <- debounceInWorkflow wctx targetRef (debouncerNew {debouncerQueueName = Just targetQueue}) tag (secondsDuration 3) (Just (encodeWorkflowValue ("one" :: Text)))
+        debounced <- debounceInWorkflow wctx targetRef (debouncerNew {debouncerQueueName = Just targetQueue}) tag (secondsDuration 3) (Just (encodeWorkflowInput ("one" :: Text)))
         case debounced of
           Right joined -> pure (Right joined.workflowId)
           Left err -> pure (Left err)
@@ -93,7 +95,7 @@ simDebouncerFixture = do
           listed <- runSystemDB (SomeSystemDB mem) (\db -> SystemDB.listSteps db wid True Nothing Nothing Nothing)
           case listed of
             Left err -> throwIO (userError (show err))
-            Right steps -> pure steps,
+            Right steps -> pure (map (stepInfoFromRecord defaultListWorkflowStepsOptions) steps),
         dbUserRuns = readTVarIO runsVar,
         dbUserOutputs = readTVarIO outputsVar,
         dbAwaitUser = \wid -> do

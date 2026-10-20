@@ -83,7 +83,7 @@ withConnection :: Monad m
                -> (forall db. SystemDB.SystemDB db m => db -> m (Either SystemDBError.Error a))
                -> m (Either (TransactError.Error c) a)
 withConnection conn action =
-  either (Left . TransactError.SystemDatabase) Right <$> runSystemDB conn.connSysdb action
+  either (Left . TransactError.fromSystemDB) Right <$> runSystemDB conn.connSysdb action
 
 -- | Which of the two surfaces a connection was opened for. Mirrors Rust
 -- @Owner@; the @Owner@ prefix is the documented collision deviation,

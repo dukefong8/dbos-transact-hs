@@ -72,9 +72,10 @@ import Data.Text qualified as Text
 import DBOS.Prelude
 import DBOS.SystemDB (BackendErrorKind (..))
 import DBOS.Transact.Datasource (RecordedOutcome (..))
+import DBOS.Transact.Instance (getWorkflowEventSerialized)
+import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
-  CodecError,
   DBOS,
   DataSource (..),
   Duration,
@@ -91,8 +92,6 @@ import DBOS.Transact
   WorkflowId (..),
   WorkflowRef,
   WorkflowStatus (..),
-  decodeWorkflowValue,
-  encodeWorkflowValue,
   getWorkflowEvent,
   isTerminal,
   millisDuration,
@@ -233,7 +232,7 @@ checkoutBody ds mkCheckout dispatchRef () wctx = runExceptT $ do
       case decision of
         Just status | status == "paid" -> do
           _ <- ExceptT (runTxStep ds (namedStep "mark_order_paid") wctx (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) 2))
-          _ <- ExceptT (startChildWorkflow wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
+          _ <- ExceptT (startChildWorkflow wctx dispatchRef startOptionsDefault (Just (encodeWorkflowInput orderId)))
           _ <- ExceptT (setEvent wctx "order_id" (Text.pack (show orderId)))
           pure "paid"
         _ -> do
@@ -275,7 +274,7 @@ waitUntil what attempts act = go attempts
 -- | Wait for a durable event to be published (blocking reads on both stacks).
 waitEvent :: WidgetCase m => WidgetFixture m -> WorkflowId -> Text -> m ()
 waitEvent wf wid key = waitUntil ("event " <> key) 30 $ do
-  found <- getWorkflowEvent wf.wfDBOS wid key (millisDuration 1000)
+  found <- getWorkflowEventSerialized wf.wfDBOS wid key (millisDuration 1000)
   pure (case found of Right (Just _) -> True; _ -> False)
 
 -- | Wait for a step's commit to land (used before a crash, when the row
@@ -307,7 +306,7 @@ observe wf wid = do
   orders <- wf.wfReadOrders
   commits <- wf.wfReadStepCommits
   status <- wf.wfReadStatus wid
-  published <- getWorkflowEvent wf.wfDBOS wid "order_id" (millisDuration 500) >>= \case
+  published <- getWorkflowEventSerialized wf.wfDBOS wid "order_id" (millisDuration 500) >>= \case
     Right (Just stored) -> pure (either (const Nothing) Just (decodeWorkflowValue "order_id" (Just stored) :: Either CodecError Text))
     _ -> pure Nothing
   pure

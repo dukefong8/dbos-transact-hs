@@ -33,7 +33,7 @@ import DBOS.Transact.Connection (Connection (..))
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
-import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import System.Log.FastLogger (ToLogStr (..))
 
 data StepError
@@ -179,7 +179,7 @@ runStep wctx name body = do
       startedAt <- timestampNow
       checked <- withSystemDB wctx (\db -> SystemDB.checkStep db workflowId' stepId' name)
       case checked of
-        Left err -> pure (Left (TransactError.SystemDatabase err))
+        Left err -> pure (Left (TransactError.fromSystemDB err))
         Right (Just recorded) -> do
           runTracer wctx.wctxTracer (StepReplaying name stepId')
           pure (replayStep name stepId' recorded)
@@ -206,7 +206,7 @@ runStep wctx name body = do
                     (Just (StepTiming startedAt completedAt))
               )
           case written of
-            Left err -> pure (Left (TransactError.SystemDatabase err))
+            Left err -> pure (Left (TransactError.fromSystemDB err))
             Right () -> do
               runTracer wctx.wctxTracer (StepOutputRecorded name stepId')
               pure (Right value)
@@ -240,13 +240,12 @@ replayStep name stepId record =
                 "result"
                 (Just (SerializedWorkflowValue output (Serialization <$> record.stepRecordSerialization)))
             of
-            Left err    -> Left (TransactError.Deserialization "result" (codecMessage err))
+            Left err    -> Left (codecFailure err)
             Right value -> Right value
   where
-    codecMessage err =
-      case err of
-        CodecNotJson _ input       -> "invalid JSON: " <> input
-        CodecTypeMismatch _ detail -> pack detail
+    codecFailure err = case codecUnknownTag err of
+      Just tag -> TransactError.UnknownSerialization {name = tag}
+      Nothing -> TransactError.Deserialization "result" (codecErrorText err)
 
 -- | How a step retries, times out and decides. Mirrors Rust @StepOptions@.
 -- Defaults are the three-way majority: one attempt (no retrying), a
@@ -384,7 +383,7 @@ driveStepWith options wctx name placement body =
       startedAt <- timestampNow
       checked <- withSystemDB wctx' (\db -> SystemDB.checkStep db workflowId' stepId' name)
       case checked of
-        Left err -> pure (Left (TransactError.SystemDatabase err))
+        Left err -> pure (Left (TransactError.fromSystemDB err))
         Right (Just recorded) -> do
           runTracer wctx'.wctxTracer (StepReplaying name stepId')
           pure (replayStep name stepId' recorded)
@@ -432,7 +431,7 @@ driveStepWith options wctx name placement body =
                           timing
                     )
               case written of
-                Left err -> pure (Left (TransactError.SystemDatabase err))
+                Left err -> pure (Left (TransactError.fromSystemDB err))
                 Right () -> case outcome of
                   Right _ -> do
                     runTracer wctx'.wctxTracer (StepOutputRecorded name stepId')
@@ -450,7 +449,7 @@ driveStepWith options wctx name placement body =
           if preempted
             then do
               runTracer wctx'.wctxTracer (StepPreempted name stepId')
-              pure (Left (TransactError.SystemDatabase (SystemDBError.WorkflowCancelled {workflowId = workflowId wctx'})))
+              pure (Left (TransactError.fromSystemDB (SystemDBError.WorkflowCancelled {workflowId = workflowId wctx'})))
             else do
               marker <- nextWorkflowMarker wctx'
               rest workflowId' stepId' attempt failures marker

@@ -31,8 +31,9 @@ where
 import DBOS.Prelude
 import DBOS.SystemDB (Timestamp, WorkflowId (..), WorkflowStatus (..), millisDuration, secondsDuration)
 import DBOS.SystemDB qualified as SysDB
+import DBOS.Transact.Serialization (decodeWorkflowValue, CodecError (..))
 import DBOS.Transact
-  ( CodecError,
+  (
     DBOS,
     EngineOnly,
     Error (..),
@@ -41,7 +42,6 @@ import DBOS.Transact
     SerializedWorkflowValue (..),
     Timeout (..),
     WorkflowCtx,
-    decodeWorkflowValue,
     newWorkflowKey,
     registerWorkflowRef,
     runWorkflowRef,

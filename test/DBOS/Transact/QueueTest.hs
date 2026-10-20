@@ -17,11 +17,12 @@ import DBOS.Prelude
 import DBOS.SystemDB (Applications (..), AwaitedOutcome (..), QueueRecord (..), SystemDB (getQueue, upsertQueue), WorkflowInitResult (..), WorkflowStatus (..), getWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact (CodecError, Config (..), DBOS, WorkflowCtx, Executor, EngineOnly, Environment (..), Error (..), QueueConflict (..), Serialization (..), SerializedWorkflowValue (..),
+import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Transact ( Config (..), DBOS, WorkflowCtx, Executor, EngineOnly, Environment (..), Error (..), QueueConflict (..), Serialization (..), SerializedWorkflowValue (..),
  WorkflowId (..),
  WorkflowKey,
  WorkflowRef,
- WorkflowHandle (..), configFromEnv, decodeWorkflowValue, defaultQueueOptions, encodeWorkflowValue, enqueueWorkflow, handleResult, handleStatus,
+ WorkflowHandle, configFromEnv, defaultQueueOptions, enqueueWorkflow, handleResult, handleStatus,
  launchWithEnvironment,
  newDBOS, newWorkflowKey, registerWorkflowRef, registerWorkflow, registerQueue, retrieveWorkflow, shutdown, waitForWorkflow)
 import DBOS.Transact.Logger (nullTracer)
@@ -189,7 +190,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchQueueExec dbos isolatedEnvironment
-          enqueued <- enqueueWorkflow dbos key workflowId (Just (encodeWorkflowValue (21 :: Int))) queueName
+          enqueued <- enqueueWorkflow dbos key workflowId (Just (encodeWorkflowInput (21 :: Int))) queueName
           case enqueued of
             Left err -> fail (show err)
             Right result -> result.initResultStatus @?= Enqueued

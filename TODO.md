@@ -1,12 +1,467 @@
 # TODO — scoped workflow capabilities + step tables
 
 Branch `proto/phantom-brands` (cut from main-line work; main untouched).
-Date: 2026-10-04. Gate state: full suite **650/650**, psql mirror green,
-migration ceiling 114, permanent probes 10/10 (`make probes`).
-Design record: `.lavish/rust-port-plan.html` (Phase 10, Rule 9, TODO 12–16),
-`docs/scoped-workflow-capabilities.md` (§1–§10),
+Date: 2026-10-04 (serialization slices added 2026-10-18; status synced
+2026-10-19). Gate state: full suite **830/830**, psql mirror green,
+migration ceiling 121. Design record: `.lavish/rust-port-plan.html` (Phase 10,
+Rule 9, TODO 12–16), `docs/scoped-workflow-capabilities.md` (§1–§10),
 `docs/agent-skill-api-review.md` (per-rule verdicts),
 `proto/deterministic-steps/README.md`, `proto/dual-store/README.md`.
+
+## Rust serialization stack — parity slices → Python interop (2026-10-18)
+
+Oracle: `~/dev/dbos-transact-rust` @ `0f1dd66` (main) plus branch
+`origin/refuse-non-finite-floats` (`fa48de8`…`e2fed10`, **unmerged upstream** —
+re-pin the branch hash before starting S7). Port position: Rust #93/#94 landed
+(`c84b4a1`). Ported 2026-10-19: S1's read dispatch and init-row input, S2 in the
+simplified ADR-0038 form, S3 in full, S4–S7, and phase P's golden corpus plus
+the Python read-back. Remaining: none in this stack.
+
+Slice state (2026-10-19):
+
+| Slice | State |
+|---|---|
+| S1 | done — dispatch, init-row input, schedule context untagged |
+| S2 | done (simplified per ADR-0038) |
+| S3 | done — portable caller error record, tag-dispatched replay |
+| S4 | done (load_output + limit/offset on instance, in-workflow, client) |
+| S5 | done (client listen default false, field inert) |
+| S6 | done — 43/44 re-vendored; schema probe and oracle green |
+| S7 | done — ADR-0039 option A; aeson facts pinned |
+| P | done — P2 golden corpus, P1/P3 Python read-back |
+
+Goal: port these commits for **Rust parity**, then prove **Haskell↔Python
+interop** on one database (phase **P**) — the payload formats are the
+cross-SDK contract, so parity without a cross-read is not evidence.
+
+Order: **S1 → S2** (S2 unblocks phase P); **S3** after S1; **S4/S5/S6**
+independent; **S7** after S1+S2; **P** after S2 and again after S7.
+
+Standing gates, every slice:
+
+- `make db-migrate` first (the Rust runner owns migrations; idempotent, and
+  the ceiling must not move — 121 today).
+- One IO/Sim pair toggled in `test/Main.hs` (`-- $>`); read `ghcid.txt` after
+  every reload, never sleep first; sim trees that `printSimTrace` need
+  `dependentTestGroup … AllFinish`; IO-only cases get the `-- IO only:` line
+  and an ADR-0020 running-list entry.
+- Watcher pair green → `cabal test test --test-option='--pattern'
+  --test-option='$2 == "<Group>"'` → `cabal test all` only while the watcher
+  is idle (`cabal build all` does not compile tests).
+- Oracle leg: `cargo test -p dbos --test <suite>` read-only from the Rust
+  checkout; never copy code, never chase main.
+- psql against `$DBOS_DATABASE_URL` for the rows the slice writes and reads
+  (a green `cabal test` is not the final gate).
+- Facade discipline: every client-facing name lands in `DBOS.Transact`; every
+  name the facade imports stays exported.
+- Docs at slice end: `.lavish/rust-port-plan.html` delta, `CHANGELOG.md`, and
+  `docs/cross-language-schema-interop.md` whenever the contract moves.
+
+### S1 — Read every payload by its row's `serialization` tag (Rust #95, `52d0f9b`)
+
+Rust: `PayloadEncoding` + `PayloadEncoding::of` (NULL/`""`/`rust_serde` →
+native; `portable_json` → portable; anything else → `UnknownSerialization`,
+never a guess); `decode_tagged` at every read; a workflow's outcome carries
+its format; recovery and dequeue run a row under the row's tag; a fresh start that finds an existing row **no
+attempt owns** runs the row's own input *and* tag (it reads them in the
+`init_workflow` transaction); a schedule's untagged context stays native.
+Behavior-neutral: Rust still writes only `rust_serde`.
+
+Port status (2026-10-19): dispatch landed with S2 under ADR-0038. The codec
+reads NULL/`""`/`rust_serde` as native and `portable_json` as portable, and
+every decode site passes the row's tag (`Registry`, `Step`, `Select`,
+`Datasource`, `Event`, `Stream`, `Message`, `Wait`). `UnknownSerialization`
+landed with S3 on both channels (`SystemDB.Error` and `Transact.Error e`,
+mapped 1:1 by `fromSystemDB`, control on both). The fresh-start-on-an-existing
+row case is done: `init_workflow` carries `initResultExistingInput`
+(`Maybe (Maybe Text)`, read in the claiming transaction) and the three start
+paths run `runInputAfterInit` — the stored input and tag when the init found
+an unowned existing row, otherwise the caller's. The schedule context is
+untagged by construction: `ScheduleRecord.scheduleRecordContext` is the row's
+raw JSON text and is never dispatched through the payload tag (the schedule
+tests round-trip it), so there is no tag to read. S1 is complete.
+
+- Do: add `PayloadEncoding` + `payloadEncodingOf`/`decodeTagged` to
+  `DBOS.Transact.Serialization`; dispatch at every decode site: `Registry.hs:142`
+  (argument), `Handle.hs:229-243` (result), `Step.hs:239` (replay),
+  `Select.hs:139`, `Datasource.hs:393`, `Event.hs:117`, `Stream.hs:193,219`,
+  `Message.hs:180`, `Wait.hs:78`; recovery/dequeue under the row's tag
+  (`Recovery.hs`/`Dequeue.hs`); the init-row case above (`Workflow.hs:107-130`
+  currently runs the caller's `input`, not the stored row's — verify and fix);
+  add `UnknownSerialization` to `SystemDB.Error` and `Transact.Error e` with
+  the boundary mapping; on a recorded step error only *undecodable bytes*
+  degrade to `StepFailed` (Rust's review fix). Done 2026-10-19: dispatch,
+  `UnknownSerialization`, and the init-row input (`initResultExistingInput` +
+  `runInputAfterInit`).
+- Tests: port `crates/dbos/tests/serialization.rs` (187 lines) and the
+  `sysdb.rs` tag cases (49). Owners: `SerializationTest.hs`, `TypesTest.hs`,
+  plus the per-domain suites for input/output/event/message/stream/await
+  reads. Pin the two fixed `portable_json` writers on the read side (sleep
+  wake time `Backend.hs:1455`, the stream-close sentinel `Types.hs:739`).
+- Validate: watcher pair for the read-path group; the oracle suite above;
+  psql `select workflow_uuid, serialization from dbos.workflow_status …` for
+  an untagged/empty-tag fixture written raw; a fork onto a row tagged
+  `pickle` expects `UnknownSerialization` (engine channel, not a retry).
+- Docs: correct `Serialization.hs`'s header claim ("Haskell-written rows
+  readable by Python DBOS … no divergence") — Python refuses `rust_serde`
+  (`_serialization.py:270-289`); the interop doc gains the tag-dispatch table.
+
+### S2 — `portable_json` (Rust #97, `1cb3983`)
+
+Portable JSON is the cross-SDK wire format and it is plain aeson JSON — no new
+codec, no byte-exactness machinery. Python reads it (`portable_json`,
+`_serialization.py`), so the contract is the JSON shape and phase P proves it.
+
+Port status (2026-10-19): done in the simplified form ADR-0038 records —
+every payload is tagged `portable_json`, workflow arguments use the envelope,
+errors use the portable record, the codec is internal to
+`DBOS.Transact.Serialization`, and there is no `SerializationFormat` surface
+and no serializer selection. The original S2 plan below is historical.
+
+- Workflow input is the envelope `{"positionalArgs": […], "namedArgs": {…}}`.
+  Reads: one positional → the input value, named-only → a record, several
+  positionals → a tuple; `()` is no arguments, a JSON `null` is one `None`.
+- Every other payload (result, error, event, message, stream value) is a plain
+  JSON value tagged `portable_json`; an error written `{name, message, code,
+  data}` reads back structured when the reader's error type matches, else as a
+  message-bearing portable error.
+- `SerializationFormat {Default, Portable, Native}` per registration, per
+  enqueue, and per event/message/stream write; `Default` defers: a start takes
+  its registration's choice, an in-workflow write the workflow's, a client its
+  configured serializer.
+- Do: `SerializationFormat` in `Transact.Serialization`, carried through
+  `Registry.hs`, `RunOptions`/`StartOptions`/`EnqueueOptions` and the write
+  calls; envelope + error encode/decode; `clientEnqueueWorkflowPortable`
+  writes a raw envelope for a callee in another language; `Handle` decodes by
+  the recorded format; scheduled runs take the registration's format (hook it
+  in the schedule sysdb layer although the engine exposure stays deferred per
+  ADR-0036); a portable error variant in `Transact.Error`.
+- Tests: new `PortableCases.hs` + live/sim pair — envelope both directions,
+  the read shapes above, unit-is-none, a portable child's error replayed by
+  its parent, the same value written/read under both formats.
+- Validate: psql the stored `workflow_input.inputs` and
+  `workflow_status.serialization` on a portable fixture (the envelope is the
+  contract; phase P1 confirms Python reads it); oracle suite `portable`.
+- Docs: `docs/cross-language-schema-interop.md` gains the envelope + error
+  contract; gap 7 in `docs/python-test-gap-analysis.md` is unblocked here.
+
+### S3 — Record a management result under the tag its bytes are in (Rust #104, `0f1dd66`)
+
+Rust: a management call's result was recorded by the sysdb itself — JSON bytes
+tagged `portable_json` whatever the row said — so the tag promised more than
+the bytes delivered and replay ignored it. The recording now carries the
+format its bytes are actually in, replay decodes by the tag, and an unreadable
+tag is `UnknownSerialization` mapped back to the engine error (a control error
+would make the workflow retry until recovery parked it). Sleep's wake time and
+the stream-close sentinel keep their fixed portable tag.
+
+Port status (2026-10-19): done. The sysdb layer gained
+`UnknownSerialization` (render `serialization N is not available`,
+`shouldRecord` false) plus `encodePortableError`/`decodePortableError`; the
+engine carries the same variant, `fromSystemDB` maps it 1:1, and `controlOf`
+treats it as control. `recordCallerOutcome` writes the portable record
+`{name,message,data}` under `portable_json`; `checkCallerStep` reads
+`stepCheckSerialization` and dispatches before replaying (NULL/`""`/
+`rust_serde` native, `portable_json` portable, anything else refused). The sim
+mirror (`verifyCallerStep`) does the same. Pinned by `PostgresTest` (portable
+write, replay, and a `pickle` tag refused), a pure `ManagementTestSim` tag
+case, and the `ErrorTest`/`SerializationTest` taxonomy cases; oracle
+`management` green.
+
+- Do: tag those sites with the format their bytes are in (the port has one
+  codec today, so `rust_serde`), record a refusal under the same tag, decode
+  replay by the tag, map an unreadable tag to the engine-level
+  `UnknownSerialization`, and keep the two fixed portable writers (sleep's
+  wake time `Backend.hs:1455`, the stream-close sentinel `Types.hs:739`).
+- Tests: a management result round-trips through replay; a row tagged `pickle`
+  reports `UnknownSerialization` on the engine channel. Owner:
+  `ManagementTest` (+ its sim mirror where the case is dual-stack).
+- Validate: oracle `cargo test -p dbos --test management`; watcher
+  `ManagementTest`/`ManagementTestSim`; psql the
+  `operation_outputs.serialization` of a management checkpoint.
+- Depends on S1.
+
+### S4 — Step listing: `load_output` and paging (Rust #102, `9c05128`)
+
+Rust: `ListWorkflowStepsOptions {load_output = true, limit, offset}` on
+`list_workflow_steps_with` (DBOS and Client); `list_workflow_steps` keeps
+loading everything; outputs off means the payload columns are left out of the
+query (a failed step then looks like a successful one — documented); the
+statement moves into a named query so a unit test checks the SQL actually
+sent.
+
+Port status (2026-10-19): done. `ListWorkflowStepsOptions {loadOutput, limit,
+offset}` (default reads everything) rides `listWorkflowStepsWith`,
+`listWorkflowStepsWithInWorkflow`, and `clientListWorkflowStepsWith`; the
+existing `listWorkflowSteps`/`clientListWorkflowSteps` delegate with the
+default. The statement now picks one of two SQL variants (`listStepsSql`):
+the metadata variant never selects `output`/`error` (the decoder fills both
+`Nothing`), and `limit $2 offset $3` pages in step order. Pinned by a pure
+SQL test, shared live/sim scenarios (outputs left out; five-step paging) and
+the client surface in `ManagementTest`; oracle `management` 33/33. The port
+reports `StepOutcomeNotLoaded` for the outputs-off read (the oracle's silent
+success is documented there), distinguishes an in-flight row as
+`StepOutcomePending`, and replays the in-workflow listing from a recorded
+`(loadOutput, [StepRecord])` snapshot.
+
+- Do: `ListWorkflowStepsOptions` (+ `defaultListWorkflowStepsOptions`),
+  `listWorkflowStepsWith`/`listWorkflowStepsWithInWorkflow` and
+  `clientListWorkflowStepsWith`; facade exports; a statement unit test
+  asserting the rendered SQL leaves the payload columns out and binds
+  `LIMIT`/`OFFSET`.
+- Tests: port `management.rs`'s two cases — outputs left out, and paging five
+  steps on both surfaces.
+- Validate: oracle `cargo test -p dbos --test management`; watcher
+  `ManagementTest`/`ManagementTestSim`; psql `operation_outputs` for the paged
+  fixture.
+
+### S5 — Client `use_listen_notify` defaults to false (Rust #101, `0b2adef`)
+
+Rust: `ClientConfig::new` sets `use_listen_notify = false` (with the listener
+on against executors that don't push, `get_event` waits out the 60-second
+fallback); the field's docs say when to turn it on; the state-based tests
+replace the LISTEN-counting test.
+
+Port status (2026-10-19): done. `clientConfigNew` sets `False` and the field
+is documented at its site as accepted-but-inert (the port polls; there is no
+listener to turn on). `ClientTest` pins the default. No behavior test exists
+to write — the port cannot observe a listener it does not have — so the pin is
+the contract.
+
+- Do: default `False`; document the field at its site (port polls regardless;
+  the field is accepted for parity). No behavior test exists to write: the
+  port cannot observe a listener it does not have — record `-- N/A:` with the
+  reason in `ClientTest` rather than inventing one.
+- Validate: oracle `cargo test -p dbos --test client`; `cabal test all`;
+  pin the default in `ConfigTest`/`ClientTest`.
+
+### S6 — Migrations 43/44 apply on any Postgres (Rust #100, `2ef88ea`) + re-vendor
+
+Rust: 43/44 drop the streams/workflow_events triggers but applied only when
+notify was on, so a database migrated with notify on and later taken past 44
+by a notify-off process kept both triggers with the migrations recorded as
+applied. Both now apply on every PostgreSQL database (`IF EXISTS` makes them
+no-ops where the triggers never existed; CockroachDB never had them);
+databases already past 44 are not repaired. The migration docs and the
+notify-off regression test now check the two trigger *functions* as well.
+
+Port status: `rust-migrate/src/migrations/mod.rs` now lists 43/44 as
+`Applies::Postgres`, and both SQL files carry the "applies on every
+PostgreSQL database" header (re-vendored 2026-10-19 from `2ef88ea`). The
+ceiling stays 121. Validated the same day: `PostgresTest` pins the absence of
+both triggers/functions and the survival of the notifications pair,
+`make db-migrate` is 121→121 twice, oracle
+`cargo test -p dbos --test migrations` is 27/27, psql shows only
+`dbos_notifications_trigger`/`notifications_function`, and the full suite is
+836/836.
+
+- Do: re-vendor the two SQL files and the `mod.rs` entries from `0f1dd66`
+  (`WhenNotify` → `Postgres`), plus any runner doc the commit touched; ceiling
+  stays 121.
+- Tests: a schema probe that both triggers and both functions are absent
+  after migration (`pg_trigger`/`pg_proc`), and `make db-migrate` twice
+  (idempotent).
+- Validate: oracle `cargo test -p dbos --test migrations`; `make db-migrate`;
+  psql probes.
+
+### S7 — Non-finite floats (branch `fa48de8`…`e2fed10`)
+
+Rust: `encode` refuses a non-finite f32/f64 anywhere in a value (portable and
+native alike at first), then `rust_serde` alone round-trips them as the JSON
+strings `"NaN"`/`"Infinity"`/`"-Infinity"` (a lenient deserializer turns a
+name into a float only where a float is asked for — a `String` field holding
+`"NaN"` stays a string; buffering targets like `Value`/`untagged`/`flatten`
+see strings), `portable_json` keeps refusing (the SDKs agree on no form);
+float map keys and serde_json's arbitrary-precision numbers are read;
+non-`encode` value paths (portable error fields, DBOS's own error variants, a
+schedule's context) go through the same float rule because a `Value` cannot
+hold a non-finite.
+
+**Measured port reality (aeson 2.3.2.0, checked 2026-10-18):**
+`encode (0/0 :: Double)` = `null` (the value is already gone),
+`encode (1/0)` = `"+inf"`, `encode (-1/0)` = `"-inf"`, and reading back gives
+`Right Infinity` for both spellings but `Left` for `"NaN"`, `"Infinity"`,
+`"-Infinity"`. Aeson collapses NaN inside `toJSON`, before any port code or
+serializer sees the value, and there is no `serialize_f64`-style hook to
+refuse it. Re-checked 2026-10-19: `fromJSON Null :: Result Double` is
+`Success NaN`, while `Result (Maybe Double)` is `Success Nothing` — the
+optional path cannot distinguish stored `null` from NaN.
+
+Port status (2026-10-19): decided as option A (ADR-0039). `SerializationTest`
+pins the aeson facts (NaN→`null`, ±Inf→`"+inf"`/`"-inf"`, a required `Double`
+reads `null` as NaN, `Maybe Double` reads `Nothing`, Rust's names are text) and
+the envelope/record shapes; the shared `scenarioNonFinite` writes a
+`-Infinity` argument and a `(+Inf, NaN)` result through the engine on both
+stacks, and the live row's stored text is `{"positionalArgs":["-inf"],
+"namedArgs":{}}` / `["-inf","+inf",null]`. Oracle branch `e2fed10`
+`serialization` is 5/5; full suite 843/843.
+
+- Decision (ADR-0039, accepted 2026-10-19): (A) keep `ToJSON`, document the
+  deviation table, and pin the observable facts — NaN writes `null`, a
+  required `Double` reads `NaN`, `Maybe Double` reads `Nothing`, ±Inf use
+  aeson's spelling, Rust's names are unreadable — **chosen**; (B) replace
+  `ToJSON` with the port's own payload class carrying a failure channel was
+  rejected as app-wide churn with no portable-format gain.
+- Do under (A): doc notes at `encodeWorkflowValue`/`decodeWorkflowValue`; **no**
+  text-level rewrite of the names (it cannot tell a float from a `String` field
+  holding the same text — the exact confusion Rust's typed deserializer
+  avoids — so record why it is declined); the schedule context and both error
+  paths documented as `Value`-limited; the `record_step_output` comment
+  corrected as Rust corrected it.
+- Tests: port the halves of `crates/dbos/tests/serialization.rs` (65 new
+  lines) that hold under the chosen option; pin the aeson facts above so the
+  deviation is visible rather than silent.
+- Validate: oracle `cargo test -p dbos --test serialization` on the branch;
+  psql the stored text of a NaN/±Inf payload; phase **P3** measures the
+  cross-SDK consequence (Python reads `"+inf"` as a string where Rust refuses
+  the write).
+- `185fdca` (`FloatVisitor` naming) and `18659e7` (envelope probes moved into
+  `serialization/shape.rs`) are oracle-internal refactors — no port work;
+  note them as N/A with the reason.
+
+### P — Haskell↔Python interop validation (after S2; repeat after S7)
+
+Harness lives **outside the repo** (e.g. `~/.local/share/dbos-interop/`),
+Python from `~/dev/dbos-transact-py`, one `DBOS_DATABASE_URL` for both sides;
+Python's `DBOSClient` never migrates (`_client.py:157`), so the port's ceiling
+stays authoritative.
+
+- **P1 — Haskell writes, Python reads.** Run a portable workflow from Haskell
+  (input with positional + named args, an event, a stream value, a message, a
+  result); a Python script reads it back (`client.retrieve_workflow`,
+  `get_event`, `read_stream`, `list_workflow_steps(load_output=...)`) and
+  asserts the envelope shape and values. Failure modes to watch: the port must
+  write `portable_json`, not `rust_serde` — Python refuses the latter
+  (`TypeError: Serialization rust_serde is not available`).
+- **P2 — Python writes, Haskell reads.** A Python script enqueues a portable
+  workflow (positional + named args) and sets an event/stream; the port claims
+  and runs it under the same app name/version. Plus an **in-repo** golden-row
+  test: raw-SQL insert of Python's `GOLDEN_INPUTS_JSON`
+  (`tests/test_interop.py:31-35`) tagged `portable_json`, and the port runs
+  it — no Python needed at test time, so the pin survives in CI.
+  (2026-10-19: the in-repo half landed as `test/DBOS/Transact/InteropTest.hs`:
+  a canonical portable write plus raw Python canonical/namedArgs rows, with
+  the missing-`namedArgs` tolerance fix. The out-of-process Python script
+  stays under P1.)
+- **P3 — negatives and non-finite pins.** Python refuses `rust_serde` rows (so
+  native rows are SDK-local by contract); a Haskell portable ±Inf payload is
+  read by Python as the string `"+inf"` (S7's measured consequence) — capture
+  it as evidence for the S7 decision.
+- Evidence per run: the psql row dump (`inputs`, `output`, `serialization`),
+  the Python assertions, the port's log lines. Nothing beyond the golden-row
+  test is committed; `docs/cross-language-schema-interop.md` records the
+  contract and the ceiling (still 114 there — correct it in S1/S2).
+
+Port status (2026-10-19): P2's in-repo half is `InteropTest`; P1/P3 ran
+out-of-process with Python's `.venv` and `DBOSClient` against the same
+`DBOS_DATABASE_URL`: the Haskell canonical row read back its result dict,
+`interop_status` event, `interop_stream` value, and a two-step workflow's
+portable outputs (`one`=22, `two`=44). The non-finite row read back as
+`["-inf","+inf",null]` with both infinities as Python `str` (P3). The harness
+lives outside the repo.
+
+### Interop seam audit (2026-10-19, Python skill as oracle)
+
+Ran against the shared `dbos` schema (123) with a Haskell GHCi executor and a
+Python `DBOS`/`DBOSClient` in IPython; the scratch harness lives outside the
+repo. The Python skill references (`advanced-serialization`,
+`advanced-shared-database`, `client-enqueue`, `comm-*`,
+`workflow-introspection`, `workflow-control`) are the seam list.
+
+Closed in this sweep:
+
+- **Facade surface.** `DBOS.Transact` now exports `getAllEvents`,
+  `getWorkflowRecord`, `clientWorkflowRecord`, `listQueuedWorkflows`,
+  `WorkflowRecord (..)`, `WorkflowFilter (..)`, `defaultWorkflowFilter`,
+  `Applications (..)`, `Timestamp` (`timestampFromEpochMs`/`timestampToEpochMs`),
+  `VersionInfo (..)`, `RateLimit (..)`, and the codec entry points (`CodecError (..)`, `encodeWorkflowInput`,
+  `encodeWorkflowValue`, `decodeWorkflowValue`); `getAllEvents`,
+  `getWorkflowRecord`, and `listQueuedWorkflows` are pinned in
+  `InteropTest`, the types by use in the facade.
+- **Portable error message.** Closed: `ErrorApplication Text` now writes the
+  payload text as `message` (`"boom"`, not `"\"boom\""`), so Python's
+  `PortableWorkflowError.message` reads `boom`; pinned by `SerializationTest`
+  and a Python read-back of a Haskell error row.
+- **Typed reads preferred.** Closed: all public step listings return the
+  typed `StepInfo` outcome ADT; the tag-preserving `StepRecord` loops are
+  internal for backend/engine/tag tests. The management/client tests assert
+  `StepInfo` (names, ids, not-loaded, decoded, portable failure) and a pure
+  conversion test pins the `py_pickle` output/error as explicit undecodable
+  outcomes. `clientGetEvent` and instance `getWorkflowEvent` are typed; their
+  `...Serialized` forms are internal.
+- **Haskell → Python.** Canonical result/event/stream/steps, the non-finite
+  strings, a raw Python error row (`name`/`message`/`data`), and a Python
+  `DBOSClient.enqueue` of a **Haskell-owned** workflow
+  (`application_name="repl-hs"`, `serialization_type=PORTABLE`, queue
+  `repl-q`) which the Haskell executor dequeued and ran; Python read
+  `{'from':'haskell','n':7,'ok':True}`.
+- **Python → Haskell.** A portable Python workflow's result read by
+  `clientRetrieveWorkflow` + `handleResult`, status by `clientWorkflowStatus`,
+  event by `clientGetEvent` (raw `SerializedWorkflowValue`, decoded with
+  `decodeWorkflowValue`), and steps by `clientListWorkflowSteps`.
+- **Demo boundary.** `demo-apps` no longer depends on
+  `dbos-transact-hs:dbos-transact-internals`; every demo import is
+  `DBOS.Transact`. The sublibrary stays `visibility: private`, is still a
+  test-suite dependency, and `cabal build exe:demo-apps` is green.
+
+Open bugs/gaps:
+
+- **Schedules.** Python's `create_schedule`/`list_schedules`/`get_schedule`/
+  `pause`/`resume`/`delete`/`apply_schedules`/`backfill`/`trigger` have no
+  Haskell client/engine/facade twin (ADR-0036 defers exposure). Schedule
+  contexts are not interoperable: the port stores raw JSON text, while
+  Python's scheduler deserializes every shared `workflow_schedules` row with
+  its own tagged serializer and crashes on a Haskell row (`binascii.Error:
+  Incorrect padding`). Clear/migrate those rows before launching Python, or
+  port the schedule context format.
+- **Step payload asymmetry.** Python step outputs stay native (`py_pickle`)
+  even inside a `PORTABLE` workflow — observed `py_step` output `gARLAy4=`
+  with `stepRecordSerialization = Just "py_pickle"` — while the port writes
+  portable step outputs. Python reads Haskell steps (P1); Haskell cannot
+  replay/fork a Python workflow's native steps. All public listings return
+  the typed `StepInfo`; the raw `[StepRecord]` is internal. The outcome ADT
+  separates not-loaded, absent, decoded, and undecodable payloads, and a
+  portable vs undecodable error. The Rust/TS/Python/Haskell field mapping is
+  in `docs/cross-language-schema-interop.md` § “Step records vs StepInfo”.
+- **`rename_application`.** The sysdb method exists, but there is no client or
+  facade wrapper; Python's `DBOSClient.rename_application` ownership transfer
+  (and `adopt_unclaimed_rows`) has no interop surface here.
+- **In-app cross-application enqueue.** `enqueueWorkflow` takes a
+  `WorkflowRef` and stamps the executor's own application; Python's
+  `enqueue_workflow_with_options` accepts `application_name`/`app_version`.
+  Only `DBOSClient` exposes the cross-application options today.
+- **`read_stream_offset`.** Python's one-value wait at an offset has no
+  direct twin; `readStreamFrom`/`clientReadStreamFrom` are readers from an
+  offset.
+- **Error data.** A foreign portable error's `data` decodes into the caller's
+  `Error e` only when the shape matches; otherwise `decodeErrorText` falls
+  back to `name: message`. Structured cross-SDK error payloads are therefore
+  best-effort by design.
+
+### Deviations to record while porting
+
+- S1: `UnknownSerialization` never guesses; NULL/empty tag = native (pre-tag
+  rows); the `Serialization.hs` "readable by Python" claim is wrong today.
+  2026-10-19: the header now states the portable/legacy/unknown rule, and the
+  engine channel treats the variant as an outcome — only the registry's
+  workflow-input decode maps it to control (`FailureControl`).
+- 2026-10-19: a plain start of an existing `ENQUEUED`/`DELAYED` row joins it
+  with a polling handle; only a dequeue claim executes it, because an
+  unclaimed execution cannot record an outcome. Pinned by
+  `scenarioQueuedStartPolls` on both stacks.
+- S2 (2026-10-19): superseded by ADR-0038 — no `SerializationFormat`; the
+  envelope + portable error record are the public contract. The codec module
+  stays internal; the facade re-exports its entry points for demo apps
+  (ADR-0038 addendum), and demo-apps no longer depend on the private
+  internals sublibrary.
+- S3: a management checkpoint's tag decides its reader.
+  2026-10-19: landed with the listing replay snapshot; an unreadable tag is an
+  outcome in the listing (`PayloadUndecodable`/`FailureUndecodable`) and a
+  control signal only for a workflow input.
+- S7: the aeson deviation table above — ADR required whichever option lands.
+- Out of scope (2026-10-18): Rust #99's custom serializer — Python interop
+  rides `portable_json` and no application here defines its own codec, so the
+  port stays `Serializer = RustSerde`.
 
 ## Constraint-audit actions (2026-10-16)
 

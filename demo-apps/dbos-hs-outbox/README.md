@@ -19,9 +19,9 @@ Both Python patterns are ported:
 - Step names (`insert_order`, `send_order_notification`,
   `update_notification_status`) match the oracle's function names, so the
   tracer and checkpoint sequence read the same.
-- The enqueued consumer takes a `NotifyEnvelope` (`positionalArgs`) rather
-  than bare positional arguments: the Python framework unwraps the envelope
-  the SQL function writes, while the Haskell engine reads the stored input
+- The enqueued consumer takes the unwrapped `(order id, customer, item)`
+  triple; the engine decodes the portable `positionalArgs` envelope before
+  the body runs, as the Python framework does.
   as-is. Same atomicity, one documented seam.
 - Tracer comparison: `TRACE_LEVEL=debug` emits
   `TransactionRunning/TransactionOutputRecorded` and

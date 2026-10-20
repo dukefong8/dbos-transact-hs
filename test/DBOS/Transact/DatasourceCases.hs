@@ -57,6 +57,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.SystemDB (BackendErrorKind (..), NewWorkflow (..), Submission (..), SystemDB (..), newWorkflow)
 import DBOS.SystemDB qualified as SysDB
+import DBOS.Transact.Serialization (encodeWorkflowValue)
 import DBOS.Transact
   (
   DBOS,
@@ -69,7 +70,6 @@ import DBOS.Transact
   Tx (..),
   WorkflowCtx,
   WorkflowId (..),
-  encodeWorkflowValue,
   registerDataSource,
   runNestedStep,
   runTxOutside,

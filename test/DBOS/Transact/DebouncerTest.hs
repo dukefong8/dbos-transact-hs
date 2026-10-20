@@ -14,7 +14,9 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.Transact.Serialization (encodeWorkflowInput)
 import DBOS.Transact
+import DBOS.Transact.Management (stepInfoFromRecord)
 import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
 import DBOS.Transact.DebouncerCases
 import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
@@ -74,7 +76,7 @@ withDebouncerFixture getBackend getTracer body = do
   -- case runs it, passing its tag as input.
   let parentBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
       parentBody tag wctx = do
-        debounced <- debounceInWorkflow wctx targetRef (debouncerNew {debouncerQueueName = Just targetQueue}) tag (secondsDuration 3) (Just (encodeWorkflowValue ("one" :: Text)))
+        debounced <- debounceInWorkflow wctx targetRef (debouncerNew {debouncerQueueName = Just targetQueue}) tag (secondsDuration 3) (Just (encodeWorkflowInput ("one" :: Text)))
         case debounced of
           Right joined -> pure (Right joined.workflowId)
           Left err -> pure (Left err)
@@ -103,7 +105,7 @@ withDebouncerFixture getBackend getTracer body = do
               listed <- runSystemDB (SomeSystemDB backend) (\db -> SystemDB.listSteps db wid True Nothing Nothing Nothing)
               case listed of
                 Left err -> throwIO (userError (show err))
-                Right steps -> pure steps,
+                Right steps -> pure (map (stepInfoFromRecord defaultListWorkflowStepsOptions) steps),
             dbUserRuns = readTVarIO runsVar,
             dbUserOutputs = readTVarIO outputsVar,
             dbAwaitUser = \wid -> do

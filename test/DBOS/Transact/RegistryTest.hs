@@ -4,19 +4,19 @@
 module DBOS.Transact.RegistryTest (tests) where
 
 import DBOS.Prelude
+import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
-    EngineOnly, CodecError,
+    EngineOnly,
     WorkflowCtx,
     WorkflowId (..),
     Error,
     SerializedWorkflowValue (..),
-    decodeWorkflowValue,
-    encodeWorkflowValue,
     newWorkflowKey,
   )
 import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Error (Failure (..))
+import DBOS.Transact.Error (Error (..), Failure (..))
+import DBOS.Transact.Serialization (unWorkflowInput)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Context (withWorkflow)
 import DBOS.Transact.Registry
@@ -120,7 +120,7 @@ tests =
         conn <- connOver backend nullTracer
         result <-
           withWorkflow conn registryTestIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
-            case workflow of ErasedWorkflow body -> body (Just (encodeWorkflowValue (21 :: Int))) wctx
+            case workflow of ErasedWorkflow body -> body (Just (unWorkflowInput (encodeWorkflowInput (21 :: Int)))) wctx
         case result of
           Right (Just output) -> decodeWorkflowValue "result" (Just output) @?= Right (42 :: Int)
           other -> fail (show other),
@@ -141,8 +141,9 @@ tests =
           withWorkflow conn registryTestIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
             case workflow of ErasedWorkflow body -> body (Just (SerializedWorkflowValue "\"not a number\"" Nothing)) wctx
         case result of
-          Left (FailureRecorded payload) -> assertBool "names the argument" ("argument" `Text.isInfixOf` payload)
-          Left (FailureControl _) -> fail "expected a recorded argument failure"
+          Left (FailureControl (Deserialization {what = what})) -> what @?= "argument"
+          Left (FailureControl _) -> fail "expected the argument decode failure"
+          Left (FailureRecorded _) -> fail "expected an input decode failure to be control, not recorded"
           Right _ -> fail "expected malformed input to fail decoding",
       testCase "a reference holds the identity it registered under" $ do
         registry <- newRegistry

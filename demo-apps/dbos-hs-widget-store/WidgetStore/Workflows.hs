@@ -32,7 +32,7 @@ import Control.Monad.Except (ExceptT (..), runExceptT)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Prelude
-import DBOS.Transact (DataSource, Duration, EngineOnly, Error, IsolationLevel (..), Topic (..), TransactionConfig (..), Tx, WorkflowCtx, WorkflowRef, encodeWorkflowValue, millisDuration, recv, runTxStep, secondsDuration, setEvent, sleepStep, startChildWorkflow, startOptionsDefault, workflowId)
+import DBOS.Transact (DataSource, Duration, EngineOnly, Error, IsolationLevel (..), Topic (..), TransactionConfig (..), Tx, WorkflowCtx, WorkflowRef, encodeWorkflowInput, millisDuration, recv, runTxStep, secondsDuration, setEvent, sleepStep, startChildWorkflow, startOptionsDefault, workflowId)
 import WidgetStore.Steps (CheckoutSteps (..), DispatchSteps (..), OrderId (..))
 import WidgetStore.Store
 
@@ -110,7 +110,7 @@ checkoutWorkflow ds mkCheckout dispatchRef wctx = runExceptT $ do
           ExceptT (runTxStep ds (namedStep "mark_order_paid") wctx (\sctx tx -> Right <$> (mkCheckout tx).coSetStatus sctx (OrderId orderId) orderStatusPaid))
           -- A child workflow, started and not awaited: dispatching takes ten
           -- seconds and the buyer should not be kept waiting for it.
-          _ <- ExceptT (startChildWorkflow wctx dispatchRef startOptionsDefault (Just (encodeWorkflowValue orderId)))
+          _ <- ExceptT (startChildWorkflow wctx dispatchRef startOptionsDefault (Just (encodeWorkflowInput orderId)))
           ExceptT (setEvent wctx orderIdEvent (Text.pack (show orderId)))
         _ -> do
           -- Refused, or nobody answered before the deadline: the widget

@@ -38,6 +38,7 @@ mockInitResult new =
       initResultRecoveryAttempts = 0,
       initResultDeadline = new.newWorkflowDeadline,
       initResultSerialization = new.newWorkflowSerialization,
+      initResultExistingInput = Nothing,
       initResultShouldExecute = True
     }
 
@@ -49,10 +50,10 @@ mockWorkflow wid =
       workflowRecordName = Just "mock-workflow",
       workflowRecordClassName = Nothing,
       workflowRecordConfigName = Nothing,
-      workflowRecordInput = Just "null",
+      workflowRecordInput = Just "{\"positionalArgs\":[],\"namedArgs\":{}}",
       workflowRecordOutput = Nothing,
       workflowRecordError = Nothing,
-      workflowRecordSerialization = Just "rust_serde",
+      workflowRecordSerialization = Just "portable_json",
       workflowRecordExecutorId = Just "mock-executor",
       workflowRecordApplicationVersion = Just "0.0.0",
       workflowRecordRecoveryAttempts = 0,
@@ -93,7 +94,7 @@ mockStep wid stepId' name =
       stepRecordOutput = Just "\"mock\"",
       stepRecordError = Nothing,
       stepRecordChildWorkflowId = Nothing,
-      stepRecordSerialization = Just "rust_serde",
+      stepRecordSerialization = Just "portable_json",
       stepRecordStartedAt = Just mockTimestamp,
       stepRecordCompletedAt = Just mockTimestamp
     }

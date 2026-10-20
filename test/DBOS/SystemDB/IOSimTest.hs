@@ -157,7 +157,7 @@ waitTests =
   testGroup
     "Waits"
     [ testCase "awaitWorkflowResult answers a success" $ do
-        run (awaitWorkflowResult backend (WorkflowId "wf-1") (secondsDuration 1) True) @?= Right (AwaitedSucceeded (Just "mock-output") (Just "rust_serde")),
+        run (awaitWorkflowResult backend (WorkflowId "wf-1") (secondsDuration 1) True) @?= Right (AwaitedSucceeded (Just "mock-output") (Just "portable_json")),
       testCase "awaitFirstWorkflowId answers the first id" $ do
         run (awaitFirstWorkflowId backend [WorkflowId "wf-1", WorkflowId "wf-2"] (secondsDuration 1)) @?= Right (WorkflowId "wf-1"),
       -- Placeholder pin: the mock answers every call canned, so the empty
@@ -204,7 +204,7 @@ eventMessageTests =
     [ testCase "setEvent succeeds" $ do
         run (setEvent backend (WorkflowId "wf-1") 0 "key" "\"v\"" Nothing) @?= Right (),
       testCase "getEvent answers a value" $ do
-        run (getEvent backend (WorkflowId "wf-1") "key" (secondsDuration 1) Nothing) @?= Right (Just (EncodedValue "mock-event" (Just "rust_serde"))),
+        run (getEvent backend (WorkflowId "wf-1") "key" (secondsDuration 1) Nothing) @?= Right (Just (EncodedValue "mock-event" (Just "portable_json"))),
       testCase "getAllEvents answers the recorded events" $ do
         let result = run (getAllEvents backend (WorkflowId "wf-1"))
         case result of
@@ -220,7 +220,7 @@ eventMessageTests =
       testCase "sendMessages succeeds" $ do
         run (sendMessages backend [message (WorkflowId "wf-1") (SerializedWorkflowValue "\"v\"" Nothing)] Nothing Nothing False) @?= Right (),
       testCase "recv answers a message" $ do
-        run (recv backend (WorkflowId "wf-1") 0 0 Nothing (secondsDuration 1)) @?= Right (Just (EncodedValue "mock-message" (Just "rust_serde")))
+        run (recv backend (WorkflowId "wf-1") 0 0 Nothing (secondsDuration 1)) @?= Right (Just (EncodedValue "mock-message" (Just "portable_json")))
     ]
 
 -- * Versions
@@ -407,9 +407,9 @@ memTests =
           received <- newEmptyMVar
           _ <- forkIO (recv mem (WorkflowId "wf-m") 0 0 (Just "topic") (secondsDuration 10) >>= putMVar received)
           threadDelay 1000
-          _ <- sendMessage mem (message (WorkflowId "wf-m") (SerializedWorkflowValue "\"v\"" Nothing)) {sendTopic = Just (Topic "topic")} (Just "rust_serde") Nothing False
+          _ <- sendMessage mem (message (WorkflowId "wf-m") (SerializedWorkflowValue "\"v\"" Nothing)) {sendTopic = Just (Topic "topic")} (Just "portable_json") Nothing False
           takeMVar received
-        result @?= Right (Just (EncodedValue "\"v\"" (Just "rust_serde"))),
+        result @?= Right (Just (EncodedValue "\"v\"" (Just "portable_json"))),
       testCase "a recv with nothing parked records the timeout as absence" $ do
         result <- runMem $ do
           mem <- newMemDB
@@ -451,9 +451,9 @@ memTests =
           received <- newEmptyMVar
           _ <- forkIO (getEvent mem (WorkflowId "wf-e") "key" (secondsDuration 10) Nothing >>= putMVar received)
           threadDelay 1000
-          _ <- setEvent mem (WorkflowId "wf-e") 0 "key" "\"v\"" (Just "rust_serde")
+          _ <- setEvent mem (WorkflowId "wf-e") 0 "key" "\"v\"" (Just "portable_json")
           takeMVar received
-        result @?= Right (Just (EncodedValue "\"v\"" (Just "rust_serde"))),
+        result @?= Right (Just (EncodedValue "\"v\"" (Just "portable_json"))),
       testCase "a schedule round-trips through create, update, and delete" $ do
         (created, found, paused, gone) <- runMem $ do
           mem <- newMemDB

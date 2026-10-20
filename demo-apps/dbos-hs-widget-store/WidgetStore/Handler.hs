@@ -25,7 +25,7 @@ import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Prelude
-import DBOS.Transact (EngineOnly, Error, StartOptions (..), Topic (..), WorkflowId (..), decodeWorkflowValue, encodeWorkflowValue, getWorkflowEvent, sendWorkflowMessage, startWorkflow, startOptionsDefault)
+import DBOS.Transact (EngineOnly, Error, StartOptions (..), Topic (..), WorkflowId (..), encodeWorkflowValue, getWorkflowEvent, sendWorkflowMessage, startWorkflow, startOptionsDefault)
 import Demo.Http (RouteHandler, runAppOr500, throwRouteError)
 import Hasql.Session qualified as Session
 import IHP.TypedSql.Id (Id' (..))
@@ -115,11 +115,11 @@ startCheckoutWorkflow app key = do
 -- exchange.
 awaitEvent :: WidgetApp -> WorkflowId -> Text -> RouteHandler (Either Text Text)
 awaitEvent app workflow key = do
-  found <- liftIO (getWorkflowEvent app.waDbos workflow key paymentTimeout)
+  found <- liftIO (getWorkflowEvent app.waDbos workflow key paymentTimeout :: IO (Either (Error EngineOnly) (Maybe Text)))
   pure (runExcept $ do
     stored <- liftEither (either (Left . Text.pack . show) Right found)
     value <- maybe (throwError ("event " <> key <> " was never published")) pure stored
-    liftEither (either (Left . Text.pack . show) Right (decodeWorkflowValue key (Just value))))
+    pure value)
 
 freshIdempotencyKey :: IO Text
 freshIdempotencyKey = UUID.toText <$> UUID.V4.nextRandom

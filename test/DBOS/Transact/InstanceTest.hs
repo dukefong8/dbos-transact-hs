@@ -15,6 +15,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import DBOS.SystemDB (AwaitedOutcome (..), VersionInfo (..), WorkflowRecord (..), getWorkflow, listApplicationVersions)
 import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.Transact.Serialization (WorkflowInput, encodeWorkflowInput)
 import DBOS.Transact
   (
     EngineOnly, Config (..),
@@ -29,7 +30,6 @@ import DBOS.Transact
     WorkflowKey,
     cancelWorkflows,
     configFromEnv,
-    encodeWorkflowValue,
     enqueueWorkflow,
     isLaunched,
     launchWithEnvironment,
@@ -114,7 +114,7 @@ tests =
                   configSchema = "dbos",
                   configExecutorId = Nothing,
                   configAppVersion = Just "test-version",
-                  configSerializer = RustSerde,
+                  configSerializer = PortableJson,
                   configUseListenNotify = True,
                   configMigrate = True,
                   configPollingConcurrency = Nothing,
@@ -208,7 +208,7 @@ tests =
           Left err -> fail (displayException err)
           Right () -> pure ()
         exec <- launchInstanceExec dbos isolatedEnvironment
-        ran <- runWf exec (newWorkflowKey "greeting") workflowId (Just (encodeWorkflowValue ("hi" :: Text)))
+        ran <- runWf exec (newWorkflowKey "greeting") workflowId (Just (encodeWorkflowInput ("hi" :: Text)))
         case ran of
           Left err -> fail (displayException err)
           Right _ -> pure ()
@@ -298,7 +298,7 @@ tests =
               dbos
               (newWorkflowKey "queued")
               workflowId
-              (Just (encodeWorkflowValue ("hello" :: Text)))
+              (Just (encodeWorkflowInput ("hello" :: Text)))
               ("cancel-" <> suffix)
           case enqueued of
             Left err -> fail (displayException err)
@@ -371,7 +371,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 -- | One backend for the whole group: pools are per-backend, so sharing

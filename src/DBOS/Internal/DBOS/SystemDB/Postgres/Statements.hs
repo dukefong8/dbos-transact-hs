@@ -54,6 +54,7 @@ module DBOS.SystemDB.Postgres.Statements
     renameBatchRangeStatement,
     StepRowRaw (..),
     listStepsSession,
+    listStepsSql,
     ForkParams (..),
     forkTx,
     forkPointsStatement,
@@ -87,6 +88,7 @@ module DBOS.SystemDB.Postgres.Statements
     reenqueueForRecoverySession,
     InitWorkflowParams (..),
     initWorkflowInputStatement,
+    initWorkflowStoredInputStatement,
     initWorkflowStatement,
     parkWorkflowSession,
     descendantsSession,
@@ -154,8 +156,8 @@ import Data.Set qualified as Set
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8)
 import DBOS.Prelude
-import DBOS.SystemDB.Error (Error (..), shouldRecord)
-import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..), WorkflowStatus (Cancelled), isActiveStatus, parseWorkflowStatus, rewindStepName, streamClosedSentinel, streamClosedSerialization)
+import DBOS.SystemDB.Error (Error (..), decodePortableError, encodePortableError, shouldRecord)
+import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..), WorkflowStatus (Cancelled), isActiveStatus, parseWorkflowStatus, portableJsonSerialization, rewindStepName, streamClosedSentinel, streamClosedSerialization)
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
@@ -669,6 +671,18 @@ initWorkflowInputStatement =
       contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
         <> contramap snd (Encoders.param (Encoders.nullable Encoders.text))
 
+-- | The row's stored input, coalescing the payload table over the legacy
+-- column. Read inside the init transaction when a fresh start found an
+-- unowned existing row. Mirrors Rust's @SELECT {stored_input}@ in
+-- @init_workflow@.
+initWorkflowStoredInputStatement :: Statement.Statement Text (Maybe Text)
+initWorkflowStoredInputStatement =
+  Statement.preparable
+    "select coalesce((select p.inputs from dbos.workflow_input p where p.workflow_uuid = $1), inputs) \
+    \from dbos.workflow_status where workflow_uuid = $1"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow (Decoders.column (Decoders.nullable Decoders.text)))
+
 
 -- | Parks a workflow that has been recovered more often than allowed, and
 -- releases what a parked workflow should not hold. Committed before the
@@ -1001,38 +1015,62 @@ data StepRowRaw = StepRowRaw
 -- which is not what this layer binds.
 listStepsSession :: Text -> Bool -> Maybe Int64 -> Maybe Int64 -> Session.Session [StepRowRaw]
 listStepsSession workflowId loadOutput limit offset =
-  Session.statement (workflowId, loadOutput, limit, offset) listStepsStatement
+  Session.statement (workflowId, limit, offset) (listStepsStatement loadOutput)
 
-listStepsStatement :: Statement.Statement (Text, Bool, Maybe Int64, Maybe Int64) [StepRowRaw]
-listStepsStatement =
-  Statement.preparable sql encoder decoder
-  where
-    sql =
+-- | The SQL a step listing sends. With @loadOutput@ off the payload columns
+-- are not selected at all, so a large output costs no read; the decoder
+-- fills them in as 'Nothing'. Exposed so a unit test pins that shape.
+listStepsSql :: Bool -> Text
+listStepsSql loadOutput
+  | loadOutput =
       "select function_id, function_name, child_workflow_id, serialization, \
-      \started_at_epoch_ms, completed_at_epoch_ms, \
-      \case when $2 then output end as output, \
-      \case when $2 then error end as error \
+      \started_at_epoch_ms, completed_at_epoch_ms, output, error \
       \from dbos.operation_outputs \
       \where workflow_uuid = $1 \
       \order by function_id \
-      \limit $3 offset $4"
+      \limit $2 offset $3"
+  | otherwise =
+      "select function_id, function_name, child_workflow_id, serialization, \
+      \started_at_epoch_ms, completed_at_epoch_ms \
+      \from dbos.operation_outputs \
+      \where workflow_uuid = $1 \
+      \order by function_id \
+      \limit $2 offset $3"
+
+listStepsStatement :: Bool -> Statement.Statement (Text, Maybe Int64, Maybe Int64) [StepRowRaw]
+listStepsStatement loadOutput =
+  Statement.preparable (listStepsSql loadOutput) encoder decoder
+  where
     encoder =
-      contramap (\(a, _, _, _) -> a) (Encoders.param (Encoders.nonNullable Encoders.text))
-        <> contramap (\(_, b, _, _) -> b) (Encoders.param (Encoders.nonNullable Encoders.bool))
-        <> contramap (\(_, _, c, _) -> c) (Encoders.param (Encoders.nullable Encoders.int8))
-        <> contramap (\(_, _, _, d) -> d) (Encoders.param (Encoders.nullable Encoders.int8))
+      contramap (\(a, _, _) -> a) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, b, _) -> b) (Encoders.param (Encoders.nullable Encoders.int8))
+        <> contramap (\(_, _, c) -> c) (Encoders.param (Encoders.nullable Encoders.int8))
     decoder =
-      Decoders.rowList
-        ( StepRowRaw
-            <$> (fromIntegral <$> Decoders.column (Decoders.nonNullable Decoders.int4))
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.int8)
-            <*> Decoders.column (Decoders.nullable Decoders.int8)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-        )
+      if loadOutput
+        then
+          Decoders.rowList
+            ( StepRowRaw
+                <$> (fromIntegral <$> Decoders.column (Decoders.nonNullable Decoders.int4))
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.int8)
+                <*> Decoders.column (Decoders.nullable Decoders.int8)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+            )
+        else
+          Decoders.rowList
+            ( StepRowRaw
+                <$> (fromIntegral <$> Decoders.column (Decoders.nonNullable Decoders.int4))
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.int8)
+                <*> Decoders.column (Decoders.nullable Decoders.int8)
+                <*> pure Nothing
+                <*> pure Nothing
+            )
 
 -- | Everything a fork's transaction binds: the sources and their new ids
 -- and start steps, the options the fork rows inherit, and the child
@@ -1205,10 +1243,30 @@ checkCallerStep stepName (Just (callerWid, callerStep)) = do
           _ -> CallerReplayed (replayStep row)
   where
     replayStep row = case row.stepCheckError of
-      Just text -> case eitherDecodeStrict (encodeUtf8 text) of
-        Right err -> Left err
-        Left _ -> Left (Malformed "unreadable recorded step error")
       Nothing -> Right ()
+      Just text -> case callerEncoding row.stepCheckSerialization of
+        Left err -> Left err
+        Right CallerPortable -> case decodePortableError text of
+          Right err -> Left err
+          Left message -> Left (Malformed ("unreadable recorded step error: " <> message))
+        Right CallerNative -> case eitherDecodeStrict (encodeUtf8 text) of
+          Right err -> Left err
+          Left _ -> Left (Malformed "unreadable recorded step error")
+
+-- | How a caller step's recorded bytes are tagged. One codec writes portable
+-- JSON; NULL, the empty string and legacy @rust_serde@ read as native. An
+-- unreadable tag is reported, not guessed.
+data CallerEncoding
+  = CallerNative
+  | CallerPortable
+
+callerEncoding :: Maybe Text -> Either Error CallerEncoding
+callerEncoding Nothing = Right CallerNative
+callerEncoding (Just "") = Right CallerNative
+callerEncoding (Just "rust_serde") = Right CallerNative
+callerEncoding (Just tag)
+  | tag == portableJsonSerialization = Right CallerPortable
+callerEncoding (Just name) = Left (UnknownSerialization {name})
 
 -- | Records the caller's step with the call's outcome: the unit output on
 -- success, the structured error on a recordable refusal. The unit repeats
@@ -1229,7 +1287,7 @@ recordCallerOutcome params outcome = case params.rewindCaller of
                   recordStepStepName = rewindStepName,
                   recordStepOutput = either (const Nothing) (const (Just "null")) outcome,
                   recordStepError = either (Just . errorJson) (const Nothing) outcome,
-                  recordStepSerialization = either (const Nothing) (const (Just "portable_json")) outcome,
+                  recordStepSerialization = Just portableJsonSerialization,
                   recordStepStartedAt = Just params.rewindStartedAt,
                   recordStepCompletedAt = Just params.rewindCompletedAt,
                   recordStepApplicationName = Nothing,
@@ -1238,7 +1296,7 @@ recordCallerOutcome params outcome = case params.rewindCaller of
           )
       )
   where
-    errorJson err = decodeUtf8 (LBS.toStrict (encode err))
+    errorJson = encodePortableError
 
 -- | The target's stored status, if it has a row.
 rewindStatusStatement :: Statement.Statement Text (Maybe Text)
@@ -1794,7 +1852,7 @@ sendStepRecord step =
       recordStepStepName = step.sendStepName,
       recordStepOutput = Nothing,
       recordStepError = Nothing,
-      recordStepSerialization = Nothing,
+      recordStepSerialization = Just portableJsonSerialization,
       recordStepStartedAt = Just step.sendStepStartedAt,
       recordStepCompletedAt = Just step.sendStepCompletedAt,
       recordStepApplicationName = Nothing,
@@ -1887,7 +1945,7 @@ setEventStepRecord params =
       recordStepStepName = "DBOS.set_event",
       recordStepOutput = Nothing,
       recordStepError = Nothing,
-      recordStepSerialization = Nothing,
+      recordStepSerialization = Just portableJsonSerialization,
       recordStepStartedAt = Just params.setEventStartedAt,
       recordStepCompletedAt = Just params.setEventCompletedAt,
       recordStepApplicationName = Nothing,

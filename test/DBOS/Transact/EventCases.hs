@@ -46,8 +46,10 @@ where
 import DBOS.Prelude
 import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), Submission (..), WorkflowId (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
+import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Transact.Instance (getWorkflowEventSerialized)
 import DBOS.Transact
-  ( CodecError,
+  (
     Config (..),
     DBOS,
     EngineOnly,
@@ -57,10 +59,7 @@ import DBOS.Transact
     Serializer (..),
     WorkflowCtx,
     WorkflowRef,
-    decodeWorkflowValue,
-    encodeWorkflowValue,
     getEvent,
-    getWorkflowEvent,
     millisDuration,
     newDBOS,
     newWorkflowKey,
@@ -190,7 +189,7 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
       instanceId <- genId
       newConnection
         sysdb
-        RustSerde
+        PortableJson
         (Just connApp)
         (secondsDuration 1)
         OwnerApplication
@@ -202,7 +201,7 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
 -- | Engine-only driver alias: the recovery and order cases read through
 -- this, so the error channel pins to 'EngineOnly' once.
 runRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-       => Executor m -> WorkflowRef m EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+       => Executor m -> WorkflowRef m EngineOnly -> RunOptions -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runRef = runWorkflowRef
 
 -- | A wait that polls for a published event instead of sleeping through it.
@@ -214,7 +213,7 @@ waitForEvent dbos wid key = go (50 :: Int)
   where
     go 0 = throwIO (userError "the workflow never published an event")
     go n = do
-      found <- getWorkflowEvent dbos wid key (millisDuration 0)
+      found <- getWorkflowEventSerialized dbos wid key (millisDuration 0)
       case found of
         Right (Just _) -> pure ()
         _ -> threadDelay 200000 >> go (n - 1)
@@ -471,7 +470,7 @@ scenarioRecoveryKeepsFirst fx = do
           Right n -> pure n
           Left err -> throwIO (userError (show err))
       other -> throwIO (userError ("expected the recovered result, got: " <> show other))
-    final <- getWorkflowEvent dbos wid "progress" (millisDuration 100)
+    final <- getWorkflowEventSerialized dbos wid "progress" (millisDuration 100)
     kept <- case final of
       Right (Just stored) ->
         case decodeWorkflowValue "event" (Just stored) :: Either CodecError Text of
@@ -501,11 +500,11 @@ scenarioWrongInstance fx = do
       execOwner <- fx.efLaunch owner
       wrongWid <- fx.efFreshId "event-wrong-id"
       inStepWid <- fx.efFreshId "event-in-step-id"
-      ran <- runRef execOwner readerRef (runOptionsDefault {runWorkflowId = Just wrongWid}) (Just (encodeWorkflowValue ()))
+      ran <- runRef execOwner readerRef (runOptionsDefault {runWorkflowId = Just wrongWid}) (Just (encodeWorkflowInput ()))
       refused <- case ran of
         Left (WrongInstance _) -> pure True
         otherOutcome -> throwIO (userError ("expected a wrong-instance refusal, got: " <> show otherOutcome))
-      ranInStep <- runRef execOwner inStepRef (runOptionsDefault {runWorkflowId = Just inStepWid}) (Just (encodeWorkflowValue ()))
+      ranInStep <- runRef execOwner inStepRef (runOptionsDefault {runWorkflowId = Just inStepWid}) (Just (encodeWorkflowInput ()))
       plain <- case ranInStep of
         Right (Just stored) ->
           case decodeWorkflowValue "result" (Just stored) :: Either CodecError (Maybe Int) of
@@ -527,7 +526,7 @@ scenarioOutOfOrderIds fx = do
       Right r -> pure r
     exec <- fx.efLaunch dbos
     wid <- fx.efFreshId "joins-out-of-order"
-    ran <- runRef exec ref (runOptionsDefault {runWorkflowId = Just wid}) (Just (encodeWorkflowValue ()))
+    ran <- runRef exec ref (runOptionsDefault {runWorkflowId = Just wid}) (Just (encodeWorkflowInput ()))
     case ran of
       Right _ -> pure ()
       other -> throwIO (userError ("the workflow failed: " <> show other))

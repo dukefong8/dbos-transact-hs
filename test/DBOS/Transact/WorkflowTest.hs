@@ -17,12 +17,13 @@ import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (AwaitedOutcome (..), NewWorkflow (..), Submission (..), WorkflowId (..), WorkflowRecord (..), getWorkflow, listSteps, newWorkflow)
+import DBOS.SystemDB (AwaitedOutcome (..), NewWorkflow (..), Submission (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), getWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
+import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, unWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
-    EngineOnly, CodecError,
+    EngineOnly,
     Config (..),
     Environment (..),
     Error (..),
@@ -30,15 +31,13 @@ import DBOS.Transact
     Serialization (..),
     SerializedWorkflowValue (..),
     StartOptions (..),
-    WorkflowHandle (..),
+    WorkflowHandle,
     DBOS,
     WorkflowCtx,
     Executor,
     WorkflowStatus (..),
     awaitChild,
     configFromEnv,
-    decodeWorkflowValue,
-    encodeWorkflowValue,
     launchWithEnvironment,
     newDBOS,
     newWorkflowKey,
@@ -60,7 +59,7 @@ import DBOS.Transact
 import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Error (decodeErrorText)
-import DBOS.Transact.Workflow (abortAll, newTasks, tasksSpawner)
+import DBOS.Transact.Workflow (abortAll, newTasks, runInputAfterInit, tasksSpawner)
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
 import DBOS.Transact.Context (spawnLocal)
 import DBOS.SystemDB.Retry (uuidEntropy)
@@ -74,6 +73,8 @@ import DBOS.Transact.WorkflowCases
     scenarioRegisteredRecordsResult,
     scenarioJoinTakesId,
     scenarioFreshJoinPolls,
+    scenarioQueuedStartPolls,
+    scenarioNonFinite,
     scenarioAwaitRecorded,
     scenarioStaleAwaitRefused,
     scenarioAwaitInsideStep,
@@ -116,6 +117,8 @@ import DBOS.Transact.WorkflowCases
     checkRegisteredResult,
     checkJoinTakesId,
     checkFreshJoinPolls,
+    checkQueuedStartPolls,
+    checkNonFinite,
     checkAwaitRecorded,
     checkStaleAwaitRefused,
     checkAwaitInsideStep,
@@ -173,6 +176,22 @@ tests =
   testGroup
     "Workflow execution"
     [ liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a registered workflow starts and records its result" scenarioRegisteredRecordsResult checkRegisteredResult,
+      testCase "an existing unowned row runs its stored input and tag" $ do
+        let storedText = "{\"positionalArgs\":[21],\"namedArgs\":{}}"
+            supplied = unWorkflowInput (encodeWorkflowInput (99 :: Int))
+            result existingInput =
+              WorkflowInitResult
+                { initResultStatus = Pending,
+                  initResultRecoveryAttempts = 0,
+                  initResultDeadline = Nothing,
+                  initResultSerialization = Just "portable_json",
+                  initResultExistingInput = existingInput,
+                  initResultShouldExecute = True
+                }
+            stored = SerializedWorkflowValue storedText (Just (Serialization "portable_json"))
+        runInputAfterInit (result (Just (Just storedText))) (Just supplied) @?= Just stored
+        runInputAfterInit (result (Just Nothing)) (Just supplied) @?= Nothing
+        runInputAfterInit (result Nothing) (Just supplied) @?= Just supplied,
       -- IO only: crash-and-relaunch recovery sweep (MemSystemDB delegates
       -- reenqueueForRecovery to the canned mock; see ADR-0020).
       testCase "a recovery run replays completed steps after a body interruption" $ do
@@ -204,7 +223,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchExec dbos isolatedEnvironment
-          first <- try (runWf exec key workflowId (Just (encodeWorkflowValue (21 :: Int)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+          first <- try (runWf exec key workflowId (Just (encodeWorkflowInput (21 :: Int)))) :: IO (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
           _ <- case first of
             Left exception -> assertBool "body interruption escapes without a workflow outcome" ("interrupted after checkpoint" `Text.isInfixOf` Text.pack (show exception))
             Right result -> fail (show result)
@@ -220,7 +239,7 @@ tests =
               assertEqual "recovery completes the same workflow" (Right 42) decoded
             other -> fail (show other)
           assertEqual "the replay adopts the recorded step" 1 =<< readIORef bodyCalls
-          adopted <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowValue (21 :: Int)))
+          adopted <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (21 :: Int)))
           case adopted of
             Right (Just stored) -> do
               let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
@@ -289,6 +308,8 @@ tests =
       -- joins rather than failing — one id, one execution.
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a fresh start is local and a join polls" scenarioFreshJoinPolls checkFreshJoinPolls,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a queued row is joined, not run, by a plain start" scenarioQueuedStartPolls checkQueuedStartPolls,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "non-finite floats store aeson's spelling and read back" scenarioNonFinite checkNonFinite,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "awaiting a child is recorded as a step" scenarioAwaitRecorded checkAwaitRecorded,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a recorded await of another workflow is refused" scenarioStaleAwaitRefused checkStaleAwaitRefused,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "awaiting a child inside a step is covered by that step" scenarioAwaitInsideStep checkAwaitInsideStep,
@@ -426,7 +447,7 @@ tests =
             Left err -> fail (show err)
             Right () -> pure ()
           exec <- launchExec dbos isolatedEnvironment
-          ran <- runWorkflow exec payKey (WorkflowId payText) (Just (encodeWorkflowValue ()))
+          ran <- runWorkflow exec payKey (WorkflowId payText) (Just (encodeWorkflowInput ()))
           case ran of
             Left (ErrorApplication (Gateway {reason})) -> reason @?= "the gateway refused the card"
             other -> fail ("expected the boundary conversion, got: " <> show other)
@@ -470,7 +491,7 @@ tests =
                     exec
                     childRef
                     (startOptionsDefault {startWorkflowId = Just (WorkflowId (childText n))})
-                    (Just (encodeWorkflowValue n))
+                    (Just (encodeWorkflowInput n))
                 case startedChild of
                   Left err -> fail (show err)
                   Right _ -> pure ()
@@ -642,13 +663,13 @@ launchExec dbos env = do
 -- for the compiler to guess. Local copies are deliberate — this module
 -- carries only the aliases it uses, and a sibling test module repeats
 -- the ones it needs.
-runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
-runWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWfRef = runWorkflowRef
 
-startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
+startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
 startWfRef = startWorkflow
 
 awaitWf :: WorkflowCtx exec IO -> WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))

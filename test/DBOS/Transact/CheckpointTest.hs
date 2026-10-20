@@ -68,7 +68,7 @@ mkCheckpointFixture backend =
         otherConn <-
           newConnection
             (SomeSystemDB backend)
-            RustSerde
+            PortableJson
             (Just "test-app")
             (secondsDuration 1)
             OwnerApplication

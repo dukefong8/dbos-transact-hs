@@ -18,7 +18,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowId (..), decodeWorkflowValue, encodeWorkflowValue, fetchWorkflowStatuses, getWorkflowEvent, listWorkflowIdsByName, millisDuration, newWorkflowKey)
+import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowId (..), encodeWorkflowInput, fetchWorkflowStatuses, getWorkflowEvent, listWorkflowIdsByName, millisDuration, newWorkflowKey)
 import DBOS.Transact qualified as Transact
 import Demo.Http (RouteHandler)
 import QueueWorker.App (QueueWorkerApp (..))
@@ -57,7 +57,7 @@ enqueueOne app = do
       app.qwDbos
       (newWorkflowKey workerWorkflowName)
       wid
-      (Just (encodeWorkflowValue defaultNumSteps))
+      (Just (encodeWorkflowInput defaultNumSteps))
       workerQueueName
   pure (voidResult enqueued)
   where
@@ -66,11 +66,8 @@ enqueueOne app = do
 
 readStatus :: DBOS IO -> (Text, Text) -> IO WorkflowStatus
 readStatus dbos (wid, status) = do
-  stored <- getWorkflowEvent dbos (WorkflowId wid) progressEventKey (millisDuration 0)
-  let progress :: Maybe Progress
-      progress = do
-        recorded <- either (const Nothing) id stored
-        either (const Nothing) Just (decodeWorkflowValue "result" (Just recorded))
+  stored <- (getWorkflowEvent dbos (WorkflowId wid) progressEventKey (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Progress)))
+  let progress = either (const Nothing) id stored
   pure WorkflowStatus
     { wsWorkflowId = wid,
       wsStatus = status,

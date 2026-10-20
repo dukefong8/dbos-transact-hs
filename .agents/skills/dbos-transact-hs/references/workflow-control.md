@@ -1,11 +1,11 @@
 ---
-title: Cancel, Resume, and Fork Workflows
+title: Cancel, Resume, Fork, and Rewind Workflows
 impact: CRITICAL
 impactDescription: Enables operational control over long-running workflows
 tags: workflow, cancel, resume, fork, management
 ---
 
-## Cancel, Resume, and Fork Workflows
+## Cancel, Resume, Fork, and Rewind Workflows
 
 Use the `Executor`/`DBOS` management entries for operational control. Cancellation stops at the next step; resume restarts from the last completed step; fork copies inputs and step outputs up to a step into a new workflow id.
 
@@ -15,15 +15,17 @@ Use the `Executor`/`DBOS` management entries for operational control. Cancellati
 -- Workflow stuck or failed with no handle on it: no cancel, no resume, no fork.
 ```
 
-**Correct (using cancel, resume, and fork):**
+**Correct (using cancel, resume, fork, and rewind):**
 
 ```haskell
 -- Cancel: status becomes CANCELLED, removed from its queue.
-_ <- cancelWorkflows exec [workflowId]
+_ <- cancelWorkflows dbos [workflowId] False
 -- Resume from the last completed step.
-_ <- resumeWorkflows exec [workflowId]
+_ <- resumeWorkflows dbos [workflowId] Nothing
 -- Fork from a step into a new workflow id.
-_ <- forkFrom exec [workflowId] forkPoint forkOptions
+_ <- forkFrom dbos [workflowId] forkPoint forkOptions
+-- Rewind in place from a step, under the same id.
+_ <- rewindWorkflows dbos workflowId (defaultRewindOptions {rewindStartStep = stepId})
 ```
 
 Notes:
@@ -32,4 +34,4 @@ Notes:
 - Resume restarts cancelled or `MAX_RECOVERY_ATTEMPTS_EXCEEDED` workflows from the last completed step, and can also start an enqueued workflow immediately, bypassing its queue.
 - Forking creates a new workflow with a new id. List steps first to find the step id, then fork from it (useful after downstream outages or bug fixes).
 
-Difference from TS: TS documents `DBOS.rewindWorkflow` (re-execute in place, same id). This port has no rewind entry — `forkWorkflows` / `forkFrom` are the available recovery copies. TS `cancelWorkflow(workflowID, { cancelChildren })` has no `cancelChildren` option here.
+Difference from TS: TS `rewindWorkflow(workflowID, options)` re-executes in place under the same id; Haskell is `rewindWorkflow` (returns a handle), `rewindWorkflows` (returns `()`), and `rewindWorkflowsInWorkflow` (records the call as a step), all taking `RewindOptions`/`defaultRewindOptions`. TS `cancelWorkflow(workflowID, { cancelChildren })` maps to the explicit `Bool` argument on `cancelWorkflows` / `cancelWorkflowsInWorkflow`.

@@ -12,17 +12,21 @@ module DBOS.Transact.ManagementTestSim (tests) where
 
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Map.Strict qualified as Map
 import DBOS.DualStack (simCase)
 import DBOS.SystemDB
   ( SerializedWorkflowValue (..),
+    StepRecord (..),
     WorkflowId (..),
-    WorkflowStatus (..))
+    WorkflowStatus (..),
+    rewindStepName)
+import DBOS.SystemDB.Error qualified as SysErr
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.Prelude
+import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, CodecError (..))
 import DBOS.Transact
   (
     EngineOnly,
-    CodecError,
     WorkflowCtx,
     DBOS,
     Executor,
@@ -30,7 +34,6 @@ import DBOS.Transact
     WorkflowHandle,
     WorkflowKey,
     WorkflowRef,
-    decodeWorkflowValue,
     handleResult,
     handleStatus,
     registerWorkflow,
@@ -45,7 +48,9 @@ import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Step qualified as StepEvent
 import DBOS.Transact.Connection (SomeSystemDB (..))
-import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
+import DBOS.SystemDB.Postgres.Statements (CallerStep (..))
+import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity, verifyCallerStep)
+import DBOS.Transact.WorkflowSimData (mockWorkflow)
 import DBOS.Transact.ManagementCases
   ( MgmtFixture (..),
     checkCancelMissing,
@@ -82,6 +87,8 @@ import DBOS.Transact.ManagementCases
     checkResumeOntoQueue,
     checkRetrieve,
     checkListSteps,
+    checkListStepsWithoutOutputs,
+    checkListStepsPaging,
     checkListStepsInWorkflow,
     checkSingular,
     checkUnlaunched,
@@ -120,6 +127,8 @@ import DBOS.Transact.ManagementCases
     scenarioResumeOntoQueue,
     scenarioRetrieve,
     scenarioListSteps,
+    scenarioListStepsWithoutOutputs,
+    scenarioListStepsPaging,
     scenarioListStepsInWorkflow,
     scenarioSingular,
     scenarioUnlaunched,
@@ -163,6 +172,8 @@ tests =
       simCase simMgmtFixture "deleting a workflow removes its row" scenarioDelete checkDelete traceDelete,
       simCase simMgmtFixture "a workflow can be retrieved by id" scenarioRetrieve checkRetrieve traceRetrieve,
       simCase simMgmtFixture "a workflow's steps list in execution order" scenarioListSteps checkListSteps traceListSteps,
+      simCase simMgmtFixture "a step listing can leave the outputs out" scenarioListStepsWithoutOutputs checkListStepsWithoutOutputs traceListStepsWithoutOutputs,
+      simCase simMgmtFixture "a step listing pages in step order" scenarioListStepsPaging checkListStepsPaging traceListStepsPaging,
       simCase simMgmtFixture "an in-workflow step listing is itself a step" scenarioListStepsInWorkflow checkListStepsInWorkflow traceListStepsInWorkflow,
       simCase simMgmtFixture "the singular wrappers move one workflow each" scenarioSingular checkSingular traceSingular,
       simCase simMgmtFixture "forking from the beginning runs the workflow again under a new id" scenarioForkFromBeginning checkForkFromBeginning traceForkFromBeginning,
@@ -190,6 +201,31 @@ tests =
       simCase simMgmtFixture "an executor rewind drops the datasource checkpoints" scenarioRewindDropsDatasourceCheckpoints checkRewindDropsDatasourceCheckpoints traceRewindDropsDatasourceCheckpoints,
       simCase simMgmtFixture "every completion clears the run's datasource checkpoints" scenarioCompletionClearsCheckpoints checkCompletionClearsCheckpoints traceCompletionClearsCheckpoints,
       simCase simMgmtFixture "an inline child clears its own datasource checkpoints on completion" scenarioChildClearsCheckpoints checkChildClearsCheckpoints traceChildClearsCheckpoints,
+      testCase "a caller step is replayed by its tag, never guessed" $ do
+        let caller = (WorkflowId "wf", 0)
+            rows = Map.singleton "wf" (mockWorkflow (WorkflowId "wf"))
+            step serialization errorText =
+              StepRecord
+                { stepRecordWorkflowId = WorkflowId "wf",
+                  stepRecordStepId = 0,
+                  stepRecordStepName = rewindStepName,
+                  stepRecordOutput = Nothing,
+                  stepRecordError = Just errorText,
+                  stepRecordChildWorkflowId = Nothing,
+                  stepRecordSerialization = serialization,
+                  stepRecordStartedAt = Nothing,
+                  stepRecordCompletedAt = Nothing
+                }
+            withStep tag text = Map.singleton ("wf", 0) (step tag text)
+        case verifyCallerStep rewindStepName (Just caller) rows (withStep (Just "pickle") "{}") of
+          CallerReplayed (Left (SysErr.UnknownSerialization {name = "pickle"})) -> pure ()
+          _ -> fail "expected an unreadable tag to be refused"
+        case verifyCallerStep rewindStepName (Just caller) rows (withStep (Just "portable_json") (SysErr.encodePortableError (SysErr.WorkflowCancelled {workflowId = "wf"}))) of
+          CallerReplayed (Left (SysErr.WorkflowCancelled {workflowId = "wf"})) -> pure ()
+          _ -> fail "expected the portable error to replay"
+        case verifyCallerStep rewindStepName (Just caller) rows (withStep (Just "rust_serde") "{\"WorkflowCancelled\":{\"workflow_id\":\"wf\"}}") of
+          CallerReplayed (Left (SysErr.WorkflowCancelled {workflowId = "wf"})) -> pure ()
+          _ -> fail "expected the legacy native error to replay",
       testCase "management announces through its tracer" $ do
         (_, tr) <- runSimCase demoTrace
         printSimTrace tr
@@ -347,6 +383,35 @@ traceListSteps tr = do
           StepRunning "three" 2,
           StepOutputRecorded "three" 2,
           WorkflowCompleted "hs-l2-mgmt-liststeps-sim"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The failing workflow's two steps are announced, then the failure; the
+-- listings themselves announce nothing.
+traceListStepsWithoutOutputs :: forall a. SimTrace a -> IO ()
+traceListStepsWithoutOutputs tr = do
+  selectTraceEventsDynamic tr
+    @?= [ StepOutputRecorded "big" 0,
+          StepErrorRecorded "fails" 1,
+          StepEvent.WorkflowFailed "hs-l2-mgmt-steps-no-output-sim"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | Five steps run; the listings announce nothing.
+traceListStepsPaging :: forall a. SimTrace a -> IO ()
+traceListStepsPaging tr = do
+  selectTraceEventsDynamic tr
+    @?= [ StepRunning "a" 0,
+          StepOutputRecorded "a" 0,
+          StepRunning "b" 1,
+          StepOutputRecorded "b" 1,
+          StepRunning "c" 2,
+          StepOutputRecorded "c" 2,
+          StepRunning "d" 3,
+          StepOutputRecorded "d" 3,
+          StepRunning "e" 4,
+          StepOutputRecorded "e" 4,
+          WorkflowCompleted "hs-l2-mgmt-steps-page-sim"
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
@@ -535,7 +600,7 @@ stagedBody ran _ wctx = do
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWfSim :: Executor (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfSim :: Executor (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWfSim = runWorkflow
 
 retrieveWfSim :: DBOS (IOSim s) -> WorkflowId -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))

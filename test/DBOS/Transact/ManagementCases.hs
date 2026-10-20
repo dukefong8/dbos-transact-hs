@@ -31,6 +31,8 @@ module DBOS.Transact.ManagementCases
     scenarioDelete,
     scenarioRetrieve,
     scenarioListSteps,
+    scenarioListStepsWithoutOutputs,
+    scenarioListStepsPaging,
     scenarioListStepsInWorkflow,
     scenarioSingular,
     scenarioForkFromBeginning,
@@ -68,6 +70,8 @@ module DBOS.Transact.ManagementCases
     checkDelete,
     checkRetrieve,
     checkListSteps,
+    checkListStepsWithoutOutputs,
+    checkListStepsPaging,
     checkListStepsInWorkflow,
     checkSingular,
     checkForkFromBeginning,
@@ -104,10 +108,11 @@ import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import GHC.Stack (HasCallStack)
-import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NotificationRecord (..), QueueName (..), Serialization (..), SerializedWorkflowValue (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, internalQueueName, streamClosedSentinel, streamClosedSerialization)
+import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NotificationRecord (..), QueueName (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, internalQueueName, streamClosedSentinel, streamClosedSerialization)
 import DBOS.SystemDB qualified as SystemDB
+import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
-  ( CodecError,
+  (
     Config (..),
     DBOS,
     Enqueue (..),
@@ -116,19 +121,21 @@ import DBOS.Transact
     Executor,
     Serializer (..),
     StartOptions (..),
-    StepRecord (..),
+    StepInfo (..),
+    StepOutcome (..),
+    StepOutput (..),
+    StepFailure (..),
+    PortableWorkflowError (..),
     WorkflowCtx,
-    WorkflowHandle (..),
+    WorkflowHandle (workflowId),
     WorkflowKey,
     WorkflowRef,
     cancelWorkflow,
     cancelWorkflows,
     closeStream,
-    decodeWorkflowValue,
     defaultRewindOptions,
     deleteWorkflow,
     deleteWorkflows,
-    encodeWorkflowValue,
     enqueueWorkflow,
     enqueueNew,
     forkWorkflow,
@@ -154,6 +161,8 @@ import DBOS.Transact
     runTxStep,
     runWorkflow,
     runStep,
+    runStepWith,
+    stepOptionsDefault,
     send,
     setEvent,
     setWorkflowDelay,
@@ -161,9 +170,12 @@ import DBOS.Transact
     Topic (..),
     updateWorkflowAttributes,
     updateWorkflowAttributesInWorkflow,
-    listWorkflowStepsInWorkflow,
-    listWorkflowSteps,
+    ListWorkflowStepsOptions (..),
+    defaultListWorkflowStepsOptions,
     listWorkflows,
+    listWorkflowSteps,
+    listWorkflowStepsWith,
+    listWorkflowStepsInWorkflow,
     secondsDuration,
     shutdown,
     startChildWorkflow,
@@ -245,7 +257,7 @@ mkMgmtFixture config identity connApp genId genEntropy sysdb tracer freshBase = 
       instanceId <- genId
       newConnection
         sysdb
-        RustSerde
+        PortableJson
         (Just connApp)
         (secondsDuration 1)
         OwnerApplication
@@ -258,11 +270,11 @@ mkMgmtFixture config identity connApp genId genEntropy sysdb tracer freshBase = 
 -- error channel pins to 'EngineOnly' once instead of at each call site.
 -- Local copies are deliberate: this module carries only the aliases it uses.
 runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-      => Executor m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+      => Executor m -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 startWfRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
-           => Executor m -> WorkflowRef m EngineOnly -> StartOptions -> Maybe SerializedWorkflowValue -> m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))
+           => Executor m -> WorkflowRef m EngineOnly -> StartOptions -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))
 startWfRef = startWorkflow
 
 retrieveWf :: forall m. (MonadMVar m)
@@ -278,7 +290,7 @@ statusWf :: forall m. (MonadMVar m)
 statusWf = handleStatus
 
 listStepsWf :: forall m. (MonadMVar m)
-            => DBOS m -> WorkflowId -> m (Either (Error EngineOnly) [StepRecord])
+            => DBOS m -> WorkflowId -> m (Either (Error EngineOnly) [StepInfo])
 listStepsWf = listWorkflowSteps
 
 -- | The cancellable body: counts its entries, then answers input plus five.
@@ -377,7 +389,7 @@ scenarioCancelResumeRun fx = do
         exec
         ref
         (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just (enqueueNew "no-runner-here")})
-        (Just (encodeWorkflowValue (0 :: Int)))
+        (Just (encodeWorkflowInput (0 :: Int)))
     case started of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -437,7 +449,7 @@ scenarioResumeOntoQueue fx = do
         exec
         ref
         (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just (enqueueNew "no-runner-here")})
-        (Just (encodeWorkflowValue (7 :: Int)))
+        (Just (encodeWorkflowInput (7 :: Int)))
     case started of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -522,7 +534,7 @@ scenarioDelete fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key wid (Just (encodeWorkflowValue (1 :: Int)))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput (1 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -556,7 +568,7 @@ scenarioRetrieve fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key wid (Just (encodeWorkflowValue (2 :: Int)))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput (2 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -605,7 +617,7 @@ scenarioListSteps fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput ()))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -614,21 +626,87 @@ scenarioListSteps fx = do
       Left err -> throwIO (userError (show err))
       Right records ->
         pure
-          ( [record.stepRecordStepName | record <- records],
-            [record.stepRecordStepId | record <- records]
+          ( [record.stepInfoName | record <- records],
+            [record.stepInfoId | record <- records]
           )
     missing <- listStepsWf dbos (WorkflowId "never-existed")
     missingNames <- case missing of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepName | record <- records]
+      Right records -> pure [record.stepInfoName | record <- records]
     pure (names, ids, missingNames)
+
+-- | A listing with 'loadOutput' off reads metadata only: both payload
+-- columns come back empty on every step, while the default reads them.
+scenarioListStepsWithoutOutputs :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                                => MgmtFixture m -> m ([StepInfo], [StepInfo])
+scenarioListStepsWithoutOutputs fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "big-then-fails"
+        wid = WorkflowId ("hs-l2-mgmt-steps-no-output-" <> suffix)
+        body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
+        body () wctx = do
+          big <- runStepWith stepOptionsDefault wctx "big" (const (pure (Right ("big output" :: Text))))
+          case big of
+            Left err -> pure (Left err)
+            Right _ -> do
+              fails <- (runStepWith stepOptionsDefault wctx "fails" (const (pure (Left (StepFailed "fails" "declined")))) :: m (Either (Error EngineOnly) ()))
+              pure (void fails)
+    registered <- registerWorkflow dbos key body
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    _ <- runWf exec key wid (Just (encodeWorkflowInput ()))
+    withOutputs <- listWorkflowStepsWith dbos wid defaultListWorkflowStepsOptions
+    without <- listWorkflowStepsWith dbos wid defaultListWorkflowStepsOptions {loadOutput = False}
+    case (withOutputs, without) of
+      (Right withRows, Right withoutRows) -> pure (withRows, withoutRows)
+      (Left err, _) -> throwIO (userError (show err))
+      (_, Left err) -> throwIO (userError (show err))
+
+-- | A listing pages with 'limit' and 'offset', in step order.
+scenarioListStepsPaging :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                        => MgmtFixture m -> m [[Text]]
+scenarioListStepsPaging fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "five-steps"
+        wid = WorkflowId ("hs-l2-mgmt-steps-page-" <> suffix)
+        body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
+        body () wctx = do
+          outcomes <- mapM (\name -> runStep wctx name (const (pure ()))) ["a", "b", "c", "d", "e"]
+          pure (void (sequence outcomes))
+    registered <- registerWorkflow dbos key body
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowInput ()))
+    case ran of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    mapM
+      ( \(limit', offset') -> do
+          listed <- listWorkflowStepsWith dbos wid defaultListWorkflowStepsOptions {limit = limit', offset = offset'}
+          case listed of
+            Left err -> throwIO (userError (show err))
+            Right records -> pure [record.stepInfoName | record <- records]
+      )
+      [ (Just 2, Nothing),
+        (Just 2, Just 2),
+        (Nothing, Just 3),
+        (Just 10, Just 4),
+        (Nothing, Just 5)
+      ]
 
 -- | The in-workflow listing is itself a step: it reads the steps recorded
 -- before it and the engine records the snapshot after it, under the
--- cross-SDK step name.
+-- cross-SDK step name. The snapshot is @(loadOutput, rows)@ so a replay can
+-- re-project the typed view from the flag the first execution read.
 scenarioListStepsInWorkflow :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
                             => MgmtFixture m ->
-                               m ([Text], [Text])
+                               m ([Text], [Text], Text)
 scenarioListStepsInWorkflow fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
@@ -641,13 +719,13 @@ scenarioListStepsInWorkflow fx = do
             Left err -> pure (Left err)
             Right () -> do
               listed <- listWorkflowStepsInWorkflow wctx wid
-              pure (fmap (map (.stepRecordStepName)) listed)
+              pure (fmap (map (.stepInfoName)) listed)
     registered <- registerWorkflow dbos key body
     case registered of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput ()))
     inside <- case ran of
       Left err -> throwIO (userError (show err))
       Right Nothing -> throwIO (userError "expected the workflow result")
@@ -658,8 +736,16 @@ scenarioListStepsInWorkflow fx = do
     outside <- listStepsWf dbos wid
     outsideNames <- case outside of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepName | record <- records]
-    pure (inside, outsideNames)
+      Right records -> pure [record.stepInfoName | record <- records]
+    recorded <-
+      runSystemDB fx.mfSystemDB
+        (\db -> SystemDB.listSteps db wid True Nothing Nothing Nothing)
+    listingText <- case recorded of
+      Left err -> throwIO (userError (show err))
+      Right records -> case [text | StepRecord {stepRecordStepName = name, stepRecordOutput = Just text} <- records, name == "DBOS.list_workflow_steps"] of
+        [text] -> pure text
+        other -> throwIO (userError ("expected one recorded listing, got: " <> show other))
+    pure (inside, outsideNames, listingText)
 
 -- | The singular wrappers move one workflow each, per the Rust @DBOS@
 -- singular surface: cancel (children skipped), resume (handle back),
@@ -685,9 +771,9 @@ scenarioSingular fx = do
         exec
         ref
         (startOptionsDefault {startWorkflowId = Just (wid 1), startQueue = Just (enqueueNew "no-runner-here")})
-        (Just (encodeWorkflowValue (1 :: Int)))
-    ran2 <- runWf exec key (wid 2) (Just (encodeWorkflowValue (2 :: Int)))
-    ran3 <- runWf exec key (wid 3) (Just (encodeWorkflowValue (3 :: Int)))
+        (Just (encodeWorkflowInput (1 :: Int)))
+    ran2 <- runWf exec key (wid 2) (Just (encodeWorkflowInput (2 :: Int)))
+    ran3 <- runWf exec key (wid 3) (Just (encodeWorkflowInput (3 :: Int)))
     case (started1, ran2, ran3) of
       (Right _, Right _, Right _) -> pure ()
       other -> throwIO (userError ("expected one queued start and two runs, got: " <> show other))
@@ -765,9 +851,47 @@ checkListSteps (names, ids, missing) = do
   checkEq [0, 1, 2] ids
   checkEq [] missing
 
--- | The listing sees the steps before it, and is itself recorded after.
-checkListStepsInWorkflow :: ([Text], [Text]) -> Either String ()
-checkListStepsInWorkflow = checkEq (["first"], ["first", "DBOS.list_workflow_steps"])
+-- | The default reads both payload columns; the metadata listing reads
+-- neither, while ids, names, timings and tags stay.
+checkListStepsWithoutOutputs :: ([StepInfo], [StepInfo]) -> Either String ()
+checkListStepsWithoutOutputs (withOutputs, without) = do
+  checkEq ["big", "fails"] (map (\record -> record.stepInfoName) withOutputs)
+  checkEq ["big", "fails"] (map (\record -> record.stepInfoName) without)
+  case withOutputs of
+    [big, fails] -> do
+      case big.stepInfoOutcome of
+        StepOutcomeSucceeded (PayloadDecoded _) -> pure ()
+        other -> Left ("expected the big step output, got: " <> show other)
+      case fails.stepInfoOutcome of
+        StepOutcomeFailed _ -> pure ()
+        other -> Left ("expected the failing step error, got: " <> show other)
+    _ -> Left "expected two steps with payloads"
+  mapM_
+    ( \record -> do
+        checkEq StepOutcomeNotLoaded record.stepInfoOutcome
+        checkEq True (record.stepInfoStartedAt /= Nothing)
+        checkEq True (record.stepInfoCompletedAt /= Nothing)
+    )
+    without
+
+-- | One page per (limit, offset), in step order.
+checkListStepsPaging :: [[Text]] -> Either String ()
+checkListStepsPaging =
+  checkEq
+    [ ["a", "b"],
+      ["c", "d"],
+      ["d", "e"],
+      ["e"],
+      []
+    ]
+
+-- | The listing sees the steps before it, is itself recorded after, and the
+-- recorded snapshot carries the @loadOutput@ the read used.
+checkListStepsInWorkflow :: ([Text], [Text], Text) -> Either String ()
+checkListStepsInWorkflow (inside, outside, recorded) = do
+  checkEq ["first"] inside
+  checkEq ["first", "DBOS.list_workflow_steps"] outside
+  checkEq True ("[true," `Text.isPrefixOf` recorded)
 
 -- | Cancel leaves it cancelled, resume re-enqueues it, delete removes the
 -- row, and the fork is a new enqueued workflow.
@@ -852,7 +976,7 @@ scenarioForkFromBeginning fx = do
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
     exec <- fx.mfLaunch dbos
-    first <- runWf exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+    first <- runWf exec key sourceId (Just (encodeWorkflowInput (0 :: Int)))
     case first of
       Left _ -> pure ()
       Right _ -> throwIO (userError "the source was supposed to fail")
@@ -892,7 +1016,7 @@ scenarioForkTakesIdAndQueue fx = do
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
     exec <- fx.mfLaunch dbos
-    _ <- runWf exec key sourceId (Just (encodeWorkflowValue (3 :: Int)))
+    _ <- runWf exec key sourceId (Just (encodeWorkflowInput (3 :: Int)))
     forked <-
       forkWorkflows
         dbos
@@ -934,7 +1058,7 @@ scenarioForkInheritsOwner fx = do
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key sourceId (Just (encodeWorkflowValue (3 :: Int)))
+    ran <- runWf exec key sourceId (Just (encodeWorkflowInput (3 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -972,7 +1096,7 @@ scenarioForkFromStep fx = do
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
     exec <- fx.mfLaunch dbos
-    first <- runWf exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+    first <- runWf exec key sourceId (Just (encodeWorkflowInput (0 :: Int)))
     case first of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -1025,7 +1149,7 @@ scenarioForkFromFailure fx = do
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
     exec <- fx.mfLaunch dbos
-    first <- runWf exec key sourceId (Just (encodeWorkflowValue (0 :: Int)))
+    first <- runWf exec key sourceId (Just (encodeWorkflowInput (0 :: Int)))
     failureStep <- case first of
       Left (StepFailed step _) -> pure step
       other -> throwIO (userError ("expected the step failure, got: " <> show other))
@@ -1091,7 +1215,7 @@ scenarioBulkCancelResume fx = do
       Right _ -> pure ()
     _ <- fx.mfLaunch dbos
     let enqueueOne wid = do
-          enqueued <- enqueueWorkflow dbos key wid (Just (encodeWorkflowValue ("hello" :: Text))) ("bulk-" <> suffix)
+          enqueued <- enqueueWorkflow dbos key wid (Just (encodeWorkflowInput ("hello" :: Text))) ("bulk-" <> suffix)
           case enqueued of
             Left err -> throwIO (userError (show err))
             Right _ -> pure ()
@@ -1128,7 +1252,7 @@ scenarioBulkFork fx = do
       Right _ -> pure ()
     exec <- fx.mfLaunch dbos
     let runOne wid input = do
-          ran <- runWf exec key wid (Just (encodeWorkflowValue input))
+          ran <- runWf exec key wid (Just (encodeWorkflowInput input))
           case ran of
             Right _ -> pure ()
             other -> throwIO (userError ("expected the source to run, got: " <> show other))
@@ -1168,7 +1292,7 @@ scenarioForkPartitioned fx = do
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
     exec <- fx.mfLaunch dbos
-    _ <- runWf exec key sourceId (Just (encodeWorkflowValue ("hello" :: Text)))
+    _ <- runWf exec key sourceId (Just (encodeWorkflowInput ("hello" :: Text)))
     forked <-
       forkFrom
         dbos
@@ -1356,11 +1480,11 @@ scenarioAttributesInWorkflow fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowValue ()))
+    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowInput ()))
     case ranTarget of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
-    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowValue targetText))
+    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowInput targetText))
     decoded <- case ranCaller of
       Left err -> throwIO (userError (show err))
       Right Nothing -> throwIO (userError "expected the caller result")
@@ -1373,7 +1497,7 @@ scenarioAttributesInWorkflow fx = do
     listed <- listStepsWf dbos (WorkflowId callerText)
     names <- case listed of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepName | record <- records]
+      Right records -> pure [record.stepInfoName | record <- records]
     cleared <- updateWorkflowAttributes dbos (WorkflowId targetText) Nothing
     case cleared of
       Left err -> throwIO (userError (show err))
@@ -1523,7 +1647,7 @@ adoptParentBody :: forall exec m. (MonadTime m, MonadMVar m, MonadCatch m, Monad
                    m (Either (Error EngineOnly) Int)
 adoptParentBody childRef ran () wctx = do
   atomically (modifyTVar ran (+ 1))
-  started <- startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowValue (21 :: Int)))
+  started <- startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput (21 :: Int)))
   case started of
     Left err -> pure (Left err)
     Right child -> do
@@ -1567,7 +1691,7 @@ scenarioRewindRunsAgain fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    first <- runWf exec key wid (Just (encodeWorkflowValue (0 :: Int)))
+    first <- runWf exec key wid (Just (encodeWorkflowInput (0 :: Int)))
     case first of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -1579,7 +1703,7 @@ scenarioRewindRunsAgain fx = do
     listed <- listStepsWf dbos wid
     stepIds <- case listed of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepId | record <- records]
+      Right records -> pure [record.stepInfoId | record <- records]
     drove <- dequeueWorkflows dbos
     case drove of
       Left err -> throwIO (userError (show err))
@@ -1684,7 +1808,7 @@ scenarioDelayReleaseInWorkflow fx = do
     case started of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
-    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowValue targetText))
+    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowInput targetText))
     decoded <- case ranCaller of
       Left err -> throwIO (userError (show err))
       Right Nothing -> throwIO (userError "expected the caller result")
@@ -1706,7 +1830,7 @@ scenarioDelayReleaseInWorkflow fx = do
     listed <- listStepsWf dbos (WorkflowId callerText)
     names <- case listed of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepName | record <- records]
+      Right records -> pure [record.stepInfoName | record <- records]
     pure (decoded, released, names)
 
 -- | The caller hands back the target id, the target ran, and the caller's
@@ -1781,7 +1905,7 @@ scenarioRewindRefusals fx = do
       Left err -> throwIO (userError (show err))
       Right r -> pure r
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key finished (Just (encodeWorkflowValue ()))
+    ran <- runWf exec key finished (Just (encodeWorkflowInput ()))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -1793,7 +1917,7 @@ scenarioRewindRefusals fx = do
         exec
         ref
         (startOptionsDefault {startWorkflowId = Just active, startQueue = Just (enqueueNew "no-runner-here")})
-        (Just (encodeWorkflowValue ()))
+        (Just (encodeWorkflowInput ()))
     case started of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -1802,7 +1926,7 @@ scenarioRewindRefusals fx = do
     listed <- listStepsWf dbos active
     stepIds <- case listed of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepId | record <- records]
+      Right records -> pure [record.stepInfoId | record <- records]
     pure (missing, negative, emptyQueue, refused, row.workflowRecordStatus, stepIds)
 
 -- | Every refusal names its cause; the active row is untouched.
@@ -1852,7 +1976,7 @@ undoAt fx cut = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key wid (Just (encodeWorkflowValue widText))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput widText))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -1875,7 +1999,7 @@ undoAt fx cut = do
     listed <- listStepsWf dbos wid
     stepIds <- case listed of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepId | record <- records]
+      Right records -> pure [record.stepInfoId | record <- records]
     row <- fx.mfReadRow wid
     pure (messages, eventHit, values, stepIds, row.workflowRecordStatus)
 
@@ -1951,7 +2075,7 @@ scenarioRewindKeepStreamClose fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput ()))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -1997,7 +2121,7 @@ scenarioRewindQueueVersion fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput ()))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -2009,7 +2133,7 @@ scenarioRewindQueueVersion fx = do
     listed <- listStepsWf dbos wid
     stepIds <- case listed of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepId | record <- records]
+      Right records -> pure [record.stepInfoId | record <- records]
     pure
       ( row.workflowRecordStatus,
         row.workflowRecordQueueName,
@@ -2057,11 +2181,11 @@ scenarioRewindInWorkflow fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowValue ()))
+    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowInput ()))
     case ranTarget of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
-    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowValue targetText))
+    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowInput targetText))
     decoded <- case ranCaller of
       Left err -> throwIO (userError (show err))
       Right Nothing -> throwIO (userError "expected the caller result")
@@ -2073,7 +2197,7 @@ scenarioRewindInWorkflow fx = do
     listed <- listStepsWf dbos (WorkflowId callerText)
     names <- case listed of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepName | record <- records]
+      Right records -> pure [record.stepInfoName | record <- records]
     pure (decoded, target.workflowRecordStatus, names)
 
 -- | The caller hands back the target id, the target is re-enqueued, and
@@ -2105,7 +2229,7 @@ scenarioRewindDropsDatasourceCheckpoints fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput ()))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -2160,7 +2284,7 @@ scenarioCompletionClearsCheckpoints fx = do
       Left err -> throwIO (userError (show err))
       Right r -> pure r
     exec <- fx.mfLaunch dbos
-    ranDirect <- runWf exec directKey directWid (Just (encodeWorkflowValue ()))
+    ranDirect <- runWf exec directKey directWid (Just (encodeWorkflowInput ()))
     case ranDirect of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -2171,7 +2295,7 @@ scenarioCompletionClearsCheckpoints fx = do
         exec
         drivenRef
         (startOptionsDefault {startWorkflowId = Just drivenWid, startQueue = Just (enqueueNew internal)})
-        (Just (encodeWorkflowValue ()))
+        (Just (encodeWorkflowInput ()))
     case started of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -2250,7 +2374,7 @@ scenarioChildClearsCheckpoints fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec parentKey parentWid (Just (encodeWorkflowValue ()))
+    ran <- runWf exec parentKey parentWid (Just (encodeWorkflowInput ()))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -2284,7 +2408,7 @@ scenarioRewindCallerStep fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ran <- runWf exec key wid (Just (encodeWorkflowValue ()))
+    ran <- runWf exec key wid (Just (encodeWorkflowInput ()))
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -2298,7 +2422,7 @@ scenarioRewindCallerStep fx = do
     listed <- listStepsWf dbos wid
     names <- case listed of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepName | record <- records]
+      Right records -> pure [record.stepInfoName | record <- records]
     row <- fx.mfReadRow wid
     pure (first == Right (), second == Right (), names, row.workflowRecordStatus, invalidRefused)
 
@@ -2334,7 +2458,7 @@ scenarioRewindAdoptsChild fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    first <- runWf exec parentKey wid (Just (encodeWorkflowValue ()))
+    first <- runWf exec parentKey wid (Just (encodeWorkflowInput ()))
     firstDecoded <- case first of
       Left err -> throwIO (userError (show err))
       Right Nothing -> throwIO (userError "expected the parent result")
@@ -2391,11 +2515,11 @@ scenarioRewindRefusedTakesNoStep fx = do
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
     exec <- fx.mfLaunch dbos
-    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowValue ()))
+    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowInput ()))
     case ranTarget of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
-    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowValue targetText))
+    ranCaller <- runWf exec callerKey (WorkflowId callerText) (Just (encodeWorkflowInput targetText))
     field <- case ranCaller of
       Left err -> throwIO (userError (show err))
       Right Nothing -> throwIO (userError "expected the caller result")
@@ -2406,7 +2530,7 @@ scenarioRewindRefusedTakesNoStep fx = do
     listed <- listStepsWf dbos (WorkflowId callerText)
     names <- case listed of
       Left err -> throwIO (userError (show err))
-      Right records -> pure [record.stepRecordStepName | record <- records]
+      Right records -> pure [record.stepInfoName | record <- records]
     pure (field, names)
 
 -- | The refusal names the cut problem, and the caller recorded no step.

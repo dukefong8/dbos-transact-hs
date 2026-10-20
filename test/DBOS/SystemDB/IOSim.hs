@@ -24,6 +24,7 @@ module DBOS.SystemDB.IOSim
     simIdentity,
     simGeneratedId,
     simEntropy,
+    verifyCallerStep,
   )
 where
 
@@ -38,9 +39,11 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
+import DBOS.SystemDB.Error (decodePortableError, encodePortableError)
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
+    claimsOwnership,
     Debounce (..),
     DebounceHolder (..),
     DebounceRequest (..),
@@ -59,6 +62,7 @@ import DBOS.SystemDB
     OnExistingQueue (..),
     Outcome (..),
     OutcomeWrite (..),
+    portableJsonSerialization,
     QueueName (..),
     QueueRecord (..),
     QueueUpdate (..),
@@ -72,6 +76,7 @@ import DBOS.SystemDB
     AwaitedStream (..),
     StreamRead (..),
     StreamRecord (..),
+    Submission (..),
     SysRewindOptions (..),
     SystemDB (..),
     Timestamp,
@@ -266,7 +271,7 @@ simConnectionWith tracer = do
   instanceId <- simInstanceId instances
   newConnection
     (SomeSystemDB MockSystemDB)
-    RustSerde
+    PortableJson
     (Just "sim-app")
     (secondsDuration 1)
     OwnerApplication
@@ -441,7 +446,7 @@ memConnectionOn mem tracer = do
   instanceId <- simInstanceId mem.memInstanceCounter
   newConnection
     (SomeSystemDB mem)
-    RustSerde
+    PortableJson
     (Just "sim-app")
     (secondsDuration 1)
     OwnerApplication
@@ -541,18 +546,23 @@ memAwaited row = case row.workflowRecordStatus of
 -- | A retried request is idempotent: an existing id joins, so the same id
 -- initialized twice executes once. A held dedup key under a fresh id is
 -- the collision; the same id retrying its own key joins instead.
-memInitResult :: WorkflowRecord -> WorkflowInitResult
-memInitResult row =
-  WorkflowInitResult
-    { initResultStatus = row.workflowRecordStatus,
-      initResultRecoveryAttempts = row.workflowRecordRecoveryAttempts,
-      initResultDeadline = row.workflowRecordDeadline,
-      initResultSerialization = row.workflowRecordSerialization,
-      initResultShouldExecute = False
-    }
+memInitResult :: Submission -> WorkflowRecord -> WorkflowInitResult
+memInitResult submission row =
+  let unowned = row.workflowRecordOwnerXid == Nothing
+      claiming = claimsOwnership submission
+      shouldExecute = not (not unowned && not claiming)
+      existingInput = if unowned && not claiming then Just row.workflowRecordInput else Nothing
+   in WorkflowInitResult
+        { initResultStatus = row.workflowRecordStatus,
+          initResultRecoveryAttempts = row.workflowRecordRecoveryAttempts,
+          initResultDeadline = row.workflowRecordDeadline,
+          initResultSerialization = row.workflowRecordSerialization,
+          initResultExistingInput = existingInput,
+          initResultShouldExecute = shouldExecute
+        }
 
 instance SystemDB (MemSystemDB s) (IOSim s) where
-  initWorkflow db new _maxAttempts _submission caller = do
+  initWorkflow db new _maxAttempts submission caller = do
     -- The wake instant a delayed enqueue waits for, as the SQL init's
     -- @delay_until@: without it a DELAYED row would never come due and the
     -- transition would pass it by forever.
@@ -560,7 +570,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     atomically $ do
       rows <- readTVar db.memRows
       case Map.lookup new.newWorkflowId rows of
-        Just row -> pure (Right (memInitResult row))
+        Just row -> pure (Right (memInitResult submission row))
         Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
           (Just queue, Just key) -> do
             held <- readTVar db.memDedup
@@ -603,6 +613,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                     initResultRecoveryAttempts = 0,
                     initResultDeadline = new.newWorkflowDeadline,
                     initResultSerialization = new.newWorkflowSerialization,
+                    initResultExistingInput = Nothing,
                     initResultShouldExecute = True
                   }
               )
@@ -786,9 +797,16 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     where
       memPriorOutput (Just record) = record.stepRecordOutput
       memPriorOutput Nothing = Nothing
-  listSteps db (WorkflowId wid) _ _ _ _ = do
+  listSteps db (WorkflowId wid) loadOutput limit offset _ = do
     steps <- readTVarIO db.memSteps
-    pure (Right [record | ((w, _), record) <- Map.toList steps, w == wid])
+    let ordered = sortOn (.stepRecordStepId) [record | ((w, _), record) <- Map.toList steps, w == wid]
+        start = maybe 0 fromIntegral offset
+        count = maybe (length ordered) fromIntegral limit
+        page = take count (drop start ordered)
+        strip record
+          | loadOutput = record
+          | otherwise = record {stepRecordOutput = Nothing, stepRecordError = Nothing}
+    pure (Right (map strip page))
   recordChildWorkflow db parent child stepId name _time = atomically $ do
     steps <- readTVar db.memSteps
     let WorkflowId parentText = parent
@@ -1623,10 +1641,30 @@ verifyCallerStep expectedName caller rows steps = case caller of
                   _ -> CallerReplayed (replayMemStep record)
   where
     replayMemStep record = case record.stepRecordError of
-      Just text -> case eitherDecodeStrict (encodeUtf8 text) of
-        Right err -> Left err
-        Left _ -> Left (Malformed "unreadable recorded step error")
+      Just text -> case simCallerEncoding record.stepRecordSerialization of
+        Left err -> Left err
+        Right SimCallerPortable -> case decodePortableError text of
+          Right err -> Left err
+          Left message -> Left (Malformed ("unreadable recorded step error: " <> message))
+        Right SimCallerNative -> case eitherDecodeStrict (encodeUtf8 text) of
+          Right err -> Left err
+          Left _ -> Left (Malformed "unreadable recorded step error")
       Nothing -> Right ()
+
+-- | How a sim caller step's recorded bytes are tagged, mirroring the live
+-- 'callerEncoding': NULL/empty/legacy native, `portable_json` portable, any
+-- other tag refused.
+data SimCallerEncoding
+  = SimCallerNative
+  | SimCallerPortable
+
+simCallerEncoding :: Maybe Text -> Either Error SimCallerEncoding
+simCallerEncoding Nothing = Right SimCallerNative
+simCallerEncoding (Just "") = Right SimCallerNative
+simCallerEncoding (Just "rust_serde") = Right SimCallerNative
+simCallerEncoding (Just tag)
+  | tag == portableJsonSerialization = Right SimCallerPortable
+simCallerEncoding (Just name) = Left (UnknownSerialization {name})
 
 -- | Deliver messages to their topics and destinations, appending a
 -- notification per delivery so 'getAllNotifications' sees them, and record
@@ -1835,12 +1873,12 @@ memRewind db wid cut sysOpts caller = do
           stepRecordOutput = either (const Nothing) (const (Just "null")) outcome,
           stepRecordError = either (Just . memErrorJson) (const Nothing) outcome,
           stepRecordChildWorkflowId = Nothing,
-          stepRecordSerialization = either (const Nothing) (const (Just "portable_json")) outcome,
+          stepRecordSerialization = Just portableJsonSerialization,
           stepRecordStartedAt = Just now,
           stepRecordCompletedAt = Just now
         }
     memErrorJson :: Error -> Text
-    memErrorJson err = decodeUtf8 (LBS.toStrict (encode err))
+    memErrorJson = encodePortableError
 
 memQueueRecord :: NewQueue -> QueueRecord
 memQueueRecord queue =
