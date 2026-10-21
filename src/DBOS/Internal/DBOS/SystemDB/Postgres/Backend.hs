@@ -99,7 +99,7 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB.Class (SystemDB (..))
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), invalidInput, shouldRecord)
-import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, messageKey, newRegistry, notified, streamKey, streamsChannel, subscribe, subscribeExclusive, unsubscribe)
+import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, messageKey, newRegistry, notified, streamKey, streamsChannel, subscribe, unsubscribe)
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
@@ -2341,8 +2341,8 @@ foreignKeyError (Backend backend) = backend.backendSqlState == Just "23503"
 foreignKeyError _                 = False
 
 -- | Waits until a message is waiting or the deadline passes, woken by the
--- exclusive subscription the caller holds. Absence at the deadline is not an
--- error: the caller's transaction records the timeout. Mirrors the oracle's
+-- subscription the caller holds. Absence at the deadline is not an error:
+-- the caller's transaction records the timeout. Mirrors the oracle's
 -- look-wait-look loop.
 pollForMessage :: PostgresSystemDB -> Subscription -> Text -> Text -> Timestamp -> IO (Either Error ())
 pollForMessage env subscription workflowId topic deadline = do
@@ -2864,41 +2864,38 @@ instance SystemDB PostgresSystemDB IO where
       -- another, including the absence a timeout produced.
       Right (Just step) -> pure (Right (stepEncodedValue step))
       Right Nothing -> do
-        acquired <- subscribeExclusive env.psdbNotify (messageKey widText (Just storedTopic))
-        case acquired of
-          Nothing -> pure (Left ConcurrentRecv {workflowId = widText, topic = topic})
-          Just subscription ->
-            ( do
-                deadline <- checkpointSleep env DeadlineSleep wid timeoutStepId timeout
-                case deadline of
+        subscription <- subscribe env.psdbNotify (messageKey widText (Just storedTopic))
+        ( do
+            deadline <- checkpointSleep env DeadlineSleep wid timeoutStepId timeout
+            case deadline of
+              Left err -> pure (Left err)
+              Right wakeAt -> do
+                waited <- pollForMessage env subscription widText storedTopic wakeAt
+                case waited of
                   Left err -> pure (Left err)
-                  Right wakeAt -> do
-                    waited <- pollForMessage env subscription widText storedTopic wakeAt
-                    case waited of
-                      Left err -> pure (Left err)
-                      Right () -> do
-                        completedAt <- timestampNow
-                        taken <-
-                          runTransaction
-                            env
-                            "recv"
-                            ( Statements.recvTx
-                                Statements.RecvParams
-                                  { recvWorkflowId = widText,
-                                    recvStepId = stepId,
-                                    recvTopic = storedTopic,
-                                    recvStartedAt = timestampToEpochMs startedAt,
-                                    recvCompletedAt = timestampToEpochMs completedAt
-                                  }
-                            )
-                        pure $ case taken of
-                          Left err -> Left err
-                          Right (Statements.RecvAdopted row) ->
-                            fmap (>>= stepEncodedValue) (stepCheckToRecord wid stepId recvStepName row)
-                          Right (Statements.RecvTook message) ->
-                            Right ((\raw -> EncodedValue raw.encodedRawValue raw.encodedRawSerialization) <$> message)
-            )
-              `finally` unsubscribe subscription
+                  Right () -> do
+                    completedAt <- timestampNow
+                    taken <-
+                      runTransaction
+                        env
+                        "recv"
+                        ( Statements.recvTx
+                            Statements.RecvParams
+                              { recvWorkflowId = widText,
+                                recvStepId = stepId,
+                                recvTopic = storedTopic,
+                                recvStartedAt = timestampToEpochMs startedAt,
+                                recvCompletedAt = timestampToEpochMs completedAt
+                              }
+                        )
+                    pure $ case taken of
+                      Left err -> Left err
+                      Right (Statements.RecvAdopted row) ->
+                        fmap (>>= stepEncodedValue) (stepCheckToRecord wid stepId recvStepName row)
+                      Right (Statements.RecvTook message) ->
+                        Right ((\raw -> EncodedValue raw.encodedRawValue raw.encodedRawSerialization) <$> message)
+          )
+            `finally` unsubscribe subscription
     where
       unwrap (Types.WorkflowId widText) = widText
   writeStream env wid stepId key value serialization writtenBy = do

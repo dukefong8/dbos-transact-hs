@@ -39,7 +39,6 @@ data Error
     -- a value the first run never saw. Mirrors Rust @UnknownSerialization@.
     UnknownSerialization {name :: Text}
   | ConflictingWorkflow {workflowId :: Text, detail :: Text}
-  | ConcurrentRecv {workflowId :: Text, topic :: Maybe Text}
   | InvalidInput {field :: Text, detail :: Text}
   | QueueDeduplicated {workflowId :: Text, queueName :: Text, deduplicationId :: Text}
   | WorkflowCancelled {workflowId :: Text}
@@ -86,7 +85,6 @@ instance ToJSON Error where
     Malformed message -> tagged "Malformed" (toJSON message)
     UnknownSerialization {name} -> tagged "UnknownSerialization" (object ["name" .= name])
     ConflictingWorkflow {workflowId, detail} -> tagged "ConflictingWorkflow" (object ["workflow_id" .= workflowId, "detail" .= detail])
-    ConcurrentRecv {workflowId, topic} -> tagged "ConcurrentRecv" (object ["workflow_id" .= workflowId, "topic" .= topic])
     InvalidInput {field, detail} -> tagged "InvalidInput" (object ["field" .= field, "detail" .= detail])
     QueueDeduplicated {workflowId, queueName, deduplicationId} -> tagged "QueueDeduplicated" (object ["workflow_id" .= workflowId, "queue_name" .= queueName, "deduplication_id" .= deduplicationId])
     WorkflowCancelled {workflowId} -> tagged "WorkflowCancelled" (object ["workflow_id" .= workflowId])
@@ -111,7 +109,6 @@ instance FromJSON Error where
       "Malformed" -> Malformed <$> parseJSON payload
       "UnknownSerialization" -> withObject "UnknownSerialization" (\o -> UnknownSerialization <$> o .: "name") payload
       "ConflictingWorkflow" -> withObject "ConflictingWorkflow" (\o -> ConflictingWorkflow <$> o .: "workflow_id" <*> o .: "detail") payload
-      "ConcurrentRecv" -> withObject "ConcurrentRecv" (\o -> ConcurrentRecv <$> o .: "workflow_id" <*> o .: "topic") payload
       "InvalidInput" -> withObject "InvalidInput" (\o -> InvalidInput <$> o .: "field" <*> o .: "detail") payload
       "QueueDeduplicated" -> withObject "QueueDeduplicated" (\o -> QueueDeduplicated <$> o .: "workflow_id" <*> o .: "queue_name" <*> o .: "deduplication_id") payload
       "WorkflowCancelled" -> withObject "WorkflowCancelled" (\o -> WorkflowCancelled <$> o .: "workflow_id") payload
@@ -171,10 +168,6 @@ renderError err =
     UnknownSerialization {name = tag} -> "serialization " <> tag <> " is not available"
     ConflictingWorkflow {workflowId = wid, detail = why} ->
       "workflow " <> wid <> " already exists: " <> why
-    ConcurrentRecv {workflowId = wid, topic = Nothing} ->
-      "workflow " <> wid <> " is already receiving"
-    ConcurrentRecv {workflowId = wid, topic = Just name} ->
-      "workflow " <> wid <> " is already receiving on topic " <> name
     InvalidInput {field = fieldName, detail = why} ->
       "invalid " <> fieldName <> ": " <> why
     QueueDeduplicated {workflowId = wid, queueName = queue, deduplicationId = key} ->
@@ -270,7 +263,6 @@ shouldRecord err = case err of
   Malformed _ -> False
   UnknownSerialization {} -> False
   ConflictingWorkflow {} -> True
-  ConcurrentRecv {} -> False
   InvalidInput {} -> True
   QueueDeduplicated {} -> True
   WorkflowCancelled {} -> False

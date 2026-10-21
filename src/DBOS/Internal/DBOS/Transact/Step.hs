@@ -62,7 +62,9 @@ data WorkflowEvent
   | StepOutputRecorded { recordedStepName :: Text, recordedStepId :: Int }
   | StepErrorRecorded { recordedStepName :: Text, recordedStepId :: Int }
   | StepPreempted { preemptedStepName :: Text, preemptedStepId :: Int }
+  | StepValueUnreadable { unreadableStepName :: Text, unreadableStepId :: Int, unreadableSerialization :: Text }
   | StepAttemptTimedOut { timedOutStepName :: Text, timedOutStepId :: Int, timedOutAfterMs :: Integer }
+  | WorkflowStartErrorReplayed { workflowStartErrorParent :: Text, workflowStartErrorStep :: Int, workflowStartErrorDetail :: Text }
   | WorkflowDedupJoined { workflowHolderId :: Text, workflowDeduplicationId :: Text }
   | WorkflowChildJoined { workflowParentId :: Text, workflowParentStepId :: Int, workflowJoinedChildId :: Text }
   | WorkflowEnqueued { workflowEnqueuedId :: Text, workflowEnqueuedQueue :: Text }
@@ -88,7 +90,9 @@ instance LogEvent WorkflowEvent where
   eventSeverity StepOutputRecorded {}           = SeverityDebug
   eventSeverity StepErrorRecorded {}            = SeverityDebug
   eventSeverity StepPreempted {}                = SeverityDebug
+  eventSeverity StepValueUnreadable {}          = SeverityWarning
   eventSeverity StepAttemptTimedOut {}          = SeverityDebug
+  eventSeverity WorkflowStartErrorReplayed {}   = SeverityDebug
   eventSeverity WorkflowDedupJoined {}          = SeverityDebug
   eventSeverity WorkflowChildJoined {}          = SeverityDebug
   eventSeverity WorkflowEnqueued {}             = SeverityDebug
@@ -118,6 +122,10 @@ instance LogEvent WorkflowEvent where
     "the step failed; its error is recorded step_id=" <> showText stepId' <> " step_name=" <> name
   renderEvent (StepPreempted name stepId') =
     "the workflow was cancelled elsewhere; the step is preempted and records nothing step_name=" <> name <> " step_id=" <> showText stepId'
+  renderEvent (StepValueUnreadable name stepId' tag) =
+    "a recorded step value holds a serialization this process cannot read step_id=" <> showText stepId' <> " step_name=" <> name <> " serialization=" <> tag
+  renderEvent (WorkflowStartErrorReplayed parentId parentStepId detail) =
+    "the child workflow start failed; the replay returns the same error parent_workflow_id=" <> parentId <> " step_id=" <> showText parentStepId <> " error=" <> detail
   renderEvent (StepAttemptTimedOut name stepId' afterMs) =
     "the step attempt exceeded its timeout and was stopped step_name=" <> name <> " step_id=" <> showText stepId' <> " timeout_ms=" <> showText afterMs
   renderEvent (WorkflowDedupJoined holderId deduplicationId) =

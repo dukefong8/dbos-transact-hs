@@ -69,6 +69,7 @@ import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 import DBOS.Transact.WorkflowCases
   ( timeoutOptionsCase,
+    startErrorCase,
     WfFixture (..),
     scenarioRegisteredRecordsResult,
     scenarioJoinTakesId,
@@ -114,6 +115,8 @@ import DBOS.Transact.WorkflowCases
     scenarioWrongInstance,
     scenarioJoinHeldKey,
     scenarioEnqueuedChildReplays,
+    scenarioDedupStartRecorded,
+    scenarioConflictStartRecorded,
     checkRegisteredResult,
     checkJoinTakesId,
     checkFreshJoinPolls,
@@ -158,6 +161,8 @@ import DBOS.Transact.WorkflowCases
     checkWrongInstance,
     checkJoinHeldKey,
     checkEnqueuedChildReplays,
+    checkDedupStartRecorded,
+    checkConflictStartRecorded,
     taskAbortAllWaits,
     taskFinishedNotRegistered,
     taskRefusedAfterSweep,
@@ -304,6 +309,7 @@ tests =
           ghostStatus <- readWorkflowStatus getBackend (WorkflowId ghostText)
           ghostStatus @?= Just Pending,
       testCase "timeouts, options, and child ids compose without a database" timeoutOptionsCase,
+      testCase "only a child start's refusals are recorded and replay" startErrorCase,
       -- The double-click: the same id while the first run still owns it
       -- joins rather than failing — one id, one execution.
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId,
@@ -532,6 +538,8 @@ tests =
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a child joining a held key is recorded as the workflow it joined" scenarioJoinHeldKey checkJoinHeldKey,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "an in-workflow enqueue is a recorded child start that replays" scenarioEnqueuedChildReplays checkEnqueuedChildReplays,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a refused child start replays after the key is freed" scenarioDedupStartRecorded checkDedupStartRecorded,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a taken child id replays after the row is deleted" scenarioConflictStartRecorded checkConflictStartRecorded,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a panicking workflow leaves its row pending" scenarioPanic checkPanic,

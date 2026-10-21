@@ -77,8 +77,8 @@ which is what keeps every borrow valid.
 - **Raw-channel consumers stay on `runSystemDB`.** `withConnection`
   promises the mapped engine channel, which does not fit consumers of
   the raw backend error: `driveGetEvent → adoptEventValue`
-  (`Event.hs:173`), `initWorkflow → resolveEnqueueCollision`
-  (`Client.hs:299`, whose callee takes raw `Error`, `Workflow.hs:545`),
+  (`Event.hs:173`), `initWorkflow → initOrJoin`
+  (`Client.hs:364`, whose callee takes raw `Error`, `Workflow.hs:614`),
   and all `try`-acquire/validation sites.
 
 ## Threads: daemon-only by design

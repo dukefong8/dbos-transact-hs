@@ -58,6 +58,7 @@ import DBOS.Transact.ManagementCases
     checkCancelTree,
     checkDelete,
     checkForkFromBeginning,
+    checkForkReplacesChild,
     checkForkFromFailure,
     checkForkFromStep,
     checkForkTakesIdAndQueue,
@@ -98,6 +99,7 @@ import DBOS.Transact.ManagementCases
     scenarioCancelTree,
     scenarioDelete,
     scenarioForkFromBeginning,
+    scenarioForkReplacesChild,
     scenarioForkFromFailure,
     scenarioForkFromStep,
     scenarioForkTakesIdAndQueue,
@@ -177,6 +179,7 @@ tests =
       simCase simMgmtFixture "an in-workflow step listing is itself a step" scenarioListStepsInWorkflow checkListStepsInWorkflow traceListStepsInWorkflow,
       simCase simMgmtFixture "the singular wrappers move one workflow each" scenarioSingular checkSingular traceSingular,
       simCase simMgmtFixture "forking from the beginning runs the workflow again under a new id" scenarioForkFromBeginning checkForkFromBeginning traceForkFromBeginning,
+      simCase simMgmtFixture "a fork adopts the replacement for a failed child" scenarioForkReplacesChild checkForkReplacesChild traceForkReplacesChild,
       simCase simMgmtFixture "a fork takes the id it is given" scenarioForkTakesIdAndQueue checkForkTakesIdAndQueue traceForkTakesIdAndQueue,
       simCase simMgmtFixture "forking from a chosen step replays the steps below it" scenarioForkFromStep checkForkFromStep traceForkFromStep,
       simCase simMgmtFixture "a fork inherits the owner of the workflow it was forked from" scenarioForkInheritsOwner checkForkInheritsOwner traceForkInheritsOwner,
@@ -450,6 +453,20 @@ traceForkFromBeginning :: forall a. SimTrace a -> IO ()
 traceForkFromBeginning tr = do
   selectTraceEventsDynamic tr @?= [StepEvent.WorkflowFailed "hs-l2-mgmt-fork-src-sim", WorkflowCompleted "hs-l2-mgmt-fork-src-sim-fork"]
   selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-mgmt-fork-src-sim-fork"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | Each accepted fork is announced as it is written; the refused maps are
+-- refused before anything is written, so they announce nothing. The
+-- shutdown ends the run.
+traceForkReplacesChild :: forall a. SimTrace a -> IO ()
+traceForkReplacesChild tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowForked "hs-l2-mgmt-fork-replace-child-sim",
+          WorkflowForked "hs-l2-mgmt-fork-replace-adopted-sim",
+          WorkflowsForked 2,
+          WorkflowForked "hs-l2-mgmt-fork-replace-plain-sim",
+          WorkflowForked "hs-l2-mgmt-fork-replace-unrelated-sim"
+        ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | The source runs, the chosen fork is announced, the driven pass runs it,

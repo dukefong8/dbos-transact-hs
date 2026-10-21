@@ -1452,6 +1452,14 @@ data ForkOptions = ForkOptions
     forkOptionsQueueName           :: Maybe Text,
     forkOptionsQueuePartitionKey   :: Maybe Text,
     forkOptionsTimeout             :: Maybe Duration,
+    -- | Child workflow ids to rewrite as the fork's steps are copied:
+    -- @(original, replacement)@ pairs. Every copied step that names child
+    -- @original@ is rewritten to name @replacement@ — the start step and any
+    -- await, so a fork replayed at the awaiting step waits on the
+    -- replacement and carries on with its result; a recorded result is never
+    -- touched. The replacement must already exist, so start the fork at the
+    -- step that awaits the child or earlier. A map naming one original
+    -- twice, or either side empty, is refused before anything is written.
     forkOptionsReplacementChildren :: [(Text, Text)]
   }
   deriving stock (Eq, Show)
@@ -1496,9 +1504,13 @@ forkOptionProblems options =
     validateChildren children = go children []
       where
         go [] _ = Nothing
-        go ((original, _) : rest) seen
+        go ((original, replacement) : rest) seen
           | Text.null original =
               Just ("replacement_children", "a replaced child id must not be empty")
+          -- A fork rewritten to wait on @""@ waits on a workflow that can
+          -- never exist.
+          | Text.null replacement =
+              Just ("replacement_children", "the replacement for " <> original <> " must not be empty")
           | original `elem` seen =
               Just ("replacement_children", original <> " is replaced more than once")
           | otherwise = go rest (original : seen)

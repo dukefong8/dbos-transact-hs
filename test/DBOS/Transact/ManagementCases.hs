@@ -35,7 +35,9 @@ module DBOS.Transact.ManagementCases
     scenarioListStepsPaging,
     scenarioListStepsInWorkflow,
     scenarioSingular,
+    ForkReplacementFacts (..),
     scenarioForkFromBeginning,
+    scenarioForkReplacesChild,
     scenarioForkTakesIdAndQueue,
     scenarioForkFromStep,
     scenarioForkFromFailure,
@@ -75,6 +77,7 @@ module DBOS.Transact.ManagementCases
     checkListStepsInWorkflow,
     checkSingular,
     checkForkFromBeginning,
+    checkForkReplacesChild,
     checkForkTakesIdAndQueue,
     checkForkFromStep,
     checkForkFromFailure,
@@ -162,6 +165,7 @@ import DBOS.Transact
     runWorkflow,
     runStep,
     runStepWith,
+    awaitChild,
     stepOptionsDefault,
     send,
     setEvent,
@@ -999,6 +1003,195 @@ scenarioForkFromBeginning fx = do
     count <- readTVarIO attempts
     pure (forkedText, decoded, count)
 
+-- | What the replacement-child scenario observed: the replacement child's
+-- result and the parent fork that adopted it, the batch's results, the
+-- step and child run counts, whether the un-mapped forks failed with the
+-- original child, the three refusals' shape, and the refused fork's row.
+data ForkReplacementFacts = ForkReplacementFacts
+  { forkReplacementResult    :: Int,
+    forkAdoptedResult        :: Int,
+    forkBatchResults         :: [Int],
+    forkBeforeRuns           :: Int,
+    forkChildRuns            :: Int,
+    forkPlainFailedWithChild :: Bool,
+    forkUnrelatedFailed      :: Bool,
+    forkRefusalsWereEngine   :: [Bool],
+    forkRefusedStatus        :: Maybe WorkflowStatus
+  }
+
+-- | A fork can adopt a replacement for a child that failed: re-run the
+-- failed child, then fork the parent from the step that awaits it, mapping
+-- the old child to the new one. Neither the parent's earlier step nor
+-- either child runs again; a fork without the map (or naming a child the
+-- parent never started) waits on the original and fails with it; a map
+-- naming one child twice, or either side empty, is refused before anything
+-- is written. Mirrors Rust's @a_fork_adopts_the_replacement_for_a_failed_child@.
+scenarioForkReplacesChild :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+                          => MgmtFixture m ->
+                             m ForkReplacementFacts
+scenarioForkReplacesChild fx =
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    broken <- newTVarIO True
+    beforeCount <- newTVarIO (0 :: Int)
+    childCount <- newTVarIO (0 :: Int)
+    let childKey = newWorkflowKey "replace-child"
+        parentKey = newWorkflowKey "replace-parent"
+        childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        childBody () _ = do
+          atomically (modifyTVar childCount (+ 1))
+          isBroken <- readTVarIO broken
+          pure (if isBroken then Left (ErrorConfig "the child is broken") else Right 42)
+    childRefE <- registerWorkflowRef dbos childKey childBody
+    childRef <- case childRefE of
+      Left err -> throwIO (userError (show err))
+      Right r  -> pure r
+    let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        parentBody () wctx = do
+          before <- runStep wctx "before" (const (atomically (modifyTVar beforeCount (+ 1)) >> pure (0 :: Int)))
+          case before of
+            Left err -> pure (Left err)
+            Right _ -> do
+              (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
+                startChildWorkflow wctx childRef startOptionsDefault Nothing
+              case started of
+                Left err -> pure (Left err)
+                Right wfHandle -> do
+                  awaited <- awaitChild wctx wfHandle
+                  pure $ case awaited of
+                    Left err -> Left err
+                    Right (Just stored) ->
+                      case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+                        Right value -> Right (value + 1)
+                        Left err    -> Left (StepFailed "parent" (Text.pack (show err)))
+                    Right Nothing -> Left (StepFailed "parent" "no child output")
+    registered <- registerWorkflow dbos parentKey parentBody
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    let parent1Text = "hs-l2-mgmt-fork-replace-parent-" <> suffix
+        parent2Text = "hs-l2-mgmt-fork-replace-other-" <> suffix
+        replacementText = "hs-l2-mgmt-fork-replace-child-" <> suffix
+        adoptedText = "hs-l2-mgmt-fork-replace-adopted-" <> suffix
+        batchOneText = "hs-l2-mgmt-fork-replace-batch-one-" <> suffix
+        batchTwoText = "hs-l2-mgmt-fork-replace-batch-two-" <> suffix
+        plainText = "hs-l2-mgmt-fork-replace-plain-" <> suffix
+        unrelatedText = "hs-l2-mgmt-fork-replace-unrelated-" <> suffix
+        refusedText = "hs-l2-mgmt-fork-replace-refused-" <> suffix
+        originalChild = parent1Text <> "-1"
+        otherChild = parent2Text <> "-1"
+        drive = do
+          drove <- dequeueWorkflows dbos
+          case drove of
+            Left err -> throwIO (userError (show err))
+            Right _  -> pure ()
+        awaitInt wid = do
+          waited <- waitForWorkflow dbos (WorkflowId wid)
+          pure $ case waited of
+            Right (SystemDB.AwaitedSucceeded (Just output) _) ->
+              either (Left . show) Right (decodeWorkflowValue "result" (Just (SystemDB.SerializedWorkflowValue output Nothing)) :: Either CodecError Int)
+            other -> Left (show other)
+        forkAt source forked step options = do
+          made <-
+            forkWorkflows
+              dbos
+              [(forkNew source) {forkForkedId = Just forked, forkStartStep = step}]
+              options
+          case made of
+            Left err -> throwIO (userError (show err))
+            Right _  -> drive
+        forkBeginning source forked options = forkAt source forked 0 options
+        forkBatch pairs options = do
+          made <-
+            forkWorkflows
+              dbos
+              [(forkNew source) {forkForkedId = Just forked, forkStartStep = 2} | (source, forked) <- pairs]
+              options
+          case made of
+            Left err -> throwIO (userError (show err))
+            Right _  -> drive
+        failedWithChild wid = do
+          waited <- waitForWorkflow dbos (WorkflowId wid)
+          pure $ case waited of
+            Right (SystemDB.AwaitedFailed {awaitedError = detail}) -> "broken" `Text.isInfixOf` detail
+            _                                                      -> False
+    expectBroken =<< runWf exec parentKey (WorkflowId parent1Text) Nothing
+    expectBroken =<< runWf exec parentKey (WorkflowId parent2Text) Nothing
+    atomically (writeTVar broken False)
+    -- The replacement child: the failed child forked from the beginning
+    -- with the id the parent's map will name.
+    _ <- forkBeginning originalChild replacementText defaultForkOptions
+    replacementResult' <- awaitInt replacementText
+    replacement <- case replacementResult' of
+      Right n -> pure n
+      Left detail -> throwIO (userError ("the replacement failed: " <> detail))
+    -- The parent, forked from the step that awaits the child: the copied
+    -- start names the replacement, so the re-run await finishes with it.
+    let adoption = defaultForkOptions {forkOptionsReplacementChildren = [(originalChild, replacementText)]}
+    _ <- forkAt parent1Text adoptedText 2 adoption
+    adoptedResult <- awaitInt adoptedText
+    adopted <- case adoptedResult of
+      Right n -> pure n
+      Left detail -> throwIO (userError ("the adopting fork failed: " <> detail))
+    -- One map for a whole batch: each parent adopts the replacement for
+    -- its own child.
+    let both =
+          defaultForkOptions
+            { forkOptionsReplacementChildren = [(originalChild, replacementText), (otherChild, replacementText)]
+            }
+    _ <- forkBatch [(parent1Text, batchOneText), (parent2Text, batchTwoText)] both
+    batchResults' <- traverse awaitInt [batchOneText, batchTwoText]
+    batch <- case sequence batchResults' of
+      Right results -> pure results
+      Left detail   -> throwIO (userError ("a fork in the batch failed: " <> detail))
+    -- Without the map, and with a map naming a child never started, the
+    -- fork waits on the original child and fails with it.
+    _ <- forkAt parent1Text plainText 2 defaultForkOptions
+    _ <- forkAt
+      parent1Text
+      unrelatedText
+      2
+      defaultForkOptions {forkOptionsReplacementChildren = [("never-started", replacementText)]}
+    plainFailed <- failedWithChild plainText
+    unrelatedFailed <- failedWithChild unrelatedText
+    -- A child named twice, or an empty id on either side, is refused
+    -- before anything is forked.
+    refusals <-
+      forM
+        [ [(originalChild, replacementText), (originalChild, otherChild)],
+          [("", replacementText)],
+          [(originalChild, "")]
+        ]
+        $ \children -> do
+          result <-
+            forkWorkflows
+              dbos
+              [(forkNew parent1Text) {forkForkedId = Just refusedText}]
+              defaultForkOptions {forkOptionsReplacementChildren = children}
+          pure $ case result of
+            Left (InvalidArgument _ detail) -> "replacement_children" `Text.isInfixOf` detail
+            _                               -> False
+    refusedStatus <- getWorkflowStatus dbos (WorkflowId refusedText)
+    beforeRuns' <- readTVarIO beforeCount
+    childRuns' <- readTVarIO childCount
+    pure
+      ForkReplacementFacts
+        { forkReplacementResult = replacement,
+          forkAdoptedResult = adopted,
+          forkBatchResults = batch,
+          forkBeforeRuns = beforeRuns',
+          forkChildRuns = childRuns',
+          forkPlainFailedWithChild = plainFailed,
+          forkUnrelatedFailed = unrelatedFailed,
+          forkRefusalsWereEngine = refusals,
+          forkRefusedStatus = refusedStatus
+        }
+  where
+    expectBroken result = case result of
+      Left err | "broken" `Text.isInfixOf` Text.pack (show err) -> pure ()
+      other -> throwIO (userError ("expected the broken child to fail the parent, got: " <> show other))
+
 -- | A fork takes the id it is given. Returns the fork's id, the queue its row
 -- carries, and the fork's decoded result.
 scenarioForkTakesIdAndQueue :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
@@ -1178,6 +1371,23 @@ checkForkFromBeginning (forkedText, decoded, count) = do
   checkEq 8 decoded
   checkEq 2 count
   checkEq True (not (Text.null forkedText))
+
+-- | The replacement ran with the child's code, the adopting fork finished
+-- with its result, the batch adopted both parents' children, and no parent
+-- step or child ran again. The un-mapped forks waited on the original and
+-- failed with it; the three bad maps were refused on the engine channel
+-- with nothing written.
+checkForkReplacesChild :: ForkReplacementFacts -> Either String ()
+checkForkReplacesChild facts = do
+  checkEq 42 facts.forkReplacementResult
+  checkEq 43 facts.forkAdoptedResult
+  checkEq [43, 43] facts.forkBatchResults
+  checkEq 2 facts.forkBeforeRuns
+  checkEq 3 facts.forkChildRuns
+  checkEq True facts.forkPlainFailedWithChild
+  checkEq True facts.forkUnrelatedFailed
+  checkEq [True, True, True] facts.forkRefusalsWereEngine
+  checkEq Nothing facts.forkRefusedStatus
 
 -- | The fork carries the id it was given, restarts on the internal queue, and
 -- runs the workflow's body.

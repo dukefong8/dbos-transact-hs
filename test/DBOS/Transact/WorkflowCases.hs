@@ -12,6 +12,7 @@
 -- in-memory backend with the same engine calls.
 module DBOS.Transact.WorkflowCases
   ( timeoutOptionsCase,
+    startErrorCase,
     WfFixture (..),
     scenarioRegisteredRecordsResult,
     JoinOutcome (..),
@@ -58,6 +59,10 @@ module DBOS.Transact.WorkflowCases
     scenarioWrongInstance,
     scenarioJoinHeldKey,
     scenarioEnqueuedChildReplays,
+    DedupStartOutcome (..),
+    scenarioDedupStartRecorded,
+    ConflictStartOutcome (..),
+    scenarioConflictStartRecorded,
     waitForRowShared,
     checkRegisteredResult,
     checkJoinTakesId,
@@ -103,6 +108,8 @@ module DBOS.Transact.WorkflowCases
     checkWrongInstance,
     checkJoinHeldKey,
     checkEnqueuedChildReplays,
+    checkDedupStartRecorded,
+    checkConflictStartRecorded,
     TaskCase,
     taskAbortAllWaits,
     taskFinishedNotRegistered,
@@ -117,14 +124,15 @@ module DBOS.Transact.WorkflowCases
 where
 
 import DBOS.Prelude
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, toJSON)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, toJSON, (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Text.Encoding (encodeUtf8)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.SystemDB (AwaitedOutcome (..), NewWorkflow (..), StepRecord (..), Submission (..), WorkflowId (..), WorkflowRecord (..), Timestamp (..), addTimeout, getWorkflow, listSteps, newWorkflow)
+import DBOS.SystemDB (AwaitedOutcome (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), Submission (..), WorkflowId (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Error qualified as SysErr
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
@@ -148,7 +156,10 @@ import DBOS.Transact
     WorkflowStatus (..),
     awaitChild,
     defaultQueueOptions,
+    deleteWorkflow,
     enqueueNew,
+    forkWorkflow,
+    forkWorkflows,
     handleResult,
     handleStatus,
     deleteQueue,
@@ -191,7 +202,7 @@ import DBOS.Transact.Context
     tokenCancelled,
     workflowId
   )
-import DBOS.Transact.Workflow (abortAll, childWorkflowId, newTasks, spawnTracked)
+import DBOS.Transact.Workflow (abortAll, childWorkflowId, isRecordedStartError, newTasks, recordedStartErrorNames, shouldRecordStartError, spawnTracked)
 import DBOS.Transact.Connection
   ( Connection,
     Owner (..),
@@ -223,6 +234,23 @@ timeoutOptionsCase = do
   childWorkflowId Nothing (Just ("parent", 0)) "generated" @?= "parent-0"
   childWorkflowId Nothing (Just ("parent", 2)) "generated" @?= "parent-2"
   childWorkflowId Nothing Nothing "generated" @?= "generated"
+
+-- | The recorded start-error surface without a database: only the two
+-- refusal variants are recorded, the names are the recorded ones, and a
+-- value is judged by its single-key shape before the typed read — so a
+-- plain step's error is never mistaken for a refusal.
+startErrorCase :: IO ()
+startErrorCase = do
+  recordedStartErrorNames @?= ["QueueDeduplicated", "ConflictingWorkflow"]
+  shouldRecordStartError (SysErr.QueueDeduplicated {workflowId = "w", queueName = "q", deduplicationId = "d"}) @?= True
+  shouldRecordStartError (SysErr.ConflictingWorkflow {workflowId = "w", detail = "taken"}) @?= True
+  shouldRecordStartError (SysErr.WorkflowCancelled {workflowId = "w"}) @?= False
+  shouldRecordStartError (SysErr.UnexpectedStep {workflowId = "w", stepId = 0, expected = "a child start", recorded = "a plain step"}) @?= False
+  isRecordedStartError (object ["QueueDeduplicated" .= True]) @?= True
+  isRecordedStartError (object ["ConflictingWorkflow" .= True]) @?= True
+  isRecordedStartError (object ["WorkflowCancelled" .= True]) @?= False
+  isRecordedStartError (object ["QueueDeduplicated" .= True, "extra" .= True]) @?= False
+  isRecordedStartError (String "not an object") @?= False
 
 -- * Shared workflow fixture: one body over any backend.
 
@@ -2180,6 +2208,231 @@ scenarioEnqueuedChildReplays fx = do
     children <- fx.wfChildren parentWid
     pure (parentText, childText, listed, children, replayed)
 
+-- | What a deduplicated child start's replay observed: the parent's first
+-- and replayed outputs, the parent's listed steps, the re-run's output, and
+-- the child rows the replay and the re-run did (or did not) start.
+data DedupStartOutcome = DedupStartOutcome
+  { dedupFirst       :: Text,
+    dedupReplay      :: Text,
+    dedupSteps       :: [StepRecord],
+    dedupRerun       :: Text,
+    dedupReplayChild :: Maybe WorkflowRecord,
+    dedupRerunChild  :: Maybe WorkflowRecord
+  }
+
+-- | A deduplicated child start's refusal is recorded at the parent's step
+-- and a replay returns it after the key is freed: the parent handles the
+-- refusal and finishes; the holder then runs; a fork that copies the start
+-- takes the same branch and starts no child, while a fork that runs the
+-- start again goes ahead. Mirrors Rust's
+-- @a_deduplicated_child_start_replays_its_error_after_the_key_is_freed@.
+scenarioDedupStartRecorded :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m)
+                           => WfFixture m -> m DedupStartOutcome
+scenarioDedupStartRecorded fx =
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    holderWid <- fx.wfFreshId "dedup-error-holder"
+    parentWid <- fx.wfFreshId "dedup-error-parent"
+    let WorkflowId holderText = holderWid
+        WorkflowId parentText = parentWid
+        queueName = "dedup-error-q-" <> holderText
+        dedupKey = "order-7-" <> holderText
+        childKey = newWorkflowKey "child"
+        parentKey = newWorkflowKey "dedup-error-parent"
+        childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        childBody () _ = pure (Right 9)
+        dedupShape = (enqueueNew queueName) {deduplicationId = Just dedupKey, duplicationPolicy = Reject}
+    childRefE <- registerWorkflowRef dbos childKey childBody
+    childRef <- case childRefE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        parentBody () wctx = do
+          started <- startChildWorkflow wctx childRef (startOptionsDefault {startQueue = Just dedupShape}) Nothing
+          pure $ case started of
+            Left (SystemDatabase (SysErr.QueueDeduplicated {})) -> Right "deduplicated"
+            Left err -> Left err
+            Right _ -> Right "started"
+    parentReg <- registerWorkflow dbos parentKey parentBody
+    case parentReg of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    let QueueName internal = internalQueueName
+    exec <- fx.wfLaunchWithQueues (Just [queueName, internal]) dbos
+    let runFork source forked point = do
+          made <-
+            forkWorkflows
+              dbos
+              [(forkNew source) {forkForkedId = Just forked, forkStartStep = point}]
+              defaultForkOptions
+          case made of
+            Left err -> throwIO (userError (show err))
+            Right _ -> pure ()
+          _ <- dequeueWorkflows dbos >>= \r -> case r of
+            Left err -> throwIO (userError (show err))
+            Right _ -> pure ()
+          handleE <- retrieveWorkflow dbos (WorkflowId forked)
+          handle <- case handleE of
+            Left err -> throwIO (userError (show err))
+            Right h -> pure (h :: WorkflowHandle m EngineOnly)
+          ran <- handleResult handle
+          pure (forked, ran)
+    -- Enqueued before its queue is registered: nothing polls it, so the
+    -- holder waits and holds the key through the parent's first run.
+    holderStarted <-
+      startWorkflow
+        exec
+        childRef
+        ( startOptionsDefault
+            { startWorkflowId = Just holderWid,
+              startQueue = Just ((enqueueNew queueName) {deduplicationId = Just dedupKey})
+            }
+        )
+        Nothing
+    case holderStarted of
+      Left err -> throwIO (userError (show (err :: Error EngineOnly)))
+      Right _ -> pure ()
+    first <- runWorkflow exec parentKey parentWid Nothing
+    firstText <- decodeText "the parent's first run" (first :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+    steps <- fx.wfListSteps parentWid
+    -- Registering the queue lets the holder run, and its finishing frees
+    -- the key.
+    _ <-
+      registerQueue dbos queueName defaultQueueOptions AlwaysUpdate >>= \r -> case r of
+        Left err -> throwIO (userError (show err))
+        Right _ -> pure ()
+    _ <- dequeueWorkflows dbos >>= \r -> case r of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    holderDone <- waitForWorkflow dbos holderWid
+    case holderDone of
+      Right (SystemDB.AwaitedSucceeded {}) -> pure ()
+      other -> throwIO (userError ("the holder never ran, got: " <> show other))
+    -- Copies of the recorded start replay the refusal.
+    (replayId, replayRan) <- runFork parentText (parentText <> "-replay-fork") 1
+    replayText <- decodeText "the replayed fork" replayRan
+    replayChild <- lookupRow (WorkflowId (replayId <> "-0"))
+    -- The start runs again with the key free.
+    (rerunId, rerunRan) <- runFork parentText (parentText <> "-rerun-fork") 0
+    rerunText <- decodeText "the re-run fork" rerunRan
+    rerunChild <- lookupRow (WorkflowId (rerunId <> "-0"))
+    _ <- deleteQueue dbos queueName >>= \r -> case r of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    pure
+      DedupStartOutcome
+        { dedupFirst = firstText,
+          dedupReplay = replayText,
+          dedupSteps = steps,
+          dedupRerun = rerunText,
+          dedupReplayChild = replayChild,
+          dedupRerunChild = rerunChild
+        }
+  where
+    decodeText what result = case result of
+      Right (Just stored) -> case decodeWorkflowValue what (Just stored) :: Either CodecError Text of
+        Right text -> pure text
+        Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected " <> Text.unpack what <> ", got: " <> show other))
+    lookupRow wid = do
+      found <- runSystemDB fx.wfSystemDB (\db -> SystemDB.getWorkflow db wid)
+      case found of
+        Left err -> throwIO (userError (show err))
+        Right row -> pure row
+
+-- | What a conflicting child start's replay observed: the first run's and
+-- the replay's rendered errors, the parent's listed steps, its terminal
+-- status, and the row at the freed id after the replay.
+data ConflictStartOutcome = ConflictStartOutcome
+  { conflictFirst    :: Text,
+    conflictReplayed :: Text,
+    conflictSteps    :: [StepRecord],
+    conflictStatus   :: Maybe WorkflowStatus,
+    conflictChildRow :: Maybe WorkflowRecord
+  }
+
+-- | A child id taken by another function is recorded at the parent's step
+-- too: the parent returns the error with @?@ and ends @ERROR@; once the
+-- other row is deleted the same start would go ahead, so a replay that did
+-- not read the record would succeed. Mirrors Rust's
+-- @a_child_id_taken_by_another_function_replays_its_error_after_the_row_is_deleted@.
+scenarioConflictStartRecorded :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m)
+                              => WfFixture m -> m ConflictStartOutcome
+scenarioConflictStartRecorded fx =
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    takenWid <- fx.wfFreshId "taken-child"
+    parentWid <- fx.wfFreshId "conflict-parent"
+    let WorkflowId takenText = takenWid
+        childKey = newWorkflowKey "child"
+        squatterKey = newWorkflowKey "squatter"
+        parentKey = newWorkflowKey "conflict-parent"
+        childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        childBody () _ = pure (Right 9)
+        squatterBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        squatterBody () _ = pure (Right 0)
+    childRefE <- registerWorkflowRef dbos childKey childBody
+    childRef <- case childRefE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    squatterRefE <- registerWorkflowRef dbos squatterKey squatterBody
+    case squatterRefE of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        parentBody () wctx = do
+          started <-
+            startChildWorkflow
+              wctx
+              childRef
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId takenText)})
+              Nothing
+          pure $ case started of
+            Left err -> Left err
+            Right _ -> Right "started"
+    parentReg <- registerWorkflow dbos parentKey parentBody
+    case parentReg of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.wfLaunch dbos
+    squatted <- runWorkflow exec squatterKey takenWid Nothing
+    case (squatted :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) of
+      Right _ -> pure ()
+      other -> throwIO (userError ("the squatter was supposed to run, got: " <> show other))
+    first <- runWorkflow exec parentKey parentWid Nothing
+    firstShown <- case (first :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) of
+      Left err -> pure (Text.pack (show err))
+      Right _ -> throwIO (userError "expected the conflicting start to fail the parent")
+    steps <- fx.wfListSteps parentWid
+    parentRow <- fx.wfReadRow parentWid
+    -- With the squatter gone the id is free, so only the record keeps the
+    -- replay failing.
+    _ <- deleteWorkflow dbos takenWid >>= \r -> case r of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    forked <- forkWorkflow dbos parentWid (Just (ForkStep 1)) defaultForkOptions
+    handle <- case forked of
+      Left err -> throwIO (userError (show (err :: Error EngineOnly)))
+      Right h -> pure (h :: WorkflowHandle m EngineOnly)
+    _ <- dequeueWorkflows dbos >>= \r -> case r of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    replayed <- handleResult handle
+    replayedShown <- case replayed of
+      Left err -> pure (Text.pack (show err))
+      Right _ -> throwIO (userError "expected the replay to end with the error")
+    childRow <- do
+      found <- runSystemDB fx.wfSystemDB (\db -> SystemDB.getWorkflow db takenWid)
+      case found of
+        Left err -> throwIO (userError (show err))
+        Right row -> pure row
+    pure
+      ConflictStartOutcome
+        { conflictFirst = firstShown,
+          conflictReplayed = replayedShown,
+          conflictSteps = steps,
+          conflictStatus = fmap (.workflowRecordStatus) parentRow,
+          conflictChildRow = childRow
+        }
+
 -- | A millisecond budget against a second-long body: the run reports the
 -- durable cancellation naming the workflow and the row reads CANCELLED.
 -- Virtual time makes the second instant under IOSim.
@@ -2401,6 +2654,60 @@ checkEnqueuedChildReplays (parentText, childText, listed, children, replayed)
             Left err -> Left ("expected the replayed parent's id, got: " <> show err)
           other -> Left ("expected the replay to adopt the recorded child, got: " <> show other)
       other -> Left ("expected the one recorded enqueue, got: " <> show other)
+
+-- | The deduplicated start's refusal is recorded with no child, the replay
+-- returns it after the key is freed, and the re-run starts the child.
+checkDedupStartRecorded :: DedupStartOutcome -> Either String ()
+checkDedupStartRecorded out
+  | out.dedupFirst /= "deduplicated" =
+      Left ("expected the handled refusal, got: " <> show out.dedupFirst)
+  | out.dedupReplay /= out.dedupFirst =
+      Left ("the replay took a different branch: " <> show (out.dedupFirst, out.dedupReplay))
+  | out.dedupRerun /= "started" =
+      Left ("expected the re-run to start the child, got: " <> show out.dedupRerun)
+  | Just _ <- out.dedupReplayChild =
+      Left ("the replay started a child: " <> show out.dedupReplayChild)
+  | otherwise = case (out.dedupSteps, out.dedupRerunChild) of
+      ([step], Just childRow)
+        | step.stepRecordStepName /= "child" ->
+            Left ("expected the child start's step, got: " <> show step.stepRecordStepName)
+        | step.stepRecordChildWorkflowId /= Nothing ->
+            Left ("the refusal recorded a child id: " <> show step.stepRecordChildWorkflowId)
+        | step.stepRecordSerialization /= Just "portable_json" ->
+            Left ("expected the refusal under the portable tag, got: " <> show step.stepRecordSerialization)
+        | not (maybe False ("QueueDeduplicated" `Text.isInfixOf`) step.stepRecordError) ->
+            Left ("expected the recorded QueueDeduplicated, got: " <> show step.stepRecordError)
+        | childRow.workflowRecordStatus /= Enqueued ->
+            Left ("expected the re-run's child ENQUEUED, got: " <> show childRow.workflowRecordStatus)
+        | otherwise -> Right ()
+      (steps, childRow) ->
+        Left ("expected one recorded refusal and the re-run's child, got: " <> show (steps, childRow))
+
+-- | The conflicting start is recorded with no child: the parent ends
+-- @ERROR@ with it, and the replay after the squatter's row is deleted ends
+-- with the same rendered error instead of starting the child.
+checkConflictStartRecorded :: ConflictStartOutcome -> Either String ()
+checkConflictStartRecorded out
+  | out.conflictFirst /= out.conflictReplayed =
+      Left ("the replay ended differently: " <> show (out.conflictFirst, out.conflictReplayed))
+  | not ("ConflictingWorkflow" `Text.isInfixOf` out.conflictFirst) =
+      Left ("expected the conflicting start's error, got: " <> show out.conflictFirst)
+  | out.conflictStatus /= Just Error =
+      Left ("expected the parent ERROR, got: " <> show out.conflictStatus)
+  | Just _ <- out.conflictChildRow =
+      Left ("the replay started the child: " <> show out.conflictChildRow)
+  | otherwise = case out.conflictSteps of
+      [step]
+        | step.stepRecordStepName /= "child" ->
+            Left ("expected the child start's step, got: " <> show step.stepRecordStepName)
+        | step.stepRecordChildWorkflowId /= Nothing ->
+            Left ("the refusal recorded a child id: " <> show step.stepRecordChildWorkflowId)
+        | step.stepRecordSerialization /= Just "portable_json" ->
+            Left ("expected the refusal under the portable tag, got: " <> show step.stepRecordSerialization)
+        | not (maybe False ("ConflictingWorkflow" `Text.isInfixOf`) step.stepRecordError) ->
+            Left ("expected the recorded ConflictingWorkflow, got: " <> show step.stepRecordError)
+        | otherwise -> Right ()
+      other -> Left ("expected the one recorded refusal, got: " <> show other)
 
 -- | Two steps compose to 44 and list in order.
 checkStepsTaken :: (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord]) -> Either String ()

@@ -104,7 +104,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SelectTest.tests
 --- $> tasty SelectSim.tests
 --- $> tasty SerializationTest.tests
--- $> tasty InteropTest.tests
+--- $> tasty InteropTest.tests
 --- $> tasty SimTest.tests
 --- $> tasty SleepTest.tests
 --- $> tasty SleepSim.tests
@@ -114,7 +114,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty StepSim.tests
 --- $> tasty WaitTest.tests
 --- $> tasty WaitSim.tests
---- $> tasty WorkflowTest.tests
+-- $> tasty WorkflowTest.tests
 -- $> tasty WorkflowSim.tests
 main :: IO ()
 main = defaultMain tests

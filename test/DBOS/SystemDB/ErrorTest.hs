@@ -35,11 +35,6 @@ tests =
       testCase "renders a reused workflow id" $
         renderError (ConflictingWorkflow {workflowId = "wf", detail = "different function"})
           @?= "workflow wf already exists: different function",
-      testCase "renders a second waiter with and without a topic" $ do
-        renderError (ConcurrentRecv {workflowId = "wf", topic = Just "t"})
-          @?= "workflow wf is already receiving on topic t"
-        renderError (ConcurrentRecv {workflowId = "wf", topic = Nothing})
-          @?= "workflow wf is already receiving",
       testCase "renders a rejected input" $
         renderError (InvalidInput {field = "name", detail = "must not be empty"})
           @?= "invalid name: must not be empty",

@@ -2097,8 +2097,8 @@ lifecycleWriteTests getBackend =
 -- | Messages: a send delivers to a destination's topic and, from a
 -- workflow, records the send as a step; a receive takes the oldest waiting
 -- message and records the take in one commit, adopts a rival's record,
--- reports an empty topic as a recorded absence, and refuses a second
--- receiver on the same topic. Mirrors @send_messages@ and @recv@.
+-- reports an empty topic as a recorded absence, and lets two receivers on
+-- one topic both wait for one message. Mirrors @send_messages@ and @recv@.
 messageTests :: IO PostgresSystemDB -> TestTree
 messageTests getBackend =
   testGroup
@@ -2145,18 +2145,23 @@ messageTests getBackend =
               record.notificationRecordTopic @?= Just "approval"
               record.notificationRecordConsumed @?= True
             other -> fail ("expected the consumed message, got: " <> show other),
-      testCase "a second receiver on one topic is refused" $ do
+      testCase "two receivers on one topic both wait and share one message" $ do
         destination <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture destination)
-          waiting <- async (recv env (WorkflowId destination) 1 2 (Just "approval") (millisDuration 500))
+          first <- async (recv env (WorkflowId destination) 1 2 (Just "approval") (millisDuration 300))
+          second <- async (recv env (WorkflowId destination) 3 4 (Just "approval") (millisDuration 300))
           threadDelay 100000
-          refused <- recv env (WorkflowId destination) 3 4 (Just "approval") (millisDuration 500)
-          case refused of
-            Left (ConcurrentRecv {}) -> pure ()
-            other -> fail ("expected ConcurrentRecv, got: " <> show other)
-          _ <- wait waiting
-          pure (),
+          _ <- sendMessage env (messageTo (WorkflowId destination) (Topic "approval") (SerializedWorkflowValue "only" Nothing)) Nothing Nothing False
+          answers <- traverse wait [first, second]
+          case answers of
+            [Right (Just value), Right Nothing] -> value @?= EncodedValue "only" Nothing
+            [Right Nothing, Right (Just value)] -> value @?= EncodedValue "only" Nothing
+            other -> fail ("expected one take and one recorded absence, got: " <> show other)
+          reported <- getAllNotifications env (WorkflowId destination)
+          case reported of
+            Right records -> length (filter (.notificationRecordConsumed) records) @?= 1
+            other -> fail ("expected the consumed message, got: " <> show other),
       testCase "a send to forks reaches the fork tree" $ do
         source <- freshWorkflowId
         withBackend getBackend $ \env -> do

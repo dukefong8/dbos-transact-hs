@@ -73,7 +73,7 @@ order by table_name, id;
 
 Expected rows include the mirrored simple workflow status row (`hs-simple-wf`, `SUCCESS`, `TryConcExec.testConcWorkflow`) and its operation output row (`hs-simple-wf:1`, `TryConcExec.testConcStep`). Adjust the IDs only when the test fixture intentionally changes.
 
-Then check the Rust oracle: `~/dev/dbos-transact-rust` is the behavioral reference. Run matching suites from that directory (e.g. `cargo test -p dbos --test recovery` for crash-and-resume, `--test queues` for the fan-out), read-only, pinned to v0.5.0 semantics — never copy code, never chase main.
+Then check the Rust oracle: `~/dev/dbos-transact-rust` is the behavioral reference. Run matching suites from that directory (e.g. `cargo test -p dbos --test recovery` for crash-and-resume, `--test queues` for the fan-out), read-only, pinned to v0.5.0 semantics — never copy code, never chase main. Docker on this Mac is OrbStack, whose socket is `~/.orbstack/run/docker.sock` (there is no `/var/run/docker.sock`); testcontainers looks at the default path, so prefix the suite with `DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock`.
 
 For the demos, restart the server after every rebuild (`PORT=8090 cabal run exe:demo-apps`) and stop it before any `cabal test` (its queue supervisor claims test fixtures). Drive the browser with `chrome-devtools-axi open/snapshot`; the storefront auto-refreshes and stale refs are rejected, so click by text via `eval` (`[...document.querySelectorAll('button')].find(...)`). Verify in psql: `widget_store.orders` (`order_status`, `progress_remaining`), `widget_store.transaction_completion` (transactional-step rows), `dbos.operation_outputs` (sleeps/steps), and `dbos.workflow_status` (`CheckoutWorkflow`, `DispatchOrderWorkflow`).
 

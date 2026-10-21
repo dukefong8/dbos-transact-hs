@@ -82,9 +82,9 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Submission (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
+import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
-import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, runSystemDB, withConnection)
+import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, withConnection)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, WorkflowHandle (workflowId), pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
@@ -93,7 +93,7 @@ import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkR
 import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
 import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
 import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), enqueueNew, maxRecoveryAttempts, resolveEnqueueCollision, storedPriority, validateEnqueue)
+import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Submitted (..), enqueueNew, initOrJoin, storedPriority, validateEnqueue)
 import Hasql.Transaction qualified as Tx
 import System.Environment (lookupEnv)
 
@@ -361,10 +361,11 @@ clientEnqueueWorkflowWith client workflowName options input = do
                 newWorkflowApplicationName = applicationName,
                 newWorkflowApplicationVersion = options.appVersion
               }
-      initialized <- runSystemDB client.conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh Nothing)
-      case initialized of
-        Right _  -> pure (Right (handle True workflowText))
-        Left err -> resolveEnqueueCollision client.conn shape workflowText err
+      started <- initOrJoin client.conn new (Just shape) Nothing
+      pure $ case started of
+        Right (SubmittedCreated _)     -> Right (handle True workflowText)
+        Right (SubmittedJoined holder) -> Right holder
+        Left err                       -> Left (TransactError.fromSystemDB err)
   where
     rawInput = unWorkflowInput <$> input
     handle failMissing workflowText =

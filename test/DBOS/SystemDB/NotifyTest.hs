@@ -19,7 +19,6 @@ import DBOS.SystemDB
     streamKey,
     streamsChannel,
     subscribe,
-    subscribeExclusive,
     unsubscribe,
     wake,
     wakeAll,
@@ -76,37 +75,6 @@ tests =
             messageKey "a" (Just "b::c") @?= messageKey "a::b" (Just "c")
             wake registry (messageKey "a::b" (Just "c"))
             waitFor (notified subscription),
-          testCase "a second exclusive waiter is refused until the first is gone" $ do
-            registry <- newRegistry
-            let key = messageKey "wf-1" (Just "orders")
-            first <- subscribeExclusive registry key
-            assertBool "nothing was waiting" (maybe False (const True) first)
-            second <- subscribeExclusive registry key
-            refusedIsNothing second
-            case first of
-              Nothing -> fail "expected the first exclusive waiter"
-              Just subscription -> unsubscribe subscription
-            registered registry >>= (@?= 0)
-            again <- subscribeExclusive registry key
-            assertBool "the topic is free again once its receiver has gone" (maybe False (const True) again),
-          testCase "exclusivity covers one key and no more" $ do
-            registry <- newRegistry
-            _orders <- exclusive registry (messageKey "wf-1" (Just "orders"))
-            _refunds <- exclusive registry (messageKey "wf-1" (Just "refunds"))
-            _elsewhere <- exclusive registry (messageKey "wf-2" (Just "orders"))
-            _event <- subscribe registry (eventKey "wf-1" "orders")
-            registered registry >>= (@?= 4),
-          testCase "an exclusive waiter and a shared one do not share a key" $ do
-            registry <- newRegistry
-            let key = messageKey "wf-1" Nothing
-            shared <- subscribe registry key
-            refused <- subscribeExclusive registry key
-            refusedIsNothing refused
-            unsubscribe shared
-            exclusive' <- subscribeExclusive registry key
-            assertBool "free again" (maybe False (const True) exclusive')
-            _joined <- subscribe registry key
-            registered registry >>= (@?= 1),
           testCase "a subscriber is woken and deregisters when dropped" $ do
             registry <- newRegistry
             subscription <- subscribe registry (eventKey "wf-1" "progress")
@@ -161,19 +129,6 @@ tests =
 -- | How many keys the registry carries. Tests only; nothing branches on it.
 registered :: Registry -> IO Int
 registered (Registry waitersVar) = Map.size <$> readTVarIO waitersVar
-
--- | An exclusive subscription that must succeed.
-exclusive :: Registry -> Text -> IO Subscription
-exclusive registry key = do
-  subscription <- subscribeExclusive registry key
-  case subscription of
-    Just found -> pure found
-    Nothing -> fail "expected the key to be free"
-
--- | A refusal: the second receiver on one topic must not be admitted.
-refusedIsNothing :: Maybe Subscription -> IO ()
-refusedIsNothing (Just _) = fail "a second receiver on one topic must be refused"
-refusedIsNothing Nothing = pure ()
 
 -- | A waiter that must be woken, not left waiting.
 waitFor :: IO a -> IO a

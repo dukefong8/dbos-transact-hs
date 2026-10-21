@@ -289,13 +289,17 @@ instance FromJSON e => FromJSON (Error e) where
       _                            -> fail ("unknown error variant " <> show tag)
     _ -> fail "an error records exactly one tagged variant"
 
--- | The oracle's @Error::control@: a cancellation, an interruption and
--- every system-database failure are signals about the execution, not
--- statements about what the workflow computed. Everything else — including
--- 'UnknownSerialization' — is an outcome and gets recorded.
+-- | The oracle's @Error::control@: a cancellation, an interruption, and the
+-- system-database failures that are signals about the execution rather than
+-- answers a call gave are not the workflow's outcome. A typed refusal
+-- ('ConflictingWorkflow', 'QueueDeduplicated', 'InvalidInput', …) is the
+-- opposite case: its step records it, every replay gives it back, and a
+-- workflow that returns one has failed with it — so it is recorded like any
+-- step's error. The verdict lives on the sysdb error ('shouldRecord'),
+-- exactly as Rust's @Error::should_record@ draws the same line.
 controlOf :: Error e -> Maybe (Error EngineOnly)
 controlOf = \case
-  SystemDatabase err -> Just (SystemDatabase err)
+  SystemDatabase err | not (SystemDBError.shouldRecord err) -> Just (SystemDatabase err)
   Interrupted workflowId -> Just (Interrupted workflowId)
   _ -> Nothing
 

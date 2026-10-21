@@ -506,6 +506,8 @@ forkTests =
           @?= Left (invalidInput "replacement_children" "a is replaced more than once")
         forkOptionsValidate (defaultForkOptions {forkOptionsReplacementChildren = [("", "b")]})
           @?= Left (invalidInput "replacement_children" "a replaced child id must not be empty")
+        forkOptionsValidate (defaultForkOptions {forkOptionsReplacementChildren = [("a", "")]})
+          @?= Left (invalidInput "replacement_children" "the replacement for a must not be empty")
         forkOptionsValidate defaultForkOptions
           @?= Right ()
     ]

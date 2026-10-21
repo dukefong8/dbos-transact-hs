@@ -29,7 +29,13 @@ module DBOS.Transact.Workflow
     startOptionsDefault,
     runOptionsToStartOptions,
     childWorkflowId,
-    resolveEnqueueCollision,
+    -- * Starting a row, joining a held deduplication key (workflow.rs @init_or_join@)
+    Submitted (..),
+    initOrJoin,
+    -- * A child start's recorded refusal (workflow.rs @check_child@)
+    recordedStartErrorNames,
+    shouldRecordStartError,
+    isRecordedStartError,
     startWorkflow,
     runWorkflowRef,
     startChildWorkflow,
@@ -53,7 +59,10 @@ import DBOS.Prelude
 -- the oracle matches with @join.is_cancelled()@. Nothing here forks,
 -- throws, or waits through base; all effects stay on io-classes.
 import Control.Exception (AsyncException (..))
-import Data.Aeson (FromJSON, Value)
+import Data.Aeson (FromJSON, Value (..), fromJSON)
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Text (pack)
@@ -61,7 +70,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Submission (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowStatus (..), addTimeout, newWorkflow, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types (AwaitedOutcome (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Submission (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowStatus (..), addTimeout, newWorkflow, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry, clearDatasourceCheckpoints)
@@ -71,7 +80,7 @@ import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (runTracer)
 import DBOS.Transact.Registry (ErasedWorkflow (..), Snapshot, WorkflowKey (..), WorkflowRef (refKey, refRegistry), lookupRegistryWorkflow, lookupSnapshotWorkflow, refName, registryInstanceId, renderWorkflowKey)
-import DBOS.Transact.Serialization (WorkflowInput (..), encodeAttributes, unWorkflowInput)
+import DBOS.Transact.Serialization (WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, encodeWorkflowValue, unWorkflowInput)
 import DBOS.Transact.Step (WorkflowEvent (..))
 
 -- | Attempts before a workflow is parked as
@@ -589,27 +598,153 @@ childWorkflowId chosen parent generated =
     (Nothing, Just (parentId, stepId)) -> parentId <> "-" <> pack (show stepId)
     (Nothing, Nothing)                 -> generated
 
--- | Settles a deduplication collision the way the caller asked: a held key
--- under 'ReturnExisting' hands back a handle to whoever holds it, and
--- anything else reports the collision. Shared by client and reference
--- enqueues so the two surfaces never diverge.
-resolveEnqueueCollision :: Monad m
-                        => Connection m -> Enqueue -> Text -> Error -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
-resolveEnqueueCollision conn shape _offeredId err =
-  case (shape.duplicationPolicy, shape.deduplicationId) of
-    (ReturnExisting, Just key) -> case err of
-      QueueDeduplicated {} -> do
-        holder <- runSystemDB conn.connSysdb (\db -> SystemDB.getDeduplicationKeyHolder db shape.name key)
-        case holder of
-          -- Mirrors the oracle's join: the handle belongs to whoever holds
-          -- the key, and the announcement names them both.
-          Right (Just (WorkflowId holderId)) -> do
-            runTracer conn.connTracer (WorkflowDedupJoined holderId key)
-            pure (Right (pollingHandle conn holderId True))
-          Right Nothing -> pure (Left (TransactError.fromSystemDB err))
-          Left lookupErr -> pure (Left (TransactError.fromSystemDB lookupErr))
-      _ -> pure (Left (TransactError.fromSystemDB err))
-    _ -> pure (Left (TransactError.fromSystemDB err))
+-- | A start's answer: the row this call created, or the holder whose
+-- deduplication key its insert lost to. Mirrors Rust @Submitted@.
+data Submitted m e
+  = SubmittedCreated WorkflowInitResult
+  | SubmittedJoined (WorkflowHandle m e)
+
+-- | One start's insert, settling a deduplication collision the way the
+-- caller asked: a held key under 'ReturnExisting' hands back a handle to
+-- whoever holds it, and anything else reports the collision. A key that
+-- frees between the losing insert and the holder read is retried, as the
+-- oracle does, rather than reported as a collision with a workflow that is
+-- over. Shared by client and reference starts so the two surfaces never
+-- diverge. Mirrors Rust @init_or_join@.
+initOrJoin :: Monad m
+           => Connection m
+           -> NewWorkflow
+           -> Maybe Enqueue
+           -> Maybe InitWorkflowCaller
+           -> m (Either Error (Submitted m e))
+initOrJoin conn new queue caller = go
+  where
+    go = do
+      initialized <-
+        runSystemDB
+          conn.connSysdb
+          (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh caller)
+      case initialized of
+        Right result -> pure (Right (SubmittedCreated result))
+        Left err -> case queue of
+          Nothing    -> pure (Left err)
+          Just shape -> joinHolder shape err
+    -- The handle belongs to whoever holds the key, and the announcement
+    -- names them both.
+    joinHolder shape err =
+      case (shape.duplicationPolicy, shape.deduplicationId, err) of
+        (ReturnExisting, Just key, QueueDeduplicated {}) -> do
+          holder <- runSystemDB conn.connSysdb (\db -> SystemDB.getDeduplicationKeyHolder db shape.name key)
+          case holder of
+            Right (Just (WorkflowId holderId)) -> do
+              runTracer conn.connTracer (WorkflowDedupJoined holderId key)
+              pure (Right (SubmittedJoined (pollingHandle conn holderId True)))
+            Right Nothing  -> go
+            Left lookupErr -> pure (Left lookupErr)
+        _ -> pure (Left err)
+
+-- | The recorded error variants a refused child start may hold. Mirrors
+-- workflow.rs @RECORDED_START_ERRORS@: the replay returns only these, so a
+-- row written by another step — or another SDK's step failure — stays
+-- 'UnexpectedStep' rather than being mistaken for a start refusal.
+recordedStartErrorNames :: [Text]
+recordedStartErrorNames = ["QueueDeduplicated", "ConflictingWorkflow"]
+
+-- | Whether a failed start is recorded at the parent's step: a refused
+-- enqueue (another run holds the deduplication key) and an id already
+-- taken by a different function are answers a replay must return, not
+-- transient trouble to try again. Mirrors @should_record_start_error@.
+shouldRecordStartError :: Error -> Bool
+shouldRecordStartError err = case err of
+  QueueDeduplicated {} -> True
+  ConflictingWorkflow {} -> True
+  _ -> False
+
+-- | Whether a recorded error value names one of the variants above, judged
+-- by shape before the typed read: a start error this build cannot decode
+-- must be reported as unreadable and name the step, not be mistaken for a
+-- plain step's row. Mirrors @is_recorded_start_error@.
+isRecordedStartError :: Value -> Bool
+isRecordedStartError (Object fields) = case KeyMap.toList fields of
+  [(name, _)] -> Key.toText name `elem` recordedStartErrorNames
+  _           -> False
+isRecordedStartError _ = False
+
+-- | Replays a recorded child start. A recorded child id hands back a handle
+-- to it; a recorded start refusal is returned as the same error without
+-- starting again; a row with neither stays 'UnexpectedStep'. An unreadable
+-- tag is 'UnknownSerialization'; a malformed or undecodable refusal names
+-- the step in a 'Malformed' report. Mirrors @Parent::check_child@.
+checkRecordedChild :: Monad m
+                   => Connection m -> Text -> Int -> Text -> StepRecord
+                   -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+checkRecordedChild conn parentText stepId stepName stored =
+  case stored.stepRecordChildWorkflowId of
+    Just (WorkflowId recordedChild) -> do
+      runTracer conn.connTracer (WorkflowChildJoined parentText stepId recordedChild)
+      pure (Right (pollingHandle conn recordedChild False))
+    Nothing -> case stored.stepRecordError of
+      Nothing -> pure (Left unexpected)
+      Just encoded ->
+        case decodeWorkflowValue "a child start's error" (Just (SerializedWorkflowValue encoded (Serialization <$> stored.stepRecordSerialization))) of
+          Left codecErr
+            | Just tag <- codecUnknownTag codecErr -> do
+                runTracer conn.connTracer (StepValueUnreadable stepName stepId tag)
+                pure (Left (TransactError.fromSystemDB (UnknownSerialization {name = tag})))
+            | otherwise -> pure (Left (malformed (codecErrorText codecErr)))
+          Right value
+            | not (isRecordedStartError value) -> pure (Left unexpected)
+            | otherwise -> case fromJSON value of
+                Aeson.Error detail -> pure (Left (malformed (Text.pack detail)))
+                Aeson.Success err -> do
+                  runTracer conn.connTracer (WorkflowStartErrorReplayed parentText stepId (SystemDBError.renderError err))
+                  pure (Left (TransactError.fromSystemDB err))
+  where
+    unexpected =
+      TransactError.fromSystemDB
+        ( UnexpectedStep
+            { workflowId = parentText,
+              stepId = stepId,
+              expected = "a child workflow start of " <> stepName,
+              recorded = "a plain step named " <> stepName
+            }
+        )
+    malformed detail =
+      TransactError.fromSystemDB
+        ( Malformed
+            ( "workflow " <> parentText <> " step " <> showText stepId <> " (" <> stepName
+                <> ") has an error this build cannot read: " <> detail
+            )
+        )
+
+-- | Records a refused child start at the parent's step, so a replay returns
+-- the same error instead of trying the start again. The row carries no
+-- child id; the error goes through the workflow's serializer as an
+-- internal step's refusal does. A recording failure is returned in place of
+-- the refusal, as in the oracle. Mirrors @Parent::record_start_error@.
+recordStartError :: (Monad m, MonadTime m)
+                 => Connection m -> Text -> Int -> Text -> Timestamp -> Error
+                 -> m (TransactError.Error e)
+recordStartError conn parentText stepId stepName startedAt err = do
+  completedAt <- timestampNow
+  let encoded = encodeWorkflowValue err
+      serialization = (\(Serialization tag) -> tag) <$> encoded.serializedSerialization
+  written <-
+    runSystemDB
+      conn.connSysdb
+      ( \db ->
+          SystemDB.recordStep
+            db
+            (WorkflowId parentText)
+            stepId
+            stepName
+            (OutcomeError encoded.serializedText)
+            serialization
+            (Just (StepTiming startedAt completedAt))
+      )
+  pure $ case written of
+    Left recordErr -> TransactError.fromSystemDB recordErr
+    Right ()       -> TransactError.fromSystemDB err
 
 -- | The debounce creation fields a start carries onto its row: the delay
 -- capped at the timeout's deadline (as the oracle's executor caps its delay
@@ -666,9 +801,12 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
                 newWorkflowDeadline = deadline',
                 newWorkflowAttributes = encodeAttributes options.startAttributes
               }
-      initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh Nothing)
-      case initialized of
-        Right result
+      started <- initOrJoin conn new options.startQueue Nothing
+      case started of
+        Left err -> pure (Left (TransactError.fromSystemDB err))
+        -- A held deduplication key: the handle belongs to its holder.
+        Right (SubmittedJoined holder) -> pure (Right holder)
+        Right (SubmittedCreated result)
           -- A fresh start is not a dequeue, so it holds no queue's slot.
           | Just shape <- options.startQueue -> do
               runTracer conn.connTracer (WorkflowEnqueued workflowText shape.name)
@@ -694,9 +832,6 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
                         executeRegisteredWorkflow spawner conn identity (WorkflowId workflowText) workflow (runInputAfterInit result input) result.initResultDeadline
                     )
                 pure (Right (localHandle conn workflowText channel))
-        Left err -> case options.startQueue of
-          Just shape -> fmap (either (Left . TransactError.liftEngine) Right) (resolveEnqueueCollision conn shape workflowText err)
-          Nothing    -> pure (Left (TransactError.fromSystemDB err))
 
 -- | Runs the referenced workflow durably and waits for its result: one
 -- init records the row with everything the options name, then the shared
@@ -774,29 +909,19 @@ startChildWorkflow wctx ref options input = do
       generated <- generatedWorkflowId conn
       let parentText = workflowId wctx
           childText = childWorkflowId options.startWorkflowId (Just (parentText, parentStepId)) generated
+          -- A refused start is recorded at this step, so a replay of a
+          -- parent that handled the refusal returns the same answer instead
+          -- of starting the child for real once the key is free.
+          recordRefusal refusal
+            | shouldRecordStartError refusal =
+                recordStartError conn parentText parentStepId name now refusal
+            | otherwise = pure (TransactError.fromSystemDB refusal)
       recorded <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db (WorkflowId parentText) parentStepId name)
       case recorded of
         Left err -> pure (Left (TransactError.fromSystemDB err))
-        Right (Just stored) -> case stored.stepRecordChildWorkflowId of
-          -- The launch is recorded against the parent: a replay finds the
-          -- child it already started. The child's own row belongs to the
-          -- earlier run, so an absent row stays "not yet".
-          Just (WorkflowId recordedChild) -> do
-            runTracer conn.connTracer (WorkflowChildJoined parentText parentStepId recordedChild)
-            pure (Right (pollingHandle conn recordedChild False))
-          Nothing ->
-            pure
-              ( Left
-                  ( TransactError.fromSystemDB
-                      ( UnexpectedStep
-                          { workflowId = parentText,
-                            stepId = parentStepId,
-                            expected = "a child workflow start of " <> name,
-                            recorded = "a plain step named " <> name
-                          }
-                      )
-                  )
-              )
+        -- The launch is recorded against the parent: a replay finds the
+        -- child it already started, or the refusal the start recorded.
+        Right (Just stored) -> checkRecordedChild conn parentText parentStepId name stored
         Right Nothing -> do
           let childDeadline = resolveTimeoutDeadline options.startTimeout options.startQueue (deadline wctx) now
               base = workflowNewWorkflow conn identity key (WorkflowId childText) rawInput ((.name) <$> options.startQueue)
@@ -821,9 +946,9 @@ startChildWorkflow wctx ref options input = do
                     initCallerStartedAt = now,
                     initCallerStepName = name
                   }
-          initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh (Just caller))
-          case initialized of
-            Right result -> do
+          started <- initOrJoin conn new options.startQueue (Just caller)
+          case started of
+            Right (SubmittedCreated result) -> do
               -- The oracle announces the enqueue at debug whether the start
               -- came from outside or from a workflow body.
               case options.startQueue of
@@ -847,20 +972,17 @@ startChildWorkflow wctx ref options input = do
                       pure (Right (localHandle conn childText channel))
                 _ -> pure (Right (pollingHandle conn childText True))
               pure spawned
-            Left err -> case options.startQueue of
-              Just shape -> do
-                joined <- resolveEnqueueCollision conn shape childText err
-                case joined of
-                  Right holder -> do
-                    -- The mapping only, never the holder's own parent link:
-                    -- it travels on 'InitWorkflowCaller' and cannot be
-                    -- reached from here.
-                    mapped <- runSystemDB conn.connSysdb (\db -> SystemDB.recordChildWorkflow db (WorkflowId parentText) (WorkflowId holder.workflowId) parentStepId name (Just now))
-                    pure $ case mapped of
-                      Left recordErr -> Left (TransactError.fromSystemDB recordErr)
-                      Right _        -> Right holder
-                  Left joinErr -> pure (Left (TransactError.liftEngine joinErr))
-              Nothing -> pure (Left (TransactError.fromSystemDB err))
+            Right (SubmittedJoined holder) -> do
+              -- The mapping only, never the holder's own parent link:
+              -- it travels on 'InitWorkflowCaller' and cannot be
+              -- reached from here.
+              mapped <- runSystemDB conn.connSysdb (\db -> SystemDB.recordChildWorkflow db (WorkflowId parentText) (WorkflowId holder.workflowId) parentStepId name (Just now))
+              pure $ case mapped of
+                Left recordErr -> Left (TransactError.fromSystemDB recordErr)
+                Right _        -> Right holder
+            Left err -> do
+              surfaced <- recordRefusal err
+              pure (Left surfaced)
 
 -- | Abort handles to reach running tasks with, and a count of how many are
 -- still alive to wait on. Mirrors Rust @Tasks@: nothing here holds a

@@ -29,6 +29,7 @@ import DBOS.Transact
   )
 import DBOS.Transact.Logger (runTracer)
 import DBOS.Transact.Recovery (EngineEvent (..))
+import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Connection (SomeSystemDB (..))
 import DBOS.Transact.WorkflowCases
@@ -59,6 +60,8 @@ import DBOS.Transact.WorkflowCases
     checkNonFinite,
     checkJoinHeldKey,
     checkEnqueuedChildReplays,
+    checkDedupStartRecorded,
+    checkConflictStartRecorded,
     checkJoinTakesId,
     checkLiftChildError,
     checkLosingTokenFired,
@@ -80,6 +83,7 @@ import DBOS.Transact.WorkflowCases
     checkZeroNoInput,
     mkWfFixture,
     timeoutOptionsCase,
+    startErrorCase,
     scenarioAppErrorRoundtrip,
     scenarioAwaitInsideStep,
     scenarioAwaitRecorded,
@@ -107,6 +111,8 @@ import DBOS.Transact.WorkflowCases
     scenarioNonFinite,
     scenarioJoinHeldKey,
     scenarioEnqueuedChildReplays,
+    scenarioDedupStartRecorded,
+    scenarioConflictStartRecorded,
     scenarioJoinTakesId,
     scenarioLiftChildError,
     scenarioLosingTokenFired,
@@ -149,6 +155,7 @@ tests =
       -- IO only: same recovery sweep as above.
       testCase "an unregistered workflow is skipped and the rest recover" (pure ()),
       testCase "timeouts, options, and child ids compose without a database" timeoutOptionsCase,
+      testCase "only a child start's refusals are recorded and replay" startErrorCase,
       simCase simWfFixture "starting a taken id joins the existing run" scenarioJoinTakesId checkJoinTakesId traceJoinTakesId,
       simCase simWfFixture "a fresh start is local and a join polls" scenarioFreshJoinPolls checkFreshJoinPolls traceFreshJoinPolls,
       simCase simWfFixture "a queued row is joined, not run, by a plain start" scenarioQueuedStartPolls checkQueuedStartPolls traceQueuedStartPolls,
@@ -188,6 +195,8 @@ tests =
       simCase simWfFixture "a child started through another instance is refused" scenarioWrongInstance checkWrongInstance traceWrongInstance,
       simCase simWfFixture "a child joining a held key is recorded as the workflow it joined" scenarioJoinHeldKey checkJoinHeldKey traceJoinHeldKey,
       simCase simWfFixture "an in-workflow enqueue is a recorded child start that replays" scenarioEnqueuedChildReplays checkEnqueuedChildReplays traceEnqueuedChildReplays,
+      simCase simWfFixture "a refused child start replays after the key is freed" scenarioDedupStartRecorded checkDedupStartRecorded traceDedupStartRecorded,
+      simCase simWfFixture "a taken child id replays after the row is deleted" scenarioConflictStartRecorded checkConflictStartRecorded traceConflictStartRecorded,
       simCase simWfFixture "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
       simCase simWfFixture "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
       simCase simWfFixture "a panicking workflow leaves its row pending" scenarioPanic checkPanic tracePanic,
@@ -397,6 +406,26 @@ traceEnqueuedChildReplays tr = do
     @?= [ WorkflowEnqueued "sim-enqueued-child-parent-0" "enqueued-child-q-sim-enqueued-child-q",
           WorkflowCompleted "sim-enqueued-child-parent",
           WorkflowAlreadyOwned "sim-enqueued-child-parent"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The replay of a recorded refusal and the re-run start are both forks of
+-- the same parent, announced one id each.
+traceDedupStartRecorded :: forall a. SimTrace a -> IO ()
+traceDedupStartRecorded tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowForked "sim-dedup-error-parent-replay-fork",
+          WorkflowForked "sim-dedup-error-parent-rerun-fork"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The squatter's row is deleted, then the single fork of the conflicting
+-- parent is announced; the replay returns the recorded error.
+traceConflictStartRecorded :: forall a. SimTrace a -> IO ()
+traceConflictStartRecorded tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowsDeleted 1,
+          WorkflowForked "sim-conflict-parent-fork"
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 

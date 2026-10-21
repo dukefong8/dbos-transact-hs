@@ -181,13 +181,16 @@ Type-level gaps and renames:
 
 ## 3. Errors, retry, wakeups
 
-`sysdb/error.rs` (15 variants): 15/15 ported in `SystemDB.Error`
-(`Backend`, `Malformed`, `ConflictingWorkflow`, `ConcurrentRecv`,
+`sysdb/error.rs` (17 variants): 17/17 ported in `SystemDB.Error`
+(`Backend`, `Malformed`, `UnknownSerialization`, `ConflictingWorkflow`,
 `InvalidInput`, `QueueDeduplicated`, `WorkflowCancelled`,
 `UnexpectedStep`, `StepAlreadyRecorded`, `NoForkPoint`,
-`NonExistentWorkflow`, `AlreadyRegistered`, `NotRegistered`,
-`RegisteredByAnother`, plus `MaxRecoveryAttemptsExceeded` under the
-documented `Error` prefix — the one constructor collision in the file).
+`NonExistentWorkflow`, `WorkflowNotRewindable`, `RewindInterrupted`,
+`AlreadyRegistered`, `NotRegistered`, `RegisteredByAnother`, plus
+`MaxRecoveryAttemptsExceeded` under the documented `Error` prefix — the
+one constructor collision in the file).
+`ConcurrentRecv` was removed with Rust #111 (two receivers on one topic
+now share the message).
 `BackendError` (3 fields) and `BackendErrorKind` (3 variants) verbatim;
 `invalidInput`, `renderError`, `renderBackendError`, `Exception`
 instance all present.
@@ -198,7 +201,7 @@ instance all present.
 for the `PostgresTest`/`RetryTest` contract).
 
 `notify.rs`: channels, `messageKey`/`eventKey`/`streamKey`/`keyFor`,
-`Registry` (`subscribe`, `subscribeExclusive`, `wake`, `wakeAll`),
+`Registry` (`subscribe`, `wake`, `wakeAll`),
 `Subscription` (`notified`) ✓, plus `unsubscribe` — Haskell has no
 `Drop` hook, so the explicit call is the documented equivalent.
 
@@ -348,7 +351,8 @@ intends). Snapshot/freeze/thaw ✓.
 (full fields, defaults, `runOptionsToStartOptions`,
 `validateEnqueue`, `storedPriority`, `enqueueNew`,
 `childWorkflowId`, `resolveTimeoutDeadline`, `timeoutBudget`) ✓;
-`resolveEnqueueCollision` ≈ `init_or_join`'s join arm ✓;
+`initOrJoin` ≈ `init_or_join` (the join, its retry when the holder
+finished, and the sysdb-channel refusal) ✓;
 `new_row` folded into row constructors ✓; `encode_attributes` lives
 in `Codec` ✓. `startWorkflowRef` / `runWorkflowRef` (single-init
 execute-or-adopt core `runRegisteredWorkflowWithRow`) and
@@ -394,7 +398,8 @@ and `Client::get_event`.
 ### `message.rs` → `Transact.Message` ◐
 
 Free `send`/`recv` ✓ (two-step recv checkpoint, `InsideStep`
-refusal, exclusive-subscription semantics in the backend). Missing:
+refusal, shared-subscription semantics in the backend: two receivers on
+one topic both wait for one message). Missing:
 `send_with`/`send_bulk`/`send_bulk_with` (+ `Message`/`SendOptions`/
 `SendBulkOptions`/`Forks` types — `SendMessage` covers the single
 shape), all four `DBOS::send*` method forms, all four `Client::send*`

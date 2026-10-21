@@ -153,9 +153,12 @@ sendBulkWith wctx messages options = do
 
 -- | Consume the oldest matching message, waiting up to the polling duration.
 -- It is checkpointed as a read plus timeout so replay returns the same
--- message (or absence) instead of consuming another one. Receives from
--- inside a step are refused because the enclosing step cannot identify the
--- consumed message on a retry.
+-- message (or absence) instead of consuming another one. Two waits on one
+-- topic both wake, and one message goes to one of them; the other waits out
+-- its deadline and records the absence (a replay of the step it shares with
+-- the winner adopts that winner's record instead). Receives from inside a
+-- step are refused because the enclosing step cannot identify the consumed
+-- message on a retry.
 recv :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m)
      => WorkflowCtx exec m -> Maybe Topic -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
 recv wctx topic timeout = do

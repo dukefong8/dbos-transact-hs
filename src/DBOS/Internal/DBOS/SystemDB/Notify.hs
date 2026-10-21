@@ -42,7 +42,6 @@ module DBOS.SystemDB.Notify
     Subscription (..),
     newRegistry,
     subscribe,
-    subscribeExclusive,
     unsubscribe,
     wake,
     wakeAll,
@@ -134,22 +133,6 @@ subscribe registry key = atomically $ do
   writeTVar registry.waiters (Map.insert key waiter {waiterSubscribers = waiter.waiterSubscribers + 1} waiters')
   receiver <- newTVar waiter.waiterGeneration
   pure Subscription {key, registry, receiver}
-
--- | Registers /sole/ interest in @key@, or 'Nothing' if something is already
--- waiting on it. For @recv@, where two waiters are a bug rather than a
--- pattern: one message can only go to one of them, so the loser would wait
--- out its timeout and report that nothing arrived. This is a per-process
--- guard and cannot be more than that: two receivers in different processes
--- are arbitrated at the database by the @consumed = FALSE@ predicate.
-subscribeExclusive :: Registry -> Text -> IO (Maybe Subscription)
-subscribeExclusive registry key = atomically $ do
-  waiters' <- readTVar registry.waiters
-  if Map.member key waiters'
-    then pure Nothing
-    else do
-      writeTVar registry.waiters (Map.insert key (Waiter 0 1) waiters')
-      receiver <- newTVar 0
-      pure (Just Subscription {key, registry, receiver})
 
 -- | Deregisters, so the registry never carries state for a caller that has
 -- gone. The explicit Haskell equivalent of Rust's @Drop@: the last

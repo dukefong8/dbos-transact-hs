@@ -570,7 +570,9 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     atomically $ do
       rows <- readTVar db.memRows
       case Map.lookup new.newWorkflowId rows of
-        Just row -> pure (Right (memInitResult submission row))
+        Just row -> case initConflict row of
+          Just conflict -> pure (Left conflict)
+          Nothing -> pure (Right (memInitResult submission row))
         Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
           (Just queue, Just key) -> do
             held <- readTVar db.memDedup
@@ -582,6 +584,21 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 insertFresh rows now
           _ -> insertFresh rows now
     where
+      -- The sim's row carries no class/config names, so the identity
+      -- conflict it can model is the function name: a start that names a
+      -- different function under an existing id is refused, as the SQL's
+      -- commit-time guard does. The detail keeps the oracle's debug
+      -- spelling so the live and sim answers read alike.
+      initConflict row = case (row.workflowRecordName, new.newWorkflowName) of
+        (stored, offered) | stored /= offered ->
+          Just
+            ConflictingWorkflow
+              { workflowId = new.newWorkflowId,
+                detail = "existing function name is " <> debugMaybe stored <> ", but " <> debugMaybe offered <> " was provided"
+              }
+        _ -> Nothing
+      debugMaybe Nothing = "None"
+      debugMaybe (Just value) = "Some(\"" <> value <> "\")"
       insertFresh rows now = do
         owner <- simOwnerText db
         let row = (memFreshRow new caller owner) {workflowRecordDelayUntil = new.newWorkflowDelay >>= addTimeout now}
@@ -1371,8 +1388,19 @@ memFork db forks options = atomically $ do
                   workflowRecordForkedFrom = Just (WorkflowId source),
                   workflowRecordWasForkedFrom = True
                 }
+          -- Mirrors the SQL copy: every copied step that names a replaced
+          -- child is rewritten, not only the step that started it.
+          rewritten child =
+            fromMaybe child (lookupReplacement child)
+          lookupReplacement (WorkflowId childText) =
+            WorkflowId <$> lookup childText options'.forkOptionsReplacementChildren
           copied =
-            [ ((forkedText, sid), record {stepRecordWorkflowId = WorkflowId forkedText})
+            [ ( (forkedText, sid),
+                record
+                  { stepRecordWorkflowId = WorkflowId forkedText,
+                    stepRecordChildWorkflowId = rewritten <$> record.stepRecordChildWorkflowId
+                  }
+              )
               | ((wid, sid), record) <- Map.toList steps,
                 wid == source,
                 sid < startStep

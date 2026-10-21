@@ -57,6 +57,86 @@ Standing gates, every slice:
 - Docs at slice end: `.lavish/rust-port-plan.html` delta, `CHANGELOG.md`, and
   `docs/cross-language-schema-interop.md` whenever the contract moves.
 
+### Two receivers on one topic (Rust #111 `0da511d`, 2026-10-21)
+
+- `ConcurrentRecv` is gone from `DBOS.SystemDB.Error` (JSON, render,
+  `shouldRecord`), the exclusive registry entry point is gone from
+  `DBOS.SystemDB.Notify`, and `recv` subscribes shared: both waiters wake,
+  the consuming `UPDATE` gives the message to one, and the other records
+  the absence at its deadline.
+- `Postgres.Messages` replaces the refusal case with a two-receiver case
+  (one message, one `Just`, one consumed notification); `NotifyTest` keeps
+  only the shared-registry cases; the audit doc is corrected.
+- Oracle leg green with OrbStack's socket
+  (`DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock`): `--test sysdb`
+  245/245 and `--test messages` 8/8, including
+  `two_receivers_in_one_process_share_one_message`.
+
+### Next — deadline slice (Rust #109 `7c879f3`, #110 `c1627c6`)
+
+Not started. Scoped, not a review-and-commit-sized delta:
+
+- #110 threads a `DatabaseTime` (the database's `clock_timestamp()` plus
+  this process's monotonic reading) through `WorkflowInitResult`, makes the
+  insert compute a direct start's deadline from its timeout, stops the
+  Haskell side stamping one, and converts `Deadline` to a monotonic expiry
+  for the body timer. It needs `MonadMonotonicTimeNSec` at `initWorkflow`
+  and touches the init statement, `dequeue`'s claim, all four
+  `executeRegisteredWorkflow` call sites, both backends and the sim data.
+- #109 adds the per-executor timeout sweep (`expireWorkflows` over a
+  locked sub-select, application-scoped, one second between passes), makes
+  the local timer cancel only when the database clock agrees and then
+  adopt the row, and vendors migration 122
+  (`122_add_workflow_status_deadline_index.sql`) into `rust-migrate` with
+  its plan/ceiling tests.
+- The oracle's deadline tests shadow `now()`/`clock_timestamp()` through a
+  private schema and a skewed database session; the port has no such
+  fixture yet, so that belongs with the slice.
+
+### Child-start replay + fork replacement (Rust #108 `2540e18`, #107 `547eb9f`, 2026-10-20)
+
+Ported in one slice:
+
+- A child start's `QueueDeduplicated`/`ConflictingWorkflow` refusal is
+  recorded at the parent's step (`recordStartError`, through the workflow
+  serializer) with no child id; a replay's `checkRecordedChild` returns the
+  recorded error without trying the start again. The recorded value is told
+  apart from a plain step's error by its single-key shape
+  (`isRecordedStartError` over `recordedStartErrorNames`), so an unreadable
+  start error reports itself, naming the step, instead of `UnexpectedStep`.
+  `initOrJoin` ports the oracle's `init_or_join`: a `ReturnExisting`
+  collision joins the holder; a holder that finished between the losing
+  insert and the read is retried (the oracle's `None => continue`), not
+  recorded as a refusal; and a holder-lookup failure stays on the sysdb
+  channel, so only a genuine refusal is recorded.
+- `controlOf` consults `shouldRecord`: typed system-database refusals are
+  outcomes (the parent that returns one ends `ERROR`), while execution
+  signals and unreadable/substrate failures stay control. Rust's
+  `Error::control` had this gate; the port was missing it, and the new
+  conflict test exposed it.
+- Fork refuses an empty `replacement_children` list in `forkOptionProblems`
+  (engine and sysdb), and the in-memory backend applies the replacement map
+  to its copied steps.
+
+Evidence: shared live/sim `scenarioDedupStartRecorded` and
+`scenarioConflictStartRecorded` (with typed trace assertions on the sim),
+the pure `startErrorCase`, `TypesTest`, and the live/sim fork-replacement
+case; `Workflow execution` 61/61 live, `WorkflowSim` 60/60, full suite
+852/852, `cabal build all` green, `make db-migrate` 123→123. psql:
+`workflow_status` shows the conflict parent and its replay `ERROR`, the
+dedup parent/replay `SUCCESS` and the re-run child `ENQUEUED`;
+`operation_outputs` step 0 holds `{"QueueDeduplicated":…}` on the parent and
+its replay fork, and the re-run fork's step 0 names its child id. The
+client's fork surface is a pass-through to the engine
+(`clientForkWorkflows … Management.forkWorkflows`), so the oracle's
+client-side replacement assertion is not duplicated; the engine cases own
+the semantics.
+
+Oracle leg green with OrbStack's socket
+(`DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock`):
+`cargo test -p dbos --test children` 28/28, plus the slice's other touched
+suites `--test workflows` 13/13 and `--test management` 34/34.
+
 ### S1 — Read every payload by its row's `serialization` tag (Rust #95, `52d0f9b`)
 
 Rust: `PayloadEncoding` + `PayloadEncoding::of` (NULL/`""`/`rust_serde` →
