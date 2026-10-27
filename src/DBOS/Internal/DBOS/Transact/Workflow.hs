@@ -128,7 +128,7 @@ runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflo
   case lookupSnapshotWorkflow key snapshot of
     Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
     Just workflow -> do
-      initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) submission Nothing)
+      initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new submission Nothing)
       case initialized of
         Left err -> pure (Left (TransactError.fromSystemDB err))
         Right result
@@ -142,7 +142,9 @@ runRegisteredWorkflowWithRow submission tasks conn identity snapshot key workflo
           -- creator mismatch the same way). Re-running would repeat the
           -- body behind an id whose history is closed. Parked rows ride
           -- along: exceeded recovery attempts never run again either.
-          | isTerminal result.initResultStatus || result.initResultStatus == MaxRecoveryAttemptsExceeded ->
+          -- Announced like every other join, as the start path does.
+          | isTerminal result.initResultStatus || result.initResultStatus == MaxRecoveryAttemptsExceeded -> do
+              runTracer conn.connTracer (WorkflowAlreadyOwned workflowText)
               adoptRecordedOutcome conn workflowId
           | not result.initResultShouldExecute -> do
               runTracer conn.connTracer (WorkflowAlreadyOwned workflowText)
@@ -234,11 +236,12 @@ adoptRecordedFailure conn wid@(WorkflowId workflowText) = do
             )
         )
     Right (AwaitedParked attempts) ->
+      -- The handle's own verdict, as Rust's @adopt@ constructs
+      -- @Error::MaxRecoveryAttemptsExceeded@ directly: the sysdb layer
+      -- never built one, so neither does this port.
       Left
         ( TransactError.FailureControl
-            ( TransactError.fromSystemDB
-                (SystemDBError.ErrorMaxRecoveryAttemptsExceeded {workflowId = workflowText, limit = attempts})
-            )
+            (TransactError.ErrorMaxRecoveryAttemptsExceeded {workflowId = workflowText, recoveryAttempts = attempts})
         )
 
 -- | The typed face of 'adoptRecordedFailure': the recorded failure decoded
@@ -400,9 +403,8 @@ spawnRegisteredWorkflowWithRow tasks release submission conn identity snapshot k
   case lookupSnapshotWorkflow key snapshot of
     Nothing -> release >> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
     Just workflow -> do
-      initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) submission Nothing)
+      initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new submission Nothing)
       case initialized of
-        Left SystemDBError.ErrorMaxRecoveryAttemptsExceeded {} -> release >> pure (Right Nothing)
         Left err -> release >> pure (Left (TransactError.fromSystemDB err))
         Right result
           | result.initResultStatus /= Pending -> release >> pure (Right Nothing)
@@ -433,7 +435,7 @@ spawnRegisteredWorkflowWithRow tasks release submission conn identity snapshot k
 enqueueWorkflow :: Monad m
                 => Connection m -> Identity -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
 enqueueWorkflow conn identity key workflowId input queueName = do
-  initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db (workflowNewWorkflow conn identity key workflowId input (Just queueName)) (Just maxRecoveryAttempts) Fresh Nothing)
+  initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db (workflowNewWorkflow conn identity key workflowId input (Just queueName)) Fresh Nothing)
   pure (either (Left . TransactError.fromSystemDB) Right initialized)
 
 workflowNewWorkflow :: Connection m -> Identity -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Maybe Text -> NewWorkflow
@@ -665,7 +667,7 @@ initOrJoin conn new queue caller = go
       initialized <-
         runSystemDB
           conn.connSysdb
-          (\db -> SystemDB.initWorkflow db new (Just maxRecoveryAttempts) Fresh caller)
+          (\db -> SystemDB.initWorkflow db new Fresh caller)
       case initialized of
         Right result -> pure (Right (SubmittedCreated result))
         Left err -> case queue of

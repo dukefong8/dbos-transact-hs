@@ -244,13 +244,13 @@ settledResult workflowText settled =
     SettledFailed err -> Left err
     SettledCancelled -> Left (TransactError.AwaitedWorkflowCancelled {workflowId = workflowText})
     SettledParked attempts ->
+      -- The handle's own verdict, matching @adopt@: the sysdb layer never
+      -- built one, so neither does this port.
       Left
-        ( TransactError.fromSystemDB
-            ( SystemDBError.ErrorMaxRecoveryAttemptsExceeded
-                { workflowId = workflowText,
-                  limit = attempts
-                }
-            )
+        ( TransactError.ErrorMaxRecoveryAttemptsExceeded
+            { workflowId = workflowText,
+              recoveryAttempts = attempts
+            }
         )
 
 -- | Record a settled await under its claimed id, with the awaited

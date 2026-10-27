@@ -356,7 +356,7 @@ scenarioOwnershipMoved :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
 scenarioOwnershipMoved fx wfId = do
   fake <- fx.dsFixtureMkDs
   started <- runFixture fx wfId $ \wctx ->
-    withSystemDB wctx (\db -> initWorkflow db ((newWorkflow wfId) {newWorkflowExecutorId = Just "other-executor"}) Nothing Fresh Nothing)
+    withSystemDB wctx (\db -> initWorkflow db ((newWorkflow wfId) {newWorkflowExecutorId = Just "other-executor"}) Fresh Nothing)
 
   case started of
     Left err -> pure (Left (SystemDatabase err))

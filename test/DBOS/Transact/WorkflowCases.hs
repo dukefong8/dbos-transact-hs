@@ -1730,7 +1730,7 @@ scenarioScopedSelect fx = do
     let WorkflowId widText = wid
     created <-
       runSystemDB fx.wfSystemDB $ \db ->
-        SystemDB.initWorkflow db ((newWorkflow widText) {newWorkflowName = Just "L2ScopedSelect"}) Nothing Fresh Nothing
+        SystemDB.initWorkflow db ((newWorkflow widText) {newWorkflowName = Just "L2ScopedSelect"}) Fresh Nothing
     case created of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()

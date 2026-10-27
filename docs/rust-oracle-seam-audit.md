@@ -225,7 +225,7 @@ not honored: verify-only connect, ADR-0004/0010) ✓, `connect` ✓
 live in the Notifier. Schema fixed to `dbos` (no `Tables` render
 parameter). `run_transactional_step` has no single counterpart:
 check-then-record runs inside each write transaction per ADR-0011.
-Polling semaphore is STM (`Postgres.hs`, `pollingLimit`), same
+Polling semaphore is STM (`Postgres.hs`, `pollingPermits`), same
 half-the-pool rule. `PORTABLE_JSON` never appears: rows record
 `rust_serde`, matching `Config.serializer`.
 

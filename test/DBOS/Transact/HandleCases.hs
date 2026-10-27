@@ -110,7 +110,7 @@ mkHandleFixture config identity connApp nameScheme genId genEntropy sysdb tracer
           let WorkflowId widText = wid
               row = (newWorkflow widText) {newWorkflowName = Just "L2HandleAwaiter"}
            in do
-                created <- runSystemDB sysdb (\db -> initWorkflow db row Nothing Fresh Nothing)
+                created <- runSystemDB sysdb (\db -> initWorkflow db row Fresh Nothing)
                 case created of
                   Left err -> throwIO (userError (show err))
                   Right _ -> pure (),

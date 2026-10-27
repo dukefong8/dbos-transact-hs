@@ -51,7 +51,7 @@ simSleepFixture = do
       { sfFreshWorkflowId = do
           n <- atomically (readTVar fresh >>= \k -> writeTVar fresh (k + 1) >> pure k)
           let widText = "sim-sleep-" <> Text.pack (show n)
-          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimSleepTest"}) Nothing Fresh Nothing
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimSleepTest"}) Fresh Nothing
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),

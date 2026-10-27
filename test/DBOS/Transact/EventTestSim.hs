@@ -100,11 +100,13 @@ traceEventSilent tr = do
 -- the relaunch recovers and announces, the driven pass and the supervisor
 -- race to resume it (the loser parks on the spent release and dies at
 -- shutdown — it adopts every step, so exactly-once still holds), and the
--- join adopts the completed run. Both launches shut down.
+-- join adopts the completed run. Both launches shut down. The final
+-- shutdown takes three tasks: the supervisor, its internal-queue worker,
+-- and the timeout sweep (which postdates the original count of two).
 traceRecoveryKeepsFirst :: forall a. SimTrace a -> IO ()
 traceRecoveryKeepsFirst tr = do
   selectTraceEventsDynamic tr @?= [WorkflowAlreadyOwned "sim-event-recovery-id", WorkflowCompleted "sim-event-recovery-id"]
-  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app", EngineRecovered 1, EngineLaunched "sim-app" "sim-executor" "0.0.0", EngineCancelledRunning 2, EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app", EngineRecovered 1, EngineLaunched "sim-app" "sim-executor" "0.0.0", EngineCancelledRunning 3, EngineShutdown "sim-app"]
 
 -- | The cross-instance read fails the run; the plain in-step read runs its
 -- step and completes. Both instances shut down.

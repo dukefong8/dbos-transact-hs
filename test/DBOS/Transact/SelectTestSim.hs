@@ -36,7 +36,7 @@ import Test.Tasty.HUnit (assertBool, testCase)
 simSelectFixture :: forall s. IOSim s (SelectFixture (IOSim s))
 simSelectFixture = do
   mem <- newMemDB
-  created <- SystemDB.initWorkflow mem ((newWorkflow "sim-select") {newWorkflowName = Just "SimSelectTest"}) Nothing Fresh Nothing
+  created <- SystemDB.initWorkflow mem ((newWorkflow "sim-select") {newWorkflowName = Just "SimSelectTest"}) Fresh Nothing
   case created of
     Left err -> error (show err)
     Right _ ->

@@ -77,7 +77,9 @@ module DBOS.SystemDB.Postgres.Backend
     runSession,
     runTransaction,
     isTransportFailure,
-    pollingLimit,
+    PollingConcurrency (PollingDefault, PollingUnlimited),
+    pollingAtMost,
+    pollingPermits,
     classifyUsageError,
     isUniqueViolation,
     isForeignKeyViolation,
@@ -103,7 +105,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Submission (Fresh), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isTerminal, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Submission (Fresh), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, claimsOwnership, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -893,7 +895,7 @@ data Settings = Settings
     settingsRetry                :: RetryPolicy,
     settingsExecutorId           :: Maybe Text,
     settingsApplicationName      :: Maybe Text,
-    settingsPollingConcurrency   :: Maybe Word32,
+    settingsPollingConcurrency   :: PollingConcurrency,
     settingsNotificationCoalesce :: Maybe Duration
   }
   deriving stock (Eq, Show)
@@ -907,7 +909,7 @@ defaultSettings =
       settingsRetry = defaultRetryPolicy,
       settingsExecutorId = Nothing,
       settingsApplicationName = Nothing,
-      settingsPollingConcurrency = Nothing,
+      settingsPollingConcurrency = PollingDefault,
       settingsNotificationCoalesce = Nothing
     }
 
@@ -968,7 +970,7 @@ configFromEnv = do
 -- @PostgresSystemDatabase@ minus the listener (the receive side of
 -- LISTEN\/NOTIFY lands with its own port) and minus what polling-only drops:
 -- no @Tables@ (typedSql pins @dbos.@ identifiers). @psdbPollingPermits@ is
--- the polling-concurrency semaphore as an STM counter ('pollingLimit' sets
+-- the polling-concurrency semaphore as an STM counter ('pollingPermits' sets
 -- its initial count); @psdbNotify@ is the waiter registry every wait
 -- subscribes to and 'signal' wakes; @psdbNotifier@ is the outbound half
 -- whose flush loop the engine spawns in P7.6; @psdbLog@ is the explicit
@@ -995,7 +997,7 @@ fromPool :: Pool.Pool -> Word32 -> Settings -> SomeTracer IO -> IO PostgresSyste
 fromPool pool poolSize settings tracer = do
   when (settings.settingsSchema /= "dbos") $
     throwIO (invalidInput "schema" ("only the dbos schema is served, not " <> settings.settingsSchema))
-  permits <- newTVarIO (pollingLimit settings.settingsPollingConcurrency poolSize)
+  permits <- newTVarIO (pollingPermits settings.settingsPollingConcurrency poolSize)
   registry <- newRegistry
   notifier <- notifierNew pool registry settings.settingsNotificationCoalesce tracer
   taskVar <- newMVar Nothing
@@ -1106,17 +1108,6 @@ runSession env operation session =
     pure $ case result of
       Left usage  -> Left (classifyUsageError usage)
       Right value -> Right value
-
--- | The polling cap for a pool of @poolSize@ connections. Mirrors Rust
--- @polling_limit@: @Nothing@ takes half the pool and at least one;
--- @Just 0@ switches the cap off (Haskell's inexhaustible count is
--- 'maxBound', where Rust uses @Semaphore::MAX_PERMITS@).
-pollingLimit :: Maybe Word32 -> Word32 -> Int
-pollingLimit configured poolSize =
-  case configured of
-    Just 0  -> maxBound
-    Just n  -> fromIntegral n
-    Nothing -> max 1 (fromIntegral poolSize `div` 2)
 
 -- | Whether a failure is a primary-key or unique-index collision.
 -- @23505 unique_violation@: for streams another writer claimed the offset
@@ -1340,11 +1331,13 @@ initConflict new row =
 -- | What the upsert's row says about whether this call may run the workflow.
 -- Mirrors the oracle's checks, in its order: an unreadable status is
 -- malformed, a different function under the same id is a conflict, a
--- differing queue is only a warning (the stored queue wins), a spent
--- recovery budget parks the workflow — a write, so it happens before the
--- error — and another owner's row is recorded but not claimed.
-finishInit :: PostgresSystemDB -> NewWorkflow -> Maybe Int64 -> Bool -> Text -> Maybe (Maybe Text) -> Statements.WorkflowInitRaw -> IO (Either Error WorkflowInitResult)
-finishInit env new maxRecoveryAttempts claiming ownerXid existing row =
+-- differing queue is only a warning (the stored queue wins), and another
+-- owner's row is recorded but not claimed. Recovery-budget parking used to
+-- live here; since the dequeue claim counts attempts, only its dispatch
+-- can tell a spent budget from a fresh one, so the check moved there and
+-- init never parks.
+finishInit :: PostgresSystemDB -> NewWorkflow -> Bool -> Text -> Maybe (Maybe Text) -> Statements.WorkflowInitRaw -> IO (Either Error WorkflowInitResult)
+finishInit env new claiming ownerXid existing row =
   case row.status of
     Nothing -> pure (Left (Malformed ("workflow " <> new.newWorkflowId <> " has a null status")))
     Just raw -> case parseWorkflowStatus raw of
@@ -1359,27 +1352,19 @@ finishInit env new maxRecoveryAttempts claiming ownerXid existing row =
                 (SysdbQueueMismatch new.newWorkflowId)
             let ownerDiffers = row.owner_xid /= Just ownerXid
                 recoveryAttempts = fromMaybe 0 row.recovery_attempts
-                spent = case maxRecoveryAttempts of
-                  Just limit -> not (isTerminal status) && recoveryAttempts > limit + 1 && ownerDiffers
-                  Nothing    -> False
-            if spent
-              then do
-                _ <- runSession env "park_workflow" (Statements.parkWorkflowSession new.newWorkflowId)
-                pure (Left (ErrorMaxRecoveryAttemptsExceeded {workflowId = new.newWorkflowId, limit = fromMaybe 0 maxRecoveryAttempts}))
-              else do
-                clock <- databaseTimeRead (fromMaybe 0 row.db_now)
-                pure
-                  ( Right
-                      WorkflowInitResult
-                        { initResultStatus = status,
-                          initResultRecoveryAttempts = recoveryAttempts,
-                          initResultDeadline = timestampFromEpochMs <$> row.workflow_deadline_epoch_ms,
-                          initResultClock = clock,
-                          initResultOwnerXid = row.owner_xid,
-                          initResultSerialization = row.serialization,
-                          initResultExistingInput = existing,
-                          initResultShouldExecute = not (ownerDiffers && not claiming && row.owner_xid /= Nothing)
-                        }
+            clock <- databaseTimeRead (fromMaybe 0 row.db_now)
+            pure
+              ( Right
+                  WorkflowInitResult
+                    { initResultStatus = status,
+                      initResultRecoveryAttempts = recoveryAttempts,
+                      initResultDeadline = timestampFromEpochMs <$> row.workflow_deadline_epoch_ms,
+                      initResultClock = clock,
+                      initResultOwnerXid = row.owner_xid,
+                      initResultSerialization = row.serialization,
+                      initResultExistingInput = existing,
+                      initResultShouldExecute = not (ownerDiffers && not claiming && row.owner_xid /= Nothing)
+                    }
                   )
 
 
@@ -2314,10 +2299,9 @@ sendBatchInTx messages serialization fallbacks sendToForks = do
 -- caller-owned transaction cannot do — Python's rule). A stored rival row
 -- condemns the whole transaction with the conflict; an identical row is a
 -- no-op join and commits. A deduplication-index violation escapes like any
--- statement failure and aborts the caller's commit. Spent-budget parking
--- and the queue-mismatch warning stay outside (they write and announce
--- through channels a caller transaction cannot host); a fresh row never
--- needs either.
+-- statement failure and aborts the caller's commit. The queue-mismatch
+-- warning stays outside (it announces through a channel a caller
+-- transaction cannot host); a fresh row never needs it.
 enqueueInTx :: NewWorkflow -> Maybe Text -> Text -> Timestamp -> Tx.Transaction (Either Error ())
 enqueueInTx new applicationName ownerXid now = do
   let status = initialStatus new
@@ -2456,7 +2440,7 @@ withPollingPermit env = bracket_ acquire release
 -- grows. Every method takes the environment explicitly and applies
 -- 'runSession' to it.
 instance SystemDB PostgresSystemDB IO where
-  initWorkflow env new maxRecoveryAttempts submission caller =
+  initWorkflow env new submission caller =
     case caller of
       -- The atomic child start: the row (with its back-pointer) and the
       -- parent record commit together, so a crash can never leave one
@@ -2533,7 +2517,7 @@ instance SystemDB PostgresSystemDB IO where
                     )
               | otherwise -> pure (Left err)
             Right (Left conflict) -> pure (Left conflict)
-            Right (Right (row, _stored, existing)) -> finishInit env new maxRecoveryAttempts claiming ownerXid existing row
+            Right (Right (row, _stored, existing)) -> finishInit env new claiming ownerXid existing row
       Nothing -> case validateNewWorkflow new of
         Left err -> pure (Left err)
         Right () -> do
@@ -2571,7 +2555,7 @@ instance SystemDB PostgresSystemDB IO where
                           }
                     )
               | otherwise -> pure (Left err)
-            Right (row, existing) -> finishInit env new maxRecoveryAttempts claiming ownerXid existing row
+            Right (row, existing) -> finishInit env new claiming ownerXid existing row
   getWorkflow env wid = do
     result <- runSession env "get_workflow" (Statements.getWorkflowSession widText)
     pure (result >>= traverse workflowRecordFromRow)
@@ -2691,6 +2675,9 @@ instance SystemDB PostgresSystemDB IO where
   cancelTimedOutWorkflows env limit =
     fmap (map Types.WorkflowId)
       <$> runSession env "cancel_timed_out_workflows" (Statements.cancelTimedOutWorkflowsSession env.psdbApplicationName limit)
+  deadLetterWorkflows env workflowIds minRecoveryAttempts =
+    fmap (map Types.WorkflowId)
+      <$> runSession env "dead_letter_workflows" (Statements.deadLetterWorkflowsSession (map (\(Types.WorkflowId widText) -> widText) workflowIds) minRecoveryAttempts)
   cancelWorkflows env workflowIds cancelChildren _caller
     | null workflowIds = pure (Right [])
     | otherwise = do

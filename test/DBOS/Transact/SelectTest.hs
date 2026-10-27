@@ -47,7 +47,7 @@ mkSelectFixture :: Postgres.PostgresSystemDB -> IO (SelectFixture IO)
 mkSelectFixture backend = do
   freshId <- UUID.V4.nextRandom
   let workflowText = "hs-l2-select-" <> Text.pack (UUID.toString freshId)
-  created <- SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just "SelectTest"}) Nothing Fresh Nothing
+  created <- SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just "SelectTest"}) Fresh Nothing
   case created of
     Left err -> fail (show err)
     Right _ ->

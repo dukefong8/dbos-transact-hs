@@ -42,6 +42,10 @@ tests =
         let engine = NotLaunched {operation = "run a workflow"} :: Error EngineOnly
         liftEngine engine @?= (NotLaunched {operation = "run a workflow"} :: Error CardDeclined)
         displayException (liftEngine engine :: Error CardDeclined) @?= "cannot run a workflow before DBOS is launched",
+      testCase "a parked await renders its budget" $ do
+        let parked = ErrorMaxRecoveryAttemptsExceeded {workflowId = "wf", recoveryAttempts = 5} :: Error CardDeclined
+        displayException parked @?= "the workflow wf exceeded 5 recovery attempts"
+        decodeErrorText (encodeErrorText parked) @?= Right parked,
       testCase "only control errors report themselves as control" $ do
         let cancelled = SystemDatabase (SystemDB.WorkflowCancelled {workflowId = "wf-1"}) :: Error CardDeclined
             interrupted = Interrupted {workflowId = "wf-1"} :: Error CardDeclined

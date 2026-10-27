@@ -1,49 +1,48 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Public-behavior tests for the @registry.rs@ identity seam.
+-- | Public-behavior tests for the @registry.rs@ identity seam. Scenarios
+-- and checks live in 'DBOS.Transact.RegistryCases' and run here over
+-- Postgres connections (and in 'DBOS.Transact.RegistryTestSim' over the
+-- mock backend). Registry checks never reach the database, but invocation
+-- runs through a workflow view, which needs a real connection on this
+-- stack.
 module DBOS.Transact.RegistryTest (tests) where
 
+import DBOS.DualStack (liveCase)
 import DBOS.Prelude
-import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
-import DBOS.Transact
-  (
-    EngineOnly,
-    WorkflowCtx,
-    WorkflowId (..),
-    Error,
-    SerializedWorkflowValue (..),
-    newWorkflowKey,
-  )
-import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Error (Error (..), Failure (..))
-import DBOS.Transact.Serialization (unWorkflowInput)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Context (withWorkflow)
-import DBOS.Transact.Registry
-  ( ErasedWorkflow (..),
-    instanceWorkflowKey,
-    lookupSnapshotWorkflow,
-    newRegistry,
-    registerErasedWorkflow,
-    registerTypedWorkflow,
-    registerWorkflowRef,
-    renderWorkflowKey,
-    WorkflowRef (refKey),
-    refName,
-    snapshotRegistry,
-    snapshotSize,
-    thawRegistry,
-    workflowKeyFromRow,
-  )
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.ContextTest (connOver)
-import Data.Text qualified as Text
+import DBOS.Transact.Identity (Identity (..))
+import DBOS.Transact.Logger (nullTracer)
+import DBOS.Transact.RegistryCases
+  ( RegistryFixture (..),
+    checkDuplicateRefRefused,
+    checkDuplicateRefused,
+    checkEmptyNamesResolve,
+    checkErasedRoundTrip,
+    checkInstanceDistinct,
+    checkKeyTriple,
+    checkMalformedReported,
+    checkReferenceIdentity,
+    checkSnapshotReopen,
+    checkZeroArgCall,
+    scenarioDuplicateRefRefused,
+    scenarioDuplicateRefused,
+    scenarioEmptyNamesResolve,
+    scenarioErasedRoundTrip,
+    scenarioInstanceDistinct,
+    scenarioKeyTriple,
+    scenarioMalformedReported,
+    scenarioReferenceIdentity,
+    scenarioSnapshotReopen,
+    scenarioZeroArgCall,
+  )
 import Test.Tasty (TestTree, testGroup, withResource)
-import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 -- | The application identity the scoped registry probes install.
-registryTestIdentity :: Identity
-registryTestIdentity =
+registryLiveIdentity :: Identity
+registryLiveIdentity =
   Identity
     { identityAppName = "test-app",
       identityAppVersion = "1.0.0",
@@ -51,7 +50,7 @@ registryTestIdentity =
       identityAppId = ""
     }
 
--- | One backend for the whole group: contexts build real connections
+-- | One backend for the whole group: invocations build real connections
 -- over it, though registry checks never reach the database.
 acquireSuiteBackend :: IO Postgres.PostgresSystemDB
 acquireSuiteBackend = do
@@ -60,134 +59,27 @@ acquireSuiteBackend = do
   Postgres.activatePostgresSystemDB backend
   pure backend
 
+-- | Every case runs against a fresh connection over the suite backend.
+liveFixture :: Postgres.PostgresSystemDB -> RegistryFixture IO
+liveFixture backend =
+  RegistryFixture
+    { rfConn = connOver backend nullTracer,
+      rfIdentity = registryLiveIdentity
+    }
+
 tests :: TestTree
 tests =
   withResource acquireSuiteBackend Postgres.releasePostgresSystemDB $ \getBackend ->
     testGroup
       "Workflow registry"
-      [ testCase "a key displays as the triple the references spell" $ do
-        renderWorkflowKey (newWorkflowKey "checkout") @?= "checkout",
-      testCase "one identity registers once" $ do
-        registry <- newRegistry
-        let key = newWorkflowKey "same"
-            body :: ErasedWorkflow IO
-            body = ErasedWorkflow (\_ _ -> pure (Right Nothing))
-        first <- registerErasedWorkflow registry key body
-        case first of
-          Right () -> pure ()
-          Left err -> fail (show err)
-        second <- registerErasedWorkflow registry key body
-        case second of
-          Left err -> displayException err @?= "a workflow is already registered as same"
-          Right () -> fail "expected duplicate registration to be refused",
-      testCase "a snapshot closes the registry and releasing it reopens" $ do
-        registry <- newRegistry
-        let key = newWorkflowKey "before"
-            body :: ErasedWorkflow IO
-            body = ErasedWorkflow (\_ _ -> pure (Right Nothing))
-        _ <- registerErasedWorkflow registry key body
-        snapshot <- snapshotRegistry registry
-        snapshotSize snapshot @?= 1
-        refused <- registerErasedWorkflow registry (newWorkflowKey "after") body
-        case refused of
-          Left err -> displayException err @?= "cannot register_workflow after DBOS is launched"
-          Right () -> fail "expected registration after snapshot to be refused"
-        assertBool "the snapshot holds the registered workflow" (maybe False (const True) (lookupSnapshotWorkflow key snapshot))
-        thawRegistry registry
-        reopened <- registerErasedWorkflow registry (newWorkflowKey "after") body
-        case reopened of
-          Right () -> pure ()
-          Left err -> fail (show err),
-      testCase "a name and an instance of it are different identities" $ do
-        let free = newWorkflowKey "shared"
-            method = instanceWorkflowKey "shared" "Checkout" "eu"
-        assertBool "the triple is distinct" (free /= method)
-        renderWorkflowKey method @?= "shared/Checkout/eu",
-      testCase "empty class and config names resolve like nulls" $ do
-        workflowKeyFromRow "checkout" (Just "") (Just "") @?= newWorkflowKey "checkout",
-      testCase "an erased workflow round-trips through json" $ do
-        registry <- newRegistry
-        let key = newWorkflowKey "double"
-            double :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            double value _ = pure (Right (value * 2))
-        registered <- registerTypedWorkflow registry key double
-        case registered of
-          Left err -> fail (show err)
-          Right () -> pure ()
-        snapshot <- snapshotRegistry registry
-        workflow <- maybe (fail "registered workflow missing from snapshot") pure (lookupSnapshotWorkflow key snapshot)
-        backend <- getBackend
-        conn <- connOver backend nullTracer
-        result <-
-          withWorkflow conn registryTestIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
-            case workflow of ErasedWorkflow body -> body (Just (unWorkflowInput (encodeWorkflowInput (21 :: Int)))) wctx
-        case result of
-          Right (Just output) -> decodeWorkflowValue "result" (Just output) @?= Right (42 :: Int)
-          other -> fail (show other),
-      testCase "a malformed argument is reported rather than panicking" $ do
-        registry <- newRegistry
-        let key = newWorkflowKey "double"
-            double :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            double value _ = pure (Right (value * 2))
-        registered <- registerTypedWorkflow registry key double
-        case registered of
-          Left err -> fail (show err)
-          Right () -> pure ()
-        snapshot <- snapshotRegistry registry
-        workflow <- maybe (fail "registered workflow missing from snapshot") pure (lookupSnapshotWorkflow key snapshot)
-        backend <- getBackend
-        conn <- connOver backend nullTracer
-        result <-
-          withWorkflow conn registryTestIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
-            case workflow of ErasedWorkflow body -> body (Just (SerializedWorkflowValue "\"not a number\"" Nothing)) wctx
-        case result of
-          Left (FailureControl (Deserialization {what = what})) -> what @?= "argument"
-          Left (FailureControl _) -> fail "expected the argument decode failure"
-          Left (FailureRecorded _) -> fail "expected an input decode failure to be control, not recorded"
-          Right _ -> fail "expected malformed input to fail decoding",
-      testCase "a reference holds the identity it registered under" $ do
-        registry <- newRegistry
-        let key = instanceWorkflowKey "checkout" "Checkout" "eu"
-            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value _ = pure (Right (value * 2))
-        registered <- registerWorkflowRef registry key body
-        case registered of
-          Left err -> fail (show err)
-          Right ref -> do
-            ref.refKey @?= key
-            refName ref @?= "checkout",
-      testCase "a reference to a duplicate identity is refused" $ do
-        registry <- newRegistry
-        let key = newWorkflowKey "same"
-            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
-            body value _ = pure (Right value)
-        first <- registerWorkflowRef registry key body
-        case first of
-          Left err -> fail (show err)
-          Right _ -> pure ()
-        second <- registerWorkflowRef registry key body
-        case second of
-          Left err -> displayException err @?= "a workflow is already registered as same"
-          Right _ -> fail "expected duplicate registration to be refused",
-      testCase "a zero argument workflow is called with no input at all" $ do
-        registry <- newRegistry
-        let key = newWorkflowKey "nothing"
-            nothing :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
-            nothing () _ = pure (Right "nothing")
-        registered <- registerTypedWorkflow registry key nothing
-        case registered of
-          Left err -> fail (show err)
-          Right () -> pure ()
-        snapshot <- snapshotRegistry registry
-        workflow <- maybe (fail "registered workflow missing from snapshot") pure (lookupSnapshotWorkflow key snapshot)
-        backend <- getBackend
-        conn <- connOver backend nullTracer
-        result <-
-          withWorkflow conn registryTestIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
-            case workflow of ErasedWorkflow body -> body Nothing wctx
-        case result of
-          Right (Just output) -> do
-            let decoded = decodeWorkflowValue "result" (Just output) :: Either CodecError Text
-            decoded @?= Right "nothing"
-          other -> fail (show other)
-    ]
+      [ liveCase (liveFixture <$> getBackend) "a key displays as the triple the references spell" scenarioKeyTriple checkKeyTriple,
+        liveCase (liveFixture <$> getBackend) "one identity registers once" scenarioDuplicateRefused checkDuplicateRefused,
+        liveCase (liveFixture <$> getBackend) "a snapshot closes the registry and releasing it reopens" scenarioSnapshotReopen checkSnapshotReopen,
+        liveCase (liveFixture <$> getBackend) "a name and an instance of it are different identities" scenarioInstanceDistinct checkInstanceDistinct,
+        liveCase (liveFixture <$> getBackend) "empty class and config names resolve like nulls" scenarioEmptyNamesResolve checkEmptyNamesResolve,
+        liveCase (liveFixture <$> getBackend) "an erased workflow round-trips through json" scenarioErasedRoundTrip checkErasedRoundTrip,
+        liveCase (liveFixture <$> getBackend) "a malformed argument is reported rather than panicking" scenarioMalformedReported checkMalformedReported,
+        liveCase (liveFixture <$> getBackend) "a reference holds the identity it registered under" scenarioReferenceIdentity checkReferenceIdentity,
+        liveCase (liveFixture <$> getBackend) "a reference to a duplicate identity is refused" scenarioDuplicateRefRefused checkDuplicateRefRefused,
+        liveCase (liveFixture <$> getBackend) "a zero argument workflow is called with no input at all" scenarioZeroArgCall checkZeroArgCall
+      ]

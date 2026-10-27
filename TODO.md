@@ -122,8 +122,6 @@ Ported in one slice (adopted an uncommitted #110 draft, then #109 on top):
 
 ### Naming hygiene (Rust #129 `defd947`, #128 `29326be`, 2026-10-26)
 
-Ported with no behavior change:
-
 - #129 (`queue` → `queue_name` on fork/rewind/resume options, schedule
   `name()` → `schedule_name()`) needed nothing: the port already names
   these fields `QueueName`, holds records (not names) in start options,
@@ -136,6 +134,80 @@ Ported with no behavior change:
   wire.
 - Gates: Stream pair 28/28 live + 24/24 sim (watcher and standalone
   binaries agree), full-tree build clean.
+
+### Polling-cap enum (Rust #114 `48789db`, 2026-10-26)
+
+- `PollingConcurrency` ADT (`Default`/`Unlimited`/`AtMost`) with
+  `pollingPermits` replaces `pollingLimit`; a zero cap cannot be written
+  (opaque constructor + `pollingAtMost :: Word32 -> Maybe`,
+  mirroring `NonZeroU32`). Settings, Config, and ClientConfig fields go
+  from `Maybe` to the ADT with `PollingDefault` defaults; the type rides
+  the Transact facade. Unlimited keeps the `maxBound` deviation.
+- Tests mirror the oracle's enum unit tests plus a zero-refusal case.
+- Slice 3 split: #123 (remove the sysdb `MaxRecoveryAttemptsExceeded`
+  error) is a relocation, not a deletion — parking must move from init to
+  the dequeue claim/dispatch path — so it follows as its own slice.
+- Gates: polling tests 5/5; Postgres group 167/167 twice. Two
+  single-occurrence parallel flakes seen once each in untouched code
+  (versions timestamp, queue concurrency), never reproduced.
+
+### Park relocation (Rust #123 `bd712ee`, 2026-10-26)
+
+- Parking moved from init to the dequeue dispatch, as the oracle did:
+  `initWorkflow` drops its limit argument everywhere (class, Postgres
+  backend, Mem/Mock, 50+ call sites swept and re-verified), `finishInit`
+  loses the spent-budget branch, and the sysdb
+  `ErrorMaxRecoveryAttemptsExceeded` variant goes with its Display, JSON,
+  and `shouldRecord` arms (`parkWorkflowSession` removed; the guarded
+  `deadLetterWorkflows` statement is the only park write).
+- Dispatch mirrors `dequeue.rs`: a three-arm `Admission` ADT
+  (`Run`/`NotPending`/`Park`) over the row read after the claim, with the
+  status checked first; `Park` dead-letters with the row's own count and
+  warns (`DequeuedBudgetSpent`), `NotPending` warns (`DequeuedRowSettled`).
+  `maxRecoveryAttempts` stays as the shared constant (never a per-call
+  argument — a lone port that parks rows its peers leave alone is the
+  worse divergence).
+- Adopt and the handle's settled-parked path construct the engine error
+  directly, as Rust's `adopt` always did: new
+  `TransactError.ErrorMaxRecoveryAttemptsExceeded` (tag stays
+  `MaxRecoveryAttemptsExceeded`; the `Error` prefix is the documented
+  facade collision deviation, `WorkflowStatus` owning the bare name).
+- Placement note: the check lives in `dispatchClaimed`, not
+  `spawnRegisteredWorkflowWithRow` — single caller, row and `QueueEvent`
+  both in scope, exact oracle file location.
+- Gates: sysdb dead-letter live + mem twin; admission unit mirror;
+  dispatch-park engine test (row parked, outcome `AwaitedParked 151`,
+  body run count 0); render/round-trip cases for the new error and
+  events.
+
+### Sim-only watcher + pre-existing trace drift (2026-10-27)
+
+- `test/Main.hs` now enables the 21 sim groups and nothing live, so the
+  watcher is fast and never contends with `cabal test` on fixture rows.
+- Enabling everything surfaced 4 sim failures that reproduce on the clean
+  tree (proven via stash): stale expectations, not regressions.
+- Three replay-adopt traces missed a trailing `WorkflowAlreadyOwned`.
+  Root cause: slice 1 (`fd9a3a2`) added a silent terminal arm to the run
+  path while its start-path twin announces. Restored the emission on the
+  run path (matching event prose: "the handle joins the existing run");
+  no expectation edits needed there.
+- `progress events survive recovery` counted 2 shutdown-cancelled tasks;
+  the timeout sweep (also slice 1) is a third legitimate tracked task on
+  the relaunch tail. Expectation updated 2 → 3 with the inventory noted.
+- The restored emission propagated to one more trace that had pinned the
+  silence (`restarting a finished id adopts`); updated with its comment.
+
+### Registry dual-stack (2026-10-27)
+
+- `RegistryTest` split into `RegistryCases` (10 shared scenarios + pure
+  checks, polymorphic over the backend monad) with `RegistryTest` reduced
+  to live leaves over the suite backend and new `RegistryTestSim` running
+  the identical scenarios over the mock backend (cabal + Main wired).
+- Sim validates the deep seams, not just values: registration, snapshot,
+  lookup, invocation through a workflow view, and the codec/control
+  boundary all execute on both stacks; every sim leaf additionally pins
+  its trace silent. Gates: 10/10 live (standalone pattern run) + 10/10
+  sim (watcher).
 
 ### Child-start replay + fork replacement (Rust #108 `2540e18`, #107 `547eb9f`, 2026-10-20)
 

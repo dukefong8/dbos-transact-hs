@@ -3,6 +3,8 @@ module DBOS.Transact
   -- lifecycle-config
     ApplicationVersion (..),
     Config (..),
+    PollingConcurrency (PollingDefault, PollingUnlimited),
+    pollingAtMost,
     configNew,
     configFromEnv,
     validateConfig,
@@ -332,4 +334,4 @@ import DBOS.Transact.Stream (ReadStreamOptions (..), StreamReader, closeStream, 
 import DBOS.Transact.Wait (joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
 import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Timeout (..), enqueueNew, runOptionsDefault, startChildWorkflow, startOptionsDefault)
 
-import DBOS.SystemDB.Types (Applications (..), ApplicationVersion (..), Change (..), Duration, ForkOptions (..), ForkPoint (..), IdempotencyKey (..), RateLimit (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Timestamp, Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultRewindOptions, defaultWorkflowFilter, isTerminal, millisDuration, secondsDuration, timestampFromEpochMs, timestampToEpochMs, workflowStatusText)
+import DBOS.SystemDB.Types (Applications (..), ApplicationVersion (..), Change (..), Duration, ForkOptions (..), ForkPoint (..), IdempotencyKey (..), PollingConcurrency (PollingDefault, PollingUnlimited), RateLimit (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Timestamp, Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultRewindOptions, defaultWorkflowFilter, isTerminal, millisDuration, pollingAtMost, secondsDuration, timestampFromEpochMs, timestampToEpochMs, workflowStatusText)

@@ -48,7 +48,6 @@ data Error
   | NonExistentWorkflow {workflowIds :: [Text]}
   | WorkflowNotRewindable {workflowId :: Text, status :: Text}
   | RewindInterrupted {workflowId :: Text, status :: Text}
-  | ErrorMaxRecoveryAttemptsExceeded {workflowId :: Text, limit :: Int64}
   | AlreadyRegistered {kind :: Text, name :: Text}
   | NotRegistered {kind :: Text, name :: Text}
   | RegisteredByAnother {kind :: Text, name :: Text, holder :: Text, claimant :: Maybe Text}
@@ -62,13 +61,6 @@ data BackendError = BackendError
     backendKind :: BackendErrorKind
   }
   deriving stock (Eq, Show)
-
--- NOTE (deviation): the parked-workflow variant is spelled
--- @ErrorMaxRecoveryAttemptsExceeded@ rather than the Rust
--- @MaxRecoveryAttemptsExceeded@, because 'DBOS.SystemDB.WorkflowStatus'
--- carries the same word from @types.rs@ and Haskell modules share one
--- constructor namespace. Documented per the AGENTS HARD RULE's
--- constructor-prefix escape hatch.
 
 -- | Whether a backend failure is worth asking again about. Classification
 -- is the backend's job, not the retry loop's. Mirrors Rust
@@ -94,8 +86,6 @@ instance ToJSON Error where
     NonExistentWorkflow {workflowIds} -> tagged "NonExistentWorkflow" (object ["workflow_ids" .= workflowIds])
     WorkflowNotRewindable {workflowId, status} -> tagged "WorkflowNotRewindable" (object ["workflow_id" .= workflowId, "status" .= status])
     RewindInterrupted {workflowId, status} -> tagged "RewindInterrupted" (object ["workflow_id" .= workflowId, "status" .= status])
-    -- Tag keeps the Rust spelling; see the decode side.
-    ErrorMaxRecoveryAttemptsExceeded {workflowId, limit} -> tagged "MaxRecoveryAttemptsExceeded" (object ["workflow_id" .= workflowId, "limit" .= limit])
     AlreadyRegistered {kind, name} -> tagged "AlreadyRegistered" (object ["kind" .= kind, "name" .= name])
     NotRegistered {kind, name} -> tagged "NotRegistered" (object ["kind" .= kind, "name" .= name])
     RegisteredByAnother {kind, name, holder, claimant} -> tagged "RegisteredByAnother" (object ["kind" .= kind, "name" .= name, "holder" .= holder, "claimant" .= claimant])
@@ -118,10 +108,6 @@ instance FromJSON Error where
       "NonExistentWorkflow" -> withObject "NonExistentWorkflow" (\o -> NonExistentWorkflow <$> o .: "workflow_ids") payload
       "WorkflowNotRewindable" -> withObject "WorkflowNotRewindable" (\o -> WorkflowNotRewindable <$> o .: "workflow_id" <*> o .: "status") payload
       "RewindInterrupted" -> withObject "RewindInterrupted" (\o -> RewindInterrupted <$> o .: "workflow_id" <*> o .: "status") payload
-      -- Tag keeps the Rust spelling: the oracle names this variant
-      -- @MaxRecoveryAttemptsExceeded@, and the port's @Error@ prefix is
-      -- collision avoidance only (constructors, never wire names).
-      "MaxRecoveryAttemptsExceeded" -> withObject "MaxRecoveryAttemptsExceeded" (\o -> ErrorMaxRecoveryAttemptsExceeded <$> o .: "workflow_id" <*> o .: "limit") payload
       "AlreadyRegistered" -> withObject "AlreadyRegistered" (\o -> AlreadyRegistered <$> o .: "kind" <*> o .: "name") payload
       "NotRegistered" -> withObject "NotRegistered" (\o -> NotRegistered <$> o .: "kind" <*> o .: "name") payload
       "RegisteredByAnother" -> withObject "RegisteredByAnother" (\o -> RegisteredByAnother <$> o .: "kind" <*> o .: "name" <*> o .: "holder" <*> o .: "claimant") payload
@@ -188,8 +174,6 @@ renderError err =
       "cannot rewind workflow " <> wid <> " (" <> current <> "): it is running or waiting to run, so cancel it first"
     RewindInterrupted {workflowId = wid, status = before} ->
       "workflow " <> wid <> " changed status from " <> before <> " while being rewound; retry the rewind"
-    ErrorMaxRecoveryAttemptsExceeded {workflowId = wid, limit = count} ->
-      "workflow " <> wid <> " exceeded " <> Text.pack (show count) <> " recovery attempts"
     AlreadyRegistered {kind = what, name = taken} ->
       what <> " \"" <> taken <> "\" is already registered"
     NotRegistered {kind = what, name = missing} ->
@@ -272,7 +256,6 @@ shouldRecord err = case err of
   NonExistentWorkflow {} -> True
   WorkflowNotRewindable {} -> True
   RewindInterrupted {} -> True
-  ErrorMaxRecoveryAttemptsExceeded {} -> True
   AlreadyRegistered {} -> True
   NotRegistered {} -> True
   RegisteredByAnother {} -> True

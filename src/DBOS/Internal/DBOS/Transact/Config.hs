@@ -27,7 +27,7 @@ where
 
 import DBOS.Prelude
 import Data.Text qualified as Text
-import DBOS.SystemDB.Types (Duration, durationIsZero, portableJsonSerialization, secondsDuration)
+import DBOS.SystemDB.Types (Duration, PollingConcurrency (PollingDefault), durationIsZero, portableJsonSerialization, secondsDuration)
 import DBOS.Transact.Error (EngineOnly, Error (..))
 import System.Environment (lookupEnv)
 
@@ -78,7 +78,7 @@ data Config = Config
     configSerializer :: Serializer,
     configUseListenNotify :: Bool,
     configMigrate :: Bool,
-    configPollingConcurrency :: Maybe Word,
+    configPollingConcurrency :: PollingConcurrency,
     configOutcomePollInterval :: Maybe Duration,
     configListenQueues :: Maybe [Text],
     configNotificationCoalesce :: Maybe Duration
@@ -99,7 +99,7 @@ configNew appName databaseUrl =
       configSerializer = PortableJson,
       configUseListenNotify = True,
       configMigrate = True,
-      configPollingConcurrency = Nothing,
+      configPollingConcurrency = PollingDefault,
       configOutcomePollInterval = Nothing,
       configListenQueues = Nothing,
       configNotificationCoalesce = Nothing

@@ -513,7 +513,6 @@ tests =
             SystemDB.initWorkflow
               reader
               ((newWorkflow waiterText) {newWorkflowName = Just "L2FirstWaiter"})
-              Nothing
               Fresh
               Nothing
           case waiterCreated of

@@ -112,7 +112,9 @@ import DBOS.SystemDB.Postgres
     isTransportFailure,
     isUniqueViolation,
     migrationVersionSession,
-    pollingLimit,
+    PollingConcurrency (PollingDefault, PollingUnlimited),
+    pollingAtMost,
+    pollingPermits,
     releasePostgresSystemDB,
     runSession,
     verifySystemDatabase,
@@ -470,32 +472,35 @@ transportTests =
         assertBool "not empty" (not (isTransportFailure ""))
     ]
 
--- | Mirrors @postgres.rs@ polling-cap tests. Rust's off value is
--- @tokio Semaphore::MAX_PERMITS@; the Haskell port's inexhaustible count is
--- 'maxBound', recorded as a deviation in ADR-0010's hub (typedSql/fixed
--- schema section covers identifier rendering; this one covers the counter).
+-- | Mirrors @postgres.rs@ polling-cap tests against the 'pollingPermits'
+-- method. Rust's off value is @tokio Semaphore::MAX_PERMITS@; the Haskell
+-- port's inexhaustible count is 'maxBound'.
 pollingTests :: TestTree
 pollingTests =
   testGroup
     "Polling cap"
     [ -- Mirrors @the_default_polling_cap_is_half_the_pool@.
       testCase "the default polling cap is half the pool" $ do
-        pollingLimit Nothing 10 @?= 5
-        pollingLimit Nothing 21 @?= 10,
+        pollingPermits PollingDefault 10 @?= 5
+        pollingPermits PollingDefault 21 @?= 10,
       -- Mirrors @a_pool_too_small_to_halve_still_admits_one_poll@: half of
       -- one is zero, which as a cap would block every poll forever.
       testCase "a pool too small to halve still admits one poll" $ do
-        pollingLimit Nothing 1 @?= 1
-        pollingLimit Nothing 0 @?= 1,
+        pollingPermits PollingDefault 1 @?= 1
+        pollingPermits PollingDefault 0 @?= 1,
       -- Mirrors @a_configured_polling_cap_is_taken_as_given@: above the pool
       -- size is the caller's business; neither reference rejects it either.
       testCase "a configured polling cap is taken as given" $ do
-        pollingLimit (Just 3) 10 @?= 3
-        pollingLimit (Just 100) 10 @?= 100,
-      -- Mirrors @zero_switches_the_polling_cap_off@: off is a permit count
-      -- nothing will exhaust, not an absent semaphore.
-      testCase "zero switches the polling cap off" $
-        pollingLimit (Just 0) 10 @?= maxBound
+        pollingPermits <$> pollingAtMost 3 <*> pure 10 @?= Just 3
+        pollingPermits <$> pollingAtMost 100 <*> pure 10 @?= Just 100,
+      -- A zero cap cannot be written: the only way to build the bounded
+      -- case refuses zero, mirroring @NonZeroU32@.
+      testCase "a zero polling cap is refused" $
+        pollingAtMost 0 @?= Nothing,
+      -- Mirrors @an_unlimited_polling_cap_never_runs_out@: off is a permit
+      -- count nothing will exhaust, not an absent semaphore.
+      testCase "an unlimited polling cap never runs out" $
+        pollingPermits PollingUnlimited 10 @?= maxBound
     ]
 
 -- | The failure classification behind the retry loop. There are no Rust
@@ -564,7 +569,7 @@ configTests =
   testGroup
     "Configuration"
     [ testCase "defaults match every implementation" $
-        defaultSettings @?= Settings "dbos" defaultRetryPolicy Nothing Nothing Nothing Nothing,
+        defaultSettings @?= Settings "dbos" defaultRetryPolicy Nothing Nothing PollingDefault Nothing,
       testCase "configNew takes the URL with shared defaults" $ do
         let config = configNew "postgresql://u:p@host:5432/db"
         config.configUrl @?= "postgresql://u:p@host:5432/db"
@@ -585,7 +590,7 @@ lifecycleTests getBackend =
           verified <- verifySystemDatabase env
           verified @?= Right ()
           permits <- readTVarIO env.psdbPollingPermits
-          permits @?= pollingLimit Nothing config.configMaxConnections,
+          permits @?= pollingPermits PollingDefault (fromIntegral config.configMaxConnections),
       testCase "runs a session through the pool" $
         withBackend getBackend $ \env -> do
           result <- runSession env "probe" migrationVersionSession
@@ -1329,7 +1334,7 @@ outcomeTests getBackend =
         unique <- freshWorkflowId
         failed <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Fresh Nothing
           recorded <- recordWorkflowOutcome env (WorkflowId unique) (OutcomeOutput (Just "\"done\""))
           recorded @?= Right Recorded
           (input, output, errorValue) <- payloadRows env unique
@@ -1337,7 +1342,7 @@ outcomeTests getBackend =
           output @?= Just "\"done\""
           errorValue @?= Nothing
           legacyPayloads env unique >>= (@?= (Nothing, Nothing, Nothing))
-          _ <- initWorkflow env (newWorkflow failed) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          _ <- initWorkflow env (newWorkflow failed) {newWorkflowInput = Just "\"in\""} Fresh Nothing
           failedRecorded <- recordWorkflowOutcome env (WorkflowId failed) (OutcomeError "\"boom\"")
           failedRecorded @?= Right Recorded
           (_, failedOutput, failedError) <- payloadRows env failed
@@ -1347,7 +1352,7 @@ outcomeTests getBackend =
       testCase "a refused outcome writes no payload" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Fresh Nothing
           _ <- cancelWorkflows env [WorkflowId unique] False Nothing
           refused <- recordWorkflowOutcome env (WorkflowId unique) (OutcomeOutput (Just "\"late\""))
           refused @?= Right AlreadyFinished
@@ -1378,14 +1383,14 @@ outcomeTests getBackend =
             source = base <> "-source"
             forked = base <> "-forked"
         withBackend getBackend $ \env -> do
-          _ <- initWorkflow env (newWorkflow direct) {newWorkflowInput = Just "\"1\""} Nothing Fresh Nothing
+          _ <- initWorkflow env (newWorkflow direct) {newWorkflowInput = Just "\"1\""} Fresh Nothing
           _ <- recordWorkflowOutcome env (WorkflowId direct) (OutcomeOutput (Just "\"2\""))
-          _ <- initWorkflow env (newWorkflow queued) {newWorkflowInput = Just "\"2\"", newWorkflowQueueName = Just ("q-" <> base)} Nothing Fresh Nothing
+          _ <- initWorkflow env (newWorkflow queued) {newWorkflowInput = Just "\"2\"", newWorkflowQueueName = Just ("q-" <> base)} Fresh Nothing
           _ <- recordWorkflowOutcome env (WorkflowId queued) (OutcomeOutput (Just "\"4\""))
-          _ <- initWorkflow env (newWorkflow parent) Nothing Fresh Nothing
+          _ <- initWorkflow env (newWorkflow parent) Fresh Nothing
           startedAt <- timestampNow
           _ <-
-            initWorkflow env (newWorkflow child) Nothing Fresh $
+            initWorkflow env (newWorkflow child) Fresh $
               Just
                 ( InitWorkflowCaller
                     { initCallerParentWorkflowId = WorkflowId parent,
@@ -1396,9 +1401,9 @@ outcomeTests getBackend =
                 )
           _ <- recordWorkflowOutcome env (WorkflowId child) (OutcomeOutput (Just "\"5\""))
           _ <- recordWorkflowOutcome env (WorkflowId parent) (OutcomeOutput (Just "\"10\""))
-          _ <- initWorkflow env (newWorkflow failed) {newWorkflowInput = Just "\"f\""} Nothing Fresh Nothing
+          _ <- initWorkflow env (newWorkflow failed) {newWorkflowInput = Just "\"f\""} Fresh Nothing
           _ <- recordWorkflowOutcome env (WorkflowId failed) (OutcomeError "\"boom\"")
-          _ <- initWorkflow env (newWorkflow source) {newWorkflowInput = Just "\"s\""} Nothing Fresh Nothing
+          _ <- initWorkflow env (newWorkflow source) {newWorkflowInput = Just "\"s\""} Fresh Nothing
           _ <- recordWorkflowOutcome env (WorkflowId source) (OutcomeOutput (Just "\"s\""))
           _ <- forkWorkflows env [(forkNew source) {forkForkedId = Just forked}] defaultForkOptions Nothing
           _ <- recordWorkflowOutcome env (WorkflowId forked) (OutcomeOutput (Just "\"s\""))
@@ -1703,7 +1708,7 @@ queueTests getBackend =
                     initCallerStepName = "ChildWorkflow",
                     initCallerStartedAt = startedAt
                   }
-          started <- initWorkflow env (newWorkflow child) Nothing Fresh (Just caller)
+          started <- initWorkflow env (newWorkflow child) Fresh (Just caller)
           case started of
             Left err -> fail ("expected a child start, got: " <> show err)
             Right _ -> pure ()
@@ -2030,15 +2035,30 @@ lifecycleWriteTests getBackend =
       testCase "the timeout sweep cancels expired rows and spares live ones" $ do
         expired <- freshWorkflowId
         live <- freshWorkflowId
+        let sweepApp = "sweep-app-" <> expired
         withBackend getBackend $ \env -> do
-          _ <- initWorkflow env ((newWorkflow expired) {newWorkflowDeadline = Just (timestampFromEpochMs 1000)}) Nothing Fresh Nothing
-          _ <- initWorkflow env ((newWorkflow live) {newWorkflowDeadline = Just (timestampFromEpochMs 4102444800000)}) Nothing Fresh Nothing
-          swept <- cancelTimedOutWorkflows env 100
-          case swept of
-            Left err -> fail ("expected a sweep, got: " <> show err)
-            Right ids -> do
-              assertBool "the expired row swept" (WorkflowId expired `elem` ids)
-              assertBool "the live row spared" (WorkflowId live `notElem` ids)
+          let plant wid deadline =
+                initWorkflow
+                  env
+                  ( (newWorkflow wid)
+                      { newWorkflowDeadline = Just deadline,
+                        newWorkflowApplicationName = Just sweepApp
+                      }
+                  )
+                  Fresh
+                  Nothing
+          _ <- plant expired (timestampFromEpochMs 1000)
+          _ <- plant live (timestampFromEpochMs 4102444800000)
+          -- Scoped to this test's application: the guard test below plants
+          -- expired rows of its own in parallel, and an unscoped sweep
+          -- would cancel them first (observed once as a `taken` miss).
+          swept <- withBackendAs getBackend (Just sweepApp) $ \sweepEnv -> do
+            result <- cancelTimedOutWorkflows sweepEnv 100
+            case result of
+              Left err -> fail ("expected a sweep, got: " <> show err)
+              Right ids -> pure ids
+          assertBool "the expired row swept" (WorkflowId expired `elem` swept)
+          assertBool "the live row spared" (WorkflowId live `notElem` swept)
           ended <- getWorkflow env (WorkflowId expired)
           case ended of
             Right (Just record) -> record.workflowRecordStatus @?= Cancelled
@@ -2050,7 +2070,13 @@ lifecycleWriteTests getBackend =
       testCase "the timed-out cancel honors ownership" $ do
         owned <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          _ <- initWorkflow env ((newWorkflow owned) {newWorkflowDeadline = Just (timestampFromEpochMs 1000)}) Nothing Fresh Nothing
+          -- A private application scope: the sweep test in this group
+          -- cancels expired rows of the shared app in parallel, and must
+          -- never see this row (nor sweep it first). The single-row cancel
+          -- takes no application filter, so the scope changes nothing it
+          -- asserts.
+          let scoped = (newWorkflow owned) {newWorkflowDeadline = Just (timestampFromEpochMs 1000), newWorkflowApplicationName = Just ("guard-app-" <> owned)}
+          _ <- initWorkflow env scoped Fresh Nothing
           refused <- cancelIfTimedOut env (WorkflowId owned) (Just "someone-else")
           refused @?= Right False
           held <- getWorkflow env (WorkflowId owned)
@@ -2064,6 +2090,24 @@ lifecycleWriteTests getBackend =
           ended <- getWorkflow env (WorkflowId owned)
           case ended of
             Right (Just record) -> record.workflowRecordStatus @?= Cancelled
+            other -> fail ("expected record, got: " <> show other),
+      testCase "dead-letter parks only over-limit pending rows" $ do
+        over <- freshWorkflowId
+        within <- freshWorkflowId
+        settled <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env ((defaultFixture over) {fixtureRecoveryAttempts = Just 150})
+          _ <- insertFixtureChecked env ((defaultFixture within) {fixtureRecoveryAttempts = Just 3})
+          _ <- insertFixtureChecked env ((defaultFixture settled) {fixtureStatus = "SUCCESS", fixtureRecoveryAttempts = Just 150})
+          parked <- deadLetterWorkflows env (map WorkflowId [over, within, settled]) 100
+          parked @?= Right [WorkflowId over]
+          parkedRow <- getWorkflow env (WorkflowId over)
+          case parkedRow of
+            Right (Just record) -> record.workflowRecordStatus @?= MaxRecoveryAttemptsExceeded
+            other -> fail ("expected record, got: " <> show other)
+          keptRow <- getWorkflow env (WorkflowId within)
+          case keptRow of
+            Right (Just record) -> record.workflowRecordStatus @?= Pending
             other -> fail ("expected record, got: " <> show other),
       testCase "cancelling stops at terminal rows and can take children" $ do
         unique <- freshWorkflowId
@@ -2120,7 +2164,7 @@ lifecycleWriteTests getBackend =
       testCase "deleting a workflow removes its payloads and steps" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Fresh Nothing
           _ <- recordStep env (WorkflowId unique) 0 "charge" (OutcomeOutput (Just "1")) Nothing Nothing
           _ <- recordWorkflowOutcome env (WorkflowId unique) (OutcomeOutput (Just "1"))
           deleted <- deleteWorkflows env [WorkflowId unique] False Nothing
@@ -2641,7 +2685,7 @@ initTests getBackend =
     [ testCase "a fresh start is pending, claimed and counted once" $ do
         unique <- freshWorkflowId
         withBackendSettings getBackend (defaultSettings {settingsExecutorId = Just "exec-1"}) $ \env -> do
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowExecutorId = Just "exec-1"} Nothing Fresh Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowExecutorId = Just "exec-1"} Fresh Nothing
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -2663,7 +2707,7 @@ initTests getBackend =
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique) {fixtureStatus = "PENDING", fixtureOwnerXid = Nothing, fixtureInput = Just "{\"positionalArgs\":[21],\"namedArgs\":{}}", fixtureSerialization = Just "portable_json"}
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowName = Just "fixture", newWorkflowInput = Just "{\"positionalArgs\":[99],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Nothing Fresh Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowName = Just "fixture", newWorkflowInput = Just "{\"positionalArgs\":[99],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Fresh Nothing
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -2673,14 +2717,14 @@ initTests getBackend =
       testCase "a fresh insert carries no existing input" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "{\"positionalArgs\":[1],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Nothing Fresh Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "{\"positionalArgs\":[1],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Fresh Nothing
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> startedResult.initResultExistingInput @?= Nothing,
       testCase "a queued start is enqueued and not counted" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowQueueName = Just "q"} Nothing Fresh Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowQueueName = Just "q"} Fresh Nothing
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -2691,7 +2735,7 @@ initTests getBackend =
         unique <- freshWorkflowId
         withBackendSettings getBackend (defaultSettings {settingsExecutorId = Just "mine"}) $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique) {fixtureName = Nothing, fixtureExecutor = Just "other-exec", fixtureOwnerXid = Just "other-owner", fixtureRecoveryAttempts = Just 1}
-          started <- initWorkflow env (newWorkflow unique) Nothing Fresh Nothing
+          started <- initWorkflow env (newWorkflow unique) Fresh Nothing
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -2705,7 +2749,7 @@ initTests getBackend =
         unique <- freshWorkflowId
         withBackendSettings getBackend (defaultSettings {settingsExecutorId = Just "mine"}) $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique) {fixtureName = Nothing, fixtureExecutor = Just "other-exec", fixtureOwnerXid = Just "other-owner", fixtureRecoveryAttempts = Just 1}
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowExecutorId = Just "mine"} Nothing Recovery Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowExecutorId = Just "mine"} Recovery Nothing
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -2719,26 +2763,23 @@ initTests getBackend =
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- runSession env "fixture" (insertFixture (defaultFixture unique) {fixtureName = Just "alpha"})
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowName = Just "beta"} Nothing Fresh Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowName = Just "beta"} Fresh Nothing
           case started of
             Left (ConflictingWorkflow {}) -> pure ()
             _ -> fail "expected ConflictingWorkflow",
-      testCase "the recovery budget parks the workflow and commits it" $ do
+      testCase "an over-limit row starts unparked: only the dequeue dispatch parks" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureName = Nothing, fixtureOwnerXid = Just "other-owner", fixtureRecoveryAttempts = Just 3, fixtureQueue = Just ("q-" <> unique), fixtureDeduplicationId = Just ("key-" <> unique)}
-          started <- initWorkflow env (newWorkflow unique) (Just 2) Recovery Nothing
+          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureName = Nothing, fixtureOwnerXid = Just "other-owner", fixtureRecoveryAttempts = Just 150, fixtureQueue = Just ("q-" <> unique), fixtureDeduplicationId = Just ("key-" <> unique)}
+          -- Recovery past the budget used to park here; since the claim
+          -- counts attempts, only its dispatch can judge a spent budget.
+          started <- initWorkflow env (newWorkflow unique) Recovery Nothing
           case started of
-            Left (ErrorMaxRecoveryAttemptsExceeded {}) -> pure ()
-            other -> fail ("expected ErrorMaxRecoveryAttemptsExceeded, got: " <> show other)
+            Right result -> result.initResultStatus @?= Pending
+            other -> fail ("expected the row back unparked, got: " <> show other)
           found <- getWorkflow env (WorkflowId unique)
           case found of
-            Right (Just record) -> do
-              record.workflowRecordStatus @?= MaxRecoveryAttemptsExceeded
-              record.workflowRecordDeduplicationId @?= Nothing
-              record.workflowRecordQueueName @?= Nothing
-              assertBool "updated_at is stamped" (record.workflowRecordUpdatedAt /= timestampFromEpochMs 0)
-              assertBool "completed_at is stamped" (record.workflowRecordCompletedAt /= Nothing)
+            Right (Just record) -> record.workflowRecordStatus @?= Pending
             other -> fail ("expected record, got: " <> show other),
       testCase "a deduplication collision is reported" $ do
         unique <- freshWorkflowId
@@ -2746,14 +2787,14 @@ initTests getBackend =
         second <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture first) {fixtureQueue = Just ("q-" <> unique), fixtureDeduplicationId = Just ("key-" <> unique)}
-          started <- initWorkflow env (newWorkflow second) {newWorkflowQueueName = Just ("q-" <> unique), newWorkflowDeduplicationId = Just ("key-" <> unique)} Nothing Fresh Nothing
+          started <- initWorkflow env (newWorkflow second) {newWorkflowQueueName = Just ("q-" <> unique), newWorkflowDeduplicationId = Just ("key-" <> unique)} Fresh Nothing
           case started of
             Left (QueueDeduplicated {}) -> pure ()
             _ -> fail "expected QueueDeduplicated",
       testCase "writes the input to the payload table, not the status row" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing Fresh Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Fresh Nothing
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right _ -> pure ()
@@ -2763,11 +2804,11 @@ initTests getBackend =
       testCase "a resubmission does not replace the input" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          first <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"first\""} Nothing Fresh Nothing
+          first <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"first\""} Fresh Nothing
           case first of
             Left err -> fail ("expected a start, got: " <> show err)
             Right _ -> pure ()
-          again <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"second\""} Nothing Fresh Nothing
+          again <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"second\""} Fresh Nothing
           case again of
             Left err -> fail ("expected a start, got: " <> show err)
             Right _ -> pure ()
@@ -2779,7 +2820,7 @@ initTests getBackend =
           _ <-
             runSession env "fixture" $
               Session.script ("insert into dbos.workflow_input (workflow_uuid, inputs) values ('" <> unique <> "', '\"stale\"')")
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"fresh\""} Nothing Fresh Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"fresh\""} Fresh Nothing
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right _ -> pure ()

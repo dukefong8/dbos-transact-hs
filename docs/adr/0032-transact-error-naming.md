@@ -56,7 +56,7 @@ tree already imports the sysdb error qualified).
 | `DBOSUnexpectedStepError` | sysdb `UnexpectedStep` |
 | `DBOSQueueDuplicatedError` | sysdb `QueueDeduplicated` |
 | `DBOSAwaitedWorkflowCancelledError` / `DBOSWorkflowCancelledError` | `AwaitedWorkflowCancelled` |
-| `DBOSAwaitedWorkflowExceededMaxRecoveryAttempts` / `DBOSMaxRecoveryAttemptsExceededError` | sysdb `ErrorMaxRecoveryAttemptsExceeded` (wrapped) |
+| `DBOSAwaitedWorkflowExceededMaxRecoveryAttempts` / `DBOSMaxRecoveryAttemptsExceededError` | `ErrorMaxRecoveryAttemptsExceeded` (engine; the sysdb variant is gone since #123) |
 | `DBOSInvalidQueuePriorityError` | `ErrorConfig` via `validateEnqueue`/`validateQueueOptions` |
 | `DBOSInvalidWorkflowInputError` | `ErrorSerialization` / `Deserialization` |
 | `DBOSWorkflowConflictError` (lost ownership) | `ErrorWorkflowClaimLost` → `WorkflowClaimLost` |

@@ -154,7 +154,7 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
         efConn = pure conn,
         efIdentity = identity,
         efInitRow = \widText name -> do
-          created <- runSystemDB sysdb (\db -> initWorkflow db ((newWorkflow widText) {newWorkflowName = Just name}) Nothing Fresh Nothing)
+          created <- runSystemDB sysdb (\db -> initWorkflow db ((newWorkflow widText) {newWorkflowName = Just name}) Fresh Nothing)
           case created of
             Left err -> throwIO (userError (show err))
             Right _ -> pure (),

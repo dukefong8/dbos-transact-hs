@@ -26,7 +26,6 @@ import DBOS.SystemDB.Error qualified as SysErr
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB)
 import DBOS.Transact.Serialization (encodeWorkflowInput, unWorkflowInput)
 import DBOS.Transact
-import DBOS.Transact.Workflow (maxRecoveryAttempts)
 import DBOS.Transact.Datasource (RecordedOutcome (..), TransactionEvent (..))
 import DBOS.Transact.OutboxCases
 import DBOS.Transact.Recovery (EngineEvent (..))
@@ -172,7 +171,7 @@ simOutboxFixture = do
                   newWorkflowApplicationName = Just "sim-app",
                   newWorkflowApplicationVersion = Just "0.0.0"
                 }
-        created <- runSystemDB (SomeSystemDB mem) (\db -> SystemDB.initWorkflow db row (Just maxRecoveryAttempts) Fresh Nothing)
+        created <- runSystemDB (SomeSystemDB mem) (\db -> SystemDB.initWorkflow db row Fresh Nothing)
         case created of
           Left err -> throwIO (userError (show err))
           Right _ -> pure (WorkflowId widText)

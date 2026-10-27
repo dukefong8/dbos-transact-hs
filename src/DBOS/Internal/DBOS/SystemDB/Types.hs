@@ -60,6 +60,9 @@ module DBOS.SystemDB.Types
     QueueUpdate (..),
     ResolvedLimits (..),
     NewQueue (..),
+    PollingConcurrency (PollingDefault, PollingUnlimited),
+    pollingAtMost,
+    pollingPermits,
     ScheduleStatus (..),
     ScheduleRecord (..),
     NewSchedule (..),
@@ -749,6 +752,39 @@ portableJsonSerialization = "portable_json"
 isStreamClosed :: Text -> Maybe Text -> Bool
 isStreamClosed value serialization =
   value == streamClosedSentinel && serialization == Just portableJsonSerialization
+
+-- | How many polling reads may run at once against a system database's
+-- pool. Every wait loops re-querying the database, and each pass takes a
+-- connection: uncapped, enough waiters empty the pool and starve the
+-- control plane. Mirrors Rust @PollingConcurrency@.
+data PollingConcurrency
+  = -- | Half the pool, and at least one: the half leaves the other half
+    -- for the control plane, and the minimum matters at one connection,
+    -- where half is zero — a cap of zero would not be a small budget but a
+    -- permanent block.
+    PollingDefault
+  | -- | No cap.
+    PollingUnlimited
+  | -- | At most this many: above the pool size is the caller's business.
+    -- Built only through 'pollingAtMost', so a zero cap cannot be written.
+    PollingAtMost Word32
+  deriving stock (Eq, Show)
+
+-- | The bounded case, refusing zero the way @NonZeroU32@ does: a zero cap
+-- cannot be written, so 'PollingUnlimited' is the only way to say no cap.
+pollingAtMost :: Word32 -> Maybe PollingConcurrency
+pollingAtMost 0 = Nothing
+pollingAtMost cap = Just (PollingAtMost cap)
+
+-- | The permits a cap of this size takes, for a pool of @poolSize@
+-- connections. No cap is a permit count nothing will exhaust rather than
+-- an absent semaphore, so a handle holds one unconditional counter with no
+-- branch on the acquire path. Haskell's inexhaustible count is 'maxBound',
+-- where Rust uses @Semaphore::MAX_PERMITS@.
+pollingPermits :: PollingConcurrency -> Word32 -> Int
+pollingPermits PollingDefault poolSize = max 1 (fromIntegral poolSize `div` 2)
+pollingPermits PollingUnlimited _ = maxBound
+pollingPermits (PollingAtMost cap) _ = fromIntegral cap
 
 -- | Cap on the partitioned-dequeue sweep. Mirrors
 -- @PARTITIONED_DEQUEUE_SWEEP_CAP@.

@@ -110,3 +110,13 @@ acceptance criterion is unchanged — deleting a sim leaf still removes no
 engine function call — and the printing contract is untouched (these
 bodies emit no events, so the sim leaves run `runSimOrThrow` with nothing
 to print).
+
+## Addendum: sim-only watcher (2026-10-27)
+
+The one-`-- $>`-toggle rule above is superseded: the watcher now enables
+every sim group and no live group (`test/Main.hs`, AGENTS.md TDD rule 3).
+Sims run against mem/mock backends, so the eval never touches the live
+database and composes freely with `cabal test` — the shared-row deadlock
+that motivated the single-pair rule cannot occur. The acceptance criterion
+is unchanged; only the eval set changed. A live-only case is verified
+through `cabal test`, never by re-enabling its group in the watcher.

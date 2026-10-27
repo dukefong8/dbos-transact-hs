@@ -103,7 +103,7 @@ mkMessageFixture backend = do
               sourceText = prefix <> "-source"
               destinationText = prefix <> "-destination"
               create workflowText workflowName =
-                SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Nothing Fresh Nothing
+                SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Fresh Nothing
           sourceCreated <- create sourceText "L2MessageSource"
           destinationCreated <- create destinationText "L2MessageDestination"
           case (sourceCreated, destinationCreated) of

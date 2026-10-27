@@ -39,7 +39,7 @@ import DBOS.SystemDB.Types as Types
 -- carrier. The class is a backend seam whose handle travels by argument,
 -- not a monad transformer over the connection.
 class Monad m => SystemDB db m where
-  initWorkflow :: db -> NewWorkflow -> Maybe Int64 -> Submission -> Maybe InitWorkflowCaller -> m (Either Error WorkflowInitResult)
+  initWorkflow :: db -> NewWorkflow -> Submission -> Maybe InitWorkflowCaller -> m (Either Error WorkflowInitResult)
   getWorkflow :: db -> WorkflowId -> m (Either Error (Maybe WorkflowRecord))
   listWorkflows :: db -> WorkflowFilter -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowRecord])
   getWorkflowChildren :: db -> WorkflowId -> m (Either Error [WorkflowId])
@@ -57,6 +57,7 @@ class Monad m => SystemDB db m where
   transitionDelayedWorkflows :: db -> m (Either Error Word64)
   cancelIfTimedOut :: db -> WorkflowId -> Maybe Text -> m (Either Error Bool)
   cancelTimedOutWorkflows :: db -> Int64 -> m (Either Error [WorkflowId])
+  deadLetterWorkflows :: db -> [WorkflowId] -> Int64 -> m (Either Error [WorkflowId])
   cancelWorkflows :: db -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
   resumeWorkflows :: db -> [WorkflowId] -> Maybe Text -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
   deleteWorkflows :: db -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either Error Word64)

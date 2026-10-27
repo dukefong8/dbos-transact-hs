@@ -144,7 +144,6 @@ stageQueuedRow mem widText application = do
             newWorkflowApplicationName = application
           }
       )
-      Nothing
       Fresh
       Nothing
   record <- getQueue mem queueName

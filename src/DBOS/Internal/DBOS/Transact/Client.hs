@@ -82,7 +82,7 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
+import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, withConnection)
 import DBOS.Transact.Error qualified as TransactError
@@ -112,7 +112,7 @@ data ClientConfig = ClientConfig
     -- listener pointed at executors that do not push waits out the
     -- 60-second fallback.
     useListenNotify      :: Bool,
-    pollingConcurrency   :: Maybe Word,
+    pollingConcurrency   :: PollingConcurrency,
     outcomePollInterval  :: Maybe Duration,
     notificationCoalesce :: Maybe Duration
   }
@@ -129,7 +129,7 @@ clientConfigNew databaseUrl =
       schema = "dbos",
       serializer = PortableJson,
       useListenNotify = False,
-      pollingConcurrency = Nothing,
+      pollingConcurrency = PollingDefault,
       outcomePollInterval = Nothing,
       notificationCoalesce = Nothing
     }
@@ -224,7 +224,7 @@ connectClient config =
               { settingsSchema = config.schema,
                 settingsExecutorId = Nothing,
                 settingsApplicationName = config.appName,
-                settingsPollingConcurrency = fromIntegral <$> config.pollingConcurrency,
+                settingsPollingConcurrency = config.pollingConcurrency,
                 settingsNotificationCoalesce = config.notificationCoalesce
               }
         }

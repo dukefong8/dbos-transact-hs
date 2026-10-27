@@ -205,7 +205,7 @@ backendConfig config identity =
           { settingsSchema = config.configSchema,
             settingsExecutorId = Just identity.identityExecutorId,
             settingsApplicationName = Just identity.identityAppName,
-            settingsPollingConcurrency = fromIntegral <$> config.configPollingConcurrency,
+            settingsPollingConcurrency = config.configPollingConcurrency,
             settingsNotificationCoalesce = config.configNotificationCoalesce
           }
     }

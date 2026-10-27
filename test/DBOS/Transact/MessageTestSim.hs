@@ -84,7 +84,7 @@ simMessageFixture = do
           let sourceText = "sim-message-" <> label <> "-source"
               destinationText = "sim-message-" <> label <> "-destination"
               create workflowText workflowName =
-                SystemDB.initWorkflow mem ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Nothing Fresh Nothing
+                SystemDB.initWorkflow mem ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Fresh Nothing
           sourceCreated <- create sourceText "SimMessageSource"
           destinationCreated <- create destinationText "SimMessageDestination"
           case (sourceCreated, destinationCreated) of

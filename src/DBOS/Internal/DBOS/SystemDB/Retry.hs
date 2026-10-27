@@ -97,8 +97,8 @@ defaultRetryPolicy =
 -- | Whether this failure should be retried. Transient contention is
 -- always retried, whatever the policy says; a connection failure is
 -- retried unless the policy opts out; everything else — including answers
--- like 'ConflictingWorkflow' and 'MaxRecoveryAttemptsExceeded', which
--- would loop forever — is returned at once.
+-- like 'ConflictingWorkflow', which would loop forever — is returned at
+-- once.
 shouldRetry :: RetryPolicy -> Error -> Bool
 shouldRetry policy err =
   case err of

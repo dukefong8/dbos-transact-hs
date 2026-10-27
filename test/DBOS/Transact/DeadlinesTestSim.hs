@@ -74,7 +74,7 @@ simDeadlinesFixtureSkewed skewMs = do
         dfPlantExpired = \wid -> do
           let WorkflowId widText = wid
               expired = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowDeadline = Just (SystemDB.timestampFromEpochMs 1000)}
-          planted <- SystemDB.initWorkflow mem expired Nothing SystemDB.Fresh Nothing
+          planted <- SystemDB.initWorkflow mem expired SystemDB.Fresh Nothing
           case planted of
             Left err -> error (show err)
             Right _ -> pure ()
@@ -102,7 +102,8 @@ tests =
 traceSweepCancels :: SimTrace a -> IO ()
 traceSweepCancels tr = selectTraceEventsDynamic tr @?= [SweepCancelled "sim-deadline"]
 
--- | The restart emits nothing: one step run, one recorded output, one
--- completion, and the second run joins silently.
+-- | The restart announces its join: one step run, one recorded output,
+-- one completion, and the second run adopts with the owned announcement,
+-- as every finished-id join does.
 traceFinishedIdAdopts :: SimTrace a -> IO ()
-traceFinishedIdAdopts tr = selectTraceEventsDynamic tr @?= [StepRunning "only" 0, StepOutputRecorded "only" 0, WorkflowCompleted "sim-deadline"]
+traceFinishedIdAdopts tr = selectTraceEventsDynamic tr @?= [StepRunning "only" 0, StepOutputRecorded "only" 0, WorkflowCompleted "sim-deadline", WorkflowAlreadyOwned "sim-deadline"]

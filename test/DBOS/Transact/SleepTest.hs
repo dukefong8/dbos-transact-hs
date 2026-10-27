@@ -69,7 +69,7 @@ mkSleepFixture backend run = do
           { sfFreshWorkflowId = do
               freshId <- UUID.V4.nextRandom
               let workflowText = "hs-l2-sleep-" <> Text.pack (UUID.toString freshId)
-              created <- SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just "L2SleepTest"}) Nothing Fresh Nothing
+              created <- SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just "L2SleepTest"}) Fresh Nothing
               case created of
                 Left err -> fail (show err)
                 Right _ -> pure (WorkflowId workflowText),

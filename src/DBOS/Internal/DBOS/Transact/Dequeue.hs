@@ -6,9 +6,10 @@
 -- backs off under contention and scales back when clean, local running
 -- tallies that bound worker concurrency without asking the database, and
 -- concurrent dispatch of every claimed row.
-module DBOS.Transact.Dequeue (QueueEvent (..), dequeuePass, superviseForever) where
+module DBOS.Transact.Dequeue (Admission (..), QueueEvent (..), admission, dequeuePass, superviseForever) where
 
 import DBOS.Prelude
+import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -27,11 +28,13 @@ import DBOS.SystemDB.Types
     WorkflowFilter (..),
     WorkflowId (..),
     WorkflowRecord (..),
+    WorkflowStatus (Pending),
     defaultWorkflowFilter,
     internalQueueName,
     queueResolvedLimits,
     resolvedIsPartitioned,
-    secondsDuration)
+    secondsDuration,
+    workflowStatusText)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry)
 import DBOS.Transact.Error qualified as TransactError
@@ -40,6 +43,7 @@ import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTra
 import DBOS.Transact.Registry (Snapshot, workflowKeyFromRow)
 import DBOS.Transact.Workflow
   ( Tasks,
+    maxRecoveryAttempts,
     spawnRegisteredWorkflowWithRow,
     spawnTracked,
     workflowNewWorkflow,
@@ -57,6 +61,8 @@ data QueueEvent
   | ClaimedWorkflowsMissing { queueClaimed :: Int, queueFound :: Int }
   | DequeuedWorkflowFailed { queueDetail :: Text }
   | DequeuedRowSkipped { queueWorkflowId :: Text }
+  | DequeuedRowSettled { queueWorkflowId :: Text, queueStatus :: Text }
+  | DequeuedBudgetSpent { queueWorkflowId :: Text, queueAttempts :: Int64, queueLimit :: Int64 }
   | QueueListFailed { queueDetail :: Text }
   | InternalQueueLimitsIgnored
   | DelayedTransitionFailed { queueDetail :: Text }
@@ -72,6 +78,8 @@ instance LogEvent QueueEvent where
   eventSeverity ClaimedWorkflowsMissing {}    = SeverityWarning
   eventSeverity DequeuedWorkflowFailed {}     = SeverityWarning
   eventSeverity DequeuedRowSkipped {}         = SeverityWarning
+  eventSeverity DequeuedRowSettled {}         = SeverityWarning
+  eventSeverity DequeuedBudgetSpent {}        = SeverityWarning
   eventSeverity QueueListFailed {}            = SeverityWarning
   eventSeverity InternalQueueLimitsIgnored    = SeverityWarning
   eventSeverity DelayedTransitionFailed {}    = SeverityWarning
@@ -89,6 +97,10 @@ instance LogEvent QueueEvent where
     "could not start the dequeued workflow; it stays PENDING for recovery: " <> detail
   renderEvent (DequeuedRowSkipped workflowText) =
     "the dequeued row " <> workflowText <> " names no workflow; skipped"
+  renderEvent (DequeuedRowSettled workflowText status) =
+    "the dequeued workflow " <> workflowText <> " is no longer pending (" <> status <> "); it is not started"
+  renderEvent (DequeuedBudgetSpent workflowText attempts limit) =
+    "the dequeued workflow " <> workflowText <> " exceeded its recovery attempts and is parked (" <> showText attempts <> " > " <> showText limit <> ")"
   renderEvent (QueueListFailed detail) = "could not list queues; keeping the current set: " <> detail
   renderEvent InternalQueueLimitsIgnored =
     "the queues table holds a row for the engine's internal queue; its stored limits are ignored. Delete the row: it can only throttle `resume` and `fork`"
@@ -328,6 +340,33 @@ shuffled seed keys = Map.elems (go (length keys - 1) (seed `xor` 1) initial)
           second = first `xor` (first `shiftR` 7)
        in second `xor` (second `shiftL` 17)
 
+-- | Whether a claimed row may run. Left alone: only a @PENDING@ row can
+-- own its outcome — a row that moved on since the claim (cancelled,
+-- resumed, or finished by another execution) would run for nothing, and a
+-- resumed one is worse than that: @resume_workflows@ puts it back on its
+-- queue as @ENQUEUED@, so running it here while the next sweep claims it
+-- again is one workflow executing twice. Parked, once it has been
+-- dispatched more often than allowed: the claim counted this attempt, and
+-- a workflow that keeps being recovered without finishing is crashing its
+-- executors — running it again would crash another. Mirrors @dequeue.rs@
+-- @Admission@.
+data Admission
+  = -- | The row is @PENDING@ and within its budget: run it.
+    Run
+  | -- | The row moved on since the claim: leave it as it is.
+    NotPending
+  | -- | The row is @PENDING@ past its budget: park it.
+    Park
+  deriving stock (Eq, Show)
+
+-- | The status first, so a row that is no longer @PENDING@ is left as it is
+-- whatever its count. Mirrors @dequeue.rs@ @admission@.
+admission :: WorkflowStatus -> Int64 -> Admission
+admission status recoveryAttempts
+  | status /= Pending = NotPending
+  | recoveryAttempts > maxRecoveryAttempts + 1 = Park
+  | otherwise = Run
+
 -- | Reads the claimed workflows and starts each, crediting the local
 -- tally before the dispatch so the next iteration's counts include it even
 -- if this one is still starting. Walked in claim order, not in the order
@@ -362,31 +401,53 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed da
                     Just key -> Just key
                     Nothing -> row.workflowRecordQueuePartitionKey
               slot <- claimSlot running queue.queueRecordName partition'
-              case row.workflowRecordName of
-                Nothing -> do
+              -- The admission check is the dispatch: the claim counted this
+              -- attempt, so the row read here carries the count the park
+              -- guard enforces. A lone port that parks rows its peers leave
+              -- alone is the worse divergence, so the cap is the shared
+              -- constant, never a per-call argument. Mirrors @dequeue.rs@
+              -- dispatch.
+              case admission row.workflowRecordStatus row.workflowRecordRecoveryAttempts of
+                NotPending -> do
                   releaseSlot slot
-                  runTracer conn.connTracer (DequeuedRowSkipped workflowText)
-                Just name -> do
-                  let key = workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName
-                      input = (\raw -> SerializedWorkflowValue raw (Serialization <$> row.workflowRecordSerialization)) <$> row.workflowRecordInput
-                      new = workflowNewWorkflow conn identity key workflowId input row.workflowRecordQueueName
-                  spawned <-
-                    spawnRegisteredWorkflowWithRow
-                      tasks
-                      (releaseSlot slot)
-                      Dequeue
-                      conn
-                      identity
-                      workflows
-                      key
-                      workflowId
-                      input
-                      new
-                      datasources
-                  case spawned of
-                    Left err ->
-                      runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError err))
-                    Right _ -> pure ()
+                  runTracer conn.connTracer (DequeuedRowSettled workflowText (workflowStatusText row.workflowRecordStatus))
+                Park -> do
+                  releaseSlot slot
+                  parked <- runSystemDB conn.connSysdb (\db -> SystemDB.deadLetterWorkflows db [workflowId] row.workflowRecordRecoveryAttempts)
+                  case parked of
+                    Left err -> runTracer conn.connTracer (DequeuedWorkflowFailed (renderError err))
+                    -- An empty park means the row moved on between the read
+                    -- and the guard (a resume reset its count): left alone,
+                    -- as the guard requires. Only a row the guard took is
+                    -- announced.
+                    Right (_ : _) -> runTracer conn.connTracer (DequeuedBudgetSpent workflowText row.workflowRecordRecoveryAttempts maxRecoveryAttempts)
+                    Right [] -> pure ()
+                Run -> do
+                  case row.workflowRecordName of
+                    Nothing -> do
+                      releaseSlot slot
+                      runTracer conn.connTracer (DequeuedRowSkipped workflowText)
+                    Just name -> do
+                      let key = workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName
+                          input = (\raw -> SerializedWorkflowValue raw (Serialization <$> row.workflowRecordSerialization)) <$> row.workflowRecordInput
+                          new = workflowNewWorkflow conn identity key workflowId input row.workflowRecordQueueName
+                      spawned <-
+                        spawnRegisteredWorkflowWithRow
+                          tasks
+                          (releaseSlot slot)
+                          Dequeue
+                          conn
+                          identity
+                          workflows
+                          key
+                          workflowId
+                          input
+                          new
+                          datasources
+                      case spawned of
+                        Left err ->
+                          runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError err))
+                        Right _ -> pure ()
 
 -- | Rebuilds and publishes the set of queues this process runs workers
 -- for, returning their names. From the table, never from what this

@@ -185,7 +185,7 @@ data MockSystemDB = MockSystemDB
   deriving stock (Eq, Show)
 
 instance SystemDB MockSystemDB (IOSim s) where
-  initWorkflow _ new _ _ _ = do
+  initWorkflow _ new _ _ = do
     clock <- databaseTimeRead (timestampToEpochMs mockTimestamp)
     pure (Right ((mockInitResult new) {initResultClock = clock}))
   getWorkflow = \cases
@@ -210,6 +210,7 @@ instance SystemDB MockSystemDB (IOSim s) where
   transitionDelayedWorkflows = \cases _ -> pure (Right 0)
   cancelIfTimedOut = \cases _ _ _ -> pure (Right False)
   cancelTimedOutWorkflows = \cases _ _ -> pure (Right [])
+  deadLetterWorkflows = \cases _ ids _ -> pure (Right ids)
   cancelWorkflows = \cases _ ids _ _ -> pure (Right (filter (/= WorkflowId "never-existed") ids))
   resumeWorkflows = \cases
     _ ids _ _ | WorkflowId "never-existed" `elem` ids -> pure (Left (NonExistentWorkflow {workflowIds = map (\(WorkflowId wid) -> wid) ids}))
@@ -619,7 +620,7 @@ memTimedOutRow now row =
     }
 
 instance SystemDB (MemSystemDB s) (IOSim s) where
-  initWorkflow db new _maxAttempts submission caller = do
+  initWorkflow db new submission caller = do
     -- The wake instant a delayed enqueue waits for, as the SQL init's
     -- @delay_until@: without it a DELAYED row would never come due and the
     -- transition would pass it by forever.
@@ -795,6 +796,29 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           rows' = foldl' (\acc wid -> Map.adjust (memTimedOutRow now) wid acc) rows targets
       writeTVar db.memRows rows'
       pure (Right (map WorkflowId targets))
+  deadLetterWorkflows db workflowIds minRecoveryAttempts = do
+    now <- memDbNow db
+    atomically $ do
+      rows <- readTVar db.memRows
+      -- Mirrors the SQL guard: only a PENDING row at or above the floor
+      -- moves, so a row that settled or reset meanwhile is left alone.
+      let move widText row
+            | row.workflowRecordStatus == Pending && row.workflowRecordRecoveryAttempts >= minRecoveryAttempts =
+                row
+                  { workflowRecordStatus = MaxRecoveryAttemptsExceeded,
+                    workflowRecordOwnerXid = Nothing,
+                    workflowRecordQueueName = Nothing,
+                    workflowRecordDeduplicationId = Nothing,
+                    workflowRecordStartedAt = Nothing,
+                    workflowRecordUpdatedAt = now,
+                    workflowRecordCompletedAt = Just now
+                  }
+            | otherwise = row
+          requested = [widText | WorkflowId widText <- workflowIds]
+          rows' = foldl' (\acc widText -> Map.adjust (move widText) widText acc) rows requested
+          parked = [WorkflowId widText | widText <- requested, Just row <- [Map.lookup widText rows], row.workflowRecordStatus == Pending, row.workflowRecordRecoveryAttempts >= minRecoveryAttempts]
+      writeTVar db.memRows rows'
+      pure (Right parked)
   cancelWorkflows db ids withChildren _ = atomically $ do
     rows <- readTVar db.memRows
     -- Transitive descendants, like the backend's per-id traverse through

@@ -82,7 +82,7 @@ simStepFixture = do
       { srfFreshWorkflowId = do
           n <- atomically (readTVar fresh >>= \k -> writeTVar fresh (k + 1) >> pure k)
           let widText = "sim-step-" <> Text.pack (show n)
-          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimStepRetryTest"}) Nothing Fresh Nothing
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimStepRetryTest"}) Fresh Nothing
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),

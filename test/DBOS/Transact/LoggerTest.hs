@@ -50,6 +50,10 @@ tests =
         renderEvent (EngineRecovered 3) @?= ("re-enqueued workflows a previous run left PENDING workflows=3" :: Text),
       testCase "a skipped row names its workflow" $ do
         renderEvent (DequeuedRowSkipped "wf-9") @?= ("the dequeued row wf-9 names no workflow; skipped" :: Text),
+      testCase "a settled row names its status" $ do
+        renderEvent (DequeuedRowSettled "wf-9" "CANCELLED") @?= ("the dequeued workflow wf-9 is no longer pending (CANCELLED); it is not started" :: Text),
+      testCase "a parked row names its count against the limit" $ do
+        renderEvent (DequeuedBudgetSpent "wf-9" 102 100) @?= ("the dequeued workflow wf-9 exceeded its recovery attempts and is parked (102 > 100)" :: Text),
       testCase "a contended dequeue announces its backoff" $ do
         renderEvent DequeueBackoff @?= ("a peer is mid-dequeue; backing off" :: Text),
       testCase "a slow pass reports its sweep, claims and elapsed time" $ do

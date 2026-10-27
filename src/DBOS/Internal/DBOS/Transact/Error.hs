@@ -33,6 +33,7 @@ import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value (..), eitherDe
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
+import Data.Int (Int64)
 import Data.Text (pack, unpack)
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import DBOS.Prelude
@@ -110,6 +111,11 @@ data Error e
     -- recorded like one and a replay is told the same thing without
     -- waiting again. Mirrors Rust @Error::AwaitedWorkflowCancelled@.
     AwaitedWorkflowCancelled {workflowId :: Text}
+  | -- | The workflow this caller was awaiting was parked after too many
+    -- recoveries. The handle's own verdict, not a system-database answer:
+    -- the sysdb layer never constructs it. Mirrors Rust
+    -- @Error::MaxRecoveryAttemptsExceeded@.
+    ErrorMaxRecoveryAttemptsExceeded {workflowId :: Text, recoveryAttempts :: Int64}
   | -- | An operation that only makes sense inside a workflow was called
     -- outside one.
     NotInWorkflow {operation :: Text}
@@ -154,6 +160,7 @@ mapApplication f = \case
   Interrupted workflowId -> Interrupted workflowId
   WorkflowFailed workflowId message -> WorkflowFailed workflowId message
   AwaitedWorkflowCancelled workflowId -> AwaitedWorkflowCancelled workflowId
+  ErrorMaxRecoveryAttemptsExceeded workflowId recoveryAttempts -> ErrorMaxRecoveryAttemptsExceeded workflowId recoveryAttempts
   NotInWorkflow operation -> NotInWorkflow operation
   WrongInstance operation -> WrongInstance operation
   InvalidArgument operation detail -> InvalidArgument operation detail
@@ -199,6 +206,7 @@ renderErrorWithoutApplication = \case
   Interrupted workflowId -> "the workflow " <> workflowId <> " was interrupted by shutdown and left PENDING"
   WorkflowFailed workflowId message -> "the workflow " <> workflowId <> " failed: " <> message
   AwaitedWorkflowCancelled workflowId -> "the workflow " <> workflowId <> " this one was awaiting was cancelled"
+  ErrorMaxRecoveryAttemptsExceeded workflowId recoveryAttempts -> "the workflow " <> workflowId <> " exceeded " <> pack (show recoveryAttempts) <> " recovery attempts"
   NotInWorkflow operation -> operation <> " must be called from within a workflow"
   WrongInstance operation -> operation <> " was called on a different DBOS instance than the one running this workflow"
   InvalidArgument operation detail -> "invalid argument to " <> operation <> ": " <> detail
@@ -246,6 +254,9 @@ instance ToJSON e => ToJSON (Error e) where
     Interrupted workflowId -> tagged "Interrupted" (object ["workflowId" .= workflowId])
     WorkflowFailed workflowId message -> tagged "WorkflowFailed" (object ["workflowId" .= workflowId, "message" .= message])
     AwaitedWorkflowCancelled workflowId -> tagged "AwaitedWorkflowCancelled" (object ["workflowId" .= workflowId])
+    -- Tag keeps the Rust spelling; the constructor carries the documented
+    -- @Error@-prefix deviation (@WorkflowStatus@ owns the bare name).
+    ErrorMaxRecoveryAttemptsExceeded workflowId recoveryAttempts -> tagged "MaxRecoveryAttemptsExceeded" (object ["workflowId" .= workflowId, "recoveryAttempts" .= recoveryAttempts])
     NotInWorkflow operation -> tagged "NotInWorkflow" (object ["operation" .= operation])
     WrongInstance operation -> tagged "WrongInstance" (object ["operation" .= operation])
     InvalidArgument operation detail -> tagged "InvalidArgument" (object ["operation" .= operation, "detail" .= detail])
@@ -279,6 +290,7 @@ instance FromJSON e => FromJSON (Error e) where
       "Interrupted"                -> withObject "Interrupted" (\o -> Interrupted <$> o .: "workflowId") payload
       "WorkflowFailed"        -> withObject "WorkflowFailed" (\o -> WorkflowFailed <$> o .: "workflowId" <*> o .: "message") payload
       "AwaitedWorkflowCancelled"   -> withObject "AwaitedWorkflowCancelled" (\o -> AwaitedWorkflowCancelled <$> o .: "workflowId") payload
+      "MaxRecoveryAttemptsExceeded"    -> withObject "MaxRecoveryAttemptsExceeded" (\o -> ErrorMaxRecoveryAttemptsExceeded <$> o .: "workflowId" <*> o .: "recoveryAttempts") payload
       "NotInWorkflow"              -> withObject "NotInWorkflow" (\o -> NotInWorkflow <$> o .: "operation") payload
       "WrongInstance"              -> withObject "WrongInstance" (\o -> WrongInstance <$> o .: "operation") payload
       "InvalidArgument"            -> withObject "InvalidArgument" (\o -> InvalidArgument <$> o .: "operation" <*> o .: "detail") payload

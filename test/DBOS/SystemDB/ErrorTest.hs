@@ -64,9 +64,6 @@ tests =
       testCase "renders a rewind that lost its status guard" $
         renderError (RewindInterrupted {workflowId = "wf", status = "SUCCESS"})
           @?= "workflow wf changed status from SUCCESS while being rewound; retry the rewind",
-      testCase "renders an exhausted recovery budget" $
-        renderError (ErrorMaxRecoveryAttemptsExceeded {workflowId = "wf", limit = 5})
-          @?= "workflow wf exceeded 5 recovery attempts",
       testCase "renders a taken name" $
         renderError (AlreadyRegistered {kind = "Schedule", name = "s"})
           @?= "Schedule \"s\" is already registered",

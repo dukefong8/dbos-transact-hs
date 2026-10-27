@@ -66,7 +66,7 @@ simWaitFixture = do
     WaitFixture
       { wfFreshWorkflowId = \label -> do
           let widText = "sim-wait-" <> label
-          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitTest"}) Nothing Fresh Nothing
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitTest"}) Fresh Nothing
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),
@@ -94,7 +94,7 @@ simWaitExecFixture = do
     WaitExecFixture
       { weFreshWorkflowId = \label -> do
           let widText = "sim-waitexec-" <> label
-          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitExecTest"}) Nothing Fresh Nothing
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitExecTest"}) Fresh Nothing
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),

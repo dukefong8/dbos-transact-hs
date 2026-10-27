@@ -23,6 +23,7 @@ import DBOS.Transact
     Executor,
     Environment (..),
     Error (..),
+    PollingConcurrency (PollingDefault),
     Serializer (..),
     SerializedWorkflowValue (..),
     WorkflowCtx,
@@ -117,7 +118,7 @@ tests =
                   configSerializer = PortableJson,
                   configUseListenNotify = True,
                   configMigrate = True,
-                  configPollingConcurrency = Nothing,
+                  configPollingConcurrency = PollingDefault,
                   configOutcomePollInterval = Nothing,
                   configListenQueues = Nothing,
                   configNotificationCoalesce = Nothing

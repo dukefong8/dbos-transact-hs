@@ -62,6 +62,7 @@ module DBOS.SystemDB.Postgres.Statements
     cancelBatchSession,
     cancelIfTimedOutStatement,
     cancelTimedOutWorkflowsSession,
+    deadLetterWorkflowsSession,
     existingWorkflowsSession,
     resumeWorkflowsSession,
     deleteWorkflowsSession,
@@ -92,7 +93,6 @@ module DBOS.SystemDB.Postgres.Statements
     initWorkflowInputStatement,
     initWorkflowStoredInputStatement,
     initWorkflowStatement,
-    parkWorkflowSession,
     descendantsSession,
     QueueRowRaw (..),
     queueByNameStatement,
@@ -690,23 +690,6 @@ initWorkflowStoredInputStatement =
     (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.singleRow (Decoders.column (Decoders.nullable Decoders.text)))
 
-
--- | Parks a workflow that has been recovered more often than allowed, and
--- releases what a parked workflow should not hold. Committed before the
--- error is reported: parking is the one error path that is itself a write.
--- Mirrors the oracle's park statement.
-parkWorkflowSession :: Text -> Session.Session Int64
-parkWorkflowSession workflowId =
-  sqlExecTypedSession [typedSql|
-    update dbos.workflow_status
-    set status = 'MAX_RECOVERY_ATTEMPTS_EXCEEDED',
-      deduplication_id = null,
-      started_at_epoch_ms = null,
-      queue_name = null,
-      updated_at = (extract(epoch from now()) * 1000)::bigint,
-      completed_at = (extract(epoch from now()) * 1000)::bigint
-    where workflow_uuid = ${workflowId} and status = 'PENDING'
-  |]
 
 -- | A step's recorded result, as the replay gate reads it. The join's
 -- columns are nullable because the step may not have run; @status@ is the
@@ -1712,6 +1695,27 @@ cancelTimedOutWorkflowsSession applicationName limit =
         order by workflow_deadline_epoch_ms
         limit ${limit}
         for update skip locked)
+      returning workflow_uuid
+    |]
+
+-- | Parks the named workflows that are past their recovery budget: only
+-- PENDING rows at or above the attempt floor move, so a row that settled
+-- (or was reset) meanwhile is left alone. Mirrors @dead_letter_workflows@.
+deadLetterWorkflowsSession :: [Text] -> Int64 -> Session.Session [Text]
+deadLetterWorkflowsSession workflowIds minRecoveryAttempts =
+  map unwrapId
+    <$> sqlQueryTypedSession [typedSql|
+      update dbos.workflow_status
+      set status = 'MAX_RECOVERY_ATTEMPTS_EXCEEDED',
+        owner_xid = null,
+        queue_name = null,
+        deduplication_id = null,
+        started_at_epoch_ms = null,
+        updated_at = (extract(epoch from now()) * 1000)::bigint,
+        completed_at = (extract(epoch from now()) * 1000)::bigint
+      where workflow_uuid = any(${workflowIds})
+        and status = 'PENDING'
+        and recovery_attempts >= ${minRecoveryAttempts}
       returning workflow_uuid
     |]
 

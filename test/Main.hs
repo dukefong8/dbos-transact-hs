@@ -38,6 +38,7 @@ import DBOS.Transact.OutboxTestSim qualified as OutboxSim
 import DBOS.Transact.QueueTest qualified as QueueTest
 import DBOS.Transact.QueueTestSim qualified as QueueSim
 import DBOS.Transact.RegistryTest qualified as RegistryTest
+import DBOS.Transact.RegistryTestSim qualified as RegistrySim
 import DBOS.Transact.SelectTest qualified as SelectTest
 import DBOS.Transact.SelectTestSim qualified as SelectSim
 import DBOS.Transact.SerializationTest qualified as SerializationTest
@@ -61,61 +62,66 @@ import Test.Tasty (TestTree, defaultIngredients, defaultMain, testGroup)
 import Test.Tasty.Ingredients (tryIngredients)
 import Test.Tasty.Options (OptionSet)
 
+-- Watcher standard (AGENTS.md TDD rule 3): sim groups enabled, live groups
+-- disabled. Sims run against mem/mock backends, so the eval never touches
+-- the live database and composes freely with `cabal test`. A new sim group
+-- joins the enabled set; a live-only test is verified through `cabal test`.
 --- $> tasty SystemDBError.tests
---- $> tasty SystemDBIOSim.tests
+-- $> tasty SystemDBIOSim.tests
 --- $> tasty SystemDBNotifier.tests
 --- $> tasty SystemDBNotify.tests
 --- $> tasty SystemDBPostgres.tests
 --- $> tasty SystemDBRetry.tests
 --- $> tasty SystemDBTypes.tests
 --- $> tasty Logger.tests
--- $> tasty StreamTest.tests
+--- $> tasty StreamTest.tests
 -- $> tasty StreamSim.tests
 --- $> tasty CheckpointTest.tests
---- $> tasty CheckpointSim.tests
+-- $> tasty CheckpointSim.tests
 --- $> tasty ClientTest.tests
 --- $> tasty ConfigTest.tests
 --- $> tasty ContextTest.tests
---- $> tasty ContextSim.tests
+-- $> tasty ContextSim.tests
 --- $> tasty DatasourceTest.tests
---- $> tasty DatasourceSim.tests
---- $> tasty QueueSim.tests
---- $> tasty WidgetSim.tests
+-- $> tasty DatasourceSim.tests
+-- $> tasty WidgetSim.tests
 --- $> tasty WidgetTest.tests
 --- $> tasty DeadlinesTest.tests
---- $> tasty DeadlinesSim.tests
+-- $> tasty DeadlinesSim.tests
 --- $> tasty DebouncerTest.tests
---- $> tasty DebouncerSim.tests
+-- $> tasty DebouncerSim.tests
 --- $> tasty ErrorTest.tests
 --- $> tasty EventTest.tests
---- $> tasty EventSim.tests
+-- $> tasty EventSim.tests
 --- $> tasty HandleTest.tests
---- $> tasty HandleSim.tests
+-- $> tasty HandleSim.tests
 --- $> tasty IdentityTest.tests
 --- $> tasty InstanceTest.tests
 --- $> tasty ManagementTest.tests
---- $> tasty ManagementSim.tests
+-- $> tasty ManagementSim.tests
 --- $> tasty MessageTest.tests
---- $> tasty MessageSim.tests
+-- $> tasty MessageSim.tests
 --- $> tasty OutboxTest.tests
---- $> tasty OutboxSim.tests
+-- $> tasty OutboxSim.tests
 --- $> tasty QueueTest.tests
+-- $> tasty QueueSim.tests
 --- $> tasty RegistryTest.tests
+-- $> tasty RegistrySim.tests
 --- $> tasty SelectTest.tests
---- $> tasty SelectSim.tests
+-- $> tasty SelectSim.tests
 --- $> tasty SerializationTest.tests
 --- $> tasty InteropTest.tests
---- $> tasty SimTest.tests
+-- $> tasty SimTest.tests
 --- $> tasty SleepTest.tests
---- $> tasty SleepSim.tests
+-- $> tasty SleepSim.tests
 --- $> tasty StepRetryTest.tests
---- $> tasty StepRetrySim.tests
+-- $> tasty StepRetrySim.tests
 --- $> tasty StepTest.tests
---- $> tasty StepSim.tests
+-- $> tasty StepSim.tests
 --- $> tasty WaitTest.tests
---- $> tasty WaitSim.tests
+-- $> tasty WaitSim.tests
 --- $> tasty WorkflowTest.tests
---- $> tasty WorkflowSim.tests
+-- $> tasty WorkflowSim.tests
 main :: IO ()
 main = defaultMain tests
 
@@ -203,6 +209,7 @@ simTests =
   , WaitSim.tests
   , DatasourceSim.tests
   , QueueSim.tests
+  , RegistrySim.tests
   , StreamSim.tests
   , WidgetSim.tests
   , WorkflowSim.tests

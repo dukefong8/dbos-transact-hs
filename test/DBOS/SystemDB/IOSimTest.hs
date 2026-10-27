@@ -11,6 +11,7 @@ module DBOS.SystemDB.IOSimTest (tests) where
 
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, runSimOrThrow)
+import Data.Map.Strict qualified as Map
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
@@ -65,7 +66,7 @@ import DBOS.SystemDB
     secondsDuration,
     timestampFromEpochMs,
     zeroRowCounts)
-import DBOS.SystemDB.IOSim (MockSystemDB (..), newMemDB)
+import DBOS.SystemDB.IOSim (MemSystemDB (memRows), MockSystemDB (..), newMemDB)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -106,7 +107,7 @@ workflowTests =
   testGroup
     "Workflows"
     [ testCase "initWorkflow answers with an executable pending row" $ do
-        let result = run (initWorkflow backend (newWorkflow "wf-1") Nothing Fresh Nothing)
+        let result = run (initWorkflow backend (newWorkflow "wf-1") Fresh Nothing)
         case result of
           Right initialized -> do
             initialized.initResultStatus @?= Pending
@@ -370,7 +371,7 @@ memTests =
         (first, second, row) <- runMem $ do
           mem <- newMemDB
           _ <- upsertQueue mem (newQueue "q") {newQueueWorkerConcurrency = Just 1} UpdateExisting
-          _ <- initWorkflow mem ((newWorkflow "wf-q") {newWorkflowQueueName = Just "q"}) Nothing Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-q") {newWorkflowQueueName = Just "q"}) Fresh Nothing
           queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "q"
           first <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0
           second <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0
@@ -382,7 +383,7 @@ memTests =
       testCase "a delayed row whose instant passed transitions to enqueued" $ do
         (before, moved, after) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-d") {newWorkflowQueueName = Just "q", newWorkflowDelay = Just (millisDuration 1)}) Nothing Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-d") {newWorkflowQueueName = Just "q", newWorkflowDelay = Just (millisDuration 1)}) Fresh Nothing
           _ <- setWorkflowDelay mem (WorkflowId "wf-d") (DelayUntil (Timestamp 0)) Nothing
           before <- orJustSim "the delayed row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-d")
           moved <- orFailSim =<< transitionDelayedWorkflows mem
@@ -394,8 +395,8 @@ memTests =
       testCase "the timeout sweep cancels expired rows and spares live ones" $ do
         (swept, ended, kept) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-expired") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing Fresh Nothing
-          _ <- initWorkflow mem ((newWorkflow "wf-live") {newWorkflowDeadline = Just (timestampFromEpochMs 4102444800000)}) Nothing Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-expired") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-live") {newWorkflowDeadline = Just (timestampFromEpochMs 4102444800000)}) Fresh Nothing
           swept <- orFailSim =<< cancelTimedOutWorkflows mem 100
           ended <- orJustSim "the swept row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-expired")
           kept <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-live")
@@ -407,7 +408,7 @@ memTests =
       testCase "the timed-out cancel honors ownership" $ do
         (refused, held, taken, ended) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-owned") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-owned") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Fresh Nothing
           refused <- orFailSim =<< cancelIfTimedOut mem (WorkflowId "wf-owned") (Just "someone-else")
           held <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-owned")
           taken <- orFailSim =<< cancelIfTimedOut mem (WorkflowId "wf-owned") held.workflowRecordOwnerXid
@@ -417,10 +418,34 @@ memTests =
         held.workflowRecordStatus @?= Pending
         taken @?= True
         ended.workflowRecordStatus @?= Cancelled,
+      -- Twin of the live dead-letter case: the mem mirror enforces the
+      -- same guard (only PENDING rows at or above the floor move).
+      testCase "dead-letter parks only over-limit pending rows" $ do
+        (parked, overRow, withinRow) <- runMem $ do
+          mem <- newMemDB
+          _ <- initWorkflow mem (newWorkflow "wf-over") Fresh Nothing
+          _ <- initWorkflow mem (newWorkflow "wf-within") Fresh Nothing
+          _ <- initWorkflow mem (newWorkflow "wf-settled") Fresh Nothing
+          let attempts widText count = Map.adjust (\row -> row {workflowRecordRecoveryAttempts = count}) widText
+          atomically $
+            modifyTVar
+              mem.memRows
+              ( attempts "wf-over" 150
+                  . attempts "wf-within" 3
+                  . attempts "wf-settled" 150
+                  . Map.adjust (\row -> row {workflowRecordStatus = Success}) "wf-settled"
+              )
+          parked <- orFailSim =<< deadLetterWorkflows mem (map WorkflowId ["wf-over", "wf-within", "wf-settled"]) 100
+          overRow <- orJustSim "the parked row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-over")
+          withinRow <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-within")
+          pure (parked, overRow, withinRow)
+        parked @?= [WorkflowId "wf-over"]
+        overRow.workflowRecordStatus @?= MaxRecoveryAttemptsExceeded
+        withinRow.workflowRecordStatus @?= Pending,
       testCase "recovery re-enqueues the named executor's pending rows" $ do
         (recovered, row) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-r") {newWorkflowExecutorId = Just "exec-1", newWorkflowApplicationVersion = Just "v1"}) Nothing Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-r") {newWorkflowExecutorId = Just "exec-1", newWorkflowApplicationVersion = Just "v1"}) Fresh Nothing
           recovered <- orFailSim =<< reenqueueForRecovery mem ["exec-1"] "v1" "recovery-q"
           row <- orJustSim "the recovered row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-r")
           pure (recovered, row)
@@ -444,7 +469,7 @@ memTests =
       testCase "a rewind clears the finished row's outcome with its steps" $ do
         (before, rewound, row, steps) <- runMem $ do
           mem <- newMemDB
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-rw") Nothing Fresh Nothing
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-rw") Fresh Nothing
           _ <- orFailSim =<< recordStep mem (WorkflowId "wf-rw") 0 "DBOS.step" (OutcomeOutput (Just "\"one\"")) Nothing Nothing
           _ <- orFailSim =<< recordWorkflowOutcome mem (WorkflowId "wf-rw") (OutcomeOutput (Just "\"done\""))
           started <- orJustSim "the finished row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-rw")
@@ -512,7 +537,7 @@ memTests =
       testCase "awaitFirstWorkflowId settles on a recorded outcome" $ do
         result <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem (newWorkflow "wf-a") Nothing Fresh Nothing
+          _ <- initWorkflow mem (newWorkflow "wf-a") Fresh Nothing
           _ <- recordWorkflowOutcome mem (WorkflowId "wf-a") (OutcomeOutput (Just "\"v\""))
           awaitFirstWorkflowId mem [WorkflowId "wf-a"] (secondsDuration 1)
         result @?= Right (WorkflowId "wf-a")
