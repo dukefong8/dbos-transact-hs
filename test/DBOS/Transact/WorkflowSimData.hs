@@ -37,6 +37,7 @@ mockInitResult new =
     { initResultStatus = Pending,
       initResultRecoveryAttempts = 0,
       initResultDeadline = new.newWorkflowDeadline,
+      initResultOwnerXid = Nothing,
       initResultSerialization = new.newWorkflowSerialization,
       initResultExistingInput = Nothing,
       initResultShouldExecute = True

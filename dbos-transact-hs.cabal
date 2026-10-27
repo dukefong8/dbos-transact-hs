@@ -83,6 +83,7 @@ library dbos-transact-internals
     DBOS.Transact.Sleep
     DBOS.Transact.Stream
     DBOS.Transact.Step
+    DBOS.Transact.TimeoutSweep
     DBOS.Transact.Wait
     DBOS.Transact.Workflow
     DBOS.SystemDB.Class

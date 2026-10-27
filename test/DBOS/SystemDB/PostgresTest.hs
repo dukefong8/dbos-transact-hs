@@ -2027,6 +2027,44 @@ lifecycleWriteTests getBackend =
           case kept of
             Right (Just record) -> record.workflowRecordStatus @?= Delayed
             other -> fail ("expected record, got: " <> show other),
+      testCase "the timeout sweep cancels expired rows and spares live ones" $ do
+        expired <- freshWorkflowId
+        live <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- initWorkflow env ((newWorkflow expired) {newWorkflowDeadline = Just (timestampFromEpochMs 1000)}) Nothing Fresh Nothing
+          _ <- initWorkflow env ((newWorkflow live) {newWorkflowDeadline = Just (timestampFromEpochMs 4102444800000)}) Nothing Fresh Nothing
+          swept <- cancelTimedOutWorkflows env 100
+          case swept of
+            Left err -> fail ("expected a sweep, got: " <> show err)
+            Right ids -> do
+              assertBool "the expired row swept" (WorkflowId expired `elem` ids)
+              assertBool "the live row spared" (WorkflowId live `notElem` ids)
+          ended <- getWorkflow env (WorkflowId expired)
+          case ended of
+            Right (Just record) -> record.workflowRecordStatus @?= Cancelled
+            other -> fail ("expected record, got: " <> show other)
+          keptLive <- getWorkflow env (WorkflowId live)
+          case keptLive of
+            Right (Just record) -> record.workflowRecordStatus @?= Pending
+            other -> fail ("expected record, got: " <> show other),
+      testCase "the timed-out cancel honors ownership" $ do
+        owned <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- initWorkflow env ((newWorkflow owned) {newWorkflowDeadline = Just (timestampFromEpochMs 1000)}) Nothing Fresh Nothing
+          refused <- cancelIfTimedOut env (WorkflowId owned) (Just "someone-else")
+          refused @?= Right False
+          held <- getWorkflow env (WorkflowId owned)
+          owner <- case held of
+            Right (Just record) -> do
+              record.workflowRecordStatus @?= Pending
+              pure record.workflowRecordOwnerXid
+            other -> fail ("expected record, got: " <> show other)
+          taken <- cancelIfTimedOut env (WorkflowId owned) owner
+          taken @?= Right True
+          ended <- getWorkflow env (WorkflowId owned)
+          case ended of
+            Right (Just record) -> record.workflowRecordStatus @?= Cancelled
+            other -> fail ("expected record, got: " <> show other),
       testCase "cancelling stops at terminal rows and can take children" $ do
         unique <- freshWorkflowId
         let root = unique <> "-root"

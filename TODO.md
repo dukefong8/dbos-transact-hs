@@ -72,26 +72,53 @@ Standing gates, every slice:
   245/245 and `--test messages` 8/8, including
   `two_receivers_in_one_process_share_one_message`.
 
-### Next — deadline slice (Rust #109 `7c879f3`, #110 `c1627c6`)
+### Deadline slice (Rust #109 `7c879f3`, #110 `c1627c6`, 2026-10-26)
 
-Not started. Scoped, not a review-and-commit-sized delta:
+Ported in one slice (adopted an uncommitted #110 draft, then #109 on top):
 
-- #110 threads a `DatabaseTime` (the database's `clock_timestamp()` plus
-  this process's monotonic reading) through `WorkflowInitResult`, makes the
-  insert compute a direct start's deadline from its timeout, stops the
-  Haskell side stamping one, and converts `Deadline` to a monotonic expiry
-  for the body timer. It needs `MonadMonotonicTimeNSec` at `initWorkflow`
-  and touches the init statement, `dequeue`'s claim, all four
-  `executeRegisteredWorkflow` call sites, both backends and the sim data.
-- #109 adds the per-executor timeout sweep (`expireWorkflows` over a
-  locked sub-select, application-scoped, one second between passes), makes
-  the local timer cancel only when the database clock agrees and then
-  adopt the row, and vendors migration 122
-  (`122_add_workflow_status_deadline_index.sql`) into `rust-migrate` with
-  its plan/ceiling tests.
-- The oracle's deadline tests shadow `now()`/`clock_timestamp()` through a
-  private schema and a skewed database session; the port has no such
-  fixture yet, so that belongs with the slice.
+- #110 threads a `DatabaseTime` through `WorkflowInitResult`, makes the
+  insert compute a direct start's deadline from its timeout (returning
+  `clock_timestamp()` with it), stops the Haskell side stamping one, and
+  converts `Deadline` to a monotonic expiry for the body timer. The fired
+  timer cancels only through `cancelIfTimedOut` (the sweep's own test) and
+  adopts the row; an adopted `AwaitedCancelled` is the execution's own
+  cancellation.
+- #109 adds the per-executor timeout sweep (`DBOS.Transact.TimeoutSweep`:
+  batch 1000, 1s idle cadence, full batch repasses at once, shutdown-aborted
+  beside the supervisor), vendors migrations 122 AND 123
+  (`122_add_workflow_status_deadline_index.sql`,
+  `123_add_workflow_status_creator_xid.sql`) into `rust-migrate`.
+- The oracle's shadowing-schema skew fixture has a shared-DB-safe
+  counterpart: `memClockSkewMs` skews every mem clock read through
+  `memDbNow`, and the ±60s dual-stack skew cases assert a 500ms budget runs
+  ~500ms virtual then cancels. Live runs the same shape unskewed.
+- Draft repairs: fresh sim inserts execute again (the unification through
+  `memInitResult` had wedged every fresh sim start), mock backend gained
+  the cancel methods plus a clock.
+- Gates: Deadlines pair 8/8 live + 10/10 sim; Workflow execution 61/61
+  live; Postgres 166/166 live; mirror 72/72; full live suite 855/855 in
+  19s; every run under 160MB peak, serial through standalone binaries
+  (no watcher, no cabal).
+  One unrelated `Application versions` timestamp failure seen once in an
+  earlier Postgres run, not reproduced since.
+  NOT run: full `cabal test` (blocked on the sibling `hasql` drift), the
+  sim trees outside Deadlines/mirror (per directive, sim suites are not
+  gates), and the oracle cargo suites.
+- Review fixes (same slice, all green): `cancelIfTimedOut` presents the row
+  owner (`initResultOwnerXid`, `IS NOT DISTINCT FROM`) so only an execution
+  that still owns the row cancels it; finished and parked ids adopt instead
+  of re-running on the run, start, and child paths; guard tests pin the
+  owner predicate live and sim; a dual-stack finished-id test pins
+  adopt-without-rerun by trace. Open alongside: dequeue claims do not rotate
+  the owner token the way the oracle's one-token-per-claim does, so the
+  guard is fail-closed but rarely refuses — claim rotation belongs with
+  #117 fencing.
+- Memory incident, root-caused and fixed: a 50GB sim blowup came from a
+  self-recursive `memDbNow` (the clock-sweep batch rewrote the helper's own
+  body), spinning virtual time forever under a retained trace. Prefix probes
+  isolated it to `initWorkflow`; the mirror group passes 72/72 at 80MB
+  peak. Prevention: re-grep an introduced identifier for self-reference
+  after every batch rewrite.
 
 ### Child-start replay + fork replacement (Rust #108 `2540e18`, #107 `547eb9f`, 2026-10-20)
 

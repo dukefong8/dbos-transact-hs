@@ -70,7 +70,6 @@ data WorkflowEvent
   | WorkflowEnqueued { workflowEnqueuedId :: Text, workflowEnqueuedQueue :: Text }
   | WorkflowAlreadyOwned { workflowOwnedId :: Text }
   | WorkflowDeadlineCancelled { workflowDeadlineId :: Text }
-  | WorkflowDeadlineRaced { workflowRacedId :: Text }
   | WorkflowDeadlineRecordFailed { workflowDeadlineFailedId :: Text, workflowDeadlineDetail :: Text }
   | WorkflowControlEnded { workflowControlDetail :: Text }
   | WorkflowOutcomeRecordFailed { workflowOutcomeDetail :: Text }
@@ -98,7 +97,6 @@ instance LogEvent WorkflowEvent where
   eventSeverity WorkflowEnqueued {}             = SeverityDebug
   eventSeverity WorkflowAlreadyOwned {}         = SeverityDebug
   eventSeverity WorkflowDeadlineCancelled {}    = SeverityInfo
-  eventSeverity WorkflowDeadlineRaced {}        = SeverityWarning
   eventSeverity WorkflowDeadlineRecordFailed {} = SeverityError
   eventSeverity WorkflowControlEnded {}         = SeverityWarning
   eventSeverity WorkflowOutcomeRecordFailed {}  = SeverityWarning
@@ -138,10 +136,8 @@ instance LogEvent WorkflowEvent where
     "the workflow is already owned; the handle joins the existing run workflow_id=" <> workflowId
   renderEvent (WorkflowDeadlineCancelled workflowId) =
     "the workflow exceeded its deadline and is cancelled workflow_id=" <> workflowId
-  renderEvent (WorkflowDeadlineRaced workflowId) =
-    "the deadline fired on a workflow another execution had already finished; its recorded outcome stands workflow_id=" <> workflowId
   renderEvent (WorkflowDeadlineRecordFailed workflowId detail) =
-    "could not record the deadline cancellation; the row stays PENDING for recovery workflow_id=" <> workflowId <> " error=" <> detail
+    "could not record the deadline cancellation workflow_id=" <> workflowId <> " error=" <> detail
   renderEvent (WorkflowControlEnded detail) =
     "a control signal ended this execution: it records no outcome of its own error=" <> detail
   renderEvent (WorkflowOutcomeRecordFailed detail) =

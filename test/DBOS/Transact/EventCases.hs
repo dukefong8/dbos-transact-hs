@@ -118,7 +118,7 @@ data EventFixture m = EventFixture
 -- 'Identity's, connection app name, id naming, and id/entropy generators,
 -- plus its 'SomeSystemDB' and 'SomeTracer'. Live passes Postgres +
 -- FastLogger; sim passes 'MemSystemDB' + the sim carrier.
-mkEventFixture :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+mkEventFixture :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                => Config ->
                   Config ->
                   Identity ->
@@ -200,7 +200,7 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
 
 -- | Engine-only driver alias: the recovery and order cases read through
 -- this, so the error channel pins to 'EngineOnly' once.
-runRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+runRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
        => Executor m -> WorkflowRef m EngineOnly -> RunOptions -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runRef = runWorkflowRef
 
@@ -435,7 +435,7 @@ scenarioReplayNoRepublish fx = do
 
 -- | Progress events survive recovery without republishing. Returns the
 -- recovered result and the kept event value.
-scenarioRecoveryKeepsFirst :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioRecoveryKeepsFirst :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                            => EventFixture m ->
                               m (Int, Text)
 scenarioRecoveryKeepsFirst fx = do
@@ -482,7 +482,7 @@ scenarioRecoveryKeepsFirst fx = do
 -- | Reading through another instance from inside a workflow is refused,
 -- while the in-step read stays plain. Returns whether the refusal fired
 -- and what the plain read found.
-scenarioWrongInstance :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioWrongInstance :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => EventFixture m ->
                          m (Bool, Maybe Int)
 scenarioWrongInstance fx = do
@@ -515,7 +515,7 @@ scenarioWrongInstance fx = do
 
 -- | Library calls driven out of build order keep the ids they were built
 -- with. Returns the recorded steps.
-scenarioOutOfOrderIds :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioOutOfOrderIds :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => EventFixture m ->
                          m [(Int, Text)]
 scenarioOutOfOrderIds fx = do

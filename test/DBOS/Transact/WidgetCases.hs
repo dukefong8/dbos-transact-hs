@@ -145,7 +145,7 @@ type WidgetCase m =
   ( Monad m,
     MonadSTM m,
     MonadMVar m,
-    MonadTimer m,
+    MonadTimer m, MonadMonotonicTimeNSec m,
     MonadTime m,
     MonadDelay m,
     MonadAsync m,

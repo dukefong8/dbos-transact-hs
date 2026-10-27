@@ -222,11 +222,11 @@ timeoutOptionsCase = do
   timeoutBudget Inherit @?= Nothing
   timeoutBudget None @?= Nothing
   timeoutBudget (Explicit budget) @?= Just budget
-  resolveTimeoutDeadline (Explicit budget) (Just (enqueueNew "q")) Nothing now @?= Nothing
-  resolveTimeoutDeadline (Explicit budget) Nothing Nothing now @?= addTimeout now budget
-  resolveTimeoutDeadline None Nothing (Just now) now @?= Nothing
-  resolveTimeoutDeadline Inherit Nothing (Just now) now @?= Just now
-  resolveTimeoutDeadline Inherit Nothing Nothing now @?= Nothing
+  resolveTimeoutDeadline (Explicit budget) Nothing @?= Nothing
+  resolveTimeoutDeadline (Explicit budget) (Just now) @?= Nothing
+  resolveTimeoutDeadline None (Just now) @?= Nothing
+  resolveTimeoutDeadline Inherit (Just now) @?= Just now
+  resolveTimeoutDeadline Inherit Nothing @?= Nothing
   runOptionsDefault @?= RunOptions Nothing Inherit Nothing
   startOptionsDefault @?= StartOptions Nothing Inherit Nothing Nothing
   runOptionsToStartOptions runOptionsDefault @?= startOptionsDefault
@@ -290,7 +290,7 @@ data WfFixture m = WfFixture
 -- proof of the 'WfFixture' plumbing. Returns the decoded result and the
 -- stored row. Engine errors throw (via 'MonadThrow'), so both trees
 -- assert on plain values.
-scenarioRegisteredRecordsResult :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioRegisteredRecordsResult :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                 => WfFixture m ->
                                    m (Int, WorkflowRecord)
 scenarioRegisteredRecordsResult fx = do
@@ -409,7 +409,7 @@ data JoinOutcome = JoinOutcome
 -- run still owns the id; the gate release lets both handles resolve.
 -- Result waits are bounded (virtual time in sim, fifteen seconds live),
 -- so a lost wakeup fails the case instead of hanging the suite.
-scenarioJoinTakesId :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioJoinTakesId :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                     => WfFixture m ->
                        m JoinOutcome
 scenarioJoinTakesId fx = do
@@ -469,7 +469,7 @@ scenarioJoinTakesId fx = do
 -- | A bounded wait for a handle to settle: virtual time in sim, fifteen
 -- seconds live. A lost wakeup fails the case instead of hanging the
 -- suite. Shared by the scenarios that resolve handles.
-awaitSettled :: forall m. (MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+awaitSettled :: forall m. (MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
              => WorkflowHandle m EngineOnly ->
                 m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 awaitSettled handle = do
@@ -482,7 +482,7 @@ awaitSettled handle = do
 -- in-process, while a second start of the same id and a retrieve observe
 -- it through polling handles. Returns the three provenance labels and the
 -- decoded result.
-scenarioFreshJoinPolls :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioFreshJoinPolls :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => WfFixture m ->
                           m (Text, Text, Text, Int)
 scenarioFreshJoinPolls fx = do
@@ -529,7 +529,7 @@ scenarioFreshJoinPolls fx = do
 -- dequeue claim can move the row out of ENQUEUED and record an outcome.
 -- Returns the second handle's provenance, the row's status, and the steps the
 -- body would have taken.
-scenarioQueuedStartPolls :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioQueuedStartPolls :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                          => WfFixture m ->
                             m (Text, WorkflowStatus, [StepRecord])
 scenarioQueuedStartPolls fx = do
@@ -572,7 +572,7 @@ scenarioQueuedStartPolls fx = do
 -- | Non-finite floats through the engine: a @-Infinity@ argument, a step-like
 -- result holding @+Infinity@ and @NaN@. Returns the decoded tuple plus the
 -- stored input/output text so the caller can pin aeson's spelling.
-scenarioNonFinite :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioNonFinite :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                   => WfFixture m ->
                      m ((Double, Double, Double), Maybe Text, Maybe Text)
 scenarioNonFinite fx = do
@@ -604,7 +604,7 @@ scenarioNonFinite fx = do
 -- and awaits it, so the parent's history holds the start and a
 -- @DBOS.get_result@ checkpoint naming the child. Returns the decoded
 -- result, the parent's steps, and the derived child id.
-scenarioAwaitRecorded :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioAwaitRecorded :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => WfFixture m ->
                          m (Int, [StepRecord], Text)
 scenarioAwaitRecorded fx = do
@@ -653,7 +653,7 @@ scenarioAwaitRecorded fx = do
 -- build order and the awaits follow in the same order, so the history is
 -- starts 0-2 then awaits 3-5. Returns the summed result, the parent's
 -- steps, the parent id, and the first-built child's recorded output.
-scenarioChildIdsInBuildOrder :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioChildIdsInBuildOrder :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => WfFixture m ->
                                 m (Int, [StepRecord], Text, Maybe Text)
 scenarioChildIdsInBuildOrder fx = do
@@ -707,7 +707,7 @@ rowStatus = fmap (.workflowRecordStatus)
 -- was registered on a second instance, so the running instance refuses
 -- to start it before anything is written. Returns the run, the derived
 -- row, and the parent's steps.
-scenarioWrongInstance :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioWrongInstance :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => WfFixture m ->
                          m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, [StepRecord], Text)
 scenarioWrongInstance fx =
@@ -770,7 +770,7 @@ waitForRowShared readRow wid = go (200 :: Int)
 
 -- | A workflow records the steps it took: two steps compose and list in
 -- order. Returns the run and the steps.
-scenarioStepsTaken :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioStepsTaken :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => WfFixture m ->
                       m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioStepsTaken fx = do
@@ -797,7 +797,7 @@ scenarioStepsTaken fx = do
 -- is gated when the executor shuts down, the caller is cancelled, and
 -- the row stays @PENDING@ for the next launch to recover. Returns the
 -- row's status before and after.
-scenarioShutdownCancels :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioShutdownCancels :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => WfFixture m ->
                            m (Maybe WorkflowStatus, Maybe WorkflowStatus)
 scenarioShutdownCancels fx = do
@@ -828,7 +828,7 @@ scenarioShutdownCancels fx = do
 -- caller leaves the row pending and the body still gated; released, the
 -- run finishes on its own. Returns the gated row's status and the
 -- settled outcome.
-scenarioDropFuture :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioDropFuture :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => WfFixture m ->
                       m (Maybe WorkflowStatus, Either (Error EngineOnly) AwaitedOutcome)
 scenarioDropFuture fx = do
@@ -861,7 +861,7 @@ scenarioDropFuture fx = do
 -- | A started workflow carries the attributes it was given: the run's
 -- attributes land on the parent's row, and the child, naming nothing of
 -- its own, inherits nothing. Returns the run, both rows, and the tenant.
-scenarioAttributes :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioAttributes :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => WfFixture m ->
                       m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord, Text)
 scenarioAttributes fx = do
@@ -906,7 +906,7 @@ scenarioAttributes fx = do
 -- | A step error is recorded in its column: the step fails, the run
 -- returns the step error, and the column holds the shortfall. Returns
 -- the run and the parent's steps.
-scenarioStepErrorRecorded :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioStepErrorRecorded :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => WfFixture m ->
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioStepErrorRecorded fx = do
@@ -926,7 +926,7 @@ scenarioStepErrorRecorded fx = do
 
 -- | An application error round-trips as itself: the body's own failure
 -- comes back unchanged through the engine. Returns the run.
-scenarioAppErrorRoundtrip :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioAppErrorRoundtrip :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => WfFixture m ->
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioAppErrorRoundtrip fx = do
@@ -947,7 +947,7 @@ scenarioAppErrorRoundtrip fx = do
 -- | A database failure is not the workflow outcome: the backend error
 -- comes back as itself and the row is left pending with no error
 -- column, so a later recovery can retry. Returns the run and the row.
-scenarioDbFailureNotOutcome :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioDbFailureNotOutcome :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                             => WfFixture m ->
                                m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioDbFailureNotOutcome fx = do
@@ -976,7 +976,7 @@ scenarioDbFailureNotOutcome fx = do
 -- | A panicking workflow leaves its row pending: the body's exception
 -- escapes the run as itself, and the row stays @PENDING@ with no error
 -- column. Returns the escaped outcome and the row.
-scenarioPanic :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioPanic :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
               => WfFixture m ->
                  m (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)), Maybe WorkflowRecord)
 scenarioPanic fx = do
@@ -1012,7 +1012,7 @@ scenarioRetrieveBeforeLaunch fx = do
 
 -- | A zero-argument workflow records no input: the row's input column
 -- stays null however the workflow ran. Returns the run and its row.
-scenarioZeroNoInput :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioZeroNoInput :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                     => WfFixture m ->
                        m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioZeroNoInput fx = do
@@ -1032,7 +1032,7 @@ scenarioZeroNoInput fx = do
 
 -- | The row exists before the body starts: the body reads its own row
 -- through the context's database and finds it. Returns the run.
-scenarioRowBeforeBody :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioRowBeforeBody :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => WfFixture m ->
                          m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioRowBeforeBody fx = do
@@ -1056,7 +1056,7 @@ scenarioRowBeforeBody fx = do
 -- start position, and the start then finds output where a child link
 -- should be. The refusal happens early, so nothing was created to be
 -- orphaned. Returns the run and the derived row.
-scenarioPlainStepAtStart :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioPlainStepAtStart :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                          => WfFixture m ->
                             m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioPlainStepAtStart fx = do
@@ -1116,7 +1116,7 @@ scenarioPlainStepAtStart fx = do
 -- second run of the parent adopts the recorded child id instead of
 -- starting another. Returns the child id, the (empty) recovery and
 -- dequeue results, the settled child, and the replayed parent's run.
-scenarioDerivedChildAdopted :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioDerivedChildAdopted :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                             => WfFixture m ->
                                m (Text, [WorkflowId], Either (Error EngineOnly) [WorkflowId], Either (Error EngineOnly) AwaitedOutcome, Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioDerivedChildAdopted fx = do
@@ -1158,7 +1158,7 @@ scenarioDerivedChildAdopted fx = do
 -- it runs under that id and no derived row ever exists. Returns the
 -- chosen id, the (empty) recovery and dequeue results, the settled
 -- child, the replayed parent's run, and both rows.
-scenarioAssignedChildAdopted :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioAssignedChildAdopted :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => WfFixture m ->
                                 m (Text, [WorkflowId], Either (Error EngineOnly) [WorkflowId], Either (Error EngineOnly) AwaitedOutcome, Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioAssignedChildAdopted fx = do
@@ -1199,7 +1199,7 @@ scenarioAssignedChildAdopted fx = do
 
 -- | A workflow started outside a workflow has no parent: a root run
 -- records no parent link. Returns the run and its row.
-scenarioRootNoParent :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioRootNoParent :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                      => WfFixture m ->
                         m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioRootNoParent fx = do
@@ -1223,7 +1223,7 @@ scenarioRootNoParent fx = do
 -- children, and the elapsed milliseconds — measured on the wall clock
 -- live, on the virtual clock in sim, where a serialized run would still
 -- show three delays.
-scenarioFanout :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioFanout :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                => WfFixture m ->
                   m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [WorkflowId], Int64)
 scenarioFanout fx = do
@@ -1269,7 +1269,7 @@ scenarioFanout fx = do
 -- detached child outlives the parent's interest and records its result.
 -- Returns the parent's run, its steps, the child's awaited outcome, the
 -- child row, the parent's children, and the parent id.
-scenarioUnawaitedChild :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioUnawaitedChild :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => WfFixture m ->
                           m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord], Either (Error EngineOnly) AwaitedOutcome, Maybe WorkflowRecord, [WorkflowId], Text)
 scenarioUnawaitedChild fx = do
@@ -1309,7 +1309,7 @@ scenarioUnawaitedChild fx = do
 -- own error channel crosses the boundary as itself on its row, and the
 -- parent reports the refused child through its own channel. Returns the
 -- parent's run and the child's row.
-scenarioLiftChildError :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioLiftChildError :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => WfFixture m ->
                           m (Either (Error GaveUp) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioLiftChildError fx = do
@@ -1361,7 +1361,7 @@ scenarioLiftChildError fx = do
 -- refused, not recorded: the depth says what the context cannot, so the
 -- engine refuses it with @InsideStep@ before anything is written and no
 -- start row appears. Returns the run and the parent's steps.
-scenarioCaptureChildRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioCaptureChildRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                             => WfFixture m ->
                                m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioCaptureChildRefused fx = do
@@ -1399,7 +1399,7 @@ scenarioCaptureChildRefused fx = do
 -- start is attempted inside a step scope, so the engine refuses it with
 -- @InsideStep@ and no start row appears. Returns the run and the
 -- parent's steps.
-scenarioChildInsideStepRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioChildInsideStepRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                => WfFixture m ->
                                   m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioChildInsideStepRefused fx = do
@@ -1435,7 +1435,7 @@ scenarioChildInsideStepRefused fx = do
 -- checkpointed nothing — nobody answered it — so a resumed parent asks
 -- the child's then-settled row again. Returns the parent's run, the
 -- child's awaited outcome, and the parent's steps.
-scenarioCascadeDeadline :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioCascadeDeadline :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => WfFixture m ->
                            m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Either (Error EngineOnly) AwaitedOutcome, [StepRecord])
 scenarioCascadeDeadline fx = do
@@ -1481,7 +1481,7 @@ scenarioCascadeDeadline fx = do
 -- bounded parent — the first says nothing, the second declines — are
 -- together the difference the timeout sum exists for. Returns the
 -- parent's run and all three rows.
-scenarioDeclinedDeadline :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioDeclinedDeadline :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                          => WfFixture m ->
                             m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioDeclinedDeadline fx = do
@@ -1532,7 +1532,7 @@ scenarioDeclinedDeadline fx = do
 -- | A child's own timeout replaces the inherited deadline: given its own
 -- budget, the child records that timeout and a deadline that outlives its
 -- parent's instead of copying the parent's instant.
-scenarioChildBudgetWins :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioChildBudgetWins :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => WfFixture m ->
                            m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioChildBudgetWins fx = do
@@ -1578,7 +1578,7 @@ scenarioChildBudgetWins fx = do
 -- a wall-clock deadline stored on its row, and the child copies the same
 -- instant instead of deriving a fresh budget. Returns the parent's run
 -- and both rows.
-scenarioDeadlineInherited :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioDeadlineInherited :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => WfFixture m ->
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioDeadlineInherited fx = do
@@ -1625,7 +1625,7 @@ scenarioDeadlineInherited fx = do
 -- waits — that is the awaited workflow's outcome, not the parent's own
 -- cancellation. Returns the parent's run, its steps, both rows' statuses,
 -- and the child id.
-scenarioCancelledChildAwaited :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioCancelledChildAwaited :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                               => WfFixture m ->
                                  m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord], Maybe WorkflowStatus, Maybe WorkflowStatus, Text)
 scenarioCancelledChildAwaited fx = do
@@ -1678,7 +1678,7 @@ scenarioCancelledChildAwaited fx = do
 -- the scoped step runner and the scoped sleep through the real run path —
 -- the erased transition hands the body a WorkflowCtx. Returns the decoded
 -- result and the recorded step names.
-scenarioScopedBody :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioScopedBody :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => WfFixture m ->
                       m (Either (Error EngineOnly) Int, [(Int, Text)])
 scenarioScopedBody fx = do
@@ -1760,7 +1760,7 @@ checkScopedSelect (outcome, steps)
 -- registration, so dropping the loser must fire the token for work the
 -- runtime cannot stop by dropping it. Returns the winner's value and
 -- whether the loser's watcher observed the fire.
-scenarioLosingTokenFired :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioLosingTokenFired :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                          => WfFixture m ->
                             m (Int, Bool)
 scenarioLosingTokenFired fx = do
@@ -1806,7 +1806,7 @@ scenarioLosingTokenFired fx = do
 -- outcome is the interrupted error wins, no step row is written, and the
 -- row stays @PENDING@. Returns the run's outcome, the parent's steps,
 -- the row's status, and the parent id.
-scenarioControlSelect :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioControlSelect :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => WfFixture m ->
                          m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord], Maybe WorkflowStatus, Text)
 scenarioControlSelect fx = do
@@ -1838,7 +1838,7 @@ scenarioControlSelect fx = do
 -- follow source order — the losing step claims 1 without a row, the
 -- await 2, and the race itself 3. Returns the winner's value, the
 -- parent's steps, and the derived child id.
-scenarioSelectStepRaces :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioSelectStepRaces :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => WfFixture m ->
                            m (Int, [StepRecord], Text)
 scenarioSelectStepRaces fx = do
@@ -1895,7 +1895,7 @@ scenarioSelectStepRaces fx = do
 -- immediately behind its own start and a replay rebuilds the same pairs
 -- however the children interleave. Returns the summed result, the
 -- parent's steps, and the parent id.
-scenarioStepIdPairs :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioStepIdPairs :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                     => WfFixture m ->
                        m (Int, [StepRecord], Text)
 scenarioStepIdPairs fx = do
@@ -1951,7 +1951,7 @@ scenarioStepIdPairs fx = do
 -- output is the child's value — no @DBOS.get_result@ checkpoint of its
 -- own. Returns the enclosing step's value, the parent's steps, and the
 -- derived child id.
-scenarioAwaitInsideStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioAwaitInsideStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => WfFixture m ->
                            m (Int, [StepRecord], Text)
 scenarioAwaitInsideStep fx = do
@@ -2004,7 +2004,7 @@ scenarioAwaitInsideStep fx = do
 -- its start step, so the planted row lands while the run owns the id —
 -- the same sequence on both stacks (cooperative in sim). Returns the
 -- settled run and the derived child id the refusal must name.
-scenarioStaleAwaitRefused :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioStaleAwaitRefused :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => WfFixture m ->
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Text)
 scenarioStaleAwaitRefused fx = do
@@ -2078,7 +2078,7 @@ scenarioStaleAwaitRefused fx = do
 -- both name the holder while no derived id ever exists. The queue is
 -- driven explicitly — no supervisor runs on either stack — with the parent
 -- run forked, the join observed, then passes until the parent settles.
-scenarioJoinHeldKey :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m)
+scenarioJoinHeldKey :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                     => WfFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Text, Maybe WorkflowRecord, [StepRecord], [WorkflowId])
 scenarioJoinHeldKey fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -2166,7 +2166,7 @@ scenarioJoinHeldKey fx = do
 -- enqueues a child onto a queue nothing drives, the start step names the
 -- child and links it, and a second run under the same id adopts the recorded
 -- child instead of enqueuing another.
-scenarioEnqueuedChildReplays :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioEnqueuedChildReplays :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => WfFixture m ->
                                 m (Text, Text, [StepRecord], [WorkflowId], Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioEnqueuedChildReplays fx = do
@@ -2226,7 +2226,7 @@ data DedupStartOutcome = DedupStartOutcome
 -- takes the same branch and starts no child, while a fork that runs the
 -- start again goes ahead. Mirrors Rust's
 -- @a_deduplicated_child_start_replays_its_error_after_the_key_is_freed@.
-scenarioDedupStartRecorded :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m)
+scenarioDedupStartRecorded :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                            => WfFixture m -> m DedupStartOutcome
 scenarioDedupStartRecorded fx =
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -2355,7 +2355,7 @@ data ConflictStartOutcome = ConflictStartOutcome
 -- other row is deleted the same start would go ahead, so a replay that did
 -- not read the record would succeed. Mirrors Rust's
 -- @a_child_id_taken_by_another_function_replays_its_error_after_the_row_is_deleted@.
-scenarioConflictStartRecorded :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m)
+scenarioConflictStartRecorded :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                               => WfFixture m -> m ConflictStartOutcome
 scenarioConflictStartRecorded fx =
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -2436,7 +2436,7 @@ scenarioConflictStartRecorded fx =
 -- | A millisecond budget against a second-long body: the run reports the
 -- durable cancellation naming the workflow and the row reads CANCELLED.
 -- Virtual time makes the second instant under IOSim.
-scenarioBudgetCancels :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m)
+scenarioBudgetCancels :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                       => WfFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
 scenarioBudgetCancels fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do

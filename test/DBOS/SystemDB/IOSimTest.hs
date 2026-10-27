@@ -391,6 +391,32 @@ memTests =
         before.workflowRecordStatus @?= Delayed
         moved @?= 1
         after.workflowRecordStatus @?= Enqueued,
+      testCase "the timeout sweep cancels expired rows and spares live ones" $ do
+        (swept, ended, kept) <- runMem $ do
+          mem <- newMemDB
+          _ <- initWorkflow mem ((newWorkflow "wf-expired") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-live") {newWorkflowDeadline = Just (timestampFromEpochMs 4102444800000)}) Nothing Fresh Nothing
+          swept <- orFailSim =<< cancelTimedOutWorkflows mem 100
+          ended <- orJustSim "the swept row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-expired")
+          kept <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-live")
+          pure (swept, ended, kept)
+        assertBool "the expired row swept" (WorkflowId "wf-expired" `elem` swept)
+        assertBool "the live row spared" (WorkflowId "wf-live" `notElem` swept)
+        ended.workflowRecordStatus @?= Cancelled
+        kept.workflowRecordStatus @?= Pending,
+      testCase "the timed-out cancel honors ownership" $ do
+        (refused, held, taken, ended) <- runMem $ do
+          mem <- newMemDB
+          _ <- initWorkflow mem ((newWorkflow "wf-owned") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing Fresh Nothing
+          refused <- orFailSim =<< cancelIfTimedOut mem (WorkflowId "wf-owned") (Just "someone-else")
+          held <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-owned")
+          taken <- orFailSim =<< cancelIfTimedOut mem (WorkflowId "wf-owned") held.workflowRecordOwnerXid
+          ended <- orJustSim "the cancelled row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-owned")
+          pure (refused, held, taken, ended)
+        refused @?= False
+        held.workflowRecordStatus @?= Pending
+        taken @?= True
+        ended.workflowRecordStatus @?= Cancelled,
       testCase "recovery re-enqueues the named executor's pending rows" $ do
         (recovered, row) <- runMem $ do
           mem <- newMemDB

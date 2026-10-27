@@ -418,6 +418,16 @@ sources![
         "121_notifications_consumed_by_function_id.sql",
         Applies::Always
     ),
+    (
+        122,
+        "122_add_workflow_status_deadline_index.sql",
+        Applies::Always
+    ),
+    (
+        123,
+        "123_add_workflow_status_creator_xid.sql",
+        Applies::Always
+    ),
 ];
 
 /// Asks whether the `notifications` primary key already exists, so migration 10 can skip its

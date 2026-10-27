@@ -11,6 +11,7 @@ module DBOS.SystemDB.IOSim
   ( MockSystemDB (..),
     MemSystemDB (..),
     newMemDB,
+    newMemDBSkewed,
     newMemDBWithApplication,
     memSetApplication,
     memConnectionOn,
@@ -30,11 +31,12 @@ where
 
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim)
+import Data.Int (Int64)
 import Data.Aeson (Value (..), eitherDecodeStrict, encode)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text.Encoding (decodeUtf8)
-import Data.List (nub, partition, sort, sortOn)
+import Data.List (foldl', nub, partition, sort, sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -44,6 +46,8 @@ import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
     claimsOwnership,
+    DatabaseTime (..),
+    databaseTimeRead,
     Debounce (..),
     DebounceHolder (..),
     DebounceRequest (..),
@@ -181,7 +185,9 @@ data MockSystemDB = MockSystemDB
   deriving stock (Eq, Show)
 
 instance SystemDB MockSystemDB (IOSim s) where
-  initWorkflow = \cases _ new _ _ _ -> pure (Right (mockInitResult new))
+  initWorkflow _ new _ _ _ = do
+    clock <- databaseTimeRead (timestampToEpochMs mockTimestamp)
+    pure (Right ((mockInitResult new) {initResultClock = clock}))
   getWorkflow = \cases
     _ (WorkflowId "missing") -> pure (Right Nothing)
     _ (WorkflowId wid) -> pure (Right (Just (mockWorkflow (WorkflowId wid))))
@@ -202,6 +208,8 @@ instance SystemDB MockSystemDB (IOSim s) where
   updateWorkflowAttributes = \cases _ _ _ _ -> pure (Right ())
   reenqueueForRecovery = \cases _ _ _ _ -> pure (Right [])
   transitionDelayedWorkflows = \cases _ -> pure (Right 0)
+  cancelIfTimedOut = \cases _ _ _ -> pure (Right False)
+  cancelTimedOutWorkflows = \cases _ _ -> pure (Right [])
   cancelWorkflows = \cases _ ids _ _ -> pure (Right (filter (/= WorkflowId "never-existed") ids))
   resumeWorkflows = \cases
     _ ids _ _ | WorkflowId "never-existed" `elem` ids -> pure (Left (NonExistentWorkflow {workflowIds = map (\(WorkflowId wid) -> wid) ids}))
@@ -397,13 +405,35 @@ data MemSystemDB s = MemSystemDB
     -- listener's own application's rows and unclaimed rows; 'Nothing'
     -- sees everything. Settable so one database can model several
     -- applications' executors.
-    memApplicationName :: StrictTVar (IOSim s) (Maybe Text)
+    memApplicationName :: StrictTVar (IOSim s) (Maybe Text),
+    -- | How far the database's clock runs ahead of this process's monotonic
+    -- clock, in milliseconds (behind, when negative): the skew knob the
+    -- deadline tests turn. The clock reading 'initWorkflow' returns carries
+    -- the offset, so budgets are timed from the database's clock however
+    -- far off it is. Fixed per database; plain tests leave it zero.
+    memClockSkewMs :: Int64
   }
 
 -- | Fresh simulated data: empty rows, steps, dedup holds, queues,
 -- messages, events, streams, schedules, versions, and an instance counter.
 newMemDB :: IOSim s (MemSystemDB s)
 newMemDB = newMemDBWithApplication Nothing
+
+-- | Fresh simulated data whose clock runs @skewMs@ ahead of this process's
+-- monotonic clock (behind, when negative).
+newMemDBSkewed :: Int64 -> IOSim s (MemSystemDB s)
+newMemDBSkewed skewMs = do
+  db <- newMemDB
+  pure (db {memClockSkewMs = skewMs})
+
+-- | This database's clock: the process clock plus the skew the deadline
+-- tests turn. Every row stamp, delay, and deadline comparison in the sim
+-- reads through here, the way every unqualified @now()@ in the SQL reads
+-- the database's clock — so a skewed database stays self-consistent.
+memDbNow :: MemSystemDB s -> IOSim s Timestamp
+memDbNow db = do
+  now <- timestampNow
+  pure (timestampFromEpochMs (timestampToEpochMs now + db.memClockSkewMs))
 
 -- | Fresh simulated data for a listener of the given application.
 newMemDBWithApplication :: Maybe Text -> IOSim s (MemSystemDB s)
@@ -424,6 +454,7 @@ newMemDBWithApplication application =
     <*> newTVarIO []
     <*> newTVarIO 0
     <*> newTVarIO application
+    <*> pure 0
 
 -- | Re-points the listener's application between sweeps, so one database
 -- can model several applications' executors.
@@ -546,8 +577,8 @@ memAwaited row = case row.workflowRecordStatus of
 -- | A retried request is idempotent: an existing id joins, so the same id
 -- initialized twice executes once. A held dedup key under a fresh id is
 -- the collision; the same id retrying its own key joins instead.
-memInitResult :: Submission -> WorkflowRecord -> WorkflowInitResult
-memInitResult submission row =
+memInitResult :: DatabaseTime -> Submission -> WorkflowRecord -> WorkflowInitResult
+memInitResult clock submission row =
   let unowned = row.workflowRecordOwnerXid == Nothing
       claiming = claimsOwnership submission
       shouldExecute = not (not unowned && not claiming)
@@ -556,23 +587,49 @@ memInitResult submission row =
         { initResultStatus = row.workflowRecordStatus,
           initResultRecoveryAttempts = row.workflowRecordRecoveryAttempts,
           initResultDeadline = row.workflowRecordDeadline,
+          initResultClock = clock,
+          initResultOwnerXid = row.workflowRecordOwnerXid,
           initResultSerialization = row.workflowRecordSerialization,
           initResultExistingInput = existingInput,
           initResultShouldExecute = shouldExecute
         }
+
+-- | The timeout sweep's predicate, as the SQL spells it: unsettled, with a
+-- deadline the database's clock has passed. The sim's clock is the one its
+-- 'timestampNow' reads, so a test advances time the way the database would.
+memTimedOut :: Timestamp -> WorkflowRecord -> Bool
+memTimedOut now row =
+  row.workflowRecordStatus `elem` [Pending, Enqueued, Delayed]
+    && case row.workflowRecordDeadline of
+      Just due -> due <= now
+      Nothing  -> False
+
+-- | What a timeout writes: a cancel's columns plus @owner_xid@, so no
+-- execution holds the row, and both stamps read the database's clock.
+memTimedOutRow :: Timestamp -> WorkflowRecord -> WorkflowRecord
+memTimedOutRow now row =
+  row
+    { workflowRecordStatus = Cancelled,
+      workflowRecordOwnerXid = Nothing,
+      workflowRecordQueueName = Nothing,
+      workflowRecordDeduplicationId = Nothing,
+      workflowRecordStartedAt = Nothing,
+      workflowRecordUpdatedAt = now,
+      workflowRecordCompletedAt = Just now
+    }
 
 instance SystemDB (MemSystemDB s) (IOSim s) where
   initWorkflow db new _maxAttempts submission caller = do
     -- The wake instant a delayed enqueue waits for, as the SQL init's
     -- @delay_until@: without it a DELAYED row would never come due and the
     -- transition would pass it by forever.
-    now <- timestampNow
-    atomically $ do
+    now <- memDbNow db
+    outcome <- atomically $ do
       rows <- readTVar db.memRows
       case Map.lookup new.newWorkflowId rows of
         Just row -> case initConflict row of
           Just conflict -> pure (Left conflict)
-          Nothing -> pure (Right (memInitResult submission row))
+          Nothing -> pure (Right (row, False))
         Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
           (Just queue, Just key) -> do
             held <- readTVar db.memDedup
@@ -581,8 +638,20 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 pure (Left (QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queue, deduplicationId = key}))
               Nothing -> do
                 writeTVar db.memDedup (Map.insert (queue, key) new.newWorkflowId held)
-                insertFresh rows now
-          _ -> insertFresh rows now
+                inserted <- insertFresh rows now
+                pure (Right (inserted, True))
+          _ -> do
+            inserted <- insertFresh rows now
+            pure (Right (inserted, True))
+    clock <- databaseTimeRead (timestampToEpochMs now)
+    pure $ case outcome of
+      Left err -> Left err
+      -- A row this call inserted runs here: the SQL init reports
+      -- should_execute for a row whose owner is the caller, and a fresh
+      -- insert's owner always is. The join path answers from the row
+      -- instead ('memInitResult').
+      Right (row, True) -> Right ((memInitResult clock submission row) {initResultShouldExecute = True})
+      Right (row, False) -> Right (memInitResult clock submission row)
     where
       -- The sim's row carries no class/config names, so the identity
       -- conflict it can model is the function name: a start that names a
@@ -601,7 +670,19 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       debugMaybe (Just value) = "Some(\"" <> value <> "\")"
       insertFresh rows now = do
         owner <- simOwnerText db
-        let row = (memFreshRow new caller owner) {workflowRecordDelayUntil = new.newWorkflowDelay >>= addTimeout now}
+        -- The SQL insert turns a PENDING row's budget into a deadline
+        -- against the database's clock; a queued row keeps none until its
+        -- claim. A recovered or resumed row keeps whatever it already had.
+        let deadlineAt = case new.newWorkflowDeadline of
+              Just _ -> new.newWorkflowDeadline
+              Nothing
+                | initialStatus new == Pending -> new.newWorkflowTimeout >>= addTimeout now
+                | otherwise -> Nothing
+            row =
+              (memFreshRow new caller owner)
+                { workflowRecordDelayUntil = new.newWorkflowDelay >>= addTimeout now,
+                  workflowRecordDeadline = deadlineAt
+                }
         writeTVar db.memRows (Map.insert new.newWorkflowId row rows)
         case caller of
           -- The init caller records the parent's start step in the same
@@ -623,18 +704,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                     }
             writeTVar db.memSteps (Map.insert (parentText, call.initCallerStepId) entry steps)
           Nothing -> pure ()
-        pure
-          ( Right
-              ( WorkflowInitResult
-                  { initResultStatus = initialStatus new,
-                    initResultRecoveryAttempts = 0,
-                    initResultDeadline = new.newWorkflowDeadline,
-                    initResultSerialization = new.newWorkflowSerialization,
-                    initResultExistingInput = Nothing,
-                    initResultShouldExecute = True
-                  }
-              )
-          )
+        pure row
   getWorkflow db (WorkflowId wid) = Right . Map.lookup wid <$> readTVarIO db.memRows
   listWorkflows db filters _ = do
     rows <- readTVarIO db.memRows
@@ -693,7 +763,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       -- than answering stale data.
       Nothing -> retry
   setWorkflowDelay db (WorkflowId wid) delay _ = do
-    now <- timestampNow
+    now <- memDbNow db
     let releaseAt = case delay of
           DelayFor duration -> addTimeout now duration
           DelayUntil instant -> Just instant
@@ -702,6 +772,29 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   updateWorkflowAttributes db (WorkflowId wid) attributes _ =
     atomically (modifyTVar db.memRows (Map.adjust (\row -> row {workflowRecordAttributes = attributes}) wid))
       >> pure (Right ())
+  cancelIfTimedOut db (WorkflowId wid) owner = do
+    now <- memDbNow db
+    atomically $ do
+      rows <- readTVar db.memRows
+      case Map.lookup wid rows of
+        Just row
+          | memTimedOut now row && row.workflowRecordOwnerXid == owner -> do
+              writeTVar db.memRows (Map.insert wid (memTimedOutRow now row) rows)
+              pure (Right True)
+        _ -> pure (Right False)
+  cancelTimedOutWorkflows db limit = do
+    now <- memDbNow db
+    atomically $ do
+      rows <- readTVar db.memRows
+      application <- readTVar db.memApplicationName
+      let inScope row = case application of
+            Nothing   -> True
+            Just name -> row.workflowRecordApplicationName == Just name || row.workflowRecordApplicationName == Nothing
+          due = [wid | (wid, row) <- sortOn (\entry -> (snd entry).workflowRecordDeadline) (Map.toList rows), memTimedOut now row, inScope row]
+          targets = take (fromIntegral limit) due
+          rows' = foldl' (\acc wid -> Map.adjust (memTimedOutRow now) wid acc) rows targets
+      writeTVar db.memRows rows'
+      pure (Right (map WorkflowId targets))
   cancelWorkflows db ids withChildren _ = atomically $ do
     rows <- readTVar db.memRows
     -- Transitive descendants, like the backend's per-id traverse through
@@ -872,7 +965,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   -- Delayed rows whose deadline has passed are enqueued; a debounced
   -- holder releases its key, as the SQL transition does.
   transitionDelayedWorkflows db = do
-    now <- timestampNow
+    now <- memDbNow db
     atomically $ do
       rows <- readTVar db.memRows
       let due row = row.workflowRecordStatus == Delayed && maybe False (<= now) row.workflowRecordDelayUntil
@@ -926,7 +1019,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       Left err -> pure (Left err)
       Right (Just _) -> pure (Right ())
       Right Nothing -> do
-        now <- timestampNow
+        now <- memDbNow db
         atomically $ do
           rows <- readTVar db.memRows
           case Map.lookup widText rows of
@@ -946,7 +1039,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     writeStream db wid stepId key streamClosedSentinel (Just streamClosedSerialization) writtenBy
   close _ = close MockSystemDB
   recordSleep db wid stepId duration = do
-    now <- timestampNow
+    now <- memDbNow db
     case addTimeout now duration of
       Nothing -> pure (Left (invalidInput "duration" "does not resolve to a representable wake time"))
       Just wakeAt -> do
@@ -977,7 +1070,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       Left err -> pure (Left err)
       Right (Just _) -> pure (Right ())
       Right Nothing -> do
-        now <- timestampNow
+        now <- memDbNow db
         atomically $ do
           events <- readTVar db.memEvents
           writeTVar db.memEvents (Map.insert (widTextOf wid, key) (EncodedValue value serialization) events)
@@ -996,7 +1089,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     case replayed of
       Just record -> pure (Right (memEncodedFromStep record))
       Nothing -> do
-        now <- timestampNow
+        now <- memDbNow db
         case addTimeout now duration of
           Nothing -> pure (Left (invalidInput "duration" "does not resolve to a representable wake time"))
           Just wakeAt -> do
@@ -1034,7 +1127,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 case caller of
                   Nothing -> pure (Right waited)
                   Just c -> do
-                    completedAt <- timestampNow
+                    completedAt <- memDbNow db
                     atomically (memInsertStep db c.getEventCallerWorkflowId c.getEventCallerStepId getEventStepName ((.encodedValue) <$> waited) (waited >>= (.encodedSerialization)) completedAt)
                     pure (Right waited)
   getAllNotifications db (WorkflowId widText) = do
@@ -1080,7 +1173,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
             | finalLook -> pure (Right Ended)
             | found.streamStatus `notElem` [Pending, Enqueued, Delayed] -> loop True
             | otherwise -> do
-                now <- timestampNow
+                now <- memDbNow db
                 -- A passed deadline is a timeout, like the Postgres backend:
                 -- 'durationSince' is 'Nothing' once the end is past, which a
                 -- missing deadline also reports, so match those separately.
@@ -1107,7 +1200,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           )
       )
   createApplicationVersion db versionName applicationName = do
-    now <- timestampNow
+    now <- memDbNow db
     atomically $ do
       versions <- readTVar db.memVersions
       let existing = [v | v <- versions, v.versionInfoName == versionName, v.versionInfoApplicationName == applicationName]
@@ -1140,7 +1233,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   -- in priority/created order, flipped to PENDING with the executor and
   -- version stamped, exactly the SQL claim's columns.
   startQueuedWorkflows db queue executorId applicationVersion partitionKey localRunning partitionLocalRunning = do
-    now <- timestampNow
+    now <- memDbNow db
     atomically $ do
       rows <- readTVar db.memRows
       application <- readTVar db.memApplicationName
@@ -1190,7 +1283,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       )
   -- One head per partition with no pending work, in key order.
   startQueuedPartitionedWorkflows db queue executorId applicationVersion maxTasks = do
-    now <- timestampNow
+    now <- memDbNow db
     atomically $ do
       rows <- readTVar db.memRows
       application <- readTVar db.memApplicationName
@@ -1256,7 +1349,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   debounceDelayedWorkflow db request caller = memDebounce db request caller
   deleteQueue db name = atomically (modifyTVar db.memQueues (Map.delete name)) >> pure (Right ())
   createSchedule db new _caller = do
-    now <- timestampNow
+    now <- memDbNow db
     atomically $ do
       schedules <- readTVar db.memSchedules
       if Map.member new.newScheduleName schedules
@@ -1265,13 +1358,13 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           writeTVar db.memSchedules (Map.insert new.newScheduleName (memScheduleRecord new now) schedules)
           pure (Right ())
   upsertSchedule db new _caller = do
-    now <- timestampNow
+    now <- memDbNow db
     atomically $ do
       schedules <- readTVar db.memSchedules
       writeTVar db.memSchedules (Map.insert new.newScheduleName (memScheduleRecord new now) schedules)
       pure (Right ())
   applySchedules db schedules = do
-    now <- timestampNow
+    now <- memDbNow db
     atomically $ do
       stored <- readTVar db.memSchedules
       let applied = foldr (\new acc -> Map.insert new.newScheduleName (memScheduleRecord new now) acc) stored schedules
@@ -1486,7 +1579,7 @@ memInsertStep db wid stepId name output serialization now = do
 
 memRecordRecvStep :: MemSystemDB s -> WorkflowId -> Int -> Text -> Maybe EncodedValue -> IOSim s ()
 memRecordRecvStep db wid stepId name value = do
-  now <- timestampNow
+  now <- memDbNow db
   atomically (memInsertStep db wid stepId name ((.encodedValue) <$> value) (value >>= (.encodedSerialization)) now)
 
 -- | Take the first parked message for a destination on a topic, blocking
@@ -1531,7 +1624,7 @@ memDebounce :: MemSystemDB s -> DebounceRequest -> Maybe (WorkflowId, Int) -> IO
 memDebounce db request caller = case debounceValidate request of
   Left err -> pure (Left err)
   Right () -> do
-    now <- timestampNow
+    now <- memDbNow db
     application <- readTVarIO db.memApplicationName
     let scope = request.debounceRequestApplicationName <|> application
     atomically $ do
@@ -1700,7 +1793,7 @@ simCallerEncoding (Just name) = Left (UnknownSerialization {name})
 -- a parked 'recv'.
 memSend :: MemSystemDB s -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> IOSim s (Either Error ())
 memSend db stepName messages serialization caller sendToForks = do
-  now <- timestampNow
+  now <- memDbNow db
   -- The duplicate-key refusal applies to the caller's list, before fan-out,
   -- exactly as live checks: one key fanning out is legal.
   case validateSendKeys messages of
@@ -1811,7 +1904,7 @@ memSend db stepName messages serialization caller sendToForks = do
 -- as live keeps rows whose @consumed_by_function_id@ stayed null.
 memRewind :: MemSystemDB s -> Text -> Int -> SysRewindOptions -> Maybe (WorkflowId, Int) -> IOSim s (Either Error ())
 memRewind db wid cut sysOpts caller = do
-  now <- timestampNow
+  now <- memDbNow db
   atomically $ do
     rows <- readTVar db.memRows
     steps <- readTVar db.memSteps

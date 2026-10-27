@@ -338,7 +338,7 @@ scenarioThrowEscape fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
   try (nextStepId ctx >> throwIO (userError "boom") >> pure 0)
 
-scenarioCoopFlag :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m) => Fixture m -> m ()
+scenarioCoopFlag :: (MonadMVar m, MonadFork m, MonadTimer m, MonadMonotonicTimeNSec m, MonadThrow m) => Fixture m -> m ()
 scenarioCoopFlag _ = do
   stop <- newTVarIO False
   done <- newEmptyMVar
@@ -347,7 +347,7 @@ scenarioCoopFlag _ = do
   atomically (writeTVar stop True)
   waitFor (takeMVar done)
 
-scenarioForkCounter :: (MonadMVar m, MonadFork m, MonadTimer m, MonadThrow m)
+scenarioForkCounter :: (MonadMVar m, MonadFork m, MonadTimer m, MonadMonotonicTimeNSec m, MonadThrow m)
                     => Fixture m -> m (Int, Int)
 scenarioForkCounter fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
@@ -582,7 +582,7 @@ waitForFlag stop done = do
 -- | A result that must arrive, not a wait that may hang the suite. Under
 -- IOSim the timeout is virtual, so a hung wait fails instantly; live it
 -- throws after five seconds, which tasty reports as a failure.
-waitFor :: (MonadTimer m, MonadThrow m) => m a -> m a
+waitFor :: (MonadTimer m, MonadMonotonicTimeNSec m, MonadThrow m) => m a -> m a
 waitFor action = do
   result <- timeout 5000000 action
   case result of

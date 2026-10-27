@@ -184,7 +184,7 @@ findNotification dbos tag = do
 -- | Drives the executor's listened queues once, returning what was claimed.
 -- Throws on a database failure; an empty claim is fine (the supervisor may
 -- have taken the row first — claims are atomic, outcomes identical).
-driveQueue :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
+driveQueue :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
            => DBOS m -> m [WorkflowId]
 driveQueue dbos = do
   driven <- dequeueWorkflows dbos
@@ -478,7 +478,7 @@ checkAtomicRedrive (row1, count1, status1, sent1, row2, count2, status2, sent2)
 -- panic (order PENDING-notification, no send), resume to one SENT order
 -- and one send. Returns the first row, count, status, completions, then
 -- the resumed row, count, status, completions.
-scenarioEnqueueRedrive :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+scenarioEnqueueRedrive :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => OutboxFixture m ->
                           m (Maybe WorkflowStatus, Int, Maybe Text, Int, Maybe WorkflowStatus, Int, Maybe Text, Int)
 scenarioEnqueueRedrive fx = do

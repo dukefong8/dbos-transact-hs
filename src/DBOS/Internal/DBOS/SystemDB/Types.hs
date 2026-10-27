@@ -32,6 +32,9 @@ module DBOS.SystemDB.Types
     timestampFromEpochMs,
     timestampToEpochMs,
     timestampNow,
+    DatabaseTime (..),
+    databaseTimeRead,
+    databaseTimeReaches,
     timestampToSystemTime,
     timestampFromSystemTime,
     durationFromMs,
@@ -1626,6 +1629,13 @@ data WorkflowInitResult = WorkflowInitResult
   { initResultStatus           :: WorkflowStatus,
     initResultRecoveryAttempts :: Int64,
     initResultDeadline         :: Maybe Timestamp,
+    -- | The database's clock as the same statement saw it, which is what a
+    -- wait for 'initResultDeadline' is measured from.
+    initResultClock            :: DatabaseTime,
+    -- | The owner the row holds after this call: the caller's token on a
+    -- row it inserted, whoever holds it otherwise. A later cancel presents
+    -- this back so only an execution that still owns the row cancels it.
+    initResultOwnerXid         :: Maybe Text,
     initResultSerialization    :: Maybe Text,
     -- | The input the row already held, where a fresh start runs a row it did
     -- not create (one no attempt owns): @Just Nothing@ for a row with no
@@ -1761,6 +1771,32 @@ timestampFromEpochMs = Timestamp
 -- | The stored value. Total, like @Timestamp::as_epoch_ms@.
 timestampToEpochMs :: Timestamp -> Int64
 timestampToEpochMs (Timestamp ms) = ms
+
+-- | A reading of the system database's clock, carried forward by this
+-- process's monotonic clock. Mirrors Rust @DatabaseTime@.
+--
+-- A deadline is an instant on the database's clock, so measuring the wait
+-- for it against this host's wall clock would make an executor whose clock
+-- disagrees with the database's cancel early or run late. Pairing the
+-- database's reading with the monotonic instant it arrived at is what keeps
+-- the wait honest. The monotonic instant is nanoseconds, the unit
+-- @io-classes@ exposes.
+data DatabaseTime = DatabaseTime
+  { databaseTimeEpochMs :: Int64,
+    databaseTimeReadAt  :: Word64
+  }
+  deriving stock (Eq, Show)
+
+-- | A reading of @epochMs@, taken now.
+databaseTimeRead :: MonadMonotonicTimeNSec m => Int64 -> m DatabaseTime
+databaseTimeRead epochMs = DatabaseTime epochMs <$> getMonotonicTimeNSec
+
+-- | When, on this process's monotonic clock (nanoseconds), the database's
+-- clock reaches @instant@: the moment of the reading for an instant already
+-- behind it.
+databaseTimeReaches :: DatabaseTime -> Timestamp -> Word64
+databaseTimeReaches clock instant =
+  clock.databaseTimeReadAt + fromIntegral (max 0 (timestampToEpochMs instant - clock.databaseTimeEpochMs)) * 1000000
 
 -- | The current time, truncated to milliseconds. A clock set before 1970
 -- gives the epoch rather than panicking, mirroring @Timestamp::now@.

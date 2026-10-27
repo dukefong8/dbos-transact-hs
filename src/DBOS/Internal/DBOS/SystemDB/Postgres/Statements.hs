@@ -60,6 +60,8 @@ module DBOS.SystemDB.Postgres.Statements
     forkPointsStatement,
     transitionDelayedSession,
     cancelBatchSession,
+    cancelIfTimedOutStatement,
+    cancelTimedOutWorkflowsSession,
     existingWorkflowsSession,
     resumeWorkflowsSession,
     deleteWorkflowsSession,
@@ -602,7 +604,8 @@ type WorkflowInitRaw =
        '("queue_name", Maybe Text),
        '("workflow_deadline_epoch_ms", Maybe Int64),
        '("owner_xid", Maybe Text),
-       '("serialization", Maybe Text)
+       '("serialization", Maybe Text),
+       '("db_now", Maybe Int64)
      ]
 
 -- | Records a workflow, reconciling with any row already under that id. The
@@ -630,7 +633,10 @@ initWorkflowStatement params =
        ${initParamAuthenticatedUser}, ${initParamAssumedRole}, ${initParamAuthenticatedRoles},
        ${initParamExecutorId}, ${initParamApplicationVersion}, ${initParamApplicationId},
        ${initParamCreatedAt}, ${initParamUpdatedAt}, ${initParamInitialAttempts},
-       ${initParamTimeoutMs}, ${initParamDeadline},
+       ${initParamTimeoutMs},
+       coalesce(${initParamDeadline}, case when ${initParamStatus} = 'PENDING'
+           then (extract(epoch from now()) * 1000)::bigint + ${initParamTimeoutMs}
+         end),
        ${initParamParentWorkflowId}, ${initParamOwnerXid}, ${initParamSerialization}, ${initParamAttributes}::text::jsonb, ${initParamScheduleName},
        ${initParamDebounceDeadline}, ${initParamIsDebounced}, ${initParamApplicationName})
     on conflict (workflow_uuid) do update set
@@ -650,7 +656,8 @@ initWorkflowStatement params =
           else dbos.workflow_status.executor_id
         end
     returning recovery_attempts, status, name, class_name::text, config_name::text, queue_name,
-      workflow_deadline_epoch_ms, owner_xid, serialization
+      workflow_deadline_epoch_ms, owner_xid, serialization,
+      (extract(epoch from clock_timestamp()) * 1000)::bigint as db_now
   |]
   where
     InitWorkflowParams {..} = params
@@ -1647,6 +1654,64 @@ cancelBatchSession workflowIds =
         completed_at = (extract(epoch from now()) * 1000)::bigint
       where workflow_uuid = any(${workflowIds})
         and status not in ('SUCCESS', 'ERROR', 'CANCELLED')
+      returning workflow_uuid
+    |]
+
+-- | Cancels one workflow if the database's clock says its deadline has
+-- passed. The timer that fired was measured on that same clock, so the two
+-- normally agree; the test is what keeps a timer that fires a moment early,
+-- inside a reading's millisecond, from cancelling a workflow early. Mirrors
+-- @cancel_if_timed_out@ (the set and the test are the sweep's, so the two
+-- can never disagree).
+cancelIfTimedOutStatement :: Text -> Maybe Text -> Statement.Statement () Int64
+cancelIfTimedOutStatement workflowId ownerXid =
+  sqlExecTypedStatement [typedSql|
+    update dbos.workflow_status
+    set status = 'CANCELLED',
+      owner_xid = null,
+      queue_name = null,
+      deduplication_id = null,
+      started_at_epoch_ms = null,
+      updated_at = (extract(epoch from now()) * 1000)::bigint,
+      completed_at = (extract(epoch from now()) * 1000)::bigint
+    where workflow_uuid = ${workflowId}
+      and owner_xid is not distinct from ${ownerXid}
+      and status in ('PENDING', 'ENQUEUED', 'DELAYED')
+      and workflow_deadline_epoch_ms is not null
+      and workflow_deadline_epoch_ms <= (extract(epoch from now()) * 1000)::bigint
+  |]
+
+-- | The timeout sweep: cancels a batch of this application's unsettled
+-- workflows whose deadline has passed, whoever owns them. One UPDATE over a
+-- locked sub-select, oldest deadline first, so a backlog drains in deadline
+-- order and concurrent sweeps skip each other's rows. The statuses are
+-- spelled into the SQL, not bound: a generic plan cannot prove the partial
+-- deadline index's predicate (migration 122) with a bound list, and the
+-- sweep would scan the table. @Nothing@ matches every application plus the
+-- unclaimed rows. Mirrors @cancel_timed_out_workflows@.
+cancelTimedOutWorkflowsSession :: Maybe Text -> Int64 -> Session.Session [Text]
+cancelTimedOutWorkflowsSession applicationName limit =
+  map unwrapId
+    <$> sqlQueryTypedSession [typedSql|
+      update dbos.workflow_status
+      set status = 'CANCELLED',
+        owner_xid = null,
+        queue_name = null,
+        deduplication_id = null,
+        started_at_epoch_ms = null,
+        updated_at = (extract(epoch from now()) * 1000)::bigint,
+        completed_at = (extract(epoch from now()) * 1000)::bigint
+      where workflow_uuid in (
+        select workflow_uuid from dbos.workflow_status
+        where status in ('PENDING', 'ENQUEUED', 'DELAYED')
+          and workflow_deadline_epoch_ms is not null
+          and workflow_deadline_epoch_ms <= (extract(epoch from now()) * 1000)::bigint
+          and (${applicationName}::text is null
+               or application_name = ${applicationName}
+               or application_name is null)
+        order by workflow_deadline_epoch_ms
+        limit ${limit}
+        for update skip locked)
       returning workflow_uuid
     |]
 

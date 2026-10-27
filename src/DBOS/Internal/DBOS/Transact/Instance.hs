@@ -90,6 +90,7 @@ import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatas
 import DBOS.Transact.Datasource qualified as Datasource (registerDataSource)
 import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflow, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
 import DBOS.Transact.Registry qualified as Registry (registerWorkflowRef)
+import DBOS.Transact.TimeoutSweep (spawnTimeoutSweep)
 import DBOS.Transact.Workflow (RunOptions (..), StartOptions, Tasks, abortAll, newTasks, runRegisteredWorkflow, spawnTracked)
 import DBOS.Transact.Workflow qualified as Workflow (enqueueWorkflow, runWorkflowRef, startWorkflow)
 
@@ -242,7 +243,7 @@ shutdown dbos =
         thawDataSourceRegistry dbos.dbos_datasources
         releaseConnection executor.conn
 
-runWorkflow :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
+runWorkflow :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
             => Executor m -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflow executor key workflowId input = do
   outcome <-
@@ -259,14 +260,14 @@ runWorkflow executor key workflowId input = do
 
 -- | Starts the referenced workflow via the launched executor: what
 -- @WorkflowRef::start_with@ becomes when the call site holds a reference.
-startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
+startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
               => Executor m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflow executor ref options input =
   Workflow.startWorkflow executor.tasks executor.conn executor.identity executor.workflows ref options (unWorkflowInput <$> input) executor.datasources
 
 -- | Runs the referenced workflow via the launched executor and waits: a
 -- start followed by an await under the same id.
-runWorkflowRef :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadTime m, FromJSON e)
+runWorkflowRef :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
                => Executor m -> WorkflowRef m e -> RunOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflowRef executor ref options input = do
   outcome <-
@@ -288,7 +289,7 @@ enqueueWorkflow dbos key workflowId input queueName = do
           (unWorkflowInput <$> input)
           queueName
 
-dequeueWorkflows :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
+dequeueWorkflows :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                  => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeueWorkflows dbos = do
   withExecutor dbos "dequeue workflows" $ \executor ->
@@ -648,7 +649,7 @@ launchOnWithQueues dbos conn identity listen = do
 -- already bound the registry and installed the executor; the repeats below
 -- keep this tail self-contained for the IO builder path, which does
 -- neither — both operations are idempotent.)
-launchExecutor :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
+launchExecutor :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                => DBOS m -> Executor m -> m (Either (TransactError.Error TransactError.EngineOnly) (Executor m))
 launchExecutor dbos executor = do
   prepared <- prepare executor.conn executor.identity
@@ -658,6 +659,7 @@ launchExecutor dbos executor = do
       bindRegistryInstance dbos.dbos_registry executor.conn.connInstanceId
       runTracer executor.conn.connTracer (EngineLaunched executor.identity.identityAppName executor.identity.identityExecutorId executor.identity.identityAppVersion)
       _ <- spawnTracked executor.tasks (superviseForever executor.tasks executor.conn executor.identity executor.workflows executor.listen_queues executor.datasources)
+      _ <- spawnTimeoutSweep executor.tasks executor.conn
       modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
       pure (Right executor)
 

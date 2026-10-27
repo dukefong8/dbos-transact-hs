@@ -20,16 +20,22 @@ module DBOS.Transact.DeadlinesCases
     scenarioKeptDeadline,
     scenarioShutdownPending,
     scenarioBeatenDeadline,
+    scenarioSweepCancelsAbandoned,
     checkWithinDeadline,
     checkPastDeadline,
     checkKeptDeadline,
     checkShutdownPending,
     checkBeatenDeadline,
+    checkSweepCancelsAbandoned,
+    scenarioSkewHoldsBudget,
+    checkSkewHoldsBudget,
+    scenarioFinishedIdAdopts,
+    checkFinishedIdAdopts,
   )
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (Timestamp, WorkflowId (..), WorkflowStatus (..), millisDuration, secondsDuration)
+import DBOS.SystemDB (Timestamp, WorkflowId (..), WorkflowStatus (..), millisDuration, secondsDuration, timestampFromEpochMs)
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact.Serialization (decodeWorkflowValue, CodecError (..))
 import DBOS.Transact
@@ -44,6 +50,7 @@ import DBOS.Transact
     WorkflowCtx,
     newWorkflowKey,
     registerWorkflowRef,
+    runStep,
     runWorkflowRef,
     runOptionsDefault,
     shutdown,
@@ -56,7 +63,8 @@ data DeadlinesFixture m = DeadlinesFixture
   { dfSetup :: m (DBOS m, WorkflowId),
     dfLaunch :: DBOS m -> m (Executor m),
     dfReadStatus :: WorkflowId -> m (Maybe WorkflowStatus),
-    dfReadDeadline :: WorkflowId -> m (Maybe Timestamp)
+    dfReadDeadline :: WorkflowId -> m (Maybe Timestamp),
+    dfPlantExpired :: WorkflowId -> m ()
   }
 
 -- | The deadline stamped on a workflow row, waiting until the row carries
@@ -74,7 +82,7 @@ waitForDeadline fx wid = go (50 :: Int)
 
 -- | A workflow within its deadline is unaffected: the run records its
 -- result and the row reads SUCCESS.
-scenarioWithinDeadline :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMask m)
+scenarioWithinDeadline :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m, MonadMask m)
                        => DeadlinesFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
 scenarioWithinDeadline fx = do
   (dbos, wid) <- fx.dfSetup
@@ -89,7 +97,7 @@ scenarioWithinDeadline fx = do
 
 -- | A workflow past its deadline is cancelled: the run reports the
 -- cancellation naming the workflow and the row reads CANCELLED.
-scenarioPastDeadline :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMask m)
+scenarioPastDeadline :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m, MonadMask m)
                      => DeadlinesFixture m -> m (WorkflowId, Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
 scenarioPastDeadline fx = do
   (dbos, wid) <- fx.dfSetup
@@ -107,7 +115,7 @@ scenarioPastDeadline fx = do
 -- | A recovered workflow keeps the deadline it already had: the deadline
 -- stamped before the crash is the deadline after the relaunch, and the
 -- resumed run records its result.
-scenarioKeptDeadline :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadTime m, MonadTimer m, MonadMask m)
+scenarioKeptDeadline :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m, MonadMask m)
                      => DeadlinesFixture m -> m (Timestamp, Timestamp, Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioKeptDeadline fx = do
   (dbos, wid) <- fx.dfSetup
@@ -129,7 +137,7 @@ scenarioKeptDeadline fx = do
 
 -- | Shutdown does not durably cancel a workflow that has a deadline: the
 -- row stays pending.
-scenarioShutdownPending :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadTime m, MonadTimer m, MonadMask m)
+scenarioShutdownPending :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m, MonadMask m)
                         => DeadlinesFixture m -> m (Maybe WorkflowStatus)
 scenarioShutdownPending fx = do
   (dbos, wid) <- fx.dfSetup
@@ -147,7 +155,7 @@ scenarioShutdownPending fx = do
 -- | A deadline that loses to a recorded outcome reports that outcome: the
 -- completed run wins, and a 1ms budget against the recording still reads
 -- the result.
-scenarioBeatenDeadline :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMask m)
+scenarioBeatenDeadline :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m, MonadMask m)
                        => DeadlinesFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
 scenarioBeatenDeadline fx = do
   (dbos, wid) <- fx.dfSetup
@@ -208,3 +216,83 @@ checkBeatenDeadline (first, second, status) = do
   secondValue <- decoded second
   unless (secondValue == 7) $ Left ("expected the recorded outcome to beat the budget, got: " <> show secondValue)
   unless (status == Just Success) $ Left ("expected the row SUCCESS, got: " <> show status)
+
+-- | The sweep cancels an abandoned expired row: a PENDING row with a past
+-- deadline and no execution running it reads CANCELLED once a launched
+-- executor's sweep passes, with no local timer involved. Returns the
+-- polled status; the bounded poll fails loudly when no sweep runs.
+scenarioSweepCancelsAbandoned :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m, MonadMask m, MonadDelay m) => DeadlinesFixture m -> m (Maybe WorkflowStatus)
+scenarioSweepCancelsAbandoned fx = do
+  (dbos, wid) <- fx.dfSetup
+  fx.dfPlantExpired wid
+  _ <- fx.dfLaunch dbos
+  status <- go fx wid (50 :: Int)
+  shutdown dbos
+  pure status
+  where
+    go _ _ 0 = error "the sweep never cancelled the abandoned row"
+    go fx wid n = do
+      status <- fx.dfReadStatus wid
+      case status of
+        Just Cancelled -> pure status
+        _ -> threadDelay 200000 >> go fx wid (n - 1)
+
+-- | The abandoned row reads CANCELLED.
+checkSweepCancelsAbandoned :: Maybe WorkflowStatus -> Either String ()
+checkSweepCancelsAbandoned status = unless (status == Just Cancelled) $ Left ("expected the abandoned row CANCELLED, got: " <> show status)
+
+-- | Restarting a finished id adopts without rerunning: the second run
+-- returns the recorded outcome and the row stays SUCCESS, with no second
+-- body execution behind it. Returns both outcomes with the row status.
+scenarioFinishedIdAdopts :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m, MonadMask m)
+                         => DeadlinesFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
+scenarioFinishedIdAdopts fx = do
+  (dbos, wid) <- fx.dfSetup
+  let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+      body () wctx = runStep wctx "only" (const (pure 7))
+  ref <- registerWorkflowRef dbos (newWorkflowKey "finished-once") body >>= either (error . show) pure
+  exec <- fx.dfLaunch dbos
+  first <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = None}) Nothing
+  second <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = None}) Nothing
+  status <- fx.dfReadStatus wid
+  shutdown dbos
+  pure (first, second, status)
+
+-- | Both runs report the recorded 7 and the row stays SUCCESS.
+checkFinishedIdAdopts :: (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus) -> Either String ()
+checkFinishedIdAdopts (first, second, status) = do
+  firstValue <- decoded first
+  unless (firstValue == 7) $ Left ("expected 7 from the first run, got: " <> show firstValue)
+  secondValue <- decoded second
+  unless (secondValue == 7) $ Left ("expected the recorded outcome on restart, got: " <> show secondValue)
+  unless (status == Just Success) $ Left ("expected the row SUCCESS, got: " <> show status)
+
+-- | A budget holds however far the database's clock is from this process's:
+-- the body runs for its budget, not less, and is cancelled soon after it,
+-- not when this process's clock would say. The sim backend skews its clock
+-- reading per fixture; live runs in agreement. Returns the row status with
+-- the measured run time in milliseconds.
+scenarioSkewHoldsBudget :: forall m. (MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m, MonadMask m)
+                        => DeadlinesFixture m -> m (Maybe WorkflowStatus, Integer)
+scenarioSkewHoldsBudget fx = do
+  (dbos, wid) <- fx.dfSetup
+  let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+      body () _ = do
+        threadDelay 30000000
+        pure (Right 1)
+  ref <- registerWorkflowRef dbos (newWorkflowKey "bounded") body >>= either (error . show) pure
+  exec <- fx.dfLaunch dbos
+  before <- getCurrentTime
+  _ran <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (millisDuration 500)}) Nothing
+  after <- getCurrentTime
+  status <- fx.dfReadStatus wid
+  shutdown dbos
+  pure (status, round (diffUTCTime after before * 1000))
+
+-- | The row reads CANCELLED after about the budget: half the budget at
+-- least (the body starts a little after the budget does), well under it
+-- plus any clock skew.
+checkSkewHoldsBudget :: (Maybe WorkflowStatus, Integer) -> Either String ()
+checkSkewHoldsBudget (status, elapsedMs) = do
+  unless (status == Just Cancelled) $ Left ("expected the row CANCELLED, got: " <> show status)
+  unless (elapsedMs >= 250 && elapsedMs <= 10000) $ Left ("expected about a 500ms run, got: " <> show elapsedMs <> "ms")

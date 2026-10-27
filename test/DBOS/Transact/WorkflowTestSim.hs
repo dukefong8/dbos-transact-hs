@@ -217,7 +217,6 @@ tests =
                 WorkflowAlreadyOwned "sim-wf-owned",
                 WorkflowChildJoined "sim-parent" 0 "sim-child",
                 WorkflowDedupJoined "sim-holder" "sim-key",
-                WorkflowDeadlineRaced "sim-wf-raced",
                 WorkflowOutcomeRecordFailed "sim-detail",
                 WorkflowSuperseded "sim-wf-first",
                 WorkflowControlEnded "sim-control"
@@ -257,17 +256,16 @@ tasksSimTests =
         checkNoMiscounts (runSimOrThrow simRun)
     ]
 
--- | The announcement shapes no staged case reaches: a superseded write,
--- a raced deadline, and a failed outcome write need races and faults the
--- sim does not stage; the rest ride the cases above. Hand-emitted through
--- the say-carrier, asserted by type.
+-- | The announcement shapes no staged case reaches: a superseded write and
+-- a failed outcome write need races and faults the sim does not stage; the
+-- rest ride the cases above. Hand-emitted through the say-carrier, asserted
+-- by type.
 demoTrace :: forall s. IOSim s ()
 demoTrace = do
   runTracer simTracer (WorkflowEnqueued "sim-wf-enqueued" "sim-queue")
   runTracer simTracer (WorkflowAlreadyOwned "sim-wf-owned")
   runTracer simTracer (WorkflowChildJoined "sim-parent" 0 "sim-child")
   runTracer simTracer (WorkflowDedupJoined "sim-holder" "sim-key")
-  runTracer simTracer (WorkflowDeadlineRaced "sim-wf-raced")
   runTracer simTracer (WorkflowOutcomeRecordFailed "sim-detail")
   runTracer simTracer (WorkflowSuperseded "sim-wf-first")
   runTracer simTracer (WorkflowControlEnded "sim-control")

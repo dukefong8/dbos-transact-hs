@@ -55,6 +55,8 @@ class Monad m => SystemDB db m where
   updateWorkflowAttributes :: db -> WorkflowId -> Maybe Text -> Maybe (WorkflowId, Int) -> m (Either Error ())
   reenqueueForRecovery :: db -> [Text] -> Text -> Text -> m (Either Error [WorkflowId])
   transitionDelayedWorkflows :: db -> m (Either Error Word64)
+  cancelIfTimedOut :: db -> WorkflowId -> Maybe Text -> m (Either Error Bool)
+  cancelTimedOutWorkflows :: db -> Int64 -> m (Either Error [WorkflowId])
   cancelWorkflows :: db -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
   resumeWorkflows :: db -> [WorkflowId] -> Maybe Text -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
   deleteWorkflows :: db -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either Error Word64)

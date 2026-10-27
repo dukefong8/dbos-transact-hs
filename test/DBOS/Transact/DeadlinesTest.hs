@@ -35,11 +35,17 @@ import DBOS.Transact.DeadlinesCases
     checkKeptDeadline,
     checkPastDeadline,
     checkShutdownPending,
+    checkSkewHoldsBudget,
+    checkFinishedIdAdopts,
+    checkSweepCancelsAbandoned,
     checkWithinDeadline,
     scenarioBeatenDeadline,
     scenarioKeptDeadline,
     scenarioPastDeadline,
     scenarioShutdownPending,
+    scenarioSkewHoldsBudget,
+    scenarioFinishedIdAdopts,
+    scenarioSweepCancelsAbandoned,
     scenarioWithinDeadline,
   )
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -101,7 +107,14 @@ mkDeadlinesFixture backend run = do
             case found of
               Left err -> fail (show err)
               Right Nothing -> pure Nothing
-              Right (Just record) -> pure record.workflowRecordDeadline
+              Right (Just record) -> pure record.workflowRecordDeadline,
+          dfPlantExpired = \wid -> do
+            let WorkflowId widText = wid
+                expired = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowDeadline = Just (SystemDB.timestampFromEpochMs 1000)}
+            planted <- SystemDB.initWorkflow backend expired Nothing SystemDB.Fresh Nothing
+            case planted of
+              Left err -> fail (show err)
+              Right _ -> pure ()
         }
 
 tests :: TestTree
@@ -115,5 +128,8 @@ tests =
             leaf "a workflow past its deadline is cancelled" scenarioPastDeadline checkPastDeadline,
             leaf "a recovered workflow keeps the deadline it already had" scenarioKeptDeadline checkKeptDeadline,
             leaf "shutdown does not durably cancel a workflow that has a deadline" scenarioShutdownPending checkShutdownPending,
-            leaf "a deadline that loses to a recorded outcome reports that outcome" scenarioBeatenDeadline checkBeatenDeadline
+            leaf "a deadline that loses to a recorded outcome reports that outcome" scenarioBeatenDeadline checkBeatenDeadline,
+            leaf "the sweep cancels an abandoned expired row" scenarioSweepCancelsAbandoned checkSweepCancelsAbandoned,
+            leaf "a budget holds with the database clock in agreement" scenarioSkewHoldsBudget checkSkewHoldsBudget,
+            leaf "restarting a finished id adopts without rerunning" scenarioFinishedIdAdopts checkFinishedIdAdopts
           ]

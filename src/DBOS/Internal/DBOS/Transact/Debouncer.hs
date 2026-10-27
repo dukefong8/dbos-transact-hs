@@ -66,7 +66,7 @@ debouncerNew =
 -- call for a quiet key enqueues a fresh debounced row; concurrent calls
 -- join it through the bounce, extending its delay and replacing its
 -- inputs. Answers a handle to the user workflow.
-debounce :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadTime m)
+debounce :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
          => DBOS m ->
             WorkflowRef m TransactError.EngineOnly ->
             Debouncer ->
@@ -134,7 +134,7 @@ debounce dbos userRef def key period input = do
 -- starts a child of the running workflow, which replays through its own
 -- checkpoint; its id derives from the parent and the bounce's step, so a
 -- replay re-enqueues the same id rather than a second row.
-debounceInWorkflow :: (MonadMVar m, MonadTimer m, MonadTime m, MonadCatch m)
+debounceInWorkflow :: (MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
                    => WorkflowCtx exec m ->
                       WorkflowRef m TransactError.EngineOnly ->
                       Debouncer ->
