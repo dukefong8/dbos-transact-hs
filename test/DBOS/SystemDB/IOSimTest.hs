@@ -39,7 +39,6 @@ import DBOS.SystemDB
     SendMessage (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
-    Submission (..),
     SysRewindOptions (..),
     SystemDB (..),
     Timestamp (..),
@@ -50,6 +49,7 @@ import DBOS.SystemDB
     WorkflowId (..),
     WorkflowInitResult (..),
     WorkflowRecord (..),
+    DatabaseTime (..),
     WorkflowStatus (..),
     defaultForkOptions,
     defaultQueueUpdate,
@@ -107,7 +107,7 @@ workflowTests =
   testGroup
     "Workflows"
     [ testCase "initWorkflow answers with an executable pending row" $ do
-        let result = run (initWorkflow backend (newWorkflow "wf-1") Fresh Nothing)
+        let result = run (initWorkflow backend (newWorkflow "wf-1") Nothing)
         case result of
           Right initialized -> do
             initialized.initResultStatus @?= Pending
@@ -255,11 +255,11 @@ queueTests =
     [ testCase "upsertQueue reports a write" $ do
         run (upsertQueue backend (newQueue "q") UpdateExisting) @?= Right True,
       testCase "startQueuedWorkflows answers a claimed id" $ do
-        run (startQueuedWorkflows backend mockQueueRecord "exec" "0.0.0" Nothing 0 0) @?= Right [WorkflowId "mock-queued"],
+        run (startQueuedWorkflows backend mockQueueRecord "exec" "0.0.0" Nothing 0 0 "tok-mock") @?= Right [WorkflowId "mock-queued"],
       testCase "getQueuePartitions answers a partition" $ do
         run (getQueuePartitions backend "q") @?= Right ["mock-partition"],
       testCase "startQueuedPartitionedWorkflows answers a claimed id" $ do
-        run (startQueuedPartitionedWorkflows backend mockQueueRecord "exec" "0.0.0" Nothing) @?= Right [WorkflowId "mock-partitioned"],
+        run (startQueuedPartitionedWorkflows backend mockQueueRecord "exec" "0.0.0" Nothing "tok-mock") @?= Right [WorkflowId "mock-partitioned"],
       testCase "getQueue answers the named queue" $ do
         let result = run (getQueue backend "q")
         case result of
@@ -363,27 +363,55 @@ lifecycleTests =
 -- and their budgets, the delayed and recovery transitions, message
 -- wakeups, events, schedules, and versions — so the sim semantics the
 -- engine relies on are asserted here rather than assumed.
+-- | Two clock readings five virtual seconds apart: the seam has to move
+-- with the simulated clock rather than answer a constant.
+simClockTwin :: forall s. MemSystemDB s -> IOSim s (DatabaseTime, DatabaseTime)
+simClockTwin mem = do
+  first <- orFailSim =<< databaseTime mem
+  threadDelay 5000000
+  later <- orFailSim =<< databaseTime mem
+  pure (first, later)
+
 memTests :: TestTree
 memTests =
   testGroup
     "MemSystemDB (stateful)"
-    [ testCase "a queue claim flips an enqueued row and honors worker concurrency" $ do
+    [ testCase "a start runs only the row it created" $ do
+        (firstExecute, firstCreator, secondExecute, owner) <- runMem $ do
+          mem <- newMemDB
+          first <- orFailSim =<< initWorkflow mem (newWorkflow "wf-c") Nothing
+          second <- orFailSim =<< initWorkflow mem (newWorkflow "wf-c") Nothing
+          row <- orJustSim "the created row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-c")
+          pure (first.initResultShouldExecute, first.initResultCreatorXid, second.initResultShouldExecute, row.workflowRecordOwnerXid)
+        firstExecute @?= True
+        secondExecute @?= False
+        owner @?= Just firstCreator,
+      -- The dispatch times a claimed row's deadline from the database's
+      -- clock, so the sim seam must answer with the simulated clock, not a
+      -- canned constant: advancing virtual time advances it.
+      testCase "databaseTime follows the simulated clock" $ do
+        (first, later) <- runMem (simClockTwin =<< newMemDB)
+        assertBool
+          ("expected the later reading to be later, got " <> show (first, later))
+          (later.databaseTimeEpochMs > first.databaseTimeEpochMs && later.databaseTimeReadAt > first.databaseTimeReadAt),
+      testCase "a queue claim flips an enqueued row and honors worker concurrency" $ do
         (first, second, row) <- runMem $ do
           mem <- newMemDB
           _ <- upsertQueue mem (newQueue "q") {newQueueWorkerConcurrency = Just 1} UpdateExisting
-          _ <- initWorkflow mem ((newWorkflow "wf-q") {newWorkflowQueueName = Just "q"}) Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-q") {newWorkflowQueueName = Just "q"}) Nothing
           queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "q"
-          first <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0
-          second <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0
+          first <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-first"
+          second <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-second"
           row <- orJustSim "the claimed row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-q")
           pure (first, second, row)
         first @?= [WorkflowId "wf-q"]
         second @?= []
-        row.workflowRecordStatus @?= Pending,
+        row.workflowRecordStatus @?= Pending
+        row.workflowRecordOwnerXid @?= Just "tok-first",
       testCase "a delayed row whose instant passed transitions to enqueued" $ do
         (before, moved, after) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-d") {newWorkflowQueueName = Just "q", newWorkflowDelay = Just (millisDuration 1)}) Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-d") {newWorkflowQueueName = Just "q", newWorkflowDelay = Just (millisDuration 1)}) Nothing
           _ <- setWorkflowDelay mem (WorkflowId "wf-d") (DelayUntil (Timestamp 0)) Nothing
           before <- orJustSim "the delayed row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-d")
           moved <- orFailSim =<< transitionDelayedWorkflows mem
@@ -395,8 +423,8 @@ memTests =
       testCase "the timeout sweep cancels expired rows and spares live ones" $ do
         (swept, ended, kept) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-expired") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Fresh Nothing
-          _ <- initWorkflow mem ((newWorkflow "wf-live") {newWorkflowDeadline = Just (timestampFromEpochMs 4102444800000)}) Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-expired") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-live") {newWorkflowDeadline = Just (timestampFromEpochMs 4102444800000)}) Nothing
           swept <- orFailSim =<< cancelTimedOutWorkflows mem 100
           ended <- orJustSim "the swept row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-expired")
           kept <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-live")
@@ -408,7 +436,7 @@ memTests =
       testCase "the timed-out cancel honors ownership" $ do
         (refused, held, taken, ended) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-owned") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-owned") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing
           refused <- orFailSim =<< cancelIfTimedOut mem (WorkflowId "wf-owned") (Just "someone-else")
           held <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-owned")
           taken <- orFailSim =<< cancelIfTimedOut mem (WorkflowId "wf-owned") held.workflowRecordOwnerXid
@@ -423,9 +451,9 @@ memTests =
       testCase "dead-letter parks only over-limit pending rows" $ do
         (parked, overRow, withinRow) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem (newWorkflow "wf-over") Fresh Nothing
-          _ <- initWorkflow mem (newWorkflow "wf-within") Fresh Nothing
-          _ <- initWorkflow mem (newWorkflow "wf-settled") Fresh Nothing
+          _ <- initWorkflow mem (newWorkflow "wf-over") Nothing
+          _ <- initWorkflow mem (newWorkflow "wf-within") Nothing
+          _ <- initWorkflow mem (newWorkflow "wf-settled") Nothing
           let attempts widText count = Map.adjust (\row -> row {workflowRecordRecoveryAttempts = count}) widText
           atomically $
             modifyTVar
@@ -445,7 +473,7 @@ memTests =
       testCase "recovery re-enqueues the named executor's pending rows" $ do
         (recovered, row) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-r") {newWorkflowExecutorId = Just "exec-1", newWorkflowApplicationVersion = Just "v1"}) Fresh Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-r") {newWorkflowExecutorId = Just "exec-1", newWorkflowApplicationVersion = Just "v1"}) Nothing
           recovered <- orFailSim =<< reenqueueForRecovery mem ["exec-1"] "v1" "recovery-q"
           row <- orJustSim "the recovered row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-r")
           pure (recovered, row)
@@ -469,7 +497,7 @@ memTests =
       testCase "a rewind clears the finished row's outcome with its steps" $ do
         (before, rewound, row, steps) <- runMem $ do
           mem <- newMemDB
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-rw") Fresh Nothing
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-rw") Nothing
           _ <- orFailSim =<< recordStep mem (WorkflowId "wf-rw") 0 "DBOS.step" (OutcomeOutput (Just "\"one\"")) Nothing Nothing
           _ <- orFailSim =<< recordWorkflowOutcome mem (WorkflowId "wf-rw") (OutcomeOutput (Just "\"done\""))
           started <- orJustSim "the finished row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-rw")
@@ -537,7 +565,7 @@ memTests =
       testCase "awaitFirstWorkflowId settles on a recorded outcome" $ do
         result <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem (newWorkflow "wf-a") Fresh Nothing
+          _ <- initWorkflow mem (newWorkflow "wf-a") Nothing
           _ <- recordWorkflowOutcome mem (WorkflowId "wf-a") (OutcomeOutput (Just "\"v\""))
           awaitFirstWorkflowId mem [WorkflowId "wf-a"] (secondsDuration 1)
         result @?= Right (WorkflowId "wf-a")

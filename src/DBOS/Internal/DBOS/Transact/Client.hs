@@ -420,9 +420,9 @@ clientEnqueueWorkflowInTx client workflowName operation callerWrites options inp
         case validateNewWorkflow new of
           Left err -> pure (Left (TransactError.fromSystemDB err))
           Right () -> do
-            ownerXid <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
+            creatorXid <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
             now <- timestampNow
-            composed <- withClientTransaction client operation (callerWrites >> Postgres.enqueueInTx new applicationName ownerXid now)
+            composed <- withClientTransaction client operation (callerWrites >> Postgres.enqueueInTx new applicationName creatorXid now)
             pure $ case composed of
               Left err -> Left err
               Right (Left sysErr) -> Left (TransactError.fromSystemDB sysErr)

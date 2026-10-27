@@ -38,6 +38,8 @@ import DBOS.Transact.DatasourceCases
     checkOutsideReexecutes,
     checkOwnershipMoved,
     checkPrecheckRetry,
+    checkReadOnlyCommitsUnrecorded,
+    checkReadOnlyReplayReruns,
     checkRegistryLifecycle,
     checkRetryThenSuccess,
     checkConnectionRetry,
@@ -55,6 +57,8 @@ import DBOS.Transact.DatasourceCases
     scenarioOutsideReexecutes,
     scenarioOwnershipMoved,
     scenarioPrecheckRetry,
+    scenarioReadOnlyCommitsUnrecorded,
+    scenarioReadOnlyReplayReruns,
     scenarioRegistryLifecycle,
     scenarioRetryThenSuccess,
     scenarioConnectionRetry,
@@ -101,8 +105,10 @@ tests :: TestTree
 tests =
   testGroup
     "Datasource (IOSim)"
-    [ testCase "a default config names nothing and defaults isolation to serializable" (either fail pure (checkDefaultConfig scenarioDefaultConfig)),
+    [ testCase "a default config is unnamed, serializable, and read-write" (either fail pure (checkDefaultConfig scenarioDefaultConfig)),
       simCase (pure simDsFixture) "a transaction commits once and replays without re-running" scenarioCommitReplay checkCommitReplay traceCommitReplay,
+      simCase (pure simDsFixture) "a read-only transaction commits without recording" scenarioReadOnlyCommitsUnrecorded checkReadOnlyCommitsUnrecorded traceReadOnlyCommitsUnrecorded,
+      simCase (pure simDsFixture) "a read-only replay re-runs the body" scenarioReadOnlyReplayReruns checkReadOnlyReplayReruns traceReadOnlyReplayReruns,
       simCase (pure simDsFixture) "a recorded failure decodes back to itself" scenarioErrorReplays checkErrorReplays traceErrorReplays,
       simCase (pure simDsFixture) "a body failure records, and replay returns it without re-running" scenarioBodyFailureRecorded checkBodyFailureRecorded traceBodyFailureRecorded,
       simCase (pure simDsFixture) "retriable failures are retried, then the body runs" scenarioRetryThenSuccess checkRetryThenSuccess traceRetryThenSuccess,
@@ -110,7 +116,7 @@ tests =
       simCase (pure simDsFixture) "a duplicate execution that won is adopted" scenarioConflictAdopts checkConflictAdopts traceConflictAdopts,
       simCase (pure simDsFixture) "a call through a captured parent is refused and records nothing" scenarioCaptureRefused checkCaptureRefused traceCaptureRefused,
       simCase (pure simDsFixture) "a nested step inside a transaction runs plainly and records once" scenarioNestedInTx checkNestedInTx traceNestedInTx,
-      testCase "beginSql names every isolation level" (either fail pure (checkBeginSql scenarioBeginSql)),
+      testCase "beginSql names every isolation level and access mode" (either fail pure (checkBeginSql scenarioBeginSql)),
       simCase (memDsFixture <$> newMemDB) "an ownership move stops the execution instead of adopting" (\fx -> scenarioOwnershipMoved fx "ds-own-sim") checkOwnershipMoved traceOwnershipMoved,
       simCase (pure simDsFixture) "a transient pre-check read is retried, then the transaction runs" scenarioPrecheckRetry checkPrecheckRetry tracePrecheckRetry,
       simCase (pure simDsFixture) "outside a workflow the body runs transactionally and checkpoints nothing" (\_ -> scenarioRunsOutside mkFakeDs) checkRunsOutside traceRunsOutside,
@@ -129,6 +135,22 @@ traceCommitReplay tr =
           TransactionOutputRecorded "ds-wf-1" "proto_step" 0,
           TransactionRunning "ds-wf-1" "proto_step" 0,
           TransactionReplaying "ds-wf-1" "proto_step" 0
+        ]
+
+-- | A read-only run announces its start and nothing else: no checkpoint
+-- exists to record or replay.
+traceReadOnlyCommitsUnrecorded :: SimTrace a -> IO ()
+traceReadOnlyCommitsUnrecorded tr =
+  (selectTraceEventsDynamic tr :: [TransactionEvent])
+    @?= [TransactionRunning "ds-wf-ro" "proto_readonly" 0]
+
+-- | Two starts, no recording, no app-level replay: the second run adopts
+-- at the workflow level, which selects no transaction events.
+traceReadOnlyReplayReruns :: SimTrace a -> IO ()
+traceReadOnlyReplayReruns tr =
+  (selectTraceEventsDynamic tr :: [TransactionEvent])
+    @?= [ TransactionRunning "ds-wf-ro-replay" "proto_readonly_replay" 0,
+          TransactionRunning "ds-wf-ro-replay" "proto_readonly_replay" 0
         ]
 
 traceErrorReplays :: SimTrace a -> IO ()

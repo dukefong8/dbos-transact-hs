@@ -61,6 +61,7 @@ import DBOS.Transact.WorkflowCases
     checkJoinHeldKey,
     checkEnqueuedChildReplays,
     checkDedupStartRecorded,
+    checkQueuedStartClaimedByNextPass,
     checkConflictStartRecorded,
     checkJoinTakesId,
     checkLiftChildError,
@@ -112,6 +113,7 @@ import DBOS.Transact.WorkflowCases
     scenarioJoinHeldKey,
     scenarioEnqueuedChildReplays,
     scenarioDedupStartRecorded,
+    scenarioQueuedStartClaimedByNextPass,
     scenarioConflictStartRecorded,
     scenarioJoinTakesId,
     scenarioLiftChildError,
@@ -196,6 +198,10 @@ tests =
       simCase simWfFixture "a child joining a held key is recorded as the workflow it joined" scenarioJoinHeldKey checkJoinHeldKey traceJoinHeldKey,
       simCase simWfFixture "an in-workflow enqueue is a recorded child start that replays" scenarioEnqueuedChildReplays checkEnqueuedChildReplays traceEnqueuedChildReplays,
       simCase simWfFixture "a refused child start replays after the key is freed" scenarioDedupStartRecorded checkDedupStartRecorded traceDedupStartRecorded,
+      -- Sim only: the window the case above races under the live supervisor,
+      -- made deterministic. A queued start is ENQUEUED until a dequeue pass
+      -- claims it, so a reader that runs after a tick sees PENDING.
+      simCase simWfFixture "a queued start is pending once the next pass claims it" scenarioQueuedStartClaimedByNextPass checkQueuedStartClaimedByNextPass traceQueuedStartClaimedByNextPass,
       simCase simWfFixture "a taken child id replays after the row is deleted" scenarioConflictStartRecorded checkConflictStartRecorded traceConflictStartRecorded,
       simCase simWfFixture "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
       simCase simWfFixture "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
@@ -416,6 +422,17 @@ traceDedupStartRecorded tr = do
           WorkflowForked "sim-dedup-error-parent-rerun-fork"
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The same hand-off the case above races, pinned deterministically: the
+-- claimed row's body blocks on its gate, so shutdown still has to cancel it
+-- — the execution is running the row, which is why a reader between the
+-- claim and that cancellation sees PENDING.
+traceQueuedStartClaimedByNextPass :: forall a. SimTrace a -> IO ()
+traceQueuedStartClaimedByNextPass tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowEnqueued "sim-claim-window" "claim-window-q-sim-claim-window"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app"]
 
 -- The squatter's row is deleted, then the single fork of the conflicting
 -- parent is announced; the replay returns the recorded error.

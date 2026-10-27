@@ -39,7 +39,11 @@ import DBOS.SystemDB.Types as Types
 -- carrier. The class is a backend seam whose handle travels by argument,
 -- not a monad transformer over the connection.
 class Monad m => SystemDB db m where
-  initWorkflow :: db -> NewWorkflow -> Submission -> Maybe InitWorkflowCaller -> m (Either Error WorkflowInitResult)
+  -- | The database's clock as of this call, paired with the moment the
+  -- answer arrived: what a wait for a deadline the database set is measured
+  -- from. Mirrors Rust @SystemDatabase::database_time@.
+  databaseTime :: db -> m (Either Error DatabaseTime)
+  initWorkflow :: db -> NewWorkflow -> Maybe InitWorkflowCaller -> m (Either Error WorkflowInitResult)
   getWorkflow :: db -> WorkflowId -> m (Either Error (Maybe WorkflowRecord))
   listWorkflows :: db -> WorkflowFilter -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowRecord])
   getWorkflowChildren :: db -> WorkflowId -> m (Either Error [WorkflowId])
@@ -90,9 +94,9 @@ class Monad m => SystemDB db m where
   getLatestApplicationVersion :: db -> Maybe Text -> m (Either Error (Maybe VersionInfo))
   updateApplicationVersionTimestamp :: db -> Text -> Timestamp -> Maybe Text -> m (Either Error ())
   upsertQueue :: db -> NewQueue -> OnExistingQueue -> m (Either Error Bool)
-  startQueuedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Text -> Int64 -> Int64 -> m (Either Error [WorkflowId])
+  startQueuedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Text -> Int64 -> Int64 -> Text -> m (Either Error [WorkflowId])
   getQueuePartitions :: db -> Text -> m (Either Error [Text])
-  startQueuedPartitionedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Int64 -> m (Either Error [WorkflowId])
+  startQueuedPartitionedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Int64 -> Text -> m (Either Error [WorkflowId])
   getQueue :: db -> Text -> m (Either Error (Maybe QueueRecord))
   listQueues :: db -> Applications -> m (Either Error [QueueRecord])
   updateQueue :: db -> Text -> QueueUpdate -> (QueueRecord -> QueueRecord -> Either Error ()) -> m (Either Error QueueRecord)

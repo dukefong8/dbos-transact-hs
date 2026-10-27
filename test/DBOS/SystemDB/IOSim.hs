@@ -45,7 +45,6 @@ import DBOS.SystemDB.Error (decodePortableError, encodePortableError)
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
-    claimsOwnership,
     DatabaseTime (..),
     databaseTimeRead,
     Debounce (..),
@@ -80,7 +79,6 @@ import DBOS.SystemDB
     AwaitedStream (..),
     StreamRead (..),
     StreamRecord (..),
-    Submission (..),
     SysRewindOptions (..),
     SystemDB (..),
     Timestamp,
@@ -185,7 +183,10 @@ data MockSystemDB = MockSystemDB
   deriving stock (Eq, Show)
 
 instance SystemDB MockSystemDB (IOSim s) where
-  initWorkflow _ new _ _ = do
+  databaseTime _ = do
+    clock <- databaseTimeRead (timestampToEpochMs mockTimestamp)
+    pure (Right clock)
+  initWorkflow _ new _ = do
     clock <- databaseTimeRead (timestampToEpochMs mockTimestamp)
     pure (Right ((mockInitResult new) {initResultClock = clock}))
   getWorkflow = \cases
@@ -241,9 +242,9 @@ instance SystemDB MockSystemDB (IOSim s) where
   getLatestApplicationVersion = \cases _ _ -> pure (Right (Just mockVersion))
   updateApplicationVersionTimestamp = \cases _ _ _ _ -> pure (Right ())
   upsertQueue = \cases _ _ _ -> pure (Right True)
-  startQueuedWorkflows = \cases _ _ _ _ _ _ _ -> pure (Right [mockQueuedId])
+  startQueuedWorkflows = \cases _ _ _ _ _ _ _ _ -> pure (Right [mockQueuedId])
   getQueuePartitions = \cases _ _ -> pure (Right [mockPartition])
-  startQueuedPartitionedWorkflows = \cases _ _ _ _ _ -> pure (Right [mockPartitionedId])
+  startQueuedPartitionedWorkflows = \cases _ _ _ _ _ _ -> pure (Right [mockPartitionedId])
   getQueue = \cases _ name -> pure (Right (Just (mockQueue name)))
   listQueues = \cases _ _ -> pure (Right [mockQueue mockQueueName])
   updateQueue = \cases _ name _ _ -> pure (Right (mockQueue name))
@@ -519,7 +520,7 @@ memDBOSOn mem tracer = do
 -- parent link rides the init caller, which is how a child start records
 -- its own start step in the same breath.
 memFreshRow :: NewWorkflow -> Maybe InitWorkflowCaller -> Text -> WorkflowRecord
-memFreshRow new caller owner =
+memFreshRow new caller creator =
   WorkflowRecord
     { workflowRecordId = WorkflowId new.newWorkflowId,
       workflowRecordStatus = initialStatus new,
@@ -541,7 +542,8 @@ memFreshRow new caller owner =
       workflowRecordForkedFrom = Nothing,
       workflowRecordParentWorkflowId = (.initCallerParentWorkflowId) <$> caller,
       workflowRecordWasForkedFrom = False,
-      workflowRecordOwnerXid = Just owner,
+      workflowRecordOwnerXid = if initialStatus new == Pending then Just creator else Nothing,
+      workflowRecordCreatorXid = Just creator,
       workflowRecordApplicationId = new.newWorkflowApplicationId,
       workflowRecordAuthenticatedUser = new.newWorkflowAuthenticatedUser,
       workflowRecordAuthenticatedRoles = new.newWorkflowAuthenticatedRoles,
@@ -578,22 +580,17 @@ memAwaited row = case row.workflowRecordStatus of
 -- | A retried request is idempotent: an existing id joins, so the same id
 -- initialized twice executes once. A held dedup key under a fresh id is
 -- the collision; the same id retrying its own key joins instead.
-memInitResult :: DatabaseTime -> Submission -> WorkflowRecord -> WorkflowInitResult
-memInitResult clock submission row =
-  let unowned = row.workflowRecordOwnerXid == Nothing
-      claiming = claimsOwnership submission
-      shouldExecute = not (not unowned && not claiming)
-      existingInput = if unowned && not claiming then Just row.workflowRecordInput else Nothing
-   in WorkflowInitResult
-        { initResultStatus = row.workflowRecordStatus,
-          initResultRecoveryAttempts = row.workflowRecordRecoveryAttempts,
-          initResultDeadline = row.workflowRecordDeadline,
-          initResultClock = clock,
-          initResultOwnerXid = row.workflowRecordOwnerXid,
-          initResultSerialization = row.workflowRecordSerialization,
-          initResultExistingInput = existingInput,
-          initResultShouldExecute = shouldExecute
-        }
+memInitResult :: DatabaseTime -> Text -> WorkflowRecord -> WorkflowInitResult
+memInitResult clock creator row =
+  WorkflowInitResult
+    { initResultStatus = row.workflowRecordStatus,
+      initResultRecoveryAttempts = row.workflowRecordRecoveryAttempts,
+      initResultDeadline = row.workflowRecordDeadline,
+      initResultClock = clock,
+      initResultCreatorXid = creator,
+      initResultSerialization = row.workflowRecordSerialization,
+      initResultShouldExecute = row.workflowRecordCreatorXid == Just creator
+    }
 
 -- | The timeout sweep's predicate, as the SQL spells it: unsettled, with a
 -- deadline the database's clock has passed. The sim's clock is the one its
@@ -620,17 +617,27 @@ memTimedOutRow now row =
     }
 
 instance SystemDB (MemSystemDB s) (IOSim s) where
-  initWorkflow db new submission caller = do
+  databaseTime db = do
+    -- The sim's clock, as every simulated write reads it: a test advances
+    -- time the way the database would.
+    now <- memDbNow db
+    clock <- databaseTimeRead (timestampToEpochMs now)
+    pure (Right clock)
+  initWorkflow db new caller = do
     -- The wake instant a delayed enqueue waits for, as the SQL init's
     -- @delay_until@: without it a DELAYED row would never come due and the
     -- transition would pass it by forever.
     now <- memDbNow db
+    -- One creator token per call, like the SQL init's per-attempt UUID:
+    -- a retry presents the same token only if the caller kept it, so a
+    -- match is this attempt's own insert.
+    creator <- atomically (simOwnerText db)
     outcome <- atomically $ do
       rows <- readTVar db.memRows
       case Map.lookup new.newWorkflowId rows of
         Just row -> case initConflict row of
           Just conflict -> pure (Left conflict)
-          Nothing -> pure (Right (row, False))
+          Nothing -> pure (Right row)
         Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
           (Just queue, Just key) -> do
             held <- readTVar db.memDedup
@@ -639,20 +646,18 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 pure (Left (QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queue, deduplicationId = key}))
               Nothing -> do
                 writeTVar db.memDedup (Map.insert (queue, key) new.newWorkflowId held)
-                inserted <- insertFresh rows now
-                pure (Right (inserted, True))
+                inserted <- insertFresh rows now creator
+                pure (Right inserted)
           _ -> do
-            inserted <- insertFresh rows now
-            pure (Right (inserted, True))
+            inserted <- insertFresh rows now creator
+            pure (Right inserted)
     clock <- databaseTimeRead (timestampToEpochMs now)
+    -- Should-execute compares the row's creator to this call's token, as
+    -- the SQL finish does: a fresh insert's stored creator always matches,
+    -- so no override is needed.
     pure $ case outcome of
       Left err -> Left err
-      -- A row this call inserted runs here: the SQL init reports
-      -- should_execute for a row whose owner is the caller, and a fresh
-      -- insert's owner always is. The join path answers from the row
-      -- instead ('memInitResult').
-      Right (row, True) -> Right ((memInitResult clock submission row) {initResultShouldExecute = True})
-      Right (row, False) -> Right (memInitResult clock submission row)
+      Right row -> Right (memInitResult clock creator row)
     where
       -- The sim's row carries no class/config names, so the identity
       -- conflict it can model is the function name: a start that names a
@@ -669,8 +674,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
         _ -> Nothing
       debugMaybe Nothing = "None"
       debugMaybe (Just value) = "Some(\"" <> value <> "\")"
-      insertFresh rows now = do
-        owner <- simOwnerText db
+      insertFresh rows now creator = do
         -- The SQL insert turns a PENDING row's budget into a deadline
         -- against the database's clock; a queued row keeps none until its
         -- claim. A recovered or resumed row keeps whatever it already had.
@@ -680,7 +684,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 | initialStatus new == Pending -> new.newWorkflowTimeout >>= addTimeout now
                 | otherwise -> Nothing
             row =
-              (memFreshRow new caller owner)
+              (memFreshRow new caller creator)
                 { workflowRecordDelayUntil = new.newWorkflowDelay >>= addTimeout now,
                   workflowRecordDeadline = deadlineAt
                 }
@@ -835,6 +839,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               ( WorkflowId wid : acc,
                 row
                   { workflowRecordStatus = Cancelled,
+                    workflowRecordOwnerXid = Nothing,
                     workflowRecordQueueName = Nothing,
                     workflowRecordDeduplicationId = Nothing,
                     workflowRecordStartedAt = Nothing,
@@ -862,6 +867,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                             workflowRecordQueueName = queue <|> Just internal,
                             workflowRecordRecoveryAttempts = 0,
                             workflowRecordDeadline = Nothing,
+                            workflowRecordOwnerXid = Nothing,
                             workflowRecordDeduplicationId = Nothing,
                             workflowRecordStartedAt = Nothing,
                             workflowRecordCompletedAt = Nothing
@@ -1256,7 +1262,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   -- limits are not modelled — Mem keeps no dequeue history), candidates
   -- in priority/created order, flipped to PENDING with the executor and
   -- version stamped, exactly the SQL claim's columns.
-  startQueuedWorkflows db queue executorId applicationVersion partitionKey localRunning partitionLocalRunning = do
+  startQueuedWorkflows db queue executorId applicationVersion partitionKey localRunning partitionLocalRunning ownerToken = do
     now <- memDbNow db
     atomically $ do
       rows <- readTVar db.memRows
@@ -1297,7 +1303,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                       Just key -> row.workflowRecordQueuePartitionKey == Just key
                 ]
               claimed = maybe candidates (\n -> take (fromIntegral n) candidates) budget'
-          writeTVar db.memRows (foldr (memClaimRow executorId applicationVersion now) rows claimed)
+          writeTVar db.memRows (foldr (memClaimRow executorId applicationVersion now ownerToken) rows claimed)
           pure (Right (map WorkflowId claimed))
   getQueuePartitions db queueName = do
     rows <- readTVarIO db.memRows
@@ -1306,7 +1312,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       ( Right (sort (Set.toList (Set.fromList [key | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordQueueName == Just queueName, row.workflowRecordStatus == Enqueued, Just key <- [row.workflowRecordQueuePartitionKey]])))
       )
   -- One head per partition with no pending work, in key order.
-  startQueuedPartitionedWorkflows db queue executorId applicationVersion maxTasks = do
+  startQueuedPartitionedWorkflows db queue executorId applicationVersion maxTasks ownerToken = do
     now <- memDbNow db
     atomically $ do
       rows <- readTVar db.memRows
@@ -1339,7 +1345,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                         ]
                     ]
               ]
-      writeTVar db.memRows (foldr (memClaimRow executorId applicationVersion now) rows heads)
+      writeTVar db.memRows (foldr (memClaimRow executorId applicationVersion now ownerToken) rows heads)
       pure (Right (map WorkflowId heads))
   getQueue db name = do
     queues <- readTVarIO db.memQueues
@@ -2085,14 +2091,15 @@ memApplyScheduleUpdate update record =
 -- | Flip one claimed row to PENDING with the executor and version stamped,
 -- bump its recovery attempt, and arm its deadline from its timeout the
 -- first time, as the SQL claim does.
-memClaimRow :: Text -> Text -> Timestamp -> Text -> Map Text WorkflowRecord -> Map Text WorkflowRecord
-memClaimRow executorId applicationVersion now widText = Map.adjust claim widText
+memClaimRow :: Text -> Text -> Timestamp -> Text -> Text -> Map Text WorkflowRecord -> Map Text WorkflowRecord
+memClaimRow executorId applicationVersion now ownerToken widText = Map.adjust claim widText
   where
     claim row =
       row
         { workflowRecordStatus = Pending,
           workflowRecordExecutorId = Just executorId,
           workflowRecordApplicationVersion = Just applicationVersion,
+          workflowRecordOwnerXid = Just ownerToken,
           workflowRecordStartedAt = Just now,
           workflowRecordUpdatedAt = now,
           workflowRecordRecoveryAttempts = row.workflowRecordRecoveryAttempts + 1,

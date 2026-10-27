@@ -73,7 +73,7 @@ dispatchTick = millisDuration 1000
 -- reserve-inventory guard leans on it, and the runner's retry loop is what
 -- absorbs the serialization failures it can produce.
 namedStep :: Text -> TransactionConfig
-namedStep name = TransactionConfig {txName = Just name, txIsolation = Just Serializable}
+namedStep name = TransactionConfig {txName = Just name, txIsolation = Just Serializable, txReadOnly = False}
 
 -- * Workflows
 

@@ -69,7 +69,7 @@ notifyDelay = 3000000
 -- | A transactional step named the way the oracle names its function, so the
 -- tracer and the checkpoint sequence read the same in every port.
 namedStep :: Text -> TransactionConfig
-namedStep name = TransactionConfig {txName = Just name, txIsolation = Just Serializable}
+namedStep name = TransactionConfig {txName = Just name, txIsolation = Just Serializable, txReadOnly = False}
 
 -- | An order as the workflows carry it: customer, item, quantity.
 type OrderInput = (Text, Text, Int)

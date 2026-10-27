@@ -19,7 +19,7 @@ import Data.Text qualified as Text
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowRecord (..), newWorkflow, portableJsonSerialization)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowRecord (..), newWorkflow, portableJsonSerialization)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
 import DBOS.SystemDB.Error qualified as SysErr
@@ -171,7 +171,7 @@ simOutboxFixture = do
                   newWorkflowApplicationName = Just "sim-app",
                   newWorkflowApplicationVersion = Just "0.0.0"
                 }
-        created <- runSystemDB (SomeSystemDB mem) (\db -> SystemDB.initWorkflow db row Fresh Nothing)
+        created <- runSystemDB (SomeSystemDB mem) (\db -> SystemDB.initWorkflow db row Nothing)
         case created of
           Left err -> throwIO (userError (show err))
           Right _ -> pure (WorkflowId widText)

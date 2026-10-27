@@ -111,7 +111,7 @@ mkDeadlinesFixture backend run = do
           dfPlantExpired = \wid -> do
             let WorkflowId widText = wid
                 expired = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowDeadline = Just (SystemDB.timestampFromEpochMs 1000)}
-            planted <- SystemDB.initWorkflow backend expired SystemDB.Fresh Nothing
+            planted <- SystemDB.initWorkflow backend expired Nothing
             case planted of
               Left err -> fail (show err)
               Right _ -> pure ()

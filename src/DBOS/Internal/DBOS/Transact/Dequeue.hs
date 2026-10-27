@@ -24,7 +24,6 @@ import DBOS.SystemDB.Types
     ResolvedLimits (..),
     Serialization (..),
     SerializedWorkflowValue (..),
-    Submission (..),
     WorkflowFilter (..),
     WorkflowId (..),
     WorkflowRecord (..),
@@ -34,19 +33,25 @@ import DBOS.SystemDB.Types
     queueResolvedLimits,
     resolvedIsPartitioned,
     secondsDuration,
+    timestampNow,
+    timestampToEpochMs,
+    databaseTimeRead,
     workflowStatusText)
-import DBOS.Transact.Connection (Connection (..), runSystemDB)
+import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Registry (Snapshot, workflowKeyFromRow)
+import DBOS.Transact.Registry (Snapshot, lookupSnapshotWorkflow, renderWorkflowKey, workflowKeyFromRow)
+import DBOS.SystemDB.Retry (SysdbEvent (..))
 import DBOS.Transact.Workflow
   ( Tasks,
+    clearCheckpointsFor,
+    deadlineOf,
+    executeRegisteredWorkflow,
     maxRecoveryAttempts,
-    spawnRegisteredWorkflowWithRow,
     spawnTracked,
-    workflowNewWorkflow,
+    tasksSpawner,
   )
 
 -- | Queue-worker events: the dequeue sweep, worker lifecycle, and
@@ -208,13 +213,15 @@ pollOnce conn identity workflows tasks running queue datasources = do
   if not (resolvedIsPartitioned limits)
     then do
       local <- runningCount running queueName
-      claimed <- startClaim Nothing local (0 :: Int)
+      -- One token per claim: every row this claim takes is owned by it.
+      ownerToken <- generatedWorkflowId conn
+      claimed <- startClaim ownerToken Nothing local (0 :: Int)
       case claimed of
         Left err -> do
           contended <- reportDequeueError conn.connTracer err
           pure (contended, [])
         Right ids -> do
-          dispatchClaimed conn identity workflows tasks running queue Nothing ids datasources
+          dispatchClaimed conn identity workflows tasks running queue Nothing ids ownerToken datasources
           pure (False, ids)
     else do
       alreadyRunning <- runningCount running queueName
@@ -224,6 +231,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
               && limits.resolvedConcurrency == Nothing
               && limits.resolvedRateLimit == Nothing
               && limits.resolvedPartitionRateLimit == Nothing -> do
+              ownerToken <- generatedWorkflowId conn
               swept <-
                 runSystemDB
                   conn.connSysdb
@@ -234,6 +242,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
                         identity.identityExecutorId
                         identity.identityAppVersion
                         (fromIntegral <$> workerBudget limits alreadyRunning)
+                        ownerToken
                   )
               case swept of
                 Left err -> do
@@ -243,7 +252,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
                   -- The sweep returns one head per partition and does not
                   -- say which; each claimed row carries its own key, so the
                   -- tally is credited from the rows themselves.
-                  dispatchClaimed conn identity workflows tasks running queue Nothing ids datasources
+                  dispatchClaimed conn identity workflows tasks running queue Nothing ids ownerToken datasources
                   pure (False, ids)
         _ -> do
           partitions <- runSystemDB conn.connSysdb (\db -> SystemDB.getQueuePartitions db queueName)
@@ -258,7 +267,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
   where
     limits = queueResolvedLimits queue
     queueName = queue.queueRecordName
-    startClaim partitionKey localRunning partitionLocalRunning =
+    startClaim ownerToken partitionKey localRunning partitionLocalRunning =
       runSystemDB
         conn.connSysdb
         ( \db ->
@@ -270,6 +279,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
               partitionKey
               (fromIntegral localRunning)
               (fromIntegral partitionLocalRunning)
+              ownerToken
         )
     walk [] _ _ = pure ()
     walk (partition : rest) alreadyRunning claimedHere =
@@ -277,6 +287,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
         Just 0 -> pure ()
         _ -> do
           local <- runningPartitionCount running queueName partition
+          ownerToken <- generatedWorkflowId conn
           claimed <-
             runSystemDB
               conn.connSysdb
@@ -289,6 +300,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
                     (Just partition)
                     (fromIntegral (alreadyRunning + claimedHere))
                     (fromIntegral local)
+                    ownerToken
               )
           case claimed of
             Left err
@@ -299,7 +311,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
                   _ <- reportDequeueError conn.connTracer err
                   walk rest alreadyRunning claimedHere
             Right ids -> do
-              dispatchClaimed conn identity workflows tasks running queue (Just partition) ids datasources
+              dispatchClaimed conn identity workflows tasks running queue (Just partition) ids ownerToken datasources
               walk rest alreadyRunning (claimedHere + length ids)
 
 -- | Turns a failed dequeue into the "was it contention" answer the caller
@@ -372,8 +384,8 @@ admission status recoveryAttempts
 -- if this one is still starting. Walked in claim order, not in the order
 -- the read came back, because claim order is what priority is for.
 dispatchClaimed :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-                => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> DataSourceRegistry m -> m ()
-dispatchClaimed conn identity workflows tasks running queue partition claimed datasources
+                => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> Text -> DataSourceRegistry m -> m ()
+dispatchClaimed conn identity workflows tasks running queue partition claimed ownerToken datasources
   | null claimed = pure ()
   | otherwise = do
       fetched <-
@@ -393,6 +405,21 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed da
         Right rows -> do
           when (length rows /= length claimed) $
             runTracer conn.connTracer (ClaimedWorkflowsMissing (length claimed) (length rows))
+          -- One reading of the database's clock for the batch, and only when
+          -- a row in it has a deadline to time: a batch that times nothing
+          -- needs no reading, and the host's is then good enough. Mirrors
+          -- @dequeue.rs@ @timing_clock@.
+          let hostClock = timestampNow >>= databaseTimeRead . timestampToEpochMs
+          clock <-
+            if any (\row -> isJust row.workflowRecordDeadline) rows
+              then do
+                reading <- runSystemDB conn.connSysdb SystemDB.databaseTime
+                case reading of
+                  Right clock' -> pure clock'
+                  Left dbError -> do
+                    runTracer conn.connTracer (SysdbClockUnreadable (renderError dbError))
+                    hostClock
+              else hostClock
           let byId = Map.fromList [(text, row) | row <- rows, let WorkflowId text = row.workflowRecordId]
           forM_ claimed $ \workflowId@(WorkflowId workflowText) -> case Map.lookup workflowText byId of
             Nothing -> pure ()
@@ -428,26 +455,32 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed da
                       releaseSlot slot
                       runTracer conn.connTracer (DequeuedRowSkipped workflowText)
                     Just name -> do
+                      -- Reconstruct the call the row describes and spawn it:
+                      -- the claim already read everything needed, so no
+                      -- init re-submits the row. The claim's token travels
+                      -- with the execution, which presents it on every
+                      -- write it makes. Mirrors @dequeue.rs@ @dispatch@.
                       let key = workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName
                           input = (\raw -> SerializedWorkflowValue raw (Serialization <$> row.workflowRecordSerialization)) <$> row.workflowRecordInput
-                          new = workflowNewWorkflow conn identity key workflowId input row.workflowRecordQueueName
-                      spawned <-
-                        spawnRegisteredWorkflowWithRow
-                          tasks
-                          (releaseSlot slot)
-                          Dequeue
-                          conn
-                          identity
-                          workflows
-                          key
-                          workflowId
-                          input
-                          new
-                          datasources
-                      case spawned of
-                        Left err ->
-                          runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError err))
-                        Right _ -> pure ()
+                      case lookupSnapshotWorkflow key workflows of
+                        Nothing -> do
+                          releaseSlot slot
+                          runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError (TransactError.NotRegistered (renderWorkflowKey key) :: TransactError.Error TransactError.EngineOnly)))
+                        Just workflow -> do
+                          gate <- newMVar False
+                          let releaseOnce = modifyMVar_ gate (\done -> if done then pure True else releaseSlot slot >> pure True)
+                          spawned <-
+                            spawnTracked
+                              tasks
+                              ( finally
+                                  (void (executeRegisteredWorkflow (tasksSpawner tasks (clearCheckpointsFor datasources)) conn identity workflowId workflow input (deadlineOf row.workflowRecordDeadline clock) (Just releaseOnce) ownerToken))
+                                  releaseOnce
+                              )
+                          case spawned of
+                            -- Refused by a closed registry: no task exists
+                            -- to run the release, so it runs here.
+                            Nothing -> releaseSlot slot >> pure ()
+                            Just _ -> pure ()
 
 -- | Rebuilds and publishes the set of queues this process runs workers
 -- for, returning their names. From the table, never from what this

@@ -31,7 +31,6 @@ import DBOS.SystemDB
     NewWorkflow (..),
     OnExistingQueue (..),
     QueueRecord,
-    Submission (..),
     WorkflowId (..),
     WorkflowRecord (..),
     getQueue,
@@ -144,7 +143,6 @@ stageQueuedRow mem widText application = do
             newWorkflowApplicationName = application
           }
       )
-      Fresh
       Nothing
   record <- getQueue mem queueName
   case record of
@@ -154,7 +152,7 @@ stageQueuedRow mem widText application = do
 -- | The claim a listener makes: the same engine call the supervisor's
 -- poll makes for one queue.
 claim :: MemSystemDB s -> QueueRecord -> Text -> IOSim s (Either Error [WorkflowId])
-claim mem record executor = startQueuedWorkflows mem record executor "v1" Nothing 0 0
+claim mem record executor = startQueuedWorkflows mem record executor "v1" Nothing 0 0 "tok-sim"
 
 rowExecutor :: MemSystemDB s -> Text -> IOSim s (Maybe Text)
 rowExecutor mem widText = do

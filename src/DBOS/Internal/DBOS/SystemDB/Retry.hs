@@ -41,6 +41,7 @@ data SysdbEvent
   | SysdbQueueMismatch { sysdbWorkflowId :: Text }
   | SysdbNotifierStopped
   | SysdbPushFailed { sysdbPushChannel :: Text, sysdbPushCount :: Int, sysdbPushDetail :: Text }
+  | SysdbClockUnreadable { sysdbDetail :: Text }
   deriving stock (Eq, Show)
 
 instance LogEvent SysdbEvent where
@@ -49,6 +50,7 @@ instance LogEvent SysdbEvent where
   eventSeverity SysdbQueueMismatch {}     = SeverityWarning
   eventSeverity SysdbNotifierStopped      = SeverityDebug
   eventSeverity SysdbPushFailed {}        = SeverityWarning
+  eventSeverity SysdbClockUnreadable {}   = SeverityWarning
   renderEvent (SysdbRetryAttempt operation attempt delayMs detail) =
     "system database operation failed; retrying operation="
       <> operation
@@ -69,6 +71,9 @@ instance LogEvent SysdbEvent where
       <> " count="
       <> showText count
       <> " error="
+      <> detail
+  renderEvent (SysdbClockUnreadable detail) =
+    "could not read the database's clock; the claimed deadlines are timed from this host's error="
       <> detail
 
 instance ToLogStr SysdbEvent where

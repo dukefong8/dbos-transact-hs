@@ -13,7 +13,7 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowId (..), millisDuration, newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), millisDuration, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB)
 import DBOS.Transact
@@ -82,7 +82,7 @@ simStepFixture = do
       { srfFreshWorkflowId = do
           n <- atomically (readTVar fresh >>= \k -> writeTVar fresh (k + 1) >> pure k)
           let widText = "sim-step-" <> Text.pack (show n)
-          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimStepRetryTest"}) Fresh Nothing
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimStepRetryTest"}) Nothing
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),

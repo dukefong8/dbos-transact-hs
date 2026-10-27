@@ -209,6 +209,69 @@ Ported in one slice (adopted an uncommitted #110 draft, then #109 on top):
   its trace silent. Gates: 10/10 live (standalone pattern run) + 10/10
   sim (watcher).
 
+### Read-only transactions (ADR-0021 deferred item, TS oracle, 2026-10-27)
+- `TransactionConfig` gains `txReadOnly :: Bool` (default `False`;
+  mirrors TS `{ isolationLevel, readOnly }`, the only oracle naming the
+  flag). `dsWithTransaction` takes the config; Postgres `BEGIN` emits
+  `READ ONLY`; the engine skips checkpoint writes and recorded
+  announcements for read-only attempts while the database refuses actual
+  writes. No app row ever exists, so every execution re-runs the body —
+  safe for reads, volatile reads are the caller's hazard (on the type).
+- `pendingTransaction` evaluated and left deferred: no oracle footprint
+  and no composition site (select arms are `PendingStep`s by construction;
+  no nesting support), so tracking would be speculative. ADR-0021 updated.
+- Gates: shared no-record + re-run-replay cases and pure `beginSql` table
+  green both stacks (watcher); live write-refusal twin green (standalone
+  pattern run).
+
+### Slice 4: owner tokens — init rewrite + dispatch bypass (Rust #117 pars 1–2)
+
+- `creator_xid` (migration 123 already applied; column present, nullable):
+  init mints one token per call, writes it always, writes it as `owner_xid`
+  only for `PENDING` inserts; conflict arm is a no-op returning the row
+  (no attempt/executor touch, no recovery bump — the claim counts, nowhere
+  else). `should_execute` compares stored creator to the call's token;
+  input written only then; `existing_input` goes.
+- `init_workflow` drops `Submission` (oracle deleted it); `WorkflowInitResult`
+  drops `initResultExistingInput`, gains `initResultCreatorXid` (renamed
+  from `initResultOwnerXid` — the execution token); `Submission` type goes
+  if unused; `claimsOwnership`/`initParamIncrement` pruned.
+- Claims take one caller-minted token per call into `owner_xid`
+  (`start_queued_workflows` family + partitioned); recovery re-enqueue and
+  cancel/resume/timeout writes clear `owner_xid` (audit current state).
+- Dispatch stops re-submitting through init: `dispatchClaimed` takes the
+  claim token, runs from the claimed row directly (admission already
+  decides), passes the token to the execution; `spawnRegisteredWorkflowWithRow`
+  deleted (was single-called). Required together — creator-semantics init
+  would refuse every claimed row.
+- Floor 121 → 123 (engine reads/writes `creator_xid` now).
+- Gates: creator live tests + mem twin green; claim-token live + mem
+  tests green; cancel/resume clearing tests green; floor probe green;
+  Postgres group 171/171 + Queue group 40/40 with the bypass live
+  (standalone pattern runs); full suite 867/867 (18s, 160MB).
+- Flake (root-caused 2026-10-27): `a refused child start replays after the
+  key is freed` failed once full-suite (re-run child read as PENDING). The
+  live case starts a queued child during a fork's body and then reads the
+  row, so a supervisor tick landing in between claims it — the claim, not
+  the start, decides the status a reader sees. Now pinned deterministically
+  by a sim-only case ("a queued start is pending once the next pass claims
+  it"): the queued start reads ENQUEUED, one driven dequeue pass claims it,
+  and the next read is PENDING with the body still blocked at shutdown.
+  The live case keeps its ENQUEUED assertion; its remaining exposure is the
+  same one-second tick, not a product race.
+- Review fix (2026-10-27): the dispatch bypass had dropped the database
+  clock and timed every claimed deadline from the host's, a regression
+  against the database-clock deadline slices. `SystemDB` gains
+  `databaseTime` (oracle `database_time`), read **once per batch and only
+  when some claimed row has a deadline**; a failed read warns
+  (`SysdbClockUnreadable`) and falls back to the host's, as
+  `dequeue.rs` `timing_clock` does. Twins: live "databaseTime reads the
+  database's clock" + sim "databaseTime follows the simulated clock".
+- Review fix 2 (2026-10-27): three comments still spoke the deleted `Submission` vocabulary (`Backend.hs` init-params header, `Statements.hs` input-upsert guard, `Workflow.hs` enqueue header). Reworded to current concepts (caller's status decisions / attempt / claimed row); the `Types.hs` deletion note stays as the record.
+- Slice 5 (separate): write fencing (`WorkflowOwner`, `check_owner_on`,
+  `WorkflowConflict`, per-domain, `StepNondeterminism`, outcome token).
+  Later: #115 self-target, #127 receivers, #113 idle timeout.
+
 ### Child-start replay + fork replacement (Rust #108 `2540e18`, #107 `547eb9f`, 2026-10-20)
 
 Ported in one slice:
@@ -780,7 +843,9 @@ recorded follow-ups were stale and are corrected in place; one stands:
 - ADR-0021's deferred list named `deleteCheckpoints` for rewind/completion — it
   landed (`Datasource.hs:159`; `Datasource/Postgres.hs:205-211`; rewind
   `Instance.hs:408`; completion `Workflow.hs:249-250,282,288`). Still deferred:
-  `readOnly` fast-path, `pendingTransaction`. ADR-0021 line 52 corrected.
+  `readOnly` fast-path, `pendingTransaction` (re-checked 2026-10-27: the
+  widget track composed checkout/dispatch live+sim without needing either;
+  ADR trigger unfired). ADR-0021 line 52 corrected.
 - Completion clearing covers the child workflow and the fire-and-forget start
   too: the clearance rides the task spawner (`Workflow.hs:121,352,670`; a child
   runs under its parent's spawner, `:818-822`), while kills and control ends
@@ -793,7 +858,9 @@ recorded follow-ups were stale and are corrected in place; one stands:
 - Still open by design (accepted limitation, R1): the captured-instance escape.
   A step body holding a captured `DBOS`/`Executor`/`Client` can start/enqueue
   with no `insideAStep` guard (`Instance.hs:252-255,266-279`,
-  `Client.hs:311-373`).
+  `Client.hs:311-373`). Re-checked 2026-10-27: no step-context threading
+  landed since; closing it still needs the phantom-brand direction, so it
+  stays an accepted limitation, not a blocker.
 
 ## Debouncer + changelog deferrals, re-checked (2026-10-17)
 
@@ -1020,18 +1087,22 @@ the last module flips.
       live+canned case (`failingPgCheckoutSteps` refuses the paid mark)
       asserts no `order_id`, order `(1,0,3)`, inventory `4`, PENDING row
       with no dispatch child. Gates: full suite 651/651, Widget pair 5/7.
-- [ ] D3 follow-up domains after the pilot proves the pattern (intentionally
-      open: next-domain work, not this epic's gate).
+- [x] D3 follow-up domains — RETIRED 2026-10-27: the pilot proved the
+      pattern and no follow-up domain requested it; keeping an open box for
+      hypothetical next-domain work added review noise. The pattern lives in
+      `docs/widget-step-tables.md` and `WidgetCases.hs` if a domain ever
+      needs it.
 
 ## Standing gates (every slice)
 
 1. `make db-migrate` first (idempotent, verify ceiling).
-2. Watcher: exactly one eval pair per edit; read `ghcid.txt` after reload.
-3. `cabal test` only with the watcher idle (shared-DB `40P01` otherwise).
+2. Watcher: sim-only eval; read `ghcid.txt` after reload.
+3. Full suite via the standalone binary, freely alongside the watcher (the
+   sim eval holds no fixture rows).
 4. psql mirror against `$DBOS_DATABASE_URL` (NOT the default `dbos` DB
    unless the env says so).
 5. Read-only Rust oracle spot-checks (`~/dev/dbos-transact-rust`).
-6. One commit per slice with gate numbers in the message.
+6. Slices land on `/review`, possibly batched, with gate numbers in the message.
 
 ## Probe index (reference only, never merge)
 

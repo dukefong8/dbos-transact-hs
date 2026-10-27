@@ -74,7 +74,7 @@ simDeadlinesFixtureSkewed skewMs = do
         dfPlantExpired = \wid -> do
           let WorkflowId widText = wid
               expired = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowDeadline = Just (SystemDB.timestampFromEpochMs 1000)}
-          planted <- SystemDB.initWorkflow mem expired SystemDB.Fresh Nothing
+          planted <- SystemDB.initWorkflow mem expired Nothing
           case planted of
             Left err -> error (show err)
             Right _ -> pure ()

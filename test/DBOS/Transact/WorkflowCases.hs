@@ -61,6 +61,7 @@ module DBOS.Transact.WorkflowCases
     scenarioEnqueuedChildReplays,
     DedupStartOutcome (..),
     scenarioDedupStartRecorded,
+    scenarioQueuedStartClaimedByNextPass,
     ConflictStartOutcome (..),
     scenarioConflictStartRecorded,
     waitForRowShared,
@@ -109,6 +110,7 @@ module DBOS.Transact.WorkflowCases
     checkJoinHeldKey,
     checkEnqueuedChildReplays,
     checkDedupStartRecorded,
+    checkQueuedStartClaimedByNextPass,
     checkConflictStartRecorded,
     TaskCase,
     taskAbortAllWaits,
@@ -130,7 +132,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.SystemDB (AwaitedOutcome (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), Submission (..), WorkflowId (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
+import DBOS.SystemDB (AwaitedOutcome (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), WorkflowId (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SysErr
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
@@ -1730,7 +1732,7 @@ scenarioScopedSelect fx = do
     let WorkflowId widText = wid
     created <-
       runSystemDB fx.wfSystemDB $ \db ->
-        SystemDB.initWorkflow db ((newWorkflow widText) {newWorkflowName = Just "L2ScopedSelect"}) Fresh Nothing
+        SystemDB.initWorkflow db ((newWorkflow widText) {newWorkflowName = Just "L2ScopedSelect"}) Nothing
     case created of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -2219,6 +2221,56 @@ data DedupStartOutcome = DedupStartOutcome
     dedupReplayChild :: Maybe WorkflowRecord,
     dedupRerunChild  :: Maybe WorkflowRecord
   }
+
+-- | The window a live queue assertion races, made deterministic: a queued
+-- start commits its row @ENQUEUED@, and the next dequeue pass claims it to
+-- @PENDING@. Nothing in between is guaranteed — a supervisor tick landing
+-- after the start and before the read is the same claim.
+--
+-- This is the mechanism behind the once-seen failure of
+-- "a refused child start replays after the key is freed": that case starts a
+-- queued child during a fork's body and then reads the row, so under the
+-- live supervisor the row can already be @PENDING@. The body here blocks on
+-- a gate it never opens before the assertion, so the claimed status is
+-- @PENDING@ on every run rather than @SUCCESS@ or @PENDING@ by luck.
+scenarioQueuedStartClaimedByNextPass
+  :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+  => WfFixture m -> m (Maybe WorkflowStatus, Maybe WorkflowStatus)
+scenarioQueuedStartClaimedByNextPass fx =
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    wid <- fx.wfFreshId "claim-window"
+    let WorkflowId text = wid
+        queueName = "claim-window-q-" <> text
+        key = newWorkflowKey "claim-window"
+        body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        body () _ = do
+          gate <- newEmptyMVar
+          takeMVar gate >> pure (Right 1)
+    ref <- registerWorkflowRef dbos key body >>= either (throwIO . userError . show) pure
+    let QueueName internal = internalQueueName
+    exec <- fx.wfLaunchWithQueues (Just [queueName, internal]) dbos
+    _ <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate >>= either (throwIO . userError . show) pure
+    (_started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
+      startWorkflow
+        exec
+        ref
+        (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just (enqueueNew queueName)})
+        Nothing
+    _ <- case _started of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    before <- fmap (.workflowRecordStatus) <$> fx.wfReadRow wid
+    _ <- dequeueWorkflows dbos >>= either (throwIO . userError . show) pure
+    after <- fmap (.workflowRecordStatus) <$> fx.wfReadRow wid
+    _ <- deleteQueue dbos queueName >>= either (throwIO . userError . show) pure
+    pure (before, after)
+
+-- | The row is @ENQUEUED@ until the pass claims it, and @PENDING@ after:
+-- the claim, not the start, is what makes the status a reader sees.
+checkQueuedStartClaimedByNextPass :: (Maybe WorkflowStatus, Maybe WorkflowStatus) -> Either String ()
+checkQueuedStartClaimedByNextPass (before, after) = do
+  unless (before == Just Enqueued) $ Left ("expected the start to leave the row enqueued, got: " <> show before)
+  unless (after == Just Pending) $ Left ("expected the next pass to claim the row, got: " <> show after)
 
 -- | A deduplicated child start's refusal is recorded at the parent's step
 -- and a replay returns it after the key is freed: the parent handles the

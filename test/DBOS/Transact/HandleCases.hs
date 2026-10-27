@@ -30,7 +30,7 @@ module DBOS.Transact.HandleCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), SerializedWorkflowValue (..), Submission (..), WorkflowId (..), WorkflowStatus (..), getResultStepName, initWorkflow, listSteps, newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowStatus (..), getResultStepName, initWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
@@ -110,7 +110,7 @@ mkHandleFixture config identity connApp nameScheme genId genEntropy sysdb tracer
           let WorkflowId widText = wid
               row = (newWorkflow widText) {newWorkflowName = Just "L2HandleAwaiter"}
            in do
-                created <- runSystemDB sysdb (\db -> initWorkflow db row Fresh Nothing)
+                created <- runSystemDB sysdb (\db -> initWorkflow db row Nothing)
                 case created of
                   Left err -> throwIO (userError (show err))
                   Right _ -> pure (),

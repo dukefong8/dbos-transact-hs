@@ -72,6 +72,8 @@ import DBOS.Transact.DatasourceCases
     checkOutsideReexecutes,
     checkOwnershipMoved,
     checkPrecheckRetry,
+    checkReadOnlyCommitsUnrecorded,
+    checkReadOnlyReplayReruns,
     checkRegistryLifecycle,
     checkRetryThenSuccess,
     checkConnectionRetry,
@@ -90,6 +92,8 @@ import DBOS.Transact.DatasourceCases
     scenarioOutsideReexecutes,
     scenarioOwnershipMoved,
     scenarioPrecheckRetry,
+    scenarioReadOnlyCommitsUnrecorded,
+    scenarioReadOnlyReplayReruns,
     scenarioRegistryLifecycle,
     scenarioRetryThenSuccess,
     scenarioConnectionRetry,
@@ -193,7 +197,7 @@ countProbe app table = do
 runProbeTx :: DataSource IO -> Maybe IsolationLevel -> (Tx IO -> IO ()) -> IO (Either BackendError ())
 runProbeTx ds iso body =
   let DataSource {dsWithTransaction = withTx} = ds
-   in withTx iso body
+   in withTx transactionConfigDefault {txIsolation = iso} body
 
 -- | A probe pool over a scratch schema this case owns, with the checkpoint
 -- table the live delete path writes to. The suite's own schema never has one
@@ -218,8 +222,10 @@ tests =
         mkLiveFixture backend = pure (DsFixture (dsRunOver backend) mkFakeDs)
      in testGroup
           "Datasource"
-          [ testCase "a default config names nothing and defaults isolation to serializable" (either fail pure (checkDefaultConfig scenarioDefaultConfig)),
+          [ testCase "a default config is unnamed, serializable, and read-write" (either fail pure (checkDefaultConfig scenarioDefaultConfig)),
             leaf "a transaction commits once and replays without re-running" scenarioCommitReplay checkCommitReplay,
+            leaf "a read-only transaction commits without recording" scenarioReadOnlyCommitsUnrecorded checkReadOnlyCommitsUnrecorded,
+            leaf "a read-only replay re-runs the body" scenarioReadOnlyReplayReruns checkReadOnlyReplayReruns,
             leaf "a recorded failure decodes back to itself" scenarioErrorReplays checkErrorReplays,
             leaf "a body failure records, and replay returns it without re-running" scenarioBodyFailureRecorded checkBodyFailureRecorded,
             leaf "retriable failures are retried, then the body runs" scenarioRetryThenSuccess checkRetryThenSuccess,
@@ -227,7 +233,7 @@ tests =
             leaf "a duplicate execution that won is adopted" scenarioConflictAdopts checkConflictAdopts,
             leaf "a call through a captured parent is refused and records nothing" scenarioCaptureRefused checkCaptureRefused,
             leaf "a nested step inside a transaction runs plainly and records once" scenarioNestedInTx checkNestedInTx,
-            testCase "beginSql names every isolation level" (either fail pure (checkBeginSql scenarioBeginSql)),
+            testCase "beginSql names every isolation level and access mode" (either fail pure (checkBeginSql scenarioBeginSql)),
             -- IO only: needs a live pool; the sim has no SQL layer. No
             -- migration ever creates the table, so absence is the assertion.
             testCase "verify refuses a database without the checkpoint table" $ do
@@ -266,6 +272,27 @@ tests =
                     Right _ -> assertFailure "expected the body failure to escape"
                   count <- countProbe app table
                   count @?= 0,
+            -- IO only: the read-only mode is database enforcement — the
+            -- sim and fakes have no SQL layer to refuse the write. The
+            -- read-write twin commits the identical body, so a Left here
+            -- proves the flag reached BEGIN, not just that writes fail.
+            testCase "a write inside a read-only transaction fails" $ do
+              withProbeApp $ \app -> do
+                withProbeTable app $ \table -> do
+                  let ds = toDataSource app
+                      roCfg = TransactionConfig {txName = Just "probe-readonly", txIsolation = Nothing, txReadOnly = True}
+                      rwCfg = TransactionConfig {txName = Just "probe-readwrite", txIsolation = Nothing, txReadOnly = False}
+                      insert wid_ = Statement.preparable ("INSERT INTO " <> table <> " (wid, bal) VALUES ('" <> wid_ <> "', 1)") Encoders.noParams Decoders.noResult
+                  refused <- runTxOutside ds roCfg $ \(Tx run) -> run (insert "ro") ()
+                  case refused of
+                    Left _ -> pure ()
+                    Right _ -> assertFailure "expected the read-only write to be refused"
+                  admitted <- runTxOutside ds rwCfg $ \(Tx run) -> run (insert "rw") ()
+                  case admitted of
+                    Left err -> assertFailure ("expected the read-write twin to commit, got: " <> show err)
+                    Right () -> pure ()
+                  count <- countProbe app table
+                  count @?= 1,
             -- IO only: needs a live pool with two connections (the inner
             -- transaction holds its own while the outer stays open) and
             -- scratch DDL; the sim/fake has no SQL layer. The inner commit
@@ -276,7 +303,7 @@ tests =
               withProbeApp $ \app -> do
                 withProbeTable app $ \table -> do
                   let ds = toDataSource app
-                      cfg name = TransactionConfig {txName = Just name, txIsolation = Nothing}
+                      cfg name = TransactionConfig {txName = Just name, txIsolation = Nothing, txReadOnly = False}
                       insert wid_ = Statement.preparable ("INSERT INTO " <> table <> " (wid, bal) VALUES ('" <> wid_ <> "', 1)") Encoders.noParams Decoders.noResult
                       countWid wid_ = do
                         result <- runAppSession app (Session.statement () (Statement.preparable ("SELECT COUNT(*) FROM " <> table <> " WHERE wid = '" <> wid_ <> "'") Encoders.noParams (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8)))))
@@ -305,7 +332,7 @@ tests =
                 found @?= Right "serializable",
             testCase "an explicit isolation reaches the database" $ do
               withProbeApp $ \app -> do
-                found <- runTxOutside (toDataSource app) (TransactionConfig {txName = Just "probe-isolation", txIsolation = Just ReadCommitted}) $ \(Tx run) ->
+                found <- runTxOutside (toDataSource app) (TransactionConfig {txName = Just "probe-isolation", txIsolation = Just ReadCommitted, txReadOnly = False}) $ \(Tx run) ->
                   run (Statement.preparable "SHOW transaction_isolation" Encoders.noParams (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))) ()
                 found @?= Right "read committed",
             leaf "an ownership move stops the execution instead of adopting" (\fx -> (("ds-own-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId >>= scenarioOwnershipMoved fx) checkOwnershipMoved,
@@ -340,8 +367,8 @@ tests =
               wfId <- (("ds-live-name-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
               withProbeCheckpointApp $ \app -> do
                 let ds = toDataSource app
-                    first = TransactionConfig {txName = Just "first_step", txIsolation = Just ReadCommitted}
-                    second = TransactionConfig {txName = Just "second_step", txIsolation = Just ReadCommitted}
+                    first = TransactionConfig {txName = Just "first_step", txIsolation = Just ReadCommitted, txReadOnly = False}
+                    second = TransactionConfig {txName = Just "second_step", txIsolation = Just ReadCommitted, txReadOnly = False}
                 written <- dsRunOver backend wfId $ \wctx ->
                   runTxStep ds first wctx (\_ _ -> pure (Right ("v" :: Text))) :: IO (Either (Error EngineOnly) Text)
                 written @?= Right "v"

@@ -87,6 +87,7 @@ import DBOS.Transact
   StepCtx,
   Topic (..),
   TransactionConfig (..),
+  transactionConfigDefault,
   Tx,
   WorkflowCtx,
   WorkflowId (..),
@@ -135,7 +136,7 @@ data DispatchSteps exec m = DispatchSteps
 -- default: the reserve guard leans on it, and the runner's retry loop absorbs
 -- the serialization failures it can produce.
 namedStep :: Text -> TransactionConfig
-namedStep name = TransactionConfig {txName = Just name, txIsolation = Just Serializable}
+namedStep name = TransactionConfig {txName = Just name, txIsolation = Just Serializable, txReadOnly = False}
 
 -- * Fixture and observation
 
@@ -424,7 +425,7 @@ readTableState wf = do
 withTx :: WidgetFixture m -> (Tx m -> m a) -> m (Either BackendError a)
 withTx wf act = do
   let DataSource {dsWithTransaction = runTx} = wf.wfDataSource
-  runTx Nothing act
+  runTx transactionConfigDefault {txIsolation = Nothing} act
 
 txOp :: WidgetCase m => WidgetFixture m -> (Tx m -> m a) -> m a
 txOp wf act = withTx wf act >>= either (throwIO . userError . show) pure
@@ -611,8 +612,8 @@ loggedDataSource commitLog source =
 lostAckOnce :: MonadSTM m => StrictTVar m Int -> DataSource m -> DataSource m
 lostAckOnce armed ds =
   ds
-    { dsWithTransaction = \isolation action -> do
-        outcome <- runReal isolation action
+    { dsWithTransaction = \config action -> do
+        outcome <- runReal config action
         case outcome of
           Left err -> pure (Left err)
           Right _ -> do

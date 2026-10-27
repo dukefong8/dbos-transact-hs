@@ -29,7 +29,6 @@ import DBOS.SystemDB
     QueueName (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
-    Submission (..),
     WorkflowFilter (..),
     WorkflowId (..),
     WorkflowRecord (..),
@@ -724,7 +723,7 @@ tests =
         fresh <- freshSuffix
         let workflowText = "hs-l2-mgmt-refusal-" <> fresh
             initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2MgmtRefusal"}
-        created <- SystemDB.initWorkflow backend initialWorkflow Fresh Nothing
+        created <- SystemDB.initWorkflow backend initialWorkflow Nothing
         case created of
           Left err -> fail (show err)
           Right _ -> pure ()
@@ -756,7 +755,7 @@ tests =
         fresh <- freshSuffix
         let workflowText = "hs-l2-mgmt-empty-" <> fresh
             initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2MgmtEmpty"}
-        created <- SystemDB.initWorkflow backend initialWorkflow Fresh Nothing
+        created <- SystemDB.initWorkflow backend initialWorkflow Nothing
         case created of
           Left err -> fail (show err)
           Right _ -> pure ()

@@ -91,7 +91,6 @@ module DBOS.SystemDB.Postgres.Statements
     reenqueueForRecoverySession,
     InitWorkflowParams (..),
     initWorkflowInputStatement,
-    initWorkflowStoredInputStatement,
     initWorkflowStatement,
     descendantsSession,
     QueueRowRaw (..),
@@ -200,6 +199,7 @@ data WorkflowRowRaw = WorkflowRowRaw
     parent_workflow_id         :: Maybe Text,
     was_forked_from            :: Maybe Bool,
     owner_xid                  :: Maybe Text,
+    creator_xid                :: Maybe Text,
     application_id             :: Maybe Text,
     authenticated_user         :: Maybe Text,
     authenticated_roles        :: Maybe Text,
@@ -267,7 +267,7 @@ workflowColumns =
   "workflow_uuid, status, name, class_name, config_name, \
   \serialization, executor_id, application_version, recovery_attempts, \
   \queue_name, created_at, updated_at, started_at_epoch_ms, completed_at, \
-  \forked_from, parent_workflow_id, was_forked_from, owner_xid, \
+  \forked_from, parent_workflow_id, was_forked_from, owner_xid, creator_xid, \
   \application_id, authenticated_user, authenticated_roles, assumed_role, \
   \request, deduplication_id, priority, queue_partition_key, rate_limited, \
   \schedule_name, workflow_timeout_ms, workflow_deadline_epoch_ms, \
@@ -296,6 +296,7 @@ workflowRowDecoder =
     <*> Decoders.column (Decoders.nullable Decoders.text)
     <*> Decoders.column (Decoders.nullable Decoders.text)
     <*> Decoders.column (Decoders.nullable Decoders.bool)
+    <*> Decoders.column (Decoders.nullable Decoders.text)
     <*> Decoders.column (Decoders.nullable Decoders.text)
     <*> Decoders.column (Decoders.nullable Decoders.text)
     <*> Decoders.column (Decoders.nullable Decoders.text)
@@ -580,20 +581,18 @@ data InitWorkflowParams = InitWorkflowParams
     initParamTimeoutMs          :: Maybe Int64,
     initParamDeadline           :: Maybe Int64,
     initParamParentWorkflowId   :: Maybe Text,
-    initParamOwnerXid           :: Text,
+    initParamCreatorXid         :: Text,
     initParamSerialization      :: Maybe Text,
     initParamAttributes         :: Maybe Text,
     initParamScheduleName       :: Maybe Text,
     initParamDebounceDeadline   :: Maybe Int64,
     initParamIsDebounced        :: Bool,
-    initParamApplicationName    :: Maybe Text,
-    initParamIncrement          :: Int64,
-    initParamClaiming           :: Bool
+    initParamApplicationName    :: Maybe Text
   }
   deriving stock (Eq, Show)
 
 -- | The columns @init_workflow@ reads back: enough to decide whether this
--- caller may run the workflow, and what the row already holds.
+-- caller created the row.
 type WorkflowInitRaw =
   SqlRow
     '[ '("recovery_attempts", Maybe Int64),
@@ -603,16 +602,19 @@ type WorkflowInitRaw =
        '("config_name", Maybe Text),
        '("queue_name", Maybe Text),
        '("workflow_deadline_epoch_ms", Maybe Int64),
-       '("owner_xid", Maybe Text),
+       '("creator_xid", Maybe Text),
        '("serialization", Maybe Text),
        '("db_now", Maybe Int64)
      ]
 
--- | Records a workflow, reconciling with any row already under that id. The
--- @ON CONFLICT@ arm counts recovery attempts only for rows that are not
--- merely queued, and re-stamps the executor only when the row is unowned,
--- this attempt's own, or the submission may claim — so a duplicate fresh
--- submission never takes another executor's row. Mirrors @init_workflow@.
+-- | Records a workflow, reconciling with any row already under that id.
+-- Two tokens, two roles: @creator_xid@ names the attempt that inserted the
+-- row and never changes — how a start that finds the row tells its own
+-- retried insert from another caller's; @owner_xid@ names the execution
+-- that owns the workflow now (this attempt, for a row it inserts @PENDING@
+-- and so runs at once, nobody for a queued or delayed one). The conflict
+-- arm changes nothing: it exists so @RETURNING@ reports the row that was
+-- already there. Mirrors @init_workflow@.
 -- | The statement behind the init transaction, exposed so the atomic child
 -- start runs it on its own transaction.
 initWorkflowStatement :: InitWorkflowParams -> Statement.Statement () WorkflowInitRaw
@@ -626,7 +628,7 @@ initWorkflowStatement params =
        created_at, updated_at, recovery_attempts,
        workflow_timeout_ms, workflow_deadline_epoch_ms,
        parent_workflow_id, owner_xid, serialization, attributes, schedule_name,
-       debounce_deadline_epoch_ms, is_debounced, application_name)
+       debounce_deadline_epoch_ms, is_debounced, application_name, creator_xid)
     values
       (${initParamWorkflowId}, ${initParamStatus}, ${initParamName}, ${initParamClassName}, ${initParamConfigName},
        ${initParamQueueName}, ${initParamDeduplicationId}, ${initParamPriority}, ${initParamQueuePartitionKey}, ${initParamDelayUntil},
@@ -637,26 +639,12 @@ initWorkflowStatement params =
        coalesce(${initParamDeadline}, case when ${initParamStatus} = 'PENDING'
            then (extract(epoch from now()) * 1000)::bigint + ${initParamTimeoutMs}
          end),
-       ${initParamParentWorkflowId}, ${initParamOwnerXid}, ${initParamSerialization}, ${initParamAttributes}::text::jsonb, ${initParamScheduleName},
-       ${initParamDebounceDeadline}, ${initParamIsDebounced}, ${initParamApplicationName})
+       ${initParamParentWorkflowId}, case when ${initParamStatus} = 'PENDING' then ${initParamCreatorXid} end, ${initParamSerialization}, ${initParamAttributes}::text::jsonb, ${initParamScheduleName},
+       ${initParamDebounceDeadline}, ${initParamIsDebounced}, ${initParamApplicationName}, ${initParamCreatorXid})
     on conflict (workflow_uuid) do update set
-      recovery_attempts = case
-          when dbos.workflow_status.status != 'ENQUEUED' and dbos.workflow_status.status != 'DELAYED'
-          then dbos.workflow_status.recovery_attempts + ${initParamIncrement}
-          else dbos.workflow_status.recovery_attempts
-        end,
-      updated_at = (extract(epoch from now()) * 1000)::bigint,
-      executor_id = case
-          when excluded.status = 'ENQUEUED' or excluded.status = 'DELAYED'
-          then dbos.workflow_status.executor_id
-          when dbos.workflow_status.owner_xid is null
-            or dbos.workflow_status.owner_xid = excluded.owner_xid
-            or ${initParamClaiming}
-          then excluded.executor_id
-          else dbos.workflow_status.executor_id
-        end
+      creator_xid = dbos.workflow_status.creator_xid
     returning recovery_attempts, status, name, class_name::text, config_name::text, queue_name,
-      workflow_deadline_epoch_ms, owner_xid, serialization,
+      workflow_deadline_epoch_ms, creator_xid, serialization,
       (extract(epoch from clock_timestamp()) * 1000)::bigint as db_now
   |]
   where
@@ -664,7 +652,7 @@ initWorkflowStatement params =
 
 -- | Records a workflow's input in its own table, replacing any orphaned row
 -- a deleted status row left behind. The caller runs this only when its own
--- attempt created the status row: a submission that found an existing row
+-- attempt created the status row: an attempt that found an existing row
 -- must not touch the input the workflow was recorded with. Mirrors the
 -- oracle's @workflow_input@ upsert in @init_workflow@.
 initWorkflowInputStatement :: Statement.Statement (Text, Maybe Text) Int64
@@ -677,19 +665,6 @@ initWorkflowInputStatement =
     encoder =
       contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
         <> contramap snd (Encoders.param (Encoders.nullable Encoders.text))
-
--- | The row's stored input, coalescing the payload table over the legacy
--- column. Read inside the init transaction when a fresh start found an
--- unowned existing row. Mirrors Rust's @SELECT {stored_input}@ in
--- @init_workflow@.
-initWorkflowStoredInputStatement :: Statement.Statement Text (Maybe Text)
-initWorkflowStoredInputStatement =
-  Statement.preparable
-    "select coalesce((select p.inputs from dbos.workflow_input p where p.workflow_uuid = $1), inputs) \
-    \from dbos.workflow_status where workflow_uuid = $1"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.singleRow (Decoders.column (Decoders.nullable Decoders.text)))
-
 
 -- | A step's recorded result, as the replay gate reads it. The join's
 -- columns are nullable because the step may not have run; @status@ is the
@@ -1630,6 +1605,7 @@ cancelBatchSession workflowIds =
     <$> sqlQueryTypedSession [typedSql|
       update dbos.workflow_status
       set status = 'CANCELLED',
+        owner_xid = null,
         queue_name = null,
         deduplication_id = null,
         started_at_epoch_ms = null,
@@ -1740,6 +1716,7 @@ resumeWorkflowsSession workflowIds queue =
         queue_name = ${queue},
         recovery_attempts = 0,
         workflow_deadline_epoch_ms = null,
+        owner_xid = null,
         deduplication_id = null,
         started_at_epoch_ms = null,
         completed_at = null,
@@ -2521,10 +2498,11 @@ dequeueCandidatesStatement lock =
 
 -- | Flips the claimed candidates to pending and stamps them. Only rows that
 -- are still enqueued and still this handle's to take come back.
-dequeueClaimStatement :: Statement.Statement (Maybe Text, Text, Text, Bool, [Text]) [Text]
+dequeueClaimStatement :: Statement.Statement (Maybe Text, Text, Text, Bool, [Text], Text) [Text]
 dequeueClaimStatement =
   Statement.preparable
     ( "update dbos.workflow_status set status = 'PENDING', executor_id = $2, \
+      \owner_xid = $6, \
       \application_version = $3, started_at_epoch_ms = (extract(epoch from now()) * 1000)::bigint, \
       \rate_limited = $4, updated_at = (extract(epoch from now()) * 1000)::bigint, \
       \application_name = coalesce(application_name, $1), \
@@ -2536,11 +2514,12 @@ dequeueClaimStatement =
       \where workflow_uuid = any($5::text[]) and status = 'ENQUEUED' \
       \and ($1::text is null or application_name = $1 or application_name is null) \
       \returning workflow_uuid" )
-    ( contramap (\(app, _, _, _, _) -> app) (Encoders.param (Encoders.nullable Encoders.text))
-        <> contramap (\(_, executor, _, _, _) -> executor) (Encoders.param (Encoders.nonNullable Encoders.text))
-        <> contramap (\(_, _, version, _, _) -> version) (Encoders.param (Encoders.nonNullable Encoders.text))
-        <> contramap (\(_, _, _, rateLimited, _) -> rateLimited) (Encoders.param (Encoders.nonNullable Encoders.bool))
-        <> contramap (\(_, _, _, _, candidates) -> candidates) (Encoders.param (Encoders.nonNullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text))))
+    ( contramap (\(app, _, _, _, _, _) -> app) (Encoders.param (Encoders.nullable Encoders.text))
+        <> contramap (\(_, executor, _, _, _, _) -> executor) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, version, _, _, _) -> version) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, _, rateLimited, _, _) -> rateLimited) (Encoders.param (Encoders.nonNullable Encoders.bool))
+        <> contramap (\(_, _, _, _, candidates, _) -> candidates) (Encoders.param (Encoders.nonNullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text))))
+        <> contramap (\(_, _, _, _, _, owner) -> owner) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     (Decoders.rowList (Decoders.column (Decoders.nonNullable Decoders.text)))
 
@@ -2611,10 +2590,11 @@ partitionSweepLockStatement =
 
 -- | Flips a partition sweep's locked candidates to pending. A sweep is never
 -- rate limited, so the flag is written false.
-partitionSweepFlipStatement :: Statement.Statement ([Text], Text, Text, Maybe Text, Text, Bool) [Text]
+partitionSweepFlipStatement :: Statement.Statement ([Text], Text, Text, Maybe Text, Text, Bool, Text) [Text]
 partitionSweepFlipStatement =
   Statement.preparable
     ( "update dbos.workflow_status set status = 'PENDING', executor_id = $5, \
+      \owner_xid = $7, \
       \application_version = $3, started_at_epoch_ms = (extract(epoch from now()) * 1000)::bigint, \
       \rate_limited = false, updated_at = (extract(epoch from now()) * 1000)::bigint, \
       \application_name = coalesce(application_name, $4), \
@@ -2628,12 +2608,13 @@ partitionSweepFlipStatement =
       \and (application_version = $3 or ($6::bool and application_version is null)) \
       \and ($4::text is null or application_name = $4 or application_name is null) \
       \returning workflow_uuid" )
-    ( contramap (\(candidates, _, _, _, _, _) -> candidates) (Encoders.param (Encoders.nonNullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text))))
-        <> contramap (\(_, queue, _, _, _, _) -> queue) (Encoders.param (Encoders.nonNullable Encoders.text))
-        <> contramap (\(_, _, version, _, _, _) -> version) (Encoders.param (Encoders.nonNullable Encoders.text))
-        <> contramap (\(_, _, _, app, _, _) -> app) (Encoders.param (Encoders.nullable Encoders.text))
-        <> contramap (\(_, _, _, _, executor, _) -> executor) (Encoders.param (Encoders.nonNullable Encoders.text))
-        <> contramap (\(_, _, _, _, _, isLatest) -> isLatest) (Encoders.param (Encoders.nonNullable Encoders.bool))
+    ( contramap (\(candidates, _, _, _, _, _, _) -> candidates) (Encoders.param (Encoders.nonNullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text))))
+        <> contramap (\(_, queue, _, _, _, _, _) -> queue) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, version, _, _, _, _) -> version) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, _, app, _, _, _) -> app) (Encoders.param (Encoders.nullable Encoders.text))
+        <> contramap (\(_, _, _, _, executor, _, _) -> executor) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, _, _, _, isLatest, _) -> isLatest) (Encoders.param (Encoders.nonNullable Encoders.bool))
+        <> contramap (\(_, _, _, _, _, _, owner) -> owner) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     (Decoders.rowList (Decoders.column (Decoders.nonNullable Decoders.text)))
 

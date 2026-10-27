@@ -17,7 +17,7 @@ import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import Data.Map.Strict qualified as Map
-import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), Submission (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), WorkflowId (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact.Connection (nextExecutionIdentity)
@@ -84,7 +84,7 @@ simMessageFixture = do
           let sourceText = "sim-message-" <> label <> "-source"
               destinationText = "sim-message-" <> label <> "-destination"
               create workflowText workflowName =
-                SystemDB.initWorkflow mem ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Fresh Nothing
+                SystemDB.initWorkflow mem ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Nothing
           sourceCreated <- create sourceText "SimMessageSource"
           destinationCreated <- create destinationText "SimMessageDestination"
           case (sourceCreated, destinationCreated) of

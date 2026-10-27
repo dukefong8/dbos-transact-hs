@@ -100,10 +100,10 @@ data OutboxFixture m = OutboxFixture
   }
 
 txInsertCfg :: TransactionConfig
-txInsertCfg = TransactionConfig {txName = Just "insert_order", txIsolation = Just Serializable}
+txInsertCfg = TransactionConfig {txName = Just "insert_order", txIsolation = Just Serializable, txReadOnly = False}
 
 txMarkCfg :: TransactionConfig
-txMarkCfg = TransactionConfig {txName = Just "update_notification_status", txIsolation = Just Serializable}
+txMarkCfg = TransactionConfig {txName = Just "update_notification_status", txIsolation = Just Serializable, txReadOnly = False}
 
 -- | Variant A body (shared): insert-order transaction, notification send
 -- step, mark-sent transaction. Returns the order id.

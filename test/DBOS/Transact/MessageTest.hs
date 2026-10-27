@@ -13,7 +13,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), Submission (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), WorkflowId (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Identity (Identity (..))
@@ -103,7 +103,7 @@ mkMessageFixture backend = do
               sourceText = prefix <> "-source"
               destinationText = prefix <> "-destination"
               create workflowText workflowName =
-                SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Fresh Nothing
+                SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Nothing
           sourceCreated <- create sourceText "L2MessageSource"
           destinationCreated <- create destinationText "L2MessageDestination"
           case (sourceCreated, destinationCreated) of

@@ -32,7 +32,7 @@ import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..)
 import DBOS.SystemDB.Postgres.Backend qualified as SystemPostgres (classifyUsageError)
 import DBOS.SystemDB.Types (WorkflowId (..))
 import DBOS.Transact.Config qualified as Config
-import DBOS.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), Tx (..))
+import DBOS.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), TransactionConfig (..), Tx (..))
 import Hasql.Connection qualified as Connection
 import Hasql.Connection.Settings qualified as ConnSettings
 import Hasql.Decoders qualified as Decoders
@@ -106,13 +106,15 @@ quoteIdent name = "\"" <> Text.replace "\"" "\"\"" name <> "\""
 releaseAppDataSource :: AppDataSource -> IO ()
 releaseAppDataSource app = Pool.release app.appSessionPool
 
--- | The @BEGIN@ opening a transaction at the requested isolation, or a
--- bare @BEGIN@ for the database default.
-beginSql :: Maybe IsolationLevel -> Text
-beginSql isolation =
+-- | The @BEGIN@ opening a transaction at the requested isolation and
+-- access mode, or a bare @BEGIN@ for the database defaults. A read-only
+-- transaction still checkpoints nothing: the mode only tells the database
+-- to refuse writes.
+beginSql :: Maybe IsolationLevel -> Bool -> Text
+beginSql isolation readOnly =
   case isolation of
-    Nothing    -> "BEGIN"
-    Just level -> "BEGIN TRANSACTION ISOLATION LEVEL " <> levelSql level
+    Nothing    -> if readOnly then "BEGIN READ ONLY" else "BEGIN"
+    Just level -> "BEGIN TRANSACTION ISOLATION LEVEL " <> levelSql level <> if readOnly then " READ ONLY" else ""
   where
     levelSql ReadUncommitted = "READ UNCOMMITTED"
     levelSql ReadCommitted   = "READ COMMITTED"
@@ -236,8 +238,8 @@ toDataSource app =
             Nothing -> case output of
               Just text -> Right (Just (RecordedOutput text))
               Nothing   -> Right Nothing,
-      dsWithTransaction = \isolation action -> do
-        attempted <- try (transactionAttempt isolation action)
+      dsWithTransaction = \config action -> do
+        attempted <- try (transactionAttempt config action)
         pure $ case attempted of
           Left err      -> Left (unwrapBackend err)
           Right outcome -> outcome,
@@ -271,10 +273,10 @@ toDataSource app =
     -- @Error@ escaping here — a connection that cannot be acquired, say —
     -- returns as 'Left' so the runner classifies it; @TxConflict@ is not an
     -- @Error@ and still passes through to the runner's adopt path.
-    transactionAttempt :: forall a. Maybe IsolationLevel -> (Tx IO -> IO a) -> IO (Either BackendError a)
-    transactionAttempt isolation action =
+    transactionAttempt :: forall a. TransactionConfig -> (Tx IO -> IO a) -> IO (Either BackendError a)
+    transactionAttempt config action =
       bracket acquireConn Connection.release $ \conn -> do
-        began <- Connection.use conn (Session.script (beginSql isolation))
+        began <- Connection.use conn (Session.script (beginSql config.txIsolation config.txReadOnly))
         case began of
           Left se -> pure (Left (sessionErr (Pool.SessionUsageError se)))
           Right () -> do

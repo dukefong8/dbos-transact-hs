@@ -37,9 +37,8 @@ mockInitResult new =
     { initResultStatus = Pending,
       initResultRecoveryAttempts = 0,
       initResultDeadline = new.newWorkflowDeadline,
-      initResultOwnerXid = Nothing,
+      initResultCreatorXid = "mock-creator",
       initResultSerialization = new.newWorkflowSerialization,
-      initResultExistingInput = Nothing,
       initResultShouldExecute = True
     }
 
@@ -67,6 +66,7 @@ mockWorkflow wid =
       workflowRecordParentWorkflowId = Nothing,
       workflowRecordWasForkedFrom = False,
       workflowRecordOwnerXid = Nothing,
+      workflowRecordCreatorXid = Nothing,
       workflowRecordApplicationId = Nothing,
       workflowRecordAuthenticatedUser = Nothing,
       workflowRecordAuthenticatedRoles = [],

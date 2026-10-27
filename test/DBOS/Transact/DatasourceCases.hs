@@ -31,6 +31,8 @@ module DBOS.Transact.DatasourceCases
     scenarioRegistryLifecycle,
     scenarioDefaultConfig,
     scenarioBeginSql,
+    scenarioReadOnlyCommitsUnrecorded,
+    scenarioReadOnlyReplayReruns,
     checkCommitReplay,
     checkErrorReplays,
     checkBodyFailureRecorded,
@@ -47,6 +49,8 @@ module DBOS.Transact.DatasourceCases
     checkRegistryLifecycle,
     checkDefaultConfig,
     checkBeginSql,
+    checkReadOnlyCommitsUnrecorded,
+    checkReadOnlyReplayReruns,
   )
 where
 
@@ -55,7 +59,7 @@ import DBOS.Transact.Context (withSystemDB)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.SystemDB (BackendErrorKind (..), NewWorkflow (..), Submission (..), SystemDB (..), newWorkflow)
+import DBOS.SystemDB (BackendErrorKind (..), NewWorkflow (..), SystemDB (..), newWorkflow)
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact.Serialization (encodeWorkflowValue)
 import DBOS.Transact
@@ -195,7 +199,7 @@ mkFakeDs = do
   pure (FakeDs source rows names runs transients drops conflict)
 
 protoConfig :: TransactionConfig
-protoConfig = TransactionConfig {txName = Just "proto_step", txIsolation = Just ReadCommitted}
+protoConfig = TransactionConfig {txName = Just "proto_step", txIsolation = Just ReadCommitted, txReadOnly = False}
 
 -- | Python @test_sync_ds_records_and_replays@: a fresh execution replays
 -- the recorded output without re-running the body.
@@ -356,7 +360,7 @@ scenarioOwnershipMoved :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
 scenarioOwnershipMoved fx wfId = do
   fake <- fx.dsFixtureMkDs
   started <- runFixture fx wfId $ \wctx ->
-    withSystemDB wctx (\db -> initWorkflow db ((newWorkflow wfId) {newWorkflowExecutorId = Just "other-executor"}) Fresh Nothing)
+    withSystemDB wctx (\db -> initWorkflow db ((newWorkflow wfId) {newWorkflowExecutorId = Just "other-executor"}) Nothing)
 
   case started of
     Left err -> pure (Left (SystemDatabase err))
@@ -379,20 +383,51 @@ scenarioRegistryLifecycle dbos fx wid = do
   rowsAfter <- readTVarIO fake.fakeRows
   pure (first, duplicate, Map.size rowsBefore, Map.size rowsAfter)
 
+-- | A read-only transaction commits without recording: the body runs
+-- and answers, but no checkpoint row exists to replay. Reads re-execute
+-- safely, so there is nothing to adopt.
+scenarioReadOnlyCommitsUnrecorded :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                                  => DsFixture m -> m (Either (Error EngineOnly) Text, Either BackendError (Maybe RecordedOutcome))
+scenarioReadOnlyCommitsUnrecorded fx = do
+  fake <- fx.dsFixtureMkDs
+  let roConfig = protoConfig {txReadOnly = True, txName = Just "proto_readonly"}
+      DataSource {dsCheck = checkStep} = fake.fakeSource
+  result <- runFixture fx "ds-wf-ro" $ \wctx -> runTxStep fake.fakeSource roConfig wctx (\_ _ -> pure (Right ("v" :: Text)))
+  found <- checkStep (WorkflowId "ds-wf-ro") "proto_readonly" 0
+  pure (result, found)
+
+-- | A read-only replay re-runs the body: with no checkpoint row
+-- anywhere — no app record by design, no workflow record for tx steps by
+-- construction — every execution re-runs. Safe because reads are
+-- side-effect-free; a volatile read is the caller's hazard, documented at
+-- 'TransactionConfig'. Both runs answer alike.
+scenarioReadOnlyReplayReruns :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+                             => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
+scenarioReadOnlyReplayReruns fx = do
+  fake <- fx.dsFixtureMkDs
+  let roConfig = protoConfig {txReadOnly = True, txName = Just "proto_readonly_replay"}
+      counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right "v1" :: Either (Error EngineOnly) Text)
+  first <- runFixture fx "ds-wf-ro-replay" $ \wctx -> runTxStep fake.fakeSource roConfig wctx (\_ tx -> counted tx)
+  second <- runFixture fx "ds-wf-ro-replay" $ \wctx -> runTxStep fake.fakeSource roConfig wctx (\_ tx -> counted tx)
+  runs <- readTVarIO fake.fakeRuns
+  pure (first, second, runs)
+
 -- | The default config names nothing and takes the database default
 -- isolation. Pure: both stacks assert the same value.
 scenarioDefaultConfig :: TransactionConfig
 scenarioDefaultConfig = transactionConfigDefault
 
--- | 'beginSql' names every isolation level. Pure: both stacks assert the
--- same mapping.
-scenarioBeginSql :: [(Maybe IsolationLevel, Text)]
+-- | 'beginSql' names every isolation level and access mode. Pure: both
+-- stacks assert the same mapping.
+scenarioBeginSql :: [(Maybe IsolationLevel, Bool, Text)]
 scenarioBeginSql =
-  [ (Nothing, beginSql Nothing),
-    (Just ReadUncommitted, beginSql (Just ReadUncommitted)),
-    (Just ReadCommitted, beginSql (Just ReadCommitted)),
-    (Just RepeatableRead, beginSql (Just RepeatableRead)),
-    (Just Serializable, beginSql (Just Serializable))
+  [ (Nothing, False, beginSql Nothing False),
+    (Nothing, True, beginSql Nothing True),
+    (Just ReadUncommitted, False, beginSql (Just ReadUncommitted) False),
+    (Just ReadCommitted, False, beginSql (Just ReadCommitted) False),
+    (Just RepeatableRead, False, beginSql (Just RepeatableRead) False),
+    (Just Serializable, False, beginSql (Just Serializable) False),
+    (Just Serializable, True, beginSql (Just Serializable) True)
   ]
 
 -- * Checks
@@ -404,6 +439,24 @@ checkCommitReplay (first, second, runs) = do
   unless (first == Right "v1") $ Left ("expected the first run to commit v1, got: " <> show first)
   unless (second == Right "v1") $ Left ("expected the replay to return v1, got: " <> show second)
   unless (runs == 1) $ Left ("expected the body to run once, got: " <> show runs)
+
+-- | The read-only run answers and records nothing: no checkpoint row
+-- exists to replay.
+checkReadOnlyCommitsUnrecorded :: (Either (Error EngineOnly) Text, Either BackendError (Maybe RecordedOutcome)) -> Either String ()
+checkReadOnlyCommitsUnrecorded (result, found) = do
+  unless (result == Right "v") $ Left ("expected the read-only body to answer v, got: " <> show result)
+  case found of
+    Right Nothing -> Right ()
+    Right (Just _) -> Left "expected no checkpoint row for a read-only transaction"
+    Left err -> Left ("expected the checkpoint read to succeed, got: " <> show err)
+
+-- | Both runs answer v1 with one body execution each: the replay finds
+-- nothing recorded and re-runs, which is safe for reads.
+checkReadOnlyReplayReruns :: (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int) -> Either String ()
+checkReadOnlyReplayReruns (first, second, runs) = do
+  unless (first == Right "v1") $ Left ("expected the first run to commit v1, got: " <> show first)
+  unless (second == Right "v1") $ Left ("expected the replay to answer v1, got: " <> show second)
+  unless (runs == 2) $ Left ("expected the body to run on both executions, got: " <> show runs)
 
 -- | The recorded failure decodes back to itself.
 checkErrorReplays :: Either (Error Text) Text -> Either String ()
@@ -513,16 +566,18 @@ checkRegistryLifecycle (first, duplicate, rowsBefore, rowsAfter) = do
 -- | The default config names nothing and takes the database default.
 checkDefaultConfig :: TransactionConfig -> Either String ()
 checkDefaultConfig config =
-  unless (config == TransactionConfig {txName = Nothing, txIsolation = Just Serializable}) $
+  unless (config == TransactionConfig {txName = Nothing, txIsolation = Just Serializable, txReadOnly = False}) $
     Left ("expected the empty default config, got: " <> show config)
 
--- | Every isolation level renders its SQL.
-checkBeginSql :: [(Maybe IsolationLevel, Text)] -> Either String ()
+-- | Every isolation level and access mode renders its SQL.
+checkBeginSql :: [(Maybe IsolationLevel, Bool, Text)] -> Either String ()
 checkBeginSql rendered =
   unless
-    (rendered == [(Nothing, "BEGIN"),
-                  (Just ReadUncommitted, "BEGIN TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"),
-                  (Just ReadCommitted, "BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED"),
-                  (Just RepeatableRead, "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ"),
-                  (Just Serializable, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE")])
+    (rendered == [(Nothing, False, "BEGIN"),
+                  (Nothing, True, "BEGIN READ ONLY"),
+                  (Just ReadUncommitted, False, "BEGIN TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"),
+                  (Just ReadCommitted, False, "BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED"),
+                  (Just RepeatableRead, False, "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ"),
+                  (Just Serializable, False, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE"),
+                  (Just Serializable, True, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY")])
     (Left ("expected every isolation level to render, got: " <> show rendered))

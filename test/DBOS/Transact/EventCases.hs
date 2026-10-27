@@ -44,7 +44,7 @@ module DBOS.Transact.EventCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), Submission (..), WorkflowId (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), WorkflowId (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact.Instance (getWorkflowEventSerialized)
@@ -154,7 +154,7 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
         efConn = pure conn,
         efIdentity = identity,
         efInitRow = \widText name -> do
-          created <- runSystemDB sysdb (\db -> initWorkflow db ((newWorkflow widText) {newWorkflowName = Just name}) Fresh Nothing)
+          created <- runSystemDB sysdb (\db -> initWorkflow db ((newWorkflow widText) {newWorkflowName = Just name}) Nothing)
           case created of
             Left err -> throwIO (userError (show err))
             Right _ -> pure (),

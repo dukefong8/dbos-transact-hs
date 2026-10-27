@@ -15,7 +15,7 @@ import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
@@ -88,7 +88,7 @@ mkStepFixture backend run = do
           { srfFreshWorkflowId = do
               freshId <- UUID.V4.nextRandom
               let workflowText = "hs-l2-retry-" <> Text.pack (UUID.toString freshId)
-              created <- SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just "L2StepRetryTest"}) Fresh Nothing
+              created <- SystemDB.initWorkflow backend ((newWorkflow workflowText) {newWorkflowName = Just "L2StepRetryTest"}) Nothing
               case created of
                 Left err -> fail (show err)
                 Right _ -> pure (WorkflowId workflowText),

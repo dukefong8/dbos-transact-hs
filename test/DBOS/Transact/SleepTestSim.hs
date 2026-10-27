@@ -15,7 +15,7 @@ import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import Data.Text qualified as Text
-import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowId (..), newWorkflow, sleepStepName)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), newWorkflow, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact
@@ -51,7 +51,7 @@ simSleepFixture = do
       { sfFreshWorkflowId = do
           n <- atomically (readTVar fresh >>= \k -> writeTVar fresh (k + 1) >> pure k)
           let widText = "sim-sleep-" <> Text.pack (show n)
-          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimSleepTest"}) Fresh Nothing
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimSleepTest"}) Nothing
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),

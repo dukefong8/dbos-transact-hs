@@ -47,7 +47,6 @@ module DBOS.SystemDB.Types
     NewWorkflow (..),
     WorkflowRecord (..),
     Change (..),
-    Submission (..),
     OutcomeWrite (..),
     WorkflowDelay (..),
     StepTiming (..),
@@ -99,7 +98,6 @@ module DBOS.SystemDB.Types
     defaultChange,
     changeSet,
     changeIsLeave,
-    claimsOwnership,
     resolveWorkflowDelay,
     isValidApplicationName,
     ApplicationName,
@@ -422,6 +420,7 @@ data WorkflowRecord = WorkflowRecord
     workflowRecordParentWorkflowId   :: Maybe WorkflowId,
     workflowRecordWasForkedFrom      :: Bool,
     workflowRecordOwnerXid           :: Maybe Text,
+    workflowRecordCreatorXid         :: Maybe Text,
     workflowRecordApplicationId      :: Maybe Text,
     workflowRecordAuthenticatedUser  :: Maybe Text,
     workflowRecordAuthenticatedRoles :: [Text],
@@ -480,23 +479,9 @@ changeIsLeave change =
     Leave -> True
     Set _ -> False
 
--- | Why a workflow is being submitted, which decides whether it may claim a
--- row someone holds. Mirrors Rust @Submission@.
-data Submission
-  = Fresh
-  | Recovery
-  | Dequeue
-  deriving stock (Eq, Show)
-
--- | Whether this submission is told it owns the workflow. Recovery and
--- dequeue may claim a row another owner holds; a fresh start may not.
--- Mirrors @Submission::claims_ownership@.
-claimsOwnership :: Submission -> Bool
-claimsOwnership submission =
-  case submission of
-    Recovery -> True
-    Dequeue  -> True
-    Fresh    -> False
+-- | @Submission@ was deleted with the creator-token rewrite, as in Rust:
+-- the conflict arm writes nothing and every start is judged by its
+-- creator token alone, so no submission kind claims anymore.
 
 -- | The result of trying to record a workflow's final outcome. Mirrors Rust
 -- @OutcomeWrite@: losing the race is not an error.
@@ -1662,17 +1647,18 @@ data WorkflowInitResult = WorkflowInitResult
     -- | The database's clock as the same statement saw it, which is what a
     -- wait for 'initResultDeadline' is measured from.
     initResultClock            :: DatabaseTime,
-    -- | The owner the row holds after this call: the caller's token on a
-    -- row it inserted, whoever holds it otherwise. A later cancel presents
-    -- this back so only an execution that still owns the row cancels it.
-    initResultOwnerXid         :: Maybe Text,
+    -- | This call's creator token, which the row holds as @creator_xid@
+    -- when 'initResultShouldExecute': a row inserted @PENDING@ is owned by
+    -- its creator from the start, so this is also the @owner_xid@ the
+    -- execution that runs it holds, and presents on every write it makes.
+    -- Mirrors Rust @WorkflowInitResult::creator_xid@.
+    initResultCreatorXid       :: Text,
     initResultSerialization    :: Maybe Text,
-    -- | The input the row already held, where a fresh start runs a row it did
-    -- not create (one no attempt owns): @Just Nothing@ for a row with no
-    -- input, @Nothing@ otherwise. A fresh start that finds an existing row
-    -- must run what the row holds, not what the caller offered; recovery and
-    -- dequeue already read the input with the row.
-    initResultExistingInput    :: Maybe (Maybe Text),
+    -- | Whether this caller should go on to run the workflow: whether it
+    -- created the row, by this call or by an earlier attempt of it whose
+    -- acknowledgement was lost. @False@ means another caller created it,
+    -- so the row is recorded but running it would be a second execution.
+    -- The caller joins it instead, whatever has become of the row.
     initResultShouldExecute    :: Bool
   }
   deriving stock (Eq, Show)
@@ -2028,6 +2014,7 @@ instance ToJSON WorkflowRecord where
         "workflowRecordParentWorkflowId" .= record.workflowRecordParentWorkflowId,
         "workflowRecordWasForkedFrom" .= record.workflowRecordWasForkedFrom,
         "workflowRecordOwnerXid" .= record.workflowRecordOwnerXid,
+        "workflowRecordCreatorXid" .= record.workflowRecordCreatorXid,
         "workflowRecordApplicationId" .= record.workflowRecordApplicationId,
         "workflowRecordAuthenticatedUser" .= record.workflowRecordAuthenticatedUser,
         "workflowRecordAuthenticatedRoles" .= record.workflowRecordAuthenticatedRoles,
@@ -2071,6 +2058,7 @@ instance FromJSON WorkflowRecord where
       <*> o .: "workflowRecordParentWorkflowId"
       <*> o .: "workflowRecordWasForkedFrom"
       <*> o .: "workflowRecordOwnerXid"
+      <*> o .: "workflowRecordCreatorXid"
       <*> o .: "workflowRecordApplicationId"
       <*> o .: "workflowRecordAuthenticatedUser"
       <*> o .: "workflowRecordAuthenticatedRoles"

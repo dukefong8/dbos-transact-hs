@@ -12,7 +12,7 @@ post-merge; gate green (11 passed, 1 skipped on the mapped subset).
 | `transaction(func\|config)` decorator | `registerTransaction` | Covered (Haskell callers close over args; no decorator protocol needed) |
 | `run_tx_step(opts, func, *args)` | `runTxStep` | Covered |
 | `sql_session()` (txn-bound queries) | `Tx.txStatement` | Covered (explicit runner vs ambient session) |
-| `DatasourceOptions{name, isolation_level}` | `TransactionConfig` | Covered (`readOnly` deferred per ADR-0021) |
+| `DatasourceOptions{name, isolation_level}` + TS `{readOnly}` | `TransactionConfig` | Covered, including `txReadOnly` (BEGIN READ ONLY, no checkpoint; replays re-run) |
 | `IsolationLevel` strings | `IsolationLevel` ADT | Covered |
 | `migrate` / `run_migrations` | — | Deviation, not a gap: no Haskell migrations ever (ADR-0004) |
 | `verify_migrations` | `verifyAppDataSource` | Covered (same refuse-to-serve posture) |

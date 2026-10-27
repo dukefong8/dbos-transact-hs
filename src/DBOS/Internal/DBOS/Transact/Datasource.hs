@@ -95,21 +95,28 @@ data IsolationLevel
   deriving stock (Eq, Show, Enum, Bounded)
 
 -- | What a caller may say about a transactional step, beyond the body.
--- Minimal v1: a step name and an isolation level. No @readOnly@ fast-path —
--- an unreadtable optimisation that earns its own case when an app needs it.
+-- Minimal v1: a step name, an isolation level, and the read-only flag. A
+-- read-only transaction runs @READ ONLY@ and records no checkpoint: reads
+-- re-execute safely, so there is nothing to adopt. A volatile read is the
+-- caller's hazard — with no record anywhere, every execution re-runs the
+-- body and may observe new data. Mirrors TypeScript's @TransactionConfig@
+-- (@{ isolationLevel, readOnly }@ — the only oracle that names the flag).
 data TransactionConfig = TransactionConfig
   { txName      :: Maybe Text,
-    txIsolation :: Maybe IsolationLevel
+    txIsolation :: Maybe IsolationLevel,
+    txReadOnly  :: Bool
   }
   deriving stock (Eq, Show)
 
 -- | A transaction that names nothing: the step name falls back to the
--- function name at the call site, isolation to 'Serializable' like Python.
+-- function name at the call site, isolation to 'Serializable' like Python,
+-- and read-write like every oracle's default.
 transactionConfigDefault :: TransactionConfig
 transactionConfigDefault =
   TransactionConfig
     { txName = Nothing,
-      txIsolation = Just Serializable
+      txIsolation = Just Serializable,
+      txReadOnly = False
     }
 
 -- | A recorded checkpoint. Mirrors the oracles' @{output}|{error}@ row,
@@ -140,7 +147,7 @@ data DataSource m = DataSource
   { dsName              :: Text,
     dsSchema            :: Text,
     dsCheck             :: WorkflowId -> Text -> Int -> m (Either BackendError (Maybe RecordedOutcome)),
-    dsWithTransaction   :: forall a. Maybe IsolationLevel -> (Tx m -> m a) -> m (Either BackendError a),
+    dsWithTransaction   :: forall a. TransactionConfig -> (Tx m -> m a) -> m (Either BackendError a),
     -- | Checkpoint write inside the transaction: 'True' means the row was
     -- written, 'False' means another execution already holds it (adopt
     -- the recorded row — never sniff @23505@: a violation from the
@@ -251,7 +258,7 @@ runTxStepWith ds config wctx body = do
             _ -> do
               runTracer tracer (TransactionReplaying (workflowId wctx) stepName stepId)
               pure (replayRecorded stepName recorded)
-        Right Nothing -> attemptTransaction ds wctx config.txIsolation body tracer wid stepName stepId 1 initialBackoffMs
+        Right Nothing -> attemptTransaction ds wctx config body tracer wid stepName stepId 1 initialBackoffMs
 
 -- | Pre-check with the oracle's retry: a transient read failure backs off
 -- and retries ('_check_execution_with_retry'); anything else is control.
@@ -277,37 +284,45 @@ checkWithRetry ds tracer wid stepName stepId = loop 1 initialBackoffMs
 -- held checkpoint throws 'TxConflict' to roll the attempt's application
 -- writes back; transport failures surface as 'Left' through the adapter.
 attemptTransaction :: forall a e exec m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
-                   => DataSource m -> WorkflowCtx exec m -> Maybe IsolationLevel -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
-attemptTransaction ds wctx isolation body tracer wid stepName stepId n waitMs = do
+                   => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
+attemptTransaction ds wctx config body tracer wid stepName stepId n waitMs = do
   let DataSource {dsWithTransaction = withTx} = ds
       DataSource {dsRecordOutput = recordOutput} = ds
       DataSource {dsRecordError = recordError} = ds
+      -- A read-only transaction records no checkpoint: reads re-execute
+      -- safely, so there is nothing to adopt. The write is skipped, not
+      -- refused — the database refuses actual writes itself.
+      recordUnlessReadOnly record tx = if config.txReadOnly then pure True else record tx
   marker <- nextWorkflowMarker wctx
   outcome <-
-    try (withTx isolation $ \tx -> do
+    try (withTx config $ \tx -> do
       bodyOutcome <- withStep wctx marker (firstStepStatus stepId) (\sctx -> body sctx tx)
       case bodyOutcome of
         Left err -> do
-          wrote <- recordError tx wid stepName stepId (encodeErrorText err)
+          wrote <- recordUnlessReadOnly (\t -> recordError t wid stepName stepId (encodeErrorText err)) tx
           if wrote then pure (Left err) else throwIO TxConflict
         Right value -> do
-          wrote <- recordOutput tx wid stepName stepId (encodeWorkflowValue value).serializedText
+          wrote <- recordUnlessReadOnly (\t -> recordOutput t wid stepName stepId (encodeWorkflowValue value).serializedText) tx
           if wrote then pure (Right value) else throwIO TxConflict)
   case outcome of
     Left TxConflict -> adoptTransaction ds wctx tracer wid stepName stepId
     Right (Left err) -> handleBackend err
-    Right (Right answer) -> do
-      case answer of
-        Left _  -> runTracer tracer (TransactionErrorRecorded widText stepName stepId)
-        Right _ -> runTracer tracer (TransactionOutputRecorded widText stepName stepId)
-      pure answer
+    -- A read-only attempt announces nothing: no checkpoint was written, so
+    -- the recorded events would lie.
+    Right (Right answer)
+      | config.txReadOnly -> pure answer
+      | otherwise -> do
+          case answer of
+            Left _ -> runTracer tracer (TransactionErrorRecorded widText stepName stepId)
+            Right _ -> runTracer tracer (TransactionOutputRecorded widText stepName stepId)
+          pure answer
   where
     WorkflowId widText = wid
     handleBackend err
       | isRetriable err = do
           runTracer tracer (TransactionSerializationRetry widText stepName stepId n (round waitMs) err.backendMessage)
           threadDelay (round (waitMs * 1000))
-          attemptTransaction ds wctx isolation body tracer wid stepName stepId (n + 1) (min (waitMs * 1.5) maxBackoffMs)
+          attemptTransaction ds wctx config body tracer wid stepName stepId (n + 1) (min (waitMs * 1.5) maxBackoffMs)
       | otherwise = pure (Left (controlErr err))
 
 -- | Adopt the recorded outcome after losing the race — unless another
@@ -448,7 +463,7 @@ runTxOutside ds config body = loop (1 :: Int) initialBackoffMs
   where
     DataSource {dsWithTransaction = withTx} = ds
     loop n waitMs = do
-      outcome <- try (withTx config.txIsolation body)
+      outcome <- try (withTx config body)
       case outcome of
         Left sysErr -> case sysErr of
           SystemDBError.Backend err -> handleBackend err

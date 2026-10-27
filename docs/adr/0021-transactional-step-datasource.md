@@ -49,11 +49,16 @@ Decision, in parts:
   set (this bullet said `ReadCommitted` until 2026-10-17; corrected to the code).
   The sweep ladder (`RepeatableRead`/`Serializable`) is copied only if an app-pool
   claim ever needs it.
-- Deferred: `readOnly` fast-path, `pendingTransaction` for `select_step!` races.
-  Each earns its own case when a widget-track test needs it. (`deleteCheckpoints`
+- ~~Deferred: `pendingTransaction` for `select_step!` races~~ — RETIRED
+  2026-10-27: the concept has no footprint in any oracle (agent-skills all
+  four SDKs, Python and Rust sources swept clean) and no composition site
+  in the port (select arms are `PendingStep`s by construction), so there
+  was never anything to track. Coined as a hedge in this ADR's creation
+  commit; nothing in 25 days gave it substance. (`deleteCheckpoints`
   was listed here until 2026-10-17; it landed for rewind and completion —
   `Datasource.hs:159`, `Datasource/Postgres.hs:205-211`, rewind `Instance.hs:408`,
-  completion `Workflow.hs:249-250,282,288`.)
+  completion `Workflow.hs:249-250,282,288`. `readOnly` was listed here until
+  2026-10-27; it landed as `TransactionConfig.txReadOnly`.)
 
 Prototypes (2026-10-02): P1 (`Proto.hs`, runghc, no DB) validated the loop semantics
 11/11 — replay-before-run, conflict adopt, backoff retry, refusal writes nothing,

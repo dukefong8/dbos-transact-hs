@@ -17,7 +17,7 @@ import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (AwaitedOutcome (..), DatabaseTime (..), NewWorkflow (..), Submission (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), getWorkflow, listSteps, newWorkflow)
+import DBOS.SystemDB (AwaitedOutcome (..), DatabaseTime (..), NewWorkflow (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), getWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, unWorkflowInput, CodecError (..))
@@ -59,7 +59,7 @@ import DBOS.Transact
 import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Error (decodeErrorText)
-import DBOS.Transact.Workflow (abortAll, newTasks, runInputAfterInit, tasksSpawner)
+import DBOS.Transact.Workflow (abortAll, newTasks, tasksSpawner)
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
 import DBOS.Transact.Context (spawnLocal)
 import DBOS.SystemDB.Retry (uuidEntropy)
@@ -181,24 +181,6 @@ tests =
   testGroup
     "Workflow execution"
     [ liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a registered workflow starts and records its result" scenarioRegisteredRecordsResult checkRegisteredResult,
-      testCase "an existing unowned row runs its stored input and tag" $ do
-        let storedText = "{\"positionalArgs\":[21],\"namedArgs\":{}}"
-            supplied = unWorkflowInput (encodeWorkflowInput (99 :: Int))
-            result existingInput =
-              WorkflowInitResult
-                { initResultStatus = Pending,
-                  initResultRecoveryAttempts = 0,
-                  initResultDeadline = Nothing,
-                  initResultClock = DatabaseTime 0 0,
-                  initResultOwnerXid = Nothing,
-                  initResultSerialization = Just "portable_json",
-                  initResultExistingInput = existingInput,
-                  initResultShouldExecute = True
-                }
-            stored = SerializedWorkflowValue storedText (Just (Serialization "portable_json"))
-        runInputAfterInit (result (Just (Just storedText))) (Just supplied) @?= Just stored
-        runInputAfterInit (result (Just Nothing)) (Just supplied) @?= Nothing
-        runInputAfterInit (result Nothing) (Just supplied) @?= Just supplied,
       -- IO only: crash-and-relaunch recovery sweep (MemSystemDB delegates
       -- reenqueueForRecovery to the canned mock; see ADR-0020).
       testCase "a recovery run replays completed steps after a body interruption" $ do
@@ -513,7 +495,6 @@ tests =
             SystemDB.initWorkflow
               reader
               ((newWorkflow waiterText) {newWorkflowName = Just "L2FirstWaiter"})
-              Fresh
               Nothing
           case waiterCreated of
             Left err -> fail (show err)

@@ -13,7 +13,7 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Submission (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact.Connection (nextExecutionIdentity)
@@ -36,7 +36,7 @@ import Test.Tasty.HUnit (assertBool, testCase)
 simSelectFixture :: forall s. IOSim s (SelectFixture (IOSim s))
 simSelectFixture = do
   mem <- newMemDB
-  created <- SystemDB.initWorkflow mem ((newWorkflow "sim-select") {newWorkflowName = Just "SimSelectTest"}) Fresh Nothing
+  created <- SystemDB.initWorkflow mem ((newWorkflow "sim-select") {newWorkflowName = Just "SimSelectTest"}) Nothing
   case created of
     Left err -> error (show err)
     Right _ ->

@@ -89,7 +89,7 @@ insertAndEnqueue (Tx run) customer item quantity = do
     fromId (Id key) = key
 
 insertConfig :: TransactionConfig
-insertConfig = TransactionConfig {txName = Just "insert_order", txIsolation = Just Serializable}
+insertConfig = TransactionConfig {txName = Just "insert_order", txIsolation = Just Serializable, txReadOnly = False}
 
 -- | How long the atomic POST waits for the workflow's order-id event. The id
 -- is published right after the insert, well before the 3s notification step.
