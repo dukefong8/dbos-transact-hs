@@ -136,7 +136,6 @@ module DBOS.SystemDB.Types
     deleteScheduleStepName,
     portableJsonSerialization,
     streamClosedSentinel,
-    streamClosedSerialization,
     isStreamClosed,
     dequeueSweepCap,
     secondsDuration,
@@ -744,17 +743,12 @@ streamClosedSentinel = "\"__DBOS_STREAM_CLOSED__\""
 portableJsonSerialization :: Text
 portableJsonSerialization = "portable_json"
 
--- | The serialization label stored with the sentinel. Mirrors Rust
--- @STREAM_CLOSED_SERIALIZATION@.
-streamClosedSerialization :: Text
-streamClosedSerialization = portableJsonSerialization
-
 -- | Whether a stream row's @(value, serialization)@ pair is the close mark.
 -- The one recognizer for the pair, so the two columns cannot be compared
 -- apart. Mirrors Rust @is_stream_closed@ (@sysdb/mod.rs:49@).
 isStreamClosed :: Text -> Maybe Text -> Bool
 isStreamClosed value serialization =
-  value == streamClosedSentinel && serialization == Just streamClosedSerialization
+  value == streamClosedSentinel && serialization == Just portableJsonSerialization
 
 -- | Cap on the partitioned-dequeue sweep. Mirrors
 -- @PARTITIONED_DEQUEUE_SWEEP_CAP@.

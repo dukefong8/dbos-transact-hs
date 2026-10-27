@@ -120,6 +120,23 @@ Ported in one slice (adopted an uncommitted #110 draft, then #109 on top):
   peak. Prevention: re-grep an introduced identifier for self-reference
   after every batch rewrite.
 
+### Naming hygiene (Rust #129 `defd947`, #128 `29326be`, 2026-10-26)
+
+Ported with no behavior change:
+
+- #129 (`queue` → `queue_name` on fork/rewind/resume options, schedule
+  `name()` → `schedule_name()`) needed nothing: the port already names
+  these fields `QueueName`, holds records (not names) in start options,
+  reports `"queue_name"` in fork validation, and has no `ResumeOptions`
+  record or schedule getter to rename. Verified by reading, no test
+  changes.
+- #128 (one `portable_json` tag) removed the `streamClosedSerialization`
+  alias; all writers and the recognizer now name
+  `portableJsonSerialization` directly. Mechanical, same string on the
+  wire.
+- Gates: Stream pair 28/28 live + 24/24 sim (watcher and standalone
+  binaries agree), full-tree build clean.
+
 ### Child-start replay + fork replacement (Rust #108 `2540e18`, #107 `547eb9f`, 2026-10-20)
 
 Ported in one slice:

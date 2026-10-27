@@ -23,7 +23,7 @@ import Data.Vector.Fusion.Stream.Monadic qualified as Vector
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), WorkflowRecord (WorkflowRecord, workflowRecordStatus), WorkflowStatus (..), WrittenBy (..), addTimeout, durationAsMillis, isStreamClosed, millisDuration, portableJsonSerialization, readStreamStepName, secondsDuration, streamClosedSentinel, streamClosedSerialization, timestampNow)
+import DBOS.SystemDB.Types (Duration, EncodedValue (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), WorkflowRecord (WorkflowRecord, workflowRecordStatus), WorkflowStatus (..), WrittenBy (..), addTimeout, durationAsMillis, isStreamClosed, millisDuration, portableJsonSerialization, readStreamStepName, secondsDuration, streamClosedSentinel, timestampNow)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Checkpoint (StepPlacement (..), placeCall)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
@@ -170,7 +170,7 @@ readStreamWith place runDb caller wid key initialOffset options = do
                           recorded <- recordRead placement startedAt (OutcomeError (encodeErrorText timedOut)) (Just portableJsonSerialization)
                           pure (live {readerEnded = True}, either (Left . SystemDatabase) (const (Left timedOut)) recorded)
                         Right Types.Ended -> do
-                          recorded <- recordRead placement startedAt (OutcomeOutput (Just streamClosedSentinel)) (Just streamClosedSerialization)
+                          recorded <- recordRead placement startedAt (OutcomeOutput (Just streamClosedSentinel)) (Just portableJsonSerialization)
                           pure (live {readerEnded = True}, either (Left . SystemDatabase) (const (Right Nothing)) recorded)
                         Right (Types.Values entries) -> deliverBuffered placement startedAt live (fillBuffer entries)
         -- Deliver the buffered head under the pull's id: recorded before it

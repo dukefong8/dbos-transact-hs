@@ -159,7 +159,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Error (Error (..), decodePortableError, encodePortableError, shouldRecord)
-import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..), WorkflowStatus (Cancelled), isActiveStatus, parseWorkflowStatus, portableJsonSerialization, rewindStepName, streamClosedSentinel, streamClosedSerialization)
+import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..), WorkflowStatus (Cancelled), isActiveStatus, parseWorkflowStatus, portableJsonSerialization, rewindStepName, streamClosedSentinel)
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
@@ -1201,7 +1201,7 @@ rewindTx params = do
     rewindDeletes status = do
       void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindDeleteEventsStatement)
       void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindRestoreEventsStatement)
-      void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep, streamClosedSentinel, streamClosedSerialization) rewindDeleteStreamCloseStatement)
+      void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep, streamClosedSentinel, portableJsonSerialization) rewindDeleteStreamCloseStatement)
       void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindDeleteStepsStatement)
       void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindDeleteHistoryStatement)
       void (Tx.statement (params.rewindWorkflowId, params.rewindStartStep) rewindDeleteNotificationsStatement)

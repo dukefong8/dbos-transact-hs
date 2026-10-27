@@ -69,8 +69,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SystemDBRetry.tests
 --- $> tasty SystemDBTypes.tests
 --- $> tasty Logger.tests
---- $> tasty StreamTest.tests
---- $> tasty StreamSim.tests
+-- $> tasty StreamTest.tests
+-- $> tasty StreamSim.tests
 --- $> tasty CheckpointTest.tests
 --- $> tasty CheckpointSim.tests
 --- $> tasty ClientTest.tests
@@ -82,8 +82,8 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty QueueSim.tests
 --- $> tasty WidgetSim.tests
 --- $> tasty WidgetTest.tests
--- $> tasty DeadlinesTest.tests
--- $> tasty DeadlinesSim.tests
+--- $> tasty DeadlinesTest.tests
+--- $> tasty DeadlinesSim.tests
 --- $> tasty DebouncerTest.tests
 --- $> tasty DebouncerSim.tests
 --- $> tasty ErrorTest.tests

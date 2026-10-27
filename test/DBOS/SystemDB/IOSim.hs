@@ -125,7 +125,7 @@ import DBOS.SystemDB
     writeStreamStepName,
     closeStreamStepName,
     streamClosedSentinel,
-    streamClosedSerialization,
+    portableJsonSerialization,
     isStreamClosed,
     setEventStepName,
     timestampFromEpochMs,
@@ -1036,7 +1036,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 writeTVar db.memSteps (Map.insert (widText, stepId) record steps)
               pure (Right ())
   closeStream db wid stepId key writtenBy =
-    writeStream db wid stepId key streamClosedSentinel (Just streamClosedSerialization) writtenBy
+    writeStream db wid stepId key streamClosedSentinel (Just portableJsonSerialization) writtenBy
   close _ = close MockSystemDB
   recordSleep db wid stepId duration = do
     now <- memDbNow db
