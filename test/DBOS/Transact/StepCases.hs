@@ -40,7 +40,7 @@ module DBOS.Transact.StepCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (WorkflowId (..))
+import DBOS.SystemDB (WorkflowId (..), WorkflowOwner (..))
 import DBOS.Transact
   ( EngineOnly,
     Error (..),
@@ -79,7 +79,7 @@ data StepFixture m = StepFixture
   { sfConnection :: m (Connection m),
     sfFreshId :: Text -> m WorkflowId,
     sfIdentity :: Identity,
-    sfInitRow :: WorkflowId -> m (),
+    sfInitRow :: WorkflowId -> m WorkflowOwner,
     sfCheckStep :: WorkflowId -> Int -> Text -> m Bool,
     sfListStepNames :: WorkflowId -> m [Text]
   }
@@ -99,10 +99,10 @@ scenarioRecordReplay fx = do
   wid <- fx.sfFreshId "record"
   calls <- newTVarIO (0 :: Int)
   observed <- newTVarIO Nothing
-  fx.sfInitRow wid
+  owner <- fx.sfInitRow wid
   let runOnce = do
         conn <- fx.sfConnection
-        withWorkflow conn fx.sfIdentity wid Nothing $ \wctx ->
+        withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx ->
           runStep wctx "test_step" (countingBody calls observed)
   first <- runOnce >>= orThrow
   second <- runOnce >>= orThrow
@@ -128,10 +128,10 @@ scenarioNestedPlain :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
                        m (Int, Bool, Bool)
 scenarioNestedPlain fx = do
   wid <- fx.sfFreshId "nested"
-  fx.sfInitRow wid
+  owner <- fx.sfInitRow wid
   conn <- fx.sfConnection
   outer <-
-    withWorkflow conn fx.sfIdentity wid Nothing $ \wctx ->
+    withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx ->
       runStep wctx "outer" nestingBody
   result <- orThrow outer
   placed <- fx.sfCheckStep wid 0 "outer"
@@ -160,10 +160,10 @@ scenarioNestedWorkflowId :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
 scenarioNestedWorkflowId fx = do
   wid <- fx.sfFreshId "nested-id"
   let WorkflowId widText = wid
-  fx.sfInitRow wid
+  owner <- fx.sfInitRow wid
   conn <- fx.sfConnection
   outer <-
-    withWorkflow conn fx.sfIdentity wid Nothing $ \wctx ->
+    withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx ->
       runStep wctx "outer" nestingIdBody
   result <- orThrow outer
   placed <- fx.sfCheckStep wid 0 "outer"
@@ -191,10 +191,10 @@ scenarioSmuggledPlain :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
                          m (Int, Bool, Bool)
 scenarioSmuggledPlain fx = do
   wid <- fx.sfFreshId "smuggled"
-  fx.sfInitRow wid
+  owner <- fx.sfInitRow wid
   conn <- fx.sfConnection
   outer <-
-    withWorkflow conn fx.sfIdentity wid Nothing $ \wctx ->
+    withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx ->
       runStep wctx "outer" (smuggledBody wctx)
   result <- orThrow outer
   placed <- fx.sfCheckStep wid 0 "outer"
@@ -225,10 +225,10 @@ scenarioScopedView fx = do
   wid <- fx.sfFreshId "scoped"
   calls <- newTVarIO (0 :: Int)
   observed <- newTVarIO Nothing
-  fx.sfInitRow wid
+  owner <- fx.sfInitRow wid
   let runOnce = do
         conn <- fx.sfConnection
-        withWorkflow conn fx.sfIdentity wid Nothing $ \wctx ->
+        withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx ->
           runStep wctx "scoped_step" (scopedBody calls observed)
   first <- runOnce >>= orThrow
   seen <- readTVarIO observed
@@ -265,10 +265,10 @@ scenarioPendingScoped :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, Mon
 scenarioPendingScoped fx = do
   wid <- fx.sfFreshId "pending"
   calls <- newTVarIO (0 :: Int)
-  fx.sfInitRow wid
+  owner <- fx.sfInitRow wid
   let runOnce = do
         conn <- fx.sfConnection
-        withWorkflow conn fx.sfIdentity wid Nothing $ \wctx -> do
+        withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx -> do
           pending <- pendingStep wctx "pending_step" (pendingBody calls)
           outcome <- pending.pendingRun
           result <- orThrow outcome
@@ -294,10 +294,10 @@ scenarioDurableSleep :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadT
                         m ((), ())
 scenarioDurableSleep fx = do
   wid <- fx.sfFreshId "sleep"
-  fx.sfInitRow wid
+  owner <- fx.sfInitRow wid
   let runOnce = do
         conn <- fx.sfConnection
-        withWorkflow conn fx.sfIdentity wid Nothing $ \wctx ->
+        withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx ->
           sleepStep wctx (millisDuration 25)
   first <- runOnce >>= orThrow
   replay <- runOnce >>= orThrow
@@ -314,10 +314,10 @@ scenarioNestedEnclosing fx = do
   wid <- fx.sfFreshId "nested-status"
   seen <- newTVarIO ([] :: [(Maybe StepStatus, Maybe StepStatus, Maybe Int)])
   attempts <- newTVarIO (0 :: Int)
-  fx.sfInitRow wid
+  owner <- fx.sfInitRow wid
   conn <- fx.sfConnection
   (first, outcome) <-
-    withWorkflow conn fx.sfIdentity wid Nothing $ \wctx -> do
+    withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx -> do
       first <- runStep wctx "first" (\_ -> pure ())
       outcome <- runStepWith (stepOptionsDefault {maxAttempts = 2, interval = millisDuration 1}) wctx "outer" (enclosingBody seen attempts)
       pure (first, outcome)
@@ -366,10 +366,10 @@ scenarioTokenQuiet :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadC
                       m Bool
 scenarioTokenQuiet fx = do
   wid <- fx.sfFreshId "quiet-token"
-  fx.sfInitRow wid
+  owner <- fx.sfInitRow wid
   conn <- fx.sfConnection
   abandoned <-
-    withWorkflow conn fx.sfIdentity wid Nothing $ \wctx -> do
+    withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx -> do
       let hanging :: forall exec. StepCtx exec m -> m (Either (Error EngineOnly) ())
           hanging _ = threadDelay 1000000 >> pure (Right ())
           options = (stepOptionsDefault :: StepOptions EngineOnly) {timeout = Just (millisDuration 20)}

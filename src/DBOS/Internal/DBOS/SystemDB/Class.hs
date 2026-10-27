@@ -47,7 +47,7 @@ class Monad m => SystemDB db m where
   getWorkflow :: db -> WorkflowId -> m (Either Error (Maybe WorkflowRecord))
   listWorkflows :: db -> WorkflowFilter -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowRecord])
   getWorkflowChildren :: db -> WorkflowId -> m (Either Error [WorkflowId])
-  recordWorkflowOutcome :: db -> WorkflowId -> Outcome -> m (Either Error OutcomeWrite)
+  recordWorkflowOutcome :: db -> WorkflowId -> Outcome -> Text -> m (Either Error OutcomeWrite)
   awaitWorkflowResult :: (MonadDelay m, MonadTime m)
                       => db -> WorkflowId -> Duration -> Bool -> m (Either Error AwaitedOutcome)
   awaitFirstWorkflowId :: (MonadDelay m, MonadTime m)
@@ -59,27 +59,47 @@ class Monad m => SystemDB db m where
   updateWorkflowAttributes :: db -> WorkflowId -> Maybe Text -> Maybe (WorkflowId, Int) -> m (Either Error ())
   reenqueueForRecovery :: db -> [Text] -> Text -> Text -> m (Either Error [WorkflowId])
   transitionDelayedWorkflows :: db -> m (Either Error Word64)
-  cancelIfTimedOut :: db -> WorkflowId -> Maybe Text -> m (Either Error Bool)
+  cancelIfTimedOut :: db -> WorkflowId -> Text -> m (Either Error Bool)
   cancelTimedOutWorkflows :: db -> Int64 -> m (Either Error [WorkflowId])
   deadLetterWorkflows :: db -> [WorkflowId] -> Int64 -> m (Either Error [WorkflowId])
-  cancelWorkflows :: db -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
-  resumeWorkflows :: db -> [WorkflowId] -> Maybe Text -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
-  deleteWorkflows :: db -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either Error Word64)
+  -- 'fromWorkflow' names the calling workflow, when one calls: a call a
+  -- workflow makes of itself is refused before anything runs. Client and
+  -- engine paths pass 'Nothing'. Mirrors Rust @from_workflow@.
+  -- Divergence note (2026-10-27): this refusal follows Rust (#115); the
+  -- TypeScript and Python oracles allow a workflow to cancel itself. Rust
+  -- wins by default where the oracles disagree, so the refusal stands.
+  cancelWorkflows :: db -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> Maybe Text -> m (Either Error [WorkflowId])
+  resumeWorkflows :: db -> [WorkflowId] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe Text -> m (Either Error [WorkflowId])
+  -- The deleter presents its owner when it runs as a step: a stale
+  -- execution deletes nothing. Client and engine paths pass 'Nothing'.
+  -- The deleter presents its owner when it runs as a step: a stale
+  -- execution deletes nothing. Client and engine paths pass 'Nothing'.
+  -- One value, not a caller plus a separate token: the row refused for
+  -- being the caller's own and the row the fence locks are then provably
+  -- the same, and a mismatched pair cannot be written down.
+  deleteWorkflows :: db -> [WorkflowId] -> Bool -> Maybe WorkflowOwner -> m (Either Error Word64)
+  -- Deferred (2026-10-27): fork, forkFrom, rewind, and debounce keep the
+  -- unfenced caller step — no engine path presents one (the delete entry is
+  -- the sole reachable Just-caller site), so there is nothing to fence yet.
   forkWorkflows :: db -> [Fork] -> ForkOptions -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
   forkFrom :: db -> [WorkflowId] -> ForkPoint -> ForkOptions -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
   rewindWorkflow :: db -> WorkflowId -> Int -> SysRewindOptions -> Maybe (WorkflowId, Int) -> m (Either Error ())
-  sendMessage :: db -> SendMessage -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> m (Either Error ())
-  sendMessages :: db -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> m (Either Error ())
+  -- The owner rides separately from the caller step: a workflow or step
+  -- send presents it and is fenced on the sending execution; a client or
+  -- engine send passes 'Nothing' and skips the fence. Mirrors Rust
+  -- @send_message@'s @Option<WorkflowOwner>@.
+  sendMessage :: db -> SendMessage -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> m (Either Error ())
+  sendMessages :: db -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> m (Either Error ())
   recv :: (MonadDelay m, MonadTime m)
-       => db -> WorkflowId -> Int -> Int -> Maybe Text -> Duration -> m (Either Error (Maybe EncodedValue))
-  writeStream :: db -> WorkflowId -> Int -> Text -> Text -> Maybe Text -> WrittenBy -> m (Either Error ())
-  closeStream :: db -> WorkflowId -> Int -> Text -> WrittenBy -> m (Either Error ())
+       => db -> WorkflowId -> Int -> Int -> Maybe Text -> Duration -> Text -> m (Either Error (Maybe EncodedValue))
+  writeStream :: db -> WorkflowId -> Int -> Text -> Text -> Maybe Text -> WrittenBy -> Text -> m (Either Error ())
+  closeStream :: db -> WorkflowId -> Int -> Text -> WrittenBy -> Text -> m (Either Error ())
   close :: db -> m ()
   checkStep :: db -> WorkflowId -> Int -> Text -> m (Either Error (Maybe StepRecord))
-  recordStep :: db -> WorkflowId -> Int -> Text -> Outcome -> Maybe Text -> Maybe StepTiming -> m (Either Error ())
+  recordStep :: db -> WorkflowId -> Int -> Text -> Outcome -> Maybe Text -> Maybe StepTiming -> Text -> m (Either Error ())
   listSteps :: db -> WorkflowId -> Bool -> Maybe Int64 -> Maybe Int64 -> Maybe (WorkflowId, Int) -> m (Either Error [StepRecord])
-  recordSleep :: db -> WorkflowId -> Int -> Duration -> m (Either Error Timestamp)
-  setEvent :: db -> WorkflowId -> Int -> Text -> Text -> Maybe Text -> m (Either Error ())
+  recordSleep :: db -> WorkflowId -> Int -> Duration -> Text -> m (Either Error Timestamp)
+  setEvent :: db -> WorkflowId -> Int -> Text -> Text -> Maybe Text -> Text -> m (Either Error ())
   getEvent :: (MonadDelay m, MonadTime m)
            => db -> WorkflowId -> Text -> Duration -> Maybe GetEventCaller -> m (Either Error (Maybe EncodedValue))
   getAllNotifications :: db -> WorkflowId -> m (Either Error [NotificationRecord])
@@ -113,7 +133,7 @@ class Monad m => SystemDB db m where
   updateScheduleLastFiredAt :: db -> Text -> Timestamp -> m (Either Error ())
   deleteSchedule :: db -> Text -> Maybe (WorkflowId, Int) -> m (Either Error ())
   renameApplication :: db -> RenameFrom -> ApplicationName -> RenameBatching -> m (Either Error ApplicationRowCounts)
-  recordChildWorkflow :: db -> WorkflowId -> WorkflowId -> Int -> Text -> Maybe Timestamp -> m (Either Error ())
+  recordChildWorkflow :: db -> WorkflowId -> WorkflowId -> Int -> Text -> Maybe Timestamp -> Text -> m (Either Error ())
   checkChildResult :: db -> WorkflowId -> Int -> m (Either Error (Maybe StepRecord))
   checkChildResult db parent step = checkStep db parent step getResultStepName
-  recordChildResult :: db -> WorkflowId -> Int -> WorkflowId -> Outcome -> Maybe Text -> Maybe StepTiming -> m (Either Error ())
+  recordChildResult :: db -> WorkflowId -> Int -> WorkflowId -> Outcome -> Maybe Text -> Maybe StepTiming -> Text -> m (Either Error ())

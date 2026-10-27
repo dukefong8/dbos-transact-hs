@@ -48,7 +48,7 @@ import DBOS.Transact.Logger (nullTracer)
 import DBOS.SystemDB.Error (BackendError)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Datasource (RecordedOutcome (..))
-import DBOS.Transact.Context (withWorkflow)
+import DBOS.Transact.Context (testOwner, withWorkflow)
 import DBOS.Transact.Connection
   ( newConnection,
     uuidWorkflowId,
@@ -141,7 +141,7 @@ dsConnOver backend = do
 dsRunOver :: Postgres.PostgresSystemDB -> Text -> (forall exec. WorkflowCtx exec IO -> IO a) -> IO a
 dsRunOver backend workflowText action = do
   conn <- dsConnOver backend
-  withWorkflow conn dsTestIdentity (WorkflowId workflowText) Nothing action
+  withWorkflow conn dsTestIdentity (WorkflowId workflowText) Nothing (testOwner (WorkflowId workflowText)) action
 
 -- | An application pool over the same database the suite runs on. The
 -- checkpoint table is never created (verify-only), so binding tests use

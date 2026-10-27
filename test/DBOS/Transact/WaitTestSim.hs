@@ -15,7 +15,7 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Outcome (..), WorkflowId (..), newWorkflow, selectStepName)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, selectStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, memLaunchOnWith, memSetApplication, newMemDB, simIdentity, simInstance)
 import DBOS.Transact (shutdown, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
@@ -62,6 +62,15 @@ import Test.Tasty.HUnit (assertBool)
 simWaitFixture :: forall s. IOSim s (WaitFixture (IOSim s))
 simWaitFixture = do
   mem <- newMemDB
+  let -- Contexts and settles present the row's own creator token, as an
+      -- execution built from the init result would.
+      ownerFor widText = do
+        fetched <- SystemDB.getWorkflow mem (WorkflowId widText)
+        case fetched of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = token})
+            Nothing -> error "wait fixture row has no creator token"
+          _ -> error "wait fixture built a context for a row that was never initialized"
   pure
     WaitFixture
       { wfFreshWorkflowId = \label -> do
@@ -70,13 +79,15 @@ simWaitFixture = do
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),
-        wfCtx = \wid action -> do
+        wfCtx = \wid@(WorkflowId widText) action -> do
           conn <- memConnectionOn mem simTracer
-          withWorkflow conn simIdentity wid Nothing action,
-        wfSettle = \wid ->
-          SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) >>= either (error . show) (const (pure ())),
+          owner <- ownerFor widText
+          withWorkflow conn simIdentity wid Nothing owner action,
+        wfSettle = \wid@(WorkflowId widText) -> do
+          owner <- ownerFor widText
+          SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) owner.ownerToken >>= either (error . show) (const (pure ())),
         wfCancel = \wid ->
-          SystemDB.cancelWorkflows mem [wid] False Nothing >>= either (error . show) (const (pure ())),
+          SystemDB.cancelWorkflows mem [wid] False Nothing Nothing >>= either (error . show) (const (pure ())),
         wfCheckStep = \wid ->
           SystemDB.checkStep mem wid 0 selectStepName >>= either (error . show) pure
       }
@@ -90,6 +101,15 @@ simWaitExecFixture = do
   memSetApplication (Just "sim-app") mem
   dbos <- simInstance
   _ <- memLaunchOnWith mem simTracer dbos Nothing
+  let -- Settling presents the row's own creator token, as the execution
+      -- that ran it would.
+      ownerFor widText = do
+        fetched <- SystemDB.getWorkflow mem (WorkflowId widText)
+        case fetched of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = token})
+            Nothing -> error "wait fixture row has no creator token"
+          _ -> error "wait fixture built a context for a row that was never initialized"
   pure
     WaitExecFixture
       { weFreshWorkflowId = \label -> do
@@ -98,8 +118,9 @@ simWaitExecFixture = do
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),
-        weSettle = \wid ->
-          SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) >>= either (error . show) (const (pure ())),
+        weSettle = \wid@(WorkflowId widText) -> do
+          owner <- ownerFor widText
+          SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) owner.ownerToken >>= either (error . show) (const (pure ())),
         weFirst = waitForFirstWorkflow dbos,
         weAll = waitForWorkflows dbos,
         weSingle = waitForWorkflow dbos,

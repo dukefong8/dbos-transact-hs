@@ -87,6 +87,7 @@ module DBOS.SystemDB.Types
     ForkOptions (..),
     GetEventCaller (..),
     InitWorkflowCaller (..),
+    WorkflowOwner (..),
     WorkflowInitResult (..),
     WrittenBy (..),
     newWorkflow,
@@ -1619,22 +1620,39 @@ rewindFieldsValid cut version queue partition
 
 -- | The workflow a @get_event@ runs on behalf of, and the steps it records
 -- against. Two step ids because they are not interchangeable: one records
--- the read, the other the deadline. Mirrors Rust @GetEventCaller@.
+-- the read, the other the deadline. The token is the caller's own: both
+-- records land only while the caller still owns its row. Mirrors Rust
+-- @GetEventCaller@.
 data GetEventCaller = GetEventCaller
   { getEventCallerWorkflowId    :: WorkflowId,
     getEventCallerStepId        :: Int,
-    getEventCallerTimeoutStepId :: Int
+    getEventCallerTimeoutStepId :: Int,
+    getEventCallerToken         :: Text
   }
   deriving stock (Eq, Show)
 
 -- | The workflow an @init_workflow@ creates a child on behalf of, and the
 -- step the start is recorded under. Everything the parent contributes is
--- here, including the child's own id. Mirrors Rust @InitWorkflowCaller@.
+-- here, including the child's own id. The token is the parent's own: a
+-- stale parent starts nothing. Mirrors Rust @InitWorkflowCaller@.
 data InitWorkflowCaller = InitWorkflowCaller
   { initCallerParentWorkflowId :: WorkflowId,
     initCallerStepId           :: Int,
     initCallerStepName         :: Text,
-    initCallerStartedAt        :: Timestamp
+    initCallerStartedAt        :: Timestamp,
+    initCallerToken            :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | A write's claim on its workflow: the row it targets and the token the
+-- execution making the write holds. A write lands only while the row still
+-- holds that token; anything else is a @WorkflowConflict@ and rolls back.
+-- Mirrors Rust @WorkflowOwner@. The @None@-shaped absence of one (a plain
+-- client or engine path with no execution) is expressed at each call site
+-- with @Maybe@, never with a dummy token.
+data WorkflowOwner = WorkflowOwner
+  { ownerWorkflowId :: WorkflowId,
+    ownerToken      :: Text
   }
   deriving stock (Eq, Show)
 

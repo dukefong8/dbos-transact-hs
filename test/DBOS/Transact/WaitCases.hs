@@ -92,15 +92,18 @@ scenarioRefusal fx = do
   pure (first, checkpoint, second)
 
 -- | A recorded winner that left the set is refused: the winner must still
--- be waited on.
+-- be waited on. The select runs under a fresh waiter scope: settling ends
+-- the member's ownership, so only a still-running row can checkpoint the
+-- win — as in production, where a running workflow waits on others.
 scenarioWinnerLeft :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
-                   => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) WorkflowId)
+                   => WaitFixture m -> m (WorkflowId, WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) WorkflowId)
 scenarioWinnerLeft fx = do
   wid <- fx.wfFreshWorkflowId "winner"
+  waiter <- fx.wfFreshWorkflowId "winner-waiter"
   fx.wfSettle wid
-  first <- wfRun fx wid $ \ctx -> selectWorkflow ctx [wid]
-  second <- wfRun fx wid $ \ctx -> selectWorkflow ctx [WorkflowId "hs-wait-elsewhere"]
-  pure (wid, first, second)
+  first <- wfRun fx waiter $ \ctx -> selectWorkflow ctx [wid]
+  second <- wfRun fx waiter $ \ctx -> selectWorkflow ctx [WorkflowId "hs-wait-elsewhere"]
+  pure (wid, waiter, first, second)
 
 -- | An all-wait completes over a settled workflow.
 scenarioJoinSettled :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
@@ -127,9 +130,10 @@ scenarioSelectSettledFirst :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
 scenarioSelectSettledFirst fx = do
   first <- fx.wfFreshWorkflowId "sfirst-a"
   second <- fx.wfFreshWorkflowId "sfirst-b"
+  waiter <- fx.wfFreshWorkflowId "sfirst-waiter"
   fx.wfSettle first
-  won <- wfRun fx first $ \ctx -> selectWorkflow ctx [first, second]
-  checkpoint <- fx.wfCheckStep first
+  won <- wfRun fx waiter $ \ctx -> selectWorkflow ctx [first, second]
+  checkpoint <- fx.wfCheckStep waiter
   pure (first, second, won, checkpoint)
 
 -- | A replayed first-wait reads its recorded winner back.
@@ -204,13 +208,13 @@ checkRefusal (first, checkpoint, second) = do
 
 -- | The settled winner returns, and the replay over a changed set names
 -- the recorded winner in its refusal.
-checkWinnerLeft :: (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) WorkflowId) -> Either String ()
-checkWinnerLeft (wid, first, second) = do
+checkWinnerLeft :: (WorkflowId, WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) WorkflowId) -> Either String ()
+checkWinnerLeft (wid, waiter, first, second) = do
   unless (first == Right wid) $ Left ("expected the settled winner, got: " <> show first)
   case second of
     Left (SystemDatabase err) -> case err of
       SysDB.UnexpectedStep {workflowId, stepId, recorded} -> do
-        unless (workflowId == widTextOf wid) $ Left ("expected the waiting workflow to be named, got: " <> show workflowId)
+        unless (workflowId == widTextOf waiter) $ Left ("expected the waiting workflow to be named, got: " <> show workflowId)
         unless (stepId == 0) $ Left ("expected step 0, got: " <> show stepId)
         unless (widTextOf wid `Text.isInfixOf` recorded) $ Left "expected the recorded winner to be named"
       otherErr -> Left ("expected UnexpectedStep, got: " <> show otherErr)

@@ -9,7 +9,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (NewWorkflow (..), SystemDB (..), newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), SystemDB (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
@@ -132,7 +132,7 @@ mkStepFixture getBackend = pure StepFixture
       created <- initWorkflow backend (newWorkflow widText) {newWorkflowName = Just "L2StepCases"} Nothing
       case created of
         Left err -> throwIO (userError (show err))
-        Right _ -> pure (),
+        Right result -> pure (WorkflowOwner {ownerWorkflowId = wid, ownerToken = result.initResultCreatorXid}),
     sfCheckStep = \wid step name -> do
       backend <- getBackend
       placed <- checkStep backend wid step name

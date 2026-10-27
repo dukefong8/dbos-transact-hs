@@ -35,7 +35,7 @@ import DBOS.SystemDB.Types (AwaitedOutcome (..), Outcome (..), Serialization (..
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (LocalTaskOutcome (..), WorkflowCtx, stepCtxBoundary, workflowId)
+import DBOS.Transact.Context (LocalTaskOutcome (..), WorkflowCtx, ownerToken, stepCtxBoundary, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 
 -- | Where this handle's result comes from. The local channel carries the
@@ -290,6 +290,7 @@ recordAwait wctx handle stepId' startedAt completedAt settled =
             outcome
             (Just (serializerName handle.conn.connSerializer))
             (Just (StepTiming startedAt completedAt))
+            (ownerToken wctx)
 
 -- | The replayed form of an await: adopt the recorded row, and only when
 -- it names the workflow this handle stands for.

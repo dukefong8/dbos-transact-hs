@@ -54,7 +54,7 @@ import DBOS.SystemDB.Types (Outcome (..), Serialization (..), SerializedWorkflow
 import DBOS.Transact.Checkpoint (PendingStep (..), StepPlacement (..), pendingStepId, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (WorkflowCtx (wctxConn), workflowId)
+import DBOS.Transact.Context (WorkflowCtx (wctxConn), ownerToken, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Serialization (CodecError, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 
@@ -194,6 +194,7 @@ recordSelect recording winner = case recording.recordingPlacement of
           (OutcomeOutput (Just encoded.serializedText))
           (serialization <|> Just (serializerName conn.connSerializer))
           timing
+          (ownerToken wctx)
     pure (either (Left . TransactError.fromSystemDB) Right written)
   _ -> pure (Right ())
 

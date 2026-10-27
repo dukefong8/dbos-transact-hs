@@ -21,7 +21,7 @@ import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Se
 import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextStepId, stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextStepId, ownerToken, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 
@@ -68,6 +68,7 @@ driveSetEvent wctx key value placement =
                 key
                 encoded.serializedText
                 serialization
+                (ownerToken wctx')
           )
       pure $ case written of
         Left err -> Left (TransactError.fromSystemDB err)
@@ -97,7 +98,8 @@ getEvent wctx destination key timeout = do
               GetEventCaller
                 { getEventCallerWorkflowId = WorkflowId workflowText,
                   getEventCallerStepId = readStep,
-                  getEventCallerTimeoutStepId = timeoutStep
+                  getEventCallerTimeoutStepId = timeoutStep,
+                  getEventCallerToken = ownerToken wctx
                 }
           )
   found <- withSystemDB wctx (\db -> SystemDB.getEvent db destination key timeout caller)
@@ -153,7 +155,7 @@ pendingGetEvent dbos wctx destination key timeout = do
         Right placement -> case placement of
           Recorded wctx' readStep -> do
             timeoutStep <- nextStepId wctx'
-            let caller = Just (GetEventCaller (WorkflowId (workflowId wctx')) readStep timeoutStep)
+            let caller = Just (GetEventCaller (WorkflowId (workflowId wctx')) readStep timeoutStep (ownerToken wctx'))
             pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor caller destination key timeout))
           _ -> pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor Nothing destination key timeout))
 

@@ -22,7 +22,7 @@ import DBOS.Transact
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Datasource (TransactionEvent (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.Context (withWorkflow)
+import DBOS.Transact.Context (testOwner, withWorkflow)
 import DBOS.Transact.DatasourceCases
   ( DsFixture (..),
     RegistryFixture (..),
@@ -88,7 +88,7 @@ simDsFixture =
 dsSimRun :: Text -> (forall exec. WorkflowCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
 dsSimRun name action = do
   conn <- simConnectionWith simTracer
-  withWorkflow conn simDsIdentity (WorkflowId name) Nothing action
+  withWorkflow conn simDsIdentity (WorkflowId name) Nothing (testOwner (WorkflowId name)) action
 
 -- | A mem-backed fixture for cases that stage system rows: 'MockSystemDB'
 -- answers canned rows, so only 'MemSystemDB' can hold a staged owner.
@@ -97,7 +97,7 @@ memDsFixture mem =
   DsFixture
     { dsFixtureRun = \name action -> do
         conn <- memConnectionOn mem simTracer
-        withWorkflow conn simDsIdentity (WorkflowId name) Nothing action,
+        withWorkflow conn simDsIdentity (WorkflowId name) Nothing (testOwner (WorkflowId name)) action,
       dsFixtureMkDs = mkFakeDs
     }
 

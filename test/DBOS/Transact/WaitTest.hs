@@ -15,7 +15,7 @@ import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (NewWorkflow (..), Outcome (..), WorkflowId (..), newWorkflow, selectStepName)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, selectStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
@@ -84,7 +84,16 @@ waitTestIdentity =
 mkWaitFixture :: Postgres.PostgresSystemDB -> (WaitFixture IO -> IO a) -> IO a
 mkWaitFixture backend run = do
   (logger, cleanup) <- acquireLoggerBackend
-  let fixture =
+  let -- Contexts and settles present the row's own creator token, as an
+      -- execution built from the init result would.
+      ownerFor widText = do
+        fetched <- SystemDB.getWorkflow backend (WorkflowId widText)
+        case fetched of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = token})
+            Nothing -> fail "wait fixture row has no creator token"
+          _ -> fail "wait fixture built a context for a row that was never initialized"
+      fixture =
         WaitFixture
           { wfFreshWorkflowId = \label -> do
               freshId <- UUID.V4.nextRandom
@@ -93,13 +102,15 @@ mkWaitFixture backend run = do
               case created of
                 Left err -> fail (show err)
                 Right _ -> pure (WorkflowId workflowText),
-            wfCtx = \wid action -> do
+            wfCtx = \wid@(WorkflowId widText) action -> do
               conn <- connOver backend (ioTracer logger)
-              withWorkflow conn waitTestIdentity wid Nothing action,
-            wfSettle = \wid ->
-              SystemDB.recordWorkflowOutcome backend wid (OutcomeOutput (Just "null")) >>= either (fail . show) (const (pure ())),
+              owner <- ownerFor widText
+              withWorkflow conn waitTestIdentity wid Nothing owner action,
+            wfSettle = \wid@(WorkflowId widText) -> do
+              owner <- ownerFor widText
+              SystemDB.recordWorkflowOutcome backend wid (OutcomeOutput (Just "null")) owner.ownerToken >>= either (fail . show) (const (pure ())),
             wfCancel = \wid ->
-              SystemDB.cancelWorkflows backend [wid] False Nothing >>= either (fail . show) (const (pure ())),
+              SystemDB.cancelWorkflows backend [wid] False Nothing Nothing >>= either (fail . show) (const (pure ())),
             wfCheckStep = \wid ->
               SystemDB.checkStep backend wid 0 selectStepName >>= either (fail . show) pure
           }
@@ -131,6 +142,15 @@ mkWaitExecFixture backend run = do
           }
   bracket (newDBOS config) shutdown $ \dbos -> do
     started <- launchWithEnvironment dbos isolatedEnvironment
+    let -- Settling presents the row's own creator token, as the execution
+        -- that ran it would.
+        ownerFor widText = do
+          fetched <- SystemDB.getWorkflow backend (WorkflowId widText)
+          case fetched of
+            Right (Just row) -> case row.workflowRecordCreatorXid of
+              Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = token})
+              Nothing -> fail "wait fixture row has no creator token"
+            _ -> fail "wait fixture built a context for a row that was never initialized"
     case started of
       Left err -> fail (show err)
       Right _ ->
@@ -143,8 +163,9 @@ mkWaitExecFixture backend run = do
                 case created of
                   Left err -> fail (show err)
                   Right _ -> pure (WorkflowId workflowText),
-              weSettle = \wid ->
-                SystemDB.recordWorkflowOutcome backend wid (OutcomeOutput (Just "null")) >>= either (fail . show) (const (pure ())),
+              weSettle = \wid@(WorkflowId widText) -> do
+                owner <- ownerFor widText
+                SystemDB.recordWorkflowOutcome backend wid (OutcomeOutput (Just "null")) owner.ownerToken >>= either (fail . show) (const (pure ())),
               weFirst = waitForFirstWorkflow dbos,
               weAll = waitForWorkflows dbos,
               weSingle = waitForWorkflow dbos,

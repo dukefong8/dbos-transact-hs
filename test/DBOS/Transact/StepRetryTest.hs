@@ -15,7 +15,7 @@ import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
@@ -83,7 +83,16 @@ stepTestIdentity =
 mkStepFixture :: Postgres.PostgresSystemDB -> (StepRetryFixture IO -> IO a) -> IO a
 mkStepFixture backend run = do
   (logger, cleanup) <- acquireLoggerBackend
-  let fixture =
+  let -- Runs present the row's own creator token, as an execution built
+      -- from the init result would.
+      ownerFor workflowText = do
+        fetched <- SystemDB.getWorkflow backend (WorkflowId workflowText)
+        case fetched of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId workflowText, ownerToken = token})
+            Nothing -> fail "retry fixture row has no creator token"
+          _ -> fail "retry fixture built a context for a row that was never initialized"
+      fixture =
         StepRetryFixture
           { srfFreshWorkflowId = do
               freshId <- UUID.V4.nextRandom
@@ -92,11 +101,12 @@ mkStepFixture backend run = do
               case created of
                 Left err -> fail (show err)
                 Right _ -> pure (WorkflowId workflowText),
-            srfRun = \wid action -> do
+            srfRun = \wid@(WorkflowId widText) action -> do
               conn <- connOver backend (ioTracer logger)
-              withWorkflow conn stepTestIdentity wid Nothing action,
+              owner <- ownerFor widText
+              withWorkflow conn stepTestIdentity wid Nothing owner action,
             srfCancel = \wids ->
-              SystemDB.cancelWorkflows backend wids False Nothing >>= either (fail . show) (const (pure ())),
+              SystemDB.cancelWorkflows backend wids False Nothing Nothing >>= either (fail . show) (const (pure ())),
             srfListSteps = \wid ->
               SystemDB.listSteps backend wid False Nothing Nothing Nothing >>= either (fail . show) pure
           }

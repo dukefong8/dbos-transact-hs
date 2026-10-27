@@ -40,7 +40,7 @@ import DBOS.Transact
     toDataSource)
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep, withWorkflow)
+import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, testOwner, withStep, withWorkflow)
 import DBOS.Transact.WidgetCases
   ( CheckoutSteps (..),
     lostAckOnce,
@@ -284,7 +284,7 @@ withWidgetFixture body = do
             wfRelaunch = launchWidget dbos,
             wfFreshWorkflowId = pure (WorkflowId ("hs-widget-" <> schema)),
             wfSetInventory = \n -> runAppSession app (Session.statement (fromIntegral (n :: Int) :: Int32) tables.wtSetInventory) >>= either (fail . show) pure,
-            wfWithTableStep = \tableBody -> withWorkflow conn tableIdentity (WorkflowId "widget-tables") Nothing (\wctx -> nextWorkflowMarker wctx >>= \marker -> withStep wctx marker (firstStepStatus 0) tableBody),
+            wfWithTableStep = \tableBody -> withWorkflow conn tableIdentity (WorkflowId "widget-tables") Nothing (testOwner (WorkflowId "widget-tables")) (\wctx -> nextWorkflowMarker wctx >>= \marker -> withStep wctx marker (firstStepStatus 0) tableBody),
             wfReadInventory = readInventory app tables,
             wfReadOrders = readOrders app tables,
             wfReadStepCommits = do

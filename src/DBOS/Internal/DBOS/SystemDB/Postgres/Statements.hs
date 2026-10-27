@@ -66,6 +66,7 @@ module DBOS.SystemDB.Postgres.Statements
     existingWorkflowsSession,
     resumeWorkflowsSession,
     deleteWorkflowsSession,
+    deleteWorkflowsStatement,
     RecvTxResult (..),
     EncodedValueRaw (..),
     RecvParams (..),
@@ -78,6 +79,8 @@ module DBOS.SystemDB.Postgres.Statements
     rewindTx,
     CallerStep (..),
     checkCallerStep,
+    checkOwnerTx,
+    refuseSelfTarget,
     SetEventParams (..),
     setEventTx,
     EventValueRaw (..),
@@ -526,19 +529,22 @@ unwrapId (Id key) = key
 -- key, whose unique index spans every status — a key left on a finished row
 -- would be held forever. The legacy @output@ and @error@ columns are cleared
 -- rather than written: readers fall back to them, so a stale error must not
--- survive beside a new outcome. Returns the rows affected. Mirrors
--- @record_workflow_outcome@'s status update.
-recordWorkflowOutcomeStatement :: Text -> Text -> Maybe Text -> Maybe Text -> Statement.Statement () Int64
-recordWorkflowOutcomeStatement workflowId statusText output errorText =
+-- survive beside a new outcome. Only the row's current owner records:
+-- the write predicates on @owner_xid@ and clears it, so a superseded
+-- execution's outcome lands as no rows, never as a second result. Returns
+-- the rows affected. Mirrors @record_workflow_outcome@'s status update.
+recordWorkflowOutcomeStatement :: Text -> Text -> Maybe Text -> Maybe Text -> Text -> Statement.Statement () Int64
+recordWorkflowOutcomeStatement workflowId statusText output errorText owner =
   sqlExecTypedStatement [typedSql|
     update dbos.workflow_status
     set status = ${statusText},
       output = null,
       error = null,
+      owner_xid = null,
       updated_at = (extract(epoch from now()) * 1000)::bigint,
       completed_at = (extract(epoch from now()) * 1000)::bigint,
       deduplication_id = null
-    where workflow_uuid = ${workflowId} and status = 'PENDING'
+    where workflow_uuid = ${workflowId} and status = 'PENDING' and owner_xid = ${owner}
   |]
 
 -- | Records a finished workflow's outcome in its own table, behind a status
@@ -1217,6 +1223,37 @@ checkCallerStep stepName (Just (callerWid, callerStep)) = do
         Right CallerNative -> case eitherDecodeStrict (encodeUtf8 text) of
           Right err -> Left err
           Left _ -> Left (Malformed "unreadable recorded step error")
+
+-- | Refuses the write unless @token@ still owns its workflow, and locks the
+-- row until the transaction ends. A missing row, a cleared owner, and a
+-- token that is not the row's all refuse the same way: the write that found
+-- out rolled back, and the execution holding the token must stop and wait
+-- for the owner's outcome. The sim judges the same verdicts with an inline
+-- mirror, so skipping work, recording outcomes, and refusing calls cannot
+-- bypass the ownership check. Mirrors Rust @check_owner_on@.
+checkOwnerTx :: Text -> Text -> Tx.Transaction (Either Error ())
+checkOwnerTx workflowId token = do
+  held <- Tx.statement workflowId checkOwnerStatement
+  pure $ case held of
+    Just (Just kept) | kept == token -> Right ()
+    _ -> Left (WorkflowConflict {workflowId = workflowId})
+
+checkOwnerStatement :: Statement.Statement Text (Maybe (Maybe Text))
+checkOwnerStatement =
+  Statement.preparable
+    "select owner_xid from dbos.workflow_status where workflow_uuid = $1 for no key update"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowMaybe (Decoders.column (Decoders.nullable Decoders.text)))
+
+-- | Refuses a cancel or a resume the caller makes of itself by name: the
+-- @from_workflow@ check of @cancel_workflows@, before anything runs. Shared
+-- by both backends so the refusal reads the same everywhere. Mirrors Rust
+-- @refuse_self_target@.
+refuseSelfTarget :: Text -> [Text] -> Text -> Maybe Error
+refuseSelfTarget callerId targets action
+  | callerId `elem` targets =
+      Just (InvalidInput {field = "workflow_ids", detail = "workflow " <> callerId <> " cannot " <> action <> " itself"})
+  | otherwise = Nothing
 
 -- | How a caller step's recorded bytes are tagged. One codec writes portable
 -- JSON; NULL, the empty string and legacy @rust_serde@ read as native. An

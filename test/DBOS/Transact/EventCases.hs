@@ -44,7 +44,7 @@ module DBOS.Transact.EventCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), WorkflowId (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact.Instance (getWorkflowEventSerialized)
@@ -106,8 +106,8 @@ data EventFixture m = EventFixture
     efFreshId :: Text -> m WorkflowId,
     efConn :: m (Connection m),
     efIdentity :: Identity,
-    efInitRow :: Text -> Text -> m (),
-    efFinishWorkflow :: WorkflowId -> Outcome -> m (),
+    efInitRow :: Text -> Text -> m WorkflowOwner,
+    efFinishWorkflow :: WorkflowId -> Outcome -> WorkflowOwner -> m (),
     efCancelWorkflow :: WorkflowId -> m (),
     efDeleteWorkflow :: WorkflowId -> m (),
     efStepNames :: WorkflowId -> m [(Int, Text)],
@@ -157,14 +157,14 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
           created <- runSystemDB sysdb (\db -> initWorkflow db ((newWorkflow widText) {newWorkflowName = Just name}) Nothing)
           case created of
             Left err -> throwIO (userError (show err))
-            Right _ -> pure (),
-        efFinishWorkflow = \wid outcome -> do
-          recorded <- runSystemDB sysdb (\db -> SystemDB.recordWorkflowOutcome db wid outcome)
+            Right result -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = result.initResultCreatorXid}),
+        efFinishWorkflow = \wid outcome owner -> do
+          recorded <- runSystemDB sysdb (\db -> SystemDB.recordWorkflowOutcome db wid outcome owner.ownerToken)
           case recorded of
             Left err -> throwIO (userError (show err))
             Right _ -> pure (),
         efCancelWorkflow = \wid -> do
-          cancelled <- runSystemDB sysdb (\db -> SystemDB.cancelWorkflows db [wid] False Nothing)
+          cancelled <- runSystemDB sysdb (\db -> SystemDB.cancelWorkflows db [wid] False Nothing Nothing)
           case cancelled of
             Left err -> throwIO (userError (show err))
             Right _ -> pure (),
@@ -291,7 +291,7 @@ scenarioPublishReplay :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, Monad
 scenarioPublishReplay fx = do
   wid <- fx.efFreshId "event"
   let WorkflowId widText = wid
-  fx.efInitRow widText "L2EventTest"
+  widOwner <- fx.efInitRow widText "L2EventTest"
   let action :: forall exec. WorkflowCtx exec m -> m (Either (Error EngineOnly) (Maybe Text))
       action wctx = do
         published <- setEvent wctx "progress" ("ready" :: Text)
@@ -299,11 +299,11 @@ scenarioPublishReplay fx = do
           Left err -> pure (Left err)
           Right () -> getEvent wctx wid "progress" (millisDuration 100)
   conn <- fx.efConn
-  first <- withWorkflow conn fx.efIdentity wid Nothing action
+  first <- withWorkflow conn fx.efIdentity wid Nothing widOwner action
   firstRead <- case first of
     Left err -> throwIO (userError (show err))
     Right read -> pure read
-  replay <- withWorkflow conn fx.efIdentity wid Nothing action
+  replay <- withWorkflow conn fx.efIdentity wid Nothing widOwner action
   replayRead <- case replay of
     Left err -> throwIO (userError (show err))
     Right read -> pure read
@@ -324,22 +324,22 @@ scenarioCheckpointedRead fx = do
       create w name = do
         let WorkflowId t = w
         fx.efInitRow t name
-  create publisher "L2EventPublisher"
-  create reader "L2EventReader"
-  create inStepper "L2EventInStep"
+  publisherOwner <- create publisher "L2EventPublisher"
+  readerOwner <- create reader "L2EventReader"
+  inStepperOwner <- create inStepper "L2EventInStep"
   conn <- fx.efConn
-  published <- withWorkflow conn fx.efIdentity publisher Nothing $ \wctx ->
+  published <- withWorkflow conn fx.efIdentity publisher Nothing publisherOwner $ \wctx ->
     setEvent wctx "answer" (42 :: Int)
   case published of
     Left err -> throwIO (userError (show err))
     Right () -> pure ()
-  outside <- withWorkflow conn fx.efIdentity reader Nothing $ \wctx ->
+  outside <- withWorkflow conn fx.efIdentity reader Nothing readerOwner $ \wctx ->
     (getEvent wctx publisher "answer" (millisDuration 0) :: m (Either (Error EngineOnly) (Maybe Int)))
   outsideRead <- case outside of
     Left err -> throwIO (userError (show err))
     Right read -> pure read
   outsideSteps <- fx.efStepNames reader
-  inside <- withWorkflow conn fx.efIdentity inStepper Nothing $ \wctx ->
+  inside <- withWorkflow conn fx.efIdentity inStepper Nothing inStepperOwner $ \wctx ->
     (runStepWith stepOptionsDefault wctx "read" (\sctx -> getEvent sctx.stepCtxWorkflow publisher "answer" (millisDuration 0)) :: m (Either (Error EngineOnly) (Maybe Int)))
   insideRead <- case inside of
     Left err -> throwIO (userError (show err))
@@ -356,10 +356,10 @@ scenarioRefusedSet :: forall m. (MonadSTM m, MonadCatch m)
 scenarioRefusedSet fx = do
   wid <- fx.efFreshId "event-refusal"
   let WorkflowId widText = wid
-  fx.efInitRow widText "L2EventRefusal"
+  widOwner <- fx.efInitRow widText "L2EventRefusal"
   conn <- fx.efConn
   (refused, before, after) <-
-    withWorkflow conn fx.efIdentity wid Nothing $ \wctx -> do
+    withWorkflow conn fx.efIdentity wid Nothing widOwner $ \wctx -> do
       marker <- nextWorkflowMarker wctx
       withStep wctx marker (firstStepStatus 0) $ \_sctx -> do
         before <- nextStepId wctx
@@ -384,16 +384,16 @@ scenarioCapturedRead fx = do
       create w name = do
         let WorkflowId t = w
         fx.efInitRow t name
-  create publisher "L2EventPublisher"
-  create reader "L2EventReader"
+  publisherOwner <- create publisher "L2EventPublisher"
+  readerOwner <- create reader "L2EventReader"
   conn <- fx.efConn
-  published <- withWorkflow conn fx.efIdentity publisher Nothing $ \wctx ->
+  published <- withWorkflow conn fx.efIdentity publisher Nothing publisherOwner $ \wctx ->
     setEvent wctx "answer" (42 :: Int)
   case published of
     Left err -> throwIO (userError (show err))
     Right () -> pure ()
   (readCaptured, before, after) <-
-    withWorkflow conn fx.efIdentity reader Nothing $ \wctx -> do
+    withWorkflow conn fx.efIdentity reader Nothing readerOwner $ \wctx -> do
       marker <- nextWorkflowMarker wctx
       withStep wctx marker (firstStepStatus 0) $ \_sctx -> do
         before <- nextStepId wctx
@@ -413,21 +413,21 @@ scenarioReplayNoRepublish fx = do
   wid <- fx.efFreshId "event-replay"
   let WorkflowId widText = wid
       reader = WorkflowId (widText <> "-reader")
-  fx.efInitRow widText "L2EventReplay"
+  widOwner <- fx.efInitRow widText "L2EventReplay"
   conn <- fx.efConn
-  first <- withWorkflow conn fx.efIdentity wid Nothing $ \wctx ->
+  first <- withWorkflow conn fx.efIdentity wid Nothing widOwner $ \wctx ->
     setEvent wctx "progress" ("first" :: Text)
   case first of
     Left err -> throwIO (userError (show err))
     Right () -> pure ()
-  replayed <- withWorkflow conn fx.efIdentity wid Nothing $ \wctx ->
+  replayed <- withWorkflow conn fx.efIdentity wid Nothing widOwner $ \wctx ->
     setEvent wctx "progress" ("second" :: Text)
   case replayed of
     Left err -> throwIO (userError (show err))
     Right () -> pure ()
   let WorkflowId readerText = reader
-  fx.efInitRow readerText "L2EventReplayReader"
-  readBack <- withWorkflow conn fx.efIdentity reader Nothing $ \wctx ->
+  readerOwner <- fx.efInitRow readerText "L2EventReplayReader"
+  readBack <- withWorkflow conn fx.efIdentity reader Nothing readerOwner $ \wctx ->
     (getEvent wctx wid "progress" (millisDuration 0) :: m (Either (Error EngineOnly) (Maybe Text)))
   case readBack of
     Left err -> throwIO (userError (show err))

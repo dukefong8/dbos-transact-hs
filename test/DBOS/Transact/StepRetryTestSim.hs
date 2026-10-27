@@ -13,7 +13,7 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), millisDuration, newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), millisDuration, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB)
 import DBOS.Transact
@@ -77,6 +77,15 @@ simStepFixture :: forall s. IOSim s (StepRetryFixture (IOSim s))
 simStepFixture = do
   mem <- newMemDB
   fresh <- newTVarIO (0 :: Int)
+  let -- Runs present the row's own creator token, as an execution built
+      -- from the init result would.
+      ownerFor widText = do
+        fetched <- SystemDB.getWorkflow mem (WorkflowId widText)
+        case fetched of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = token})
+            Nothing -> error "retry fixture row has no creator token"
+          _ -> error "retry fixture built a context for a row that was never initialized"
   pure
     StepRetryFixture
       { srfFreshWorkflowId = do
@@ -86,11 +95,12 @@ simStepFixture = do
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),
-        srfRun = \wid action -> do
+        srfRun = \wid@(WorkflowId widText) action -> do
           conn <- memConnectionOn mem simTracer
-          withWorkflow conn simStepIdentity wid Nothing action,
+          owner <- ownerFor widText
+          withWorkflow conn simStepIdentity wid Nothing owner action,
         srfCancel = \wids ->
-          SystemDB.cancelWorkflows mem wids False Nothing >>= either (error . show) (const (pure ())),
+          SystemDB.cancelWorkflows mem wids False Nothing Nothing >>= either (error . show) (const (pure ())),
         srfListSteps = \wid ->
           SystemDB.listSteps mem wid False Nothing Nothing Nothing >>= either (error . show) pure
       }
@@ -200,9 +210,10 @@ traceTimeoutStopsBody tr =
   traceEvents tr @?= [StepAttemptTimedOut "slow" 0 5, StepErrorRecorded "slow" 0]
 
 tracePlainNotPreemptible :: SimTrace a -> IO ()
--- | The plain path never announces a start: only the recorded output.
+-- | The plain path never announces a start, and the refused record announces
+-- nothing either: the late result leaves no trace behind.
 tracePlainNotPreemptible tr =
-  traceEvents tr @?= [StepOutputRecorded "plain" 0]
+  traceEvents tr @?= []
 
 traceTokenQuiet :: SimTrace a -> IO ()
 traceTokenQuiet tr =

@@ -85,9 +85,9 @@ scenarioStreamReader :: forall m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDe
 scenarioStreamReader fx = do
   wid <- fx.efFreshId "stream-reader"
   let WorkflowId widText = wid
-  fx.efInitRow widText "L2StreamReader"
+  widOwner <- fx.efInitRow widText "L2StreamReader"
   conn <- fx.efConn
-  consumed <- withWorkflow conn fx.efIdentity wid Nothing $ \wctx -> do
+  consumed <- withWorkflow conn fx.efIdentity wid Nothing widOwner $ \wctx -> do
     written <- writeStream wctx "progress" ("value" :: Text)
     case written of
       Left err -> pure (Left err)
@@ -114,15 +114,15 @@ scenarioWrittenStream fx = do
   consumer <- fx.efFreshId "stream-written-reader"
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
-  fx.efInitRow producerText "L2StreamWritten"
-  fx.efInitRow consumerText "L2StreamWrittenReader"
+  producerOwner <- fx.efInitRow producerText "L2StreamWritten"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamWrittenReader"
   conn <- fx.efConn
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> do
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> do
     mapM_ (writeOrFail wctx "out") (["a", "b", "c"] :: [Text])
     closeOrFail wctx "out"
     pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
-  withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
     readAll <- readValues wctx producer 0 defaultReadStreamOptions
     readOffset <- readValues wctx producer 1 defaultReadStreamOptions
     reader <- (readStream wctx producer "out" defaultReadStreamOptions :: m (StreamReader (Error EngineOnly) m Text))
@@ -142,15 +142,15 @@ scenarioUnclosedStream fx = do
   consumer <- fx.efFreshId "stream-unclosed-reader"
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
-  fx.efInitRow producerText "L2StreamUnclosed"
-  fx.efInitRow consumerText "L2StreamUnclosedReader"
+  producerOwner <- fx.efInitRow producerText "L2StreamUnclosed"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamUnclosedReader"
   conn <- fx.efConn
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> do
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> do
     mapM_ (writeOrFail wctx "out") (["a", "b"] :: [Text])
     pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
-  fx.efFinishWorkflow producer (OutcomeOutput Nothing)
-  result <- withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> readValues wctx producer 0 defaultReadStreamOptions
+  fx.efFinishWorkflow producer (OutcomeOutput Nothing) producerOwner
+  result <- withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> readValues wctx producer 0 defaultReadStreamOptions
   either (throwIO . userError . show) pure result
 
 checkUnclosedStream :: [Text] -> Either String ()
@@ -161,9 +161,9 @@ scenarioCloseStopsStream :: (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m,
 scenarioCloseStopsStream fx = do
   wid <- fx.efFreshId "stream-close-stops"
   let WorkflowId widText = wid
-  fx.efInitRow widText "L2StreamCloseStops"
+  widOwner <- fx.efInitRow widText "L2StreamCloseStops"
   conn <- fx.efConn
-  result <- withWorkflow conn fx.efIdentity wid Nothing $ \wctx -> do
+  result <- withWorkflow conn fx.efIdentity wid Nothing widOwner $ \wctx -> do
     writeOrFail wctx "out" ("a" :: Text)
     closeOrFail wctx "out"
     writeOrFail wctx "out" ("after" :: Text)
@@ -187,20 +187,20 @@ scenarioCrossPages fx = do
       WorkflowId tailConsumerText = tailConsumer
       WorkflowId prewrittenConsumerText = prewrittenConsumer
       values = [0 .. 249] :: [Int]
-  fx.efInitRow producerText "L2StreamPages"
-  fx.efInitRow prewrittenProducerText "L2StreamPagesReady"
-  fx.efInitRow consumerText "L2StreamPagesReader"
-  fx.efInitRow tailConsumerText "L2StreamPagesTailReader"
-  fx.efInitRow prewrittenConsumerText "L2StreamPagesReadyReader"
+  producerOwner <- fx.efInitRow producerText "L2StreamPages"
+  prewrittenProducerOwner <- fx.efInitRow prewrittenProducerText "L2StreamPagesReady"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamPagesReader"
+  tailConsumerOwner <- fx.efInitRow tailConsumerText "L2StreamPagesTailReader"
+  prewrittenConsumerOwner <- fx.efInitRow prewrittenConsumerText "L2StreamPagesReadyReader"
   conn <- fx.efConn
-  ready <- withWorkflow conn fx.efIdentity prewrittenProducer Nothing $ \wctx -> do
+  ready <- withWorkflow conn fx.efIdentity prewrittenProducer Nothing prewrittenProducerOwner $ \wctx -> do
     mapM_ (writeOrFail wctx "out") values
     closeOrFail wctx "out"
     pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure ready
-  fx.efFinishWorkflow prewrittenProducer (OutcomeOutput Nothing)
+  fx.efFinishWorkflow prewrittenProducer (OutcomeOutput Nothing) prewrittenProducerOwner
   reachedPage <- newEmptyMVar
-  readerTask <- async $ withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  readerTask <- async $ withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
     reader <- readStream wctx producer "out" defaultReadStreamOptions :: m (StreamReader (Error EngineOnly) m Int)
     case toVectorStream reader of
       Vector.Stream next initial -> do
@@ -215,17 +215,17 @@ scenarioCrossPages fx = do
                   when (length found' == 150) (putMVar reachedPage ())
                   collect state' found'
         collect initial []
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> do
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> do
     mapM_ (writeOrFail wctx "out") (take 150 values)
     takeMVar reachedPage
     mapM_ (writeOrFail wctx "out") (drop 150 values)
     closeOrFail wctx "out"
     pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
-  fx.efFinishWorkflow producer (OutcomeOutput Nothing)
+  fx.efFinishWorkflow producer (OutcomeOutput Nothing) producerOwner
   allValues <- wait readerTask >>= either (throwIO . userError . show) (pure . reverse)
-  tailValues <- withWorkflow conn fx.efIdentity tailConsumer Nothing $ \wctx -> readValues wctx producer 150 defaultReadStreamOptions
-  prewrittenValues <- withWorkflow conn fx.efIdentity prewrittenConsumer Nothing $ \wctx -> readValues wctx prewrittenProducer 0 defaultReadStreamOptions
+  tailValues <- withWorkflow conn fx.efIdentity tailConsumer Nothing tailConsumerOwner $ \wctx -> readValues wctx producer 150 defaultReadStreamOptions
+  prewrittenValues <- withWorkflow conn fx.efIdentity prewrittenConsumer Nothing prewrittenConsumerOwner $ \wctx -> readValues wctx prewrittenProducer 0 defaultReadStreamOptions
   case tailValues of
     Right tailRead -> case prewrittenValues of
       Right readyRead -> pure (allValues, tailRead, readyRead)
@@ -246,12 +246,12 @@ scenarioTimeoutAfterValue fx = do
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
       options = defaultReadStreamOptions {timeout = Just (millisDuration 25), pollingInterval = Just (millisDuration 5)}
-  fx.efInitRow producerText "L2StreamTimeout"
-  fx.efInitRow consumerText "L2StreamTimeoutReader"
+  producerOwner <- fx.efInitRow producerText "L2StreamTimeout"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamTimeoutReader"
   conn <- fx.efConn
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> writeOrFail wctx "out" ("a" :: Text) >> pure (Right () :: Either (Error EngineOnly) ())
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> writeOrFail wctx "out" ("a" :: Text) >> pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
-  withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
     reader <- readStream wctx producer "out" options :: m (StreamReader (Error EngineOnly) m Text)
     case toVectorStream reader of
       Vector.Stream next initial -> do
@@ -276,18 +276,18 @@ scenarioSingleStreamValue fx = do
   consumer <- fx.efFreshId "stream-single-value-reader"
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
-  fx.efInitRow producerText "L2StreamSingleValue"
-  fx.efInitRow consumerText "L2StreamSingleValueReader"
+  producerOwner <- fx.efInitRow producerText "L2StreamSingleValue"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamSingleValueReader"
   conn <- fx.efConn
-  written <- (withWorkflow conn fx.efIdentity producer Nothing $ \wctx ->
+  written <- (withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx ->
     runStep wctx "initial" $ \sctx -> writeOrFail sctx.stepCtxWorkflow "out" ("a" :: Text)) :: m (Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
-  withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
     firstValue <- readStreamHead wctx producer 0 defaultReadStreamOptions
     secondTask <- async (readStreamHead wctx producer 1 defaultReadStreamOptions)
     -- Let the second pull enter its wait while the producer is still pending.
     threadDelay 20000
-    appended <- (withWorkflow conn fx.efIdentity producer Nothing $ \producerCtx -> do
+    appended <- (withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \producerCtx -> do
       initialStep <- runStep producerCtx "initial" (\_ -> pure ())
       case initialStep of
         Left err -> pure (Left err)
@@ -296,7 +296,7 @@ scenarioSingleStreamValue fx = do
           closeOrFail sctx.stepCtxWorkflow "out"
           pure ()) :: m (Either (Error EngineOnly) ())
     either (throwIO . userError . show) pure appended
-    fx.efFinishWorkflow producer (OutcomeOutput Nothing)
+    fx.efFinishWorkflow producer (OutcomeOutput Nothing) producerOwner
     secondValue <- wait secondTask
     atClose <- readStreamHead wctx producer 2 defaultReadStreamOptions
     pastClose <- readStreamHead wctx producer 5 defaultReadStreamOptions
@@ -315,15 +315,15 @@ scenarioCancelledProducer fx = do
   consumer <- fx.efFreshId "stream-cancelled-reader"
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
-  fx.efInitRow producerText "L2StreamCancelledProducer"
-  fx.efInitRow consumerText "L2StreamCancelledReader"
+  producerOwner <- fx.efInitRow producerText "L2StreamCancelledProducer"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamCancelledReader"
   conn <- fx.efConn
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> do
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> do
     mapM_ (writeOrFail wctx "out") (["a", "b"] :: [Text])
     pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
   fx.efCancelWorkflow producer
-  result <- withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> readValues wctx producer 0 defaultReadStreamOptions
+  result <- withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> readValues wctx producer 0 defaultReadStreamOptions
   either (throwIO . userError . show) pure result
 
 checkCancelledProducer :: [Text] -> Either String ()
@@ -338,17 +338,17 @@ scenarioWriteInsideStep fx = do
   consumer <- fx.efFreshId "stream-step-writes-reader"
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
-  fx.efInitRow producerText "L2StreamStepWrites"
-  fx.efInitRow consumerText "L2StreamStepWritesReader"
+  producerOwner <- fx.efInitRow producerText "L2StreamStepWrites"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamStepWritesReader"
   conn <- fx.efConn
-  written <- (withWorkflow conn fx.efIdentity producer Nothing $ \wctx ->
+  written <- (withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx ->
     runStep wctx "produce" $ \sctx -> do
       writeOrFail sctx.stepCtxWorkflow "out" ("a" :: Text)
       writeOrFail sctx.stepCtxWorkflow "out" ("b" :: Text)
       closeOrFail sctx.stepCtxWorkflow "out"
       pure ()) :: m (Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
-  values <- withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> readValues wctx producer 0 defaultReadStreamOptions
+  values <- withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> readValues wctx producer 0 defaultReadStreamOptions
   found <- either (throwIO . userError . show) pure values
   names <- fx.efStepNames producer
   pure (found, names)
@@ -365,16 +365,16 @@ scenarioReplayRead fx = do
   consumer <- fx.efFreshId "stream-replay-consumer"
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
-  fx.efInitRow producerText "L2StreamReplayProducer"
-  fx.efInitRow consumerText "L2StreamReplayConsumer"
+  producerOwner <- fx.efInitRow producerText "L2StreamReplayProducer"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamReplayConsumer"
   conn <- fx.efConn
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> do
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> do
     mapM_ (writeOrFail wctx "out") (["a", "b", "c"] :: [Text])
     closeOrFail wctx "out"
     pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
-  fx.efFinishWorkflow producer (OutcomeOutput Nothing)
-  let readOnce = withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> readValues wctx producer 0 defaultReadStreamOptions
+  fx.efFinishWorkflow producer (OutcomeOutput Nothing) producerOwner
+  let readOnce = withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> readValues wctx producer 0 defaultReadStreamOptions
   firstRead <- readOnce >>= either (throwIO . userError . show) pure
   fx.efDeleteWorkflow producer
   replayed <- readOnce >>= either (throwIO . userError . show) pure
@@ -392,16 +392,16 @@ scenarioTimeoutReplay fx = do
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
       options = defaultReadStreamOptions {timeout = Just (millisDuration 25), pollingInterval = Just (millisDuration 5)}
-  fx.efInitRow producerText "L2StreamTimeoutReplayProducer"
-  fx.efInitRow consumerText "L2StreamTimeoutReplayConsumer"
+  producerOwner <- fx.efInitRow producerText "L2StreamTimeoutReplayProducer"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamTimeoutReplayConsumer"
   conn <- fx.efConn
-  let readTimedOut = withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  let readTimedOut = withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
         answer <- readStreamHead wctx producer 0 options
         pure $ case answer of
           Left (StreamTimeout {}) -> True
           _ -> False
   firstWasTimeout <- readTimedOut
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> do
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> do
     writeOrFail wctx "out" ("late" :: Text)
     pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
@@ -419,16 +419,16 @@ scenarioJoinedReaders fx = do
   consumer <- fx.efFreshId "stream-joined-consumer"
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
-  fx.efInitRow producerText "L2StreamJoinedProducer"
-  fx.efInitRow consumerText "L2StreamJoinedConsumer"
+  producerOwner <- fx.efInitRow producerText "L2StreamJoinedProducer"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamJoinedConsumer"
   conn <- fx.efConn
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> do
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> do
     writeOrFail wctx "out" ("a" :: Text)
     closeOrFail wctx "out"
     pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
-  fx.efFinishWorkflow producer (OutcomeOutput Nothing)
-  withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  fx.efFinishWorkflow producer (OutcomeOutput Nothing) producerOwner
+  withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
     (leftRead, rightRead) <- withAsync (readStreamHead wctx producer 0 defaultReadStreamOptions) $ \leftTask ->
       withAsync (readStreamHead wctx producer 0 defaultReadStreamOptions) $ \rightTask ->
         (,) <$> wait leftTask <*> wait rightTask
@@ -449,21 +449,21 @@ scenarioDroppedRead fx = do
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
       values = ["0", "1", "2", "3", "4"] :: [Text]
-  fx.efInitRow producerText "L2StreamDroppedProducer"
-  fx.efInitRow consumerText "L2StreamDroppedConsumer"
+  producerOwner <- fx.efInitRow producerText "L2StreamDroppedProducer"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamDroppedConsumer"
   conn <- fx.efConn
-  withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
     -- Abandon an in-flight pull while the producer is still pending. Its
     -- cancelled consumer must not advance the durable read offset.
     withAsync (readStreamHead wctx producer 0 defaultReadStreamOptions) $ \pendingRead -> do
       threadDelay 20000
       cancel pendingRead
-    written <- withWorkflow conn fx.efIdentity producer Nothing $ \producerCtx -> do
+    written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \producerCtx -> do
       mapM_ (writeOrFail producerCtx "out") values
       closeOrFail producerCtx "out"
       pure (Right () :: Either (Error EngineOnly) ())
     either (throwIO . userError . show) pure written
-    fx.efFinishWorkflow producer (OutcomeOutput Nothing)
+    fx.efFinishWorkflow producer (OutcomeOutput Nothing) producerOwner
     replayed <- readValues wctx producer 0 defaultReadStreamOptions
     case replayed of
       Right remaining -> pure ([], remaining)
@@ -481,16 +481,16 @@ scenarioMissingWorkflowReplay fx = do
   producer <- fx.efFreshId "stream-missing-replay-producer"
   let WorkflowId consumerText = consumer
       WorkflowId producerText = producer
-  fx.efInitRow consumerText "L2StreamMissingReplayConsumer"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamMissingReplayConsumer"
   conn <- fx.efConn
-  let checkMissing = withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  let checkMissing = withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
         answer <- readStreamHead wctx producer 0 defaultReadStreamOptions
         pure $ case answer of
           Left (SystemDatabase (SystemDB.NonExistentWorkflow {})) -> True
           _ -> False
   firstMissing <- checkMissing
-  fx.efInitRow producerText "L2StreamMissingReplayProducer"
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> do
+  producerOwner <- fx.efInitRow producerText "L2StreamMissingReplayProducer"
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> do
     writeOrFail wctx "out" ("now-present" :: Text)
     closeOrFail wctx "out"
     pure (Right () :: Either (Error EngineOnly) ())
@@ -511,10 +511,10 @@ scenarioInvalidStreamRead fx = do
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
       zeroPoll = defaultReadStreamOptions {pollingInterval = Just (millisDuration 0)}
-  fx.efInitRow producerText "L2StreamInvalidProducer"
-  fx.efInitRow consumerText "L2StreamInvalidConsumer"
+  producerOwner <- fx.efInitRow producerText "L2StreamInvalidProducer"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamInvalidConsumer"
   conn <- fx.efConn
-  withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
     negative <- pullTwice wctx producer (-1) defaultReadStreamOptions
     zero <- pullTwice wctx producer 0 zeroPoll
     pure (negative, zero)
@@ -548,10 +548,10 @@ scenarioCancelledReader fx = do
   consumer <- fx.efFreshId "stream-cancelled-reader-consumer"
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
-  fx.efInitRow producerText "L2StreamCancelledReaderProducer"
-  fx.efInitRow consumerText "L2StreamCancelledReaderConsumer"
+  producerOwner <- fx.efInitRow producerText "L2StreamCancelledReaderProducer"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamCancelledReaderConsumer"
   conn <- fx.efConn
-  readTask <- async $ withWorkflow conn fx.efIdentity consumer Nothing $ \wctx ->
+  readTask <- async $ withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx ->
     readStreamHead wctx producer 0 defaultReadStreamOptions
   threadDelay 20000
   fx.efCancelWorkflow consumer
@@ -575,10 +575,10 @@ scenarioWaitingReadStepId fx = do
   let WorkflowId producerText = producer
       WorkflowId consumerText = consumer
       options = defaultReadStreamOptions {pollingInterval = Just (millisDuration 20)}
-  fx.efInitRow producerText "L2StreamWaitStepId"
-  fx.efInitRow consumerText "L2StreamWaitStepIdReader"
+  producerOwner <- fx.efInitRow producerText "L2StreamWaitStepId"
+  consumerOwner <- fx.efInitRow consumerText "L2StreamWaitStepIdReader"
   conn <- fx.efConn
-  readTask <- async $ withWorkflow conn fx.efIdentity consumer Nothing $ \wctx -> do
+  readTask <- async $ withWorkflow conn fx.efIdentity consumer Nothing consumerOwner $ \wctx -> do
     reader <- readStream wctx producer "out" options :: m (StreamReader (Error EngineOnly) m Text)
     found <- runExceptT (foldVectorStream (Foldl.generalize Foldl.list) (toVectorStream reader))
     case found of
@@ -591,12 +591,12 @@ scenarioWaitingReadStepId fx = do
   -- purpose: a stall that lets the reader start late would weaken the
   -- assertion rather than fail it.
   threadDelay 200000
-  written <- withWorkflow conn fx.efIdentity producer Nothing $ \wctx -> do
+  written <- withWorkflow conn fx.efIdentity producer Nothing producerOwner $ \wctx -> do
     writeOrFail wctx "out" ("a" :: Text)
     closeOrFail wctx "out"
     pure (Right () :: Either (Error EngineOnly) ())
   either (throwIO . userError . show) pure written
-  fx.efFinishWorkflow producer (OutcomeOutput Nothing)
+  fx.efFinishWorkflow producer (OutcomeOutput Nothing) producerOwner
   (values, _) <- wait readTask >>= either (throwIO . userError . show) pure
   names <- fx.efStepNames consumer
   pure (values, names)
@@ -635,9 +635,9 @@ scenarioStreamReaderError fx = do
   wid <- fx.efFreshId "stream-reader-error"
   let WorkflowId widText = wid
       WorkflowId missing = WorkflowId (widText <> "-missing")
-  fx.efInitRow widText "L2StreamReaderError"
+  widOwner <- fx.efInitRow widText "L2StreamReaderError"
   conn <- fx.efConn
-  result <- withWorkflow conn fx.efIdentity wid Nothing $ \wctx -> do
+  result <- withWorkflow conn fx.efIdentity wid Nothing widOwner $ \wctx -> do
     reader <- (readStream wctx (WorkflowId missing) "progress" defaultReadStreamOptions :: m (StreamReader (Error EngineOnly) m Text))
     runExceptT (foldVectorStream (Foldl.generalize Foldl.list) (toVectorStream reader))
   case result of
@@ -654,9 +654,9 @@ scenarioStreamDecodeFailure :: forall m. (MonadMVar m, MonadSTM m, MonadTime m, 
 scenarioStreamDecodeFailure fx = do
   wid <- fx.efFreshId "stream-decode-failure"
   let WorkflowId widText = wid
-  fx.efInitRow widText "L2StreamDecodeFailure"
+  widOwner <- fx.efInitRow widText "L2StreamDecodeFailure"
   conn <- fx.efConn
-  withWorkflow conn fx.efIdentity wid Nothing $ \wctx -> do
+  withWorkflow conn fx.efIdentity wid Nothing widOwner $ \wctx -> do
     _ <- writeStream wctx "progress" (1 :: Int)
     _ <- writeStream wctx "progress" ("survivor" :: Text)
     _ <- closeStream wctx "progress"

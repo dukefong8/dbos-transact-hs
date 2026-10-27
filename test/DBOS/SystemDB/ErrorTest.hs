@@ -47,9 +47,22 @@ tests =
       testCase "renders a renamed step" $
         renderError (UnexpectedStep {workflowId = "wf", stepId = 2, expected = "b", recorded = "a"})
           @?= "workflow wf step 2 was recorded as \"a\", but \"b\" was expected",
-      testCase "renders a step another execution recorded" $
-        renderError (StepAlreadyRecorded {workflowId = "wf", stepId = 2})
-          @?= "workflow wf step 2 was already recorded by another execution",
+      testCase "renders a step the same execution recorded twice" $
+        renderError (StepNondeterminism {workflowId = "wf", stepId = 2})
+          @?= "step 2 of workflow wf was recorded twice by the same execution with different results; check that the workflow is deterministic",
+      testCase "a nondeterministic step is control, never recorded" $
+        shouldRecord (StepNondeterminism {workflowId = "wf", stepId = 2}) @?= False,
+      testCase "a nondeterministic step round trips" $
+        decodePortableError (encodePortableError (StepNondeterminism {workflowId = "wf", stepId = 2}))
+          @?= Right (StepNondeterminism {workflowId = "wf", stepId = 2}),
+      testCase "renders an execution that lost its workflow" $
+        renderError (WorkflowConflict {workflowId = "wf"})
+          @?= "workflow wf is no longer owned by this execution",
+      testCase "a lost workflow is control, never recorded" $
+        shouldRecord (WorkflowConflict {workflowId = "wf"}) @?= False,
+      testCase "a lost workflow round trips" $
+        decodePortableError (encodePortableError (WorkflowConflict {workflowId = "wf"}))
+          @?= Right (WorkflowConflict {workflowId = "wf"}),
       testCase "renders a missing fork point with and without a name" $ do
         renderError (NoForkPoint {workflowIds = ["a", "b"], stepName = Just "s"})
           @?= "no step named s in workflows a, b"

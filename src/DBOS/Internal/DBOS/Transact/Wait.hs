@@ -27,7 +27,7 @@ import DBOS.SystemDB.Types (AwaitedOutcome, Outcome (..), Serialization (..), Se
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Connection (Connection (..), withConnection)
-import DBOS.Transact.Context (WorkflowCtx (wctxConn, wctxTracer), nextStepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (WorkflowCtx (wctxConn, wctxTracer), nextStepId, ownerToken, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor)
 
@@ -110,7 +110,7 @@ selectWorkflow wctx workflowIds = do
             withSystemDB
               wctx
               ( \db ->
-                  SystemDB.recordStep db workflowId' stepId' selectStepName (OutcomeError (TransactError.encodeErrorText refused)) Nothing (Just (StepTiming startedAt startedAt))
+                  SystemDB.recordStep db workflowId' stepId' selectStepName (OutcomeError (TransactError.encodeErrorText refused)) Nothing (Just (StepTiming startedAt startedAt)) (ownerToken wctx)
               )
           pure (Left refused)
         else do
@@ -127,7 +127,7 @@ selectWorkflow wctx workflowIds = do
                 withSystemDB
                   wctx
                   ( \db ->
-                      SystemDB.recordStep db workflowId' stepId' selectStepName (OutcomeOutput (Just encoded.serializedText)) serialization (Just (StepTiming startedAt completedAt))
+                      SystemDB.recordStep db workflowId' stepId' selectStepName (OutcomeOutput (Just encoded.serializedText)) serialization (Just (StepTiming startedAt completedAt)) (ownerToken wctx)
                   )
               pure (Right winnerId)
   where

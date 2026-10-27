@@ -17,7 +17,7 @@ import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import Data.Map.Strict qualified as Map
-import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact.Connection (nextExecutionIdentity)
@@ -68,14 +68,25 @@ simMessageFixture :: forall s. IOSim s (MessageFixture (IOSim s))
 simMessageFixture = do
   mem <- newMemDB
   states <- newTVarIO Map.empty
-  let stateFor widText = do
+  let -- The context holds the row's own creator token, as an execution built
+      -- from the init result would: anything else is refused at the first
+      -- fenced write.
+      ownerFor widText = do
+        fetched <- SystemDB.getWorkflow mem (WorkflowId widText)
+        case fetched of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = token})
+            Nothing -> error "message fixture row has no creator token"
+          _ -> error "message fixture built a context for a row that was never initialized"
+      stateFor widText = do
         found <- Map.lookup widText <$> readTVarIO states
         case found of
           Just st -> pure st
           Nothing -> do
             conn <- memConnectionOn mem simTracer
             identity <- nextExecutionIdentity conn
-            st <- newWorkflowState widText Nothing identity
+            owner <- ownerFor widText
+            st <- newWorkflowState widText Nothing owner identity
             atomically (modifyTVar states (Map.insert widText st))
             pure st
   pure
@@ -101,7 +112,8 @@ simMessageFixture = do
           let WorkflowId widText = wid
           conn <- memConnectionOn mem simTracer
           identity <- nextExecutionIdentity conn
-          st <- newWorkflowState widText Nothing identity
+          owner <- ownerFor widText
+          st <- newWorkflowState widText Nothing owner identity
           ctx <- newWorkflowCtx conn simIdentity st
           action ctx,
         mfNotifyCount = \wid -> do
@@ -125,8 +137,9 @@ simMessageFixture = do
             Left err -> error (show err)
             Right [fork] -> pure fork
             Right other -> error ("expected one fork, got: " <> show (length other)),
-        mfSettle = \wid ->
-          SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) >>= either (error . show) (const (pure ())),
+        mfSettle = \wid@(WorkflowId widText) -> do
+          owner <- ownerFor widText
+          SystemDB.recordWorkflowOutcome mem wid (OutcomeOutput (Just "null")) owner.ownerToken >>= either (error . show) (const (pure ())),
         mfCheckStep = \wid name step ->
           SystemDB.checkStep mem wid step name >>= either (error . show) pure,
         mfNotifyIds = \wid -> do

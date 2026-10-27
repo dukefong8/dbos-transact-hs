@@ -43,7 +43,8 @@ data Error
   | QueueDeduplicated {workflowId :: Text, queueName :: Text, deduplicationId :: Text}
   | WorkflowCancelled {workflowId :: Text}
   | UnexpectedStep {workflowId :: Text, stepId :: Int, expected :: Text, recorded :: Text}
-  | StepAlreadyRecorded {workflowId :: Text, stepId :: Int}
+  | StepNondeterminism {workflowId :: Text, stepId :: Int}
+  | WorkflowConflict {workflowId :: Text}
   | NoForkPoint {workflowIds :: [Text], stepName :: Maybe Text}
   | NonExistentWorkflow {workflowIds :: [Text]}
   | WorkflowNotRewindable {workflowId :: Text, status :: Text}
@@ -81,7 +82,8 @@ instance ToJSON Error where
     QueueDeduplicated {workflowId, queueName, deduplicationId} -> tagged "QueueDeduplicated" (object ["workflow_id" .= workflowId, "queue_name" .= queueName, "deduplication_id" .= deduplicationId])
     WorkflowCancelled {workflowId} -> tagged "WorkflowCancelled" (object ["workflow_id" .= workflowId])
     UnexpectedStep {workflowId, stepId, expected, recorded} -> tagged "UnexpectedStep" (object ["workflow_id" .= workflowId, "step_id" .= stepId, "expected" .= expected, "recorded" .= recorded])
-    StepAlreadyRecorded {workflowId, stepId} -> tagged "StepAlreadyRecorded" (object ["workflow_id" .= workflowId, "step_id" .= stepId])
+    StepNondeterminism {workflowId, stepId} -> tagged "StepNondeterminism" (object ["workflow_id" .= workflowId, "step_id" .= stepId])
+    WorkflowConflict {workflowId} -> tagged "WorkflowConflict" (object ["workflow_id" .= workflowId])
     NoForkPoint {workflowIds, stepName} -> tagged "NoForkPoint" (object ["workflow_ids" .= workflowIds, "step_name" .= stepName])
     NonExistentWorkflow {workflowIds} -> tagged "NonExistentWorkflow" (object ["workflow_ids" .= workflowIds])
     WorkflowNotRewindable {workflowId, status} -> tagged "WorkflowNotRewindable" (object ["workflow_id" .= workflowId, "status" .= status])
@@ -103,7 +105,8 @@ instance FromJSON Error where
       "QueueDeduplicated" -> withObject "QueueDeduplicated" (\o -> QueueDeduplicated <$> o .: "workflow_id" <*> o .: "queue_name" <*> o .: "deduplication_id") payload
       "WorkflowCancelled" -> withObject "WorkflowCancelled" (\o -> WorkflowCancelled <$> o .: "workflow_id") payload
       "UnexpectedStep" -> withObject "UnexpectedStep" (\o -> UnexpectedStep <$> o .: "workflow_id" <*> o .: "step_id" <*> o .: "expected" <*> o .: "recorded") payload
-      "StepAlreadyRecorded" -> withObject "StepAlreadyRecorded" (\o -> StepAlreadyRecorded <$> o .: "workflow_id" <*> o .: "step_id") payload
+      "StepNondeterminism" -> withObject "StepNondeterminism" (\o -> StepNondeterminism <$> o .: "workflow_id" <*> o .: "step_id") payload
+      "WorkflowConflict" -> withObject "WorkflowConflict" (\o -> WorkflowConflict <$> o .: "workflow_id") payload
       "NoForkPoint" -> withObject "NoForkPoint" (\o -> NoForkPoint <$> o .: "workflow_ids" <*> o .: "step_name") payload
       "NonExistentWorkflow" -> withObject "NonExistentWorkflow" (\o -> NonExistentWorkflow <$> o .: "workflow_ids") payload
       "WorkflowNotRewindable" -> withObject "WorkflowNotRewindable" (\o -> WorkflowNotRewindable <$> o .: "workflow_id" <*> o .: "status") payload
@@ -162,8 +165,10 @@ renderError err =
       "workflow " <> wid <> " is cancelled"
     UnexpectedStep {workflowId = wid, stepId = position, expected = want, recorded = got} ->
       "workflow " <> wid <> " step " <> Text.pack (show position) <> " was recorded as \"" <> got <> "\", but \"" <> want <> "\" was expected"
-    StepAlreadyRecorded {workflowId = wid, stepId = position} ->
-      "workflow " <> wid <> " step " <> Text.pack (show position) <> " was already recorded by another execution"
+    StepNondeterminism {workflowId = wid, stepId = position} ->
+      "step " <> Text.pack (show position) <> " of workflow " <> wid <> " was recorded twice by the same execution with different results; check that the workflow is deterministic"
+    WorkflowConflict {workflowId = wid} ->
+      "workflow " <> wid <> " is no longer owned by this execution"
     NoForkPoint {workflowIds = ids, stepName = Nothing} ->
       "no steps in workflows " <> Text.intercalate ", " ids
     NoForkPoint {workflowIds = ids, stepName = Just name} ->
@@ -251,7 +256,8 @@ shouldRecord err = case err of
   QueueDeduplicated {} -> True
   WorkflowCancelled {} -> False
   UnexpectedStep {} -> False
-  StepAlreadyRecorded {} -> False
+  StepNondeterminism {} -> False
+  WorkflowConflict {} -> False
   NoForkPoint {} -> True
   NonExistentWorkflow {} -> True
   WorkflowNotRewindable {} -> True

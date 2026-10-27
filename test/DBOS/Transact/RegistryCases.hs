@@ -41,7 +41,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.Transact (EngineOnly, Error, SerializedWorkflowValue (..), WorkflowCtx, newWorkflowKey)
 import DBOS.Transact.Connection (Connection)
-import DBOS.Transact.Context (withWorkflow)
+import DBOS.Transact.Context (testOwner, withWorkflow)
 import DBOS.Transact.Error (Error (..), Failure (..))
 import DBOS.Transact.Identity (Identity)
 import DBOS.Transact.Registry
@@ -176,7 +176,7 @@ scenarioErasedRoundTrip fixture = do
         Just (ErasedWorkflow body) -> do
           conn <- fixture.rfConn
           outcome <-
-            withWorkflow conn fixture.rfIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
+            withWorkflow conn fixture.rfIdentity (WorkflowId "wf-1") Nothing (testOwner (WorkflowId "wf-1")) $ \wctx ->
               body (Just (unWorkflowInput (encodeWorkflowInput (21 :: Int)))) wctx
           case outcome of
             Right (Just output) -> case decodeWorkflowValue "result" (Just output) of
@@ -209,7 +209,7 @@ scenarioMalformedReported fixture = do
         Just (ErasedWorkflow body) -> do
           conn <- fixture.rfConn
           outcome <-
-            withWorkflow conn fixture.rfIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
+            withWorkflow conn fixture.rfIdentity (WorkflowId "wf-1") Nothing (testOwner (WorkflowId "wf-1")) $ \wctx ->
               body (Just (SerializedWorkflowValue "\"not a number\"" Nothing)) wctx
           case outcome of
             Left (FailureControl (Deserialization {what})) -> pure (Right what)
@@ -283,7 +283,7 @@ scenarioZeroArgCall fixture = do
         Just (ErasedWorkflow body) -> do
           conn <- fixture.rfConn
           outcome <-
-            withWorkflow conn fixture.rfIdentity (WorkflowId "wf-1") Nothing $ \wctx ->
+            withWorkflow conn fixture.rfIdentity (WorkflowId "wf-1") Nothing (testOwner (WorkflowId "wf-1")) $ \wctx ->
               body Nothing wctx
           case outcome of
             Right (Just output) -> case decodeWorkflowValue "result" (Just output) of

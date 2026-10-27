@@ -53,9 +53,9 @@ import Data.Int (Int64)
 import Data.Text.Encoding (encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Fork (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
+import DBOS.SystemDB.Types (Fork (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
 import DBOS.Transact.Connection (Connection (..), withConnection)
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, stepStatusId, workflowId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, workflowId, workflowOwner)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue)
@@ -109,9 +109,9 @@ instance ToLogStr ManagementEvent where
   toLogStr = toLogStr . renderLine
 
 cancelWorkflows :: Monad m
-                => Connection m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
-cancelWorkflows conn workflowIds cancelChildren = do
-  result <- withConnection conn (\db -> SystemDB.cancelWorkflows db workflowIds cancelChildren Nothing)
+                => Connection m -> [WorkflowId] -> Bool -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+cancelWorkflows conn workflowIds cancelChildren fromWorkflow = do
+  result <- withConnection conn (\db -> SystemDB.cancelWorkflows db workflowIds cancelChildren Nothing fromWorkflow)
   case result of
     Left err -> pure (Left err)
     -- Mirrors @cancel_all@: what moved, not what was asked for — silence
@@ -132,14 +132,14 @@ cancelWorkflowsInWorkflow wctx workflowIds cancelChildren =
     stepOptionsDefault
     wctx
     cancelStepName
-    (\_ -> cancelWorkflows conn workflowIds cancelChildren)
+    (\_ -> cancelWorkflows conn workflowIds cancelChildren (Just (workflowId wctx)))
   where
     conn = wctx.wctxConn
 
 resumeWorkflows :: Monad m
-                => Connection m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
-resumeWorkflows conn workflowIds queueName = do
-  result <- withConnection conn (\db -> SystemDB.resumeWorkflows db workflowIds queueName Nothing)
+                => Connection m -> [WorkflowId] -> Maybe Text -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+resumeWorkflows conn workflowIds queueName fromWorkflow = do
+  result <- withConnection conn (\db -> SystemDB.resumeWorkflows db workflowIds queueName Nothing fromWorkflow)
   case result of
     Left err -> pure (Left err)
     -- Mirrors @resume_all@: what moved against what was asked — an id that
@@ -158,7 +158,7 @@ resumeWorkflowsInWorkflow wctx workflowIds queueName =
     stepOptionsDefault
     wctx
     resumeStepName
-    (\_ -> resumeWorkflows conn workflowIds queueName)
+    (\_ -> resumeWorkflows conn workflowIds queueName (Just (workflowId wctx)))
   where
     conn = wctx.wctxConn
 
@@ -167,13 +167,14 @@ deleteWorkflows :: Monad m
 deleteWorkflows conn workflowIds deleteChildren =
   deleteWorkflowsWithCaller conn workflowIds deleteChildren Nothing
 
--- | Deletes workflows naming the calling workflow's step, so the backend
--- refuses a target set containing the caller itself. The engine's
--- in-workflow entry passes the step the call was checkpointed under.
+-- | Deletes workflows naming the calling workflow's owner, so the backend
+-- refuses a target set containing the caller itself and fences the removal
+-- on the caller's token. The engine's in-workflow entry passes the owner of
+-- the context the call was checkpointed under.
 deleteWorkflowsWithCaller :: Monad m
-                          => Connection m -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
-deleteWorkflowsWithCaller conn workflowIds deleteChildren caller = do
-  result <- withConnection conn (\db -> SystemDB.deleteWorkflows db workflowIds deleteChildren caller)
+                          => Connection m -> [WorkflowId] -> Bool -> Maybe WorkflowOwner -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
+deleteWorkflowsWithCaller conn workflowIds deleteChildren owner = do
+  result <- withConnection conn (\db -> SystemDB.deleteWorkflows db workflowIds deleteChildren owner)
   case result of
     Left err -> pure (Left err)
     -- Mirrors @delete_all@: silence when no rows went.
@@ -197,12 +198,12 @@ deleteWorkflowsInWorkflow wctx workflowIds deleteChildren =
     wctx
     deleteStepName
     ( \sctx -> case stepCtxStatus sctx of
-        Just status ->
+        Just _ ->
           deleteWorkflowsWithCaller
             conn
             workflowIds
             deleteChildren
-            (Just (WorkflowId (workflowId sctx.stepCtxWorkflow), stepStatusId status))
+            (Just (workflowOwner sctx.stepCtxWorkflow))
         Nothing -> deleteWorkflows conn workflowIds deleteChildren
     )
   where

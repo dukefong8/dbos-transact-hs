@@ -25,7 +25,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), IdempotencyKey, SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
 import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextStepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextStepId, ownerToken, withSystemDB, workflowId, workflowOwner)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
 
@@ -103,7 +103,9 @@ sendWith wctx destination value options = do
       else do
         stepId' <- nextStepId wctx
         pure (Just (WorkflowId workflowText, stepId'))
-  written <- withSystemDB wctx (\db -> SystemDB.sendMessage db message serialization caller sendToForks)
+  -- Workflow and step sends alike present the sending execution; the
+  -- client path below presents no owner and skips the fence.
+  written <- withSystemDB wctx (\db -> SystemDB.sendMessage db message serialization caller (Just (workflowOwner wctx)) sendToForks)
   pure $ case written of
     Left err -> Left (TransactError.fromSystemDB err)
     Right () -> Right ()
@@ -148,7 +150,7 @@ sendBulkWith wctx messages options = do
               sendIdempotencyKey = message.messageIdempotencyKey
             }
     plainSend wctx' encodedMessages serialization caller = do
-      written <- withSystemDB wctx' (\db -> SystemDB.sendMessages db encodedMessages serialization caller (options.forks == ForksInclude))
+      written <- withSystemDB wctx' (\db -> SystemDB.sendMessages db encodedMessages serialization caller (Just (workflowOwner wctx')) (options.forks == ForksInclude))
       pure (either (Left . TransactError.fromSystemDB) Right written)
 
 -- | Consume the oldest matching message, waiting up to the polling duration.
@@ -175,7 +177,7 @@ recv wctx topic timeout = do
           topicText = case topic of
             Nothing -> Nothing
             Just (Topic name) -> Just name
-      found <- withSystemDB wctx (\db -> SystemDB.recv db workflowId' stepId' timeoutStepId topicText timeout)
+      found <- withSystemDB wctx (\db -> SystemDB.recv db workflowId' stepId' timeoutStepId topicText timeout (ownerToken wctx))
       pure $ case found of
         Left err -> Left (TransactError.fromSystemDB err)
         Right Nothing -> Right Nothing

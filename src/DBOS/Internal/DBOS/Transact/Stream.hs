@@ -27,7 +27,7 @@ import DBOS.SystemDB.Types (Duration, EncodedValue (..), Outcome (..), Serializa
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Checkpoint (StepPlacement (..), placeCall)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Transact.Context (WorkflowCtx, stepId, withSystemDB, workflowId)
+import DBOS.Transact.Context (WorkflowCtx, ownerToken, stepId, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 
@@ -223,7 +223,7 @@ readStreamWith place runDb caller wid key initialOffset options = do
         recordRead placement startedAt outcome serialization = case placement of
           Recorded readerWctx stepNo -> do
             completedAt <- timestampNow
-            withSystemDB readerWctx (\db -> SystemDB.recordStep db (WorkflowId (workflowId readerWctx)) stepNo readStreamStepName outcome serialization (Just (StepTiming startedAt completedAt)))
+            withSystemDB readerWctx (\db -> SystemDB.recordStep db (WorkflowId (workflowId readerWctx)) stepNo readStreamStepName outcome serialization (Just (StepTiming startedAt completedAt)) (ownerToken readerWctx))
           _ -> pure (Right ())
         isClose encoded = isStreamClosed encoded.encodedValue encoded.encodedSerialization
         decodeFailure codecError = case codecUnknownTag codecError of
@@ -236,14 +236,14 @@ writeStream wctx key value = do
   placement <- placeCall wctx
   let (stepNo, writtenBy) = writePosition placement
   written <- withSystemDB wctx $ \db ->
-    SystemDB.writeStream db (WorkflowId (workflowId wctx)) stepNo key encoded.serializedText (unSerialization <$> encoded.serializedSerialization) writtenBy
+    SystemDB.writeStream db (WorkflowId (workflowId wctx)) stepNo key encoded.serializedText (unSerialization <$> encoded.serializedSerialization) writtenBy (ownerToken wctx)
   pure (either (Left . SystemDatabase) Right written)
 
 closeStream :: MonadSTM m => WorkflowCtx exec m -> Text -> m (Either (Error EngineOnly) ())
 closeStream wctx key = do
   placement <- placeCall wctx
   let (stepNo, writtenBy) = writePosition placement
-  closed <- withSystemDB wctx $ \db -> SystemDB.closeStream db (WorkflowId (workflowId wctx)) stepNo key writtenBy
+  closed <- withSystemDB wctx $ \db -> SystemDB.closeStream db (WorkflowId (workflowId wctx)) stepNo key writtenBy (ownerToken wctx)
   pure (either (Left . SystemDatabase) Right closed)
 
 -- | The row a stream write lands on: a workflow-level write carries its step

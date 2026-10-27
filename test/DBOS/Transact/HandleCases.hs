@@ -30,7 +30,7 @@ module DBOS.Transact.HandleCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowStatus (..), getResultStepName, initWorkflow, listSteps, newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowStatus (..), getResultStepName, initWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
@@ -60,7 +60,7 @@ import DBOS.Transact
 import DBOS.Transact.Logger (SomeTracer (..))
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Instance (launchOn)
-import DBOS.Transact.Context (withWorkflow)
+import DBOS.Transact.Context (testOwner, withWorkflow)
 import DBOS.Transact.Connection
   ( Connection,
     Owner (..),
@@ -79,7 +79,7 @@ data HandleFixture m = HandleFixture
     hfFreshId :: Text -> m WorkflowId,
     hfConn :: m (Connection m),
     hfIdentity :: Identity,
-    hfInitRow :: WorkflowId -> m (),
+    hfInitRow :: WorkflowId -> m WorkflowOwner,
     hfListStepNames :: WorkflowId -> m [Text]
   }
 
@@ -113,7 +113,7 @@ mkHandleFixture config identity connApp nameScheme genId genEntropy sysdb tracer
                 created <- runSystemDB sysdb (\db -> initWorkflow db row Nothing)
                 case created of
                   Left err -> throwIO (userError (show err))
-                  Right _ -> pure (),
+                  Right result -> pure (WorkflowOwner {ownerWorkflowId = wid, ownerToken = result.initResultCreatorXid}),
         hfListStepNames = \wid -> do
           listed <- runSystemDB sysdb (\db -> listSteps db wid True Nothing Nothing Nothing)
           case listed of
@@ -316,7 +316,7 @@ scenarioScopedAwait :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTi
 scenarioScopedAwait fx = do
   parentWid <- fx.hfFreshId "handle-await-parent"
   childWid <- fx.hfFreshId "handle-await-child"
-  fx.hfInitRow parentWid
+  parentOwner <- fx.hfInitRow parentWid
   bracket fx.hfNewDBOS shutdown $ \dbos -> do
     registerDouble dbos
     exec <- fx.hfLaunch dbos
@@ -330,7 +330,7 @@ scenarioScopedAwait fx = do
       Left err -> throwIO (userError (show err))
       Right handle -> do
         conn <- fx.hfConn
-        awaited <- withWorkflow conn fx.hfIdentity parentWid Nothing $ \wctx ->
+        awaited <- withWorkflow conn fx.hfIdentity parentWid Nothing parentOwner $ \wctx ->
           awaitChild wctx handle
         decoded <- case awaited of
           Right (Just stored) ->

@@ -12,7 +12,7 @@ import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
-import DBOS.Transact.Context (WorkflowCtx (wctxTracer), stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.Transact.Context (WorkflowCtx (wctxTracer), ownerToken, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import System.Log.FastLogger (ToLogStr (..))
@@ -66,7 +66,7 @@ driveSleep wctx duration placement =
       sleepPlain duration >> pure (Right ())
     Right (DurabilityRecorded wctx' stepId') -> do
       let workflowId' = WorkflowId (workflowId wctx')
-      recordedWake <- withSystemDB wctx' (\db -> SystemDB.recordSleep db workflowId' stepId' duration)
+      recordedWake <- withSystemDB wctx' (\db -> SystemDB.recordSleep db workflowId' stepId' duration (ownerToken wctx'))
       case recordedWake of
         Left err -> pure (Left (TransactError.fromSystemDB err))
         Right wakeAt -> do

@@ -13,7 +13,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Identity (Identity (..))
@@ -85,14 +85,25 @@ acquireSuiteBackend = do
 mkMessageFixture :: Postgres.PostgresSystemDB -> IO (MessageFixture IO)
 mkMessageFixture backend = do
   states <- newTVarIO Map.empty
-  let stateFor widText = do
+  let -- The context holds the row's own creator token, as an execution built
+      -- from the init result would: anything else is refused at the first
+      -- fenced write.
+      ownerFor widText = do
+        fetched <- SystemDB.getWorkflow backend (WorkflowId widText)
+        case fetched of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = token})
+            Nothing -> fail "message fixture row has no creator token"
+          _ -> fail "message fixture built a context for a row that was never initialized"
+      stateFor widText = do
         found <- Map.lookup widText <$> readTVarIO states
         case found of
           Just st -> pure st
           Nothing -> do
             conn <- connOver backend nullTracer
             identity <- nextExecutionIdentity conn
-            st <- newWorkflowState widText Nothing identity
+            owner <- ownerFor widText
+            st <- newWorkflowState widText Nothing owner identity
             atomically (modifyTVar states (Map.insert widText st))
             pure st
   pure
@@ -120,7 +131,8 @@ mkMessageFixture backend = do
           let WorkflowId widText = wid
           conn <- connOver backend nullTracer
           identity <- nextExecutionIdentity conn
-          st <- newWorkflowState widText Nothing identity
+          owner <- ownerFor widText
+          st <- newWorkflowState widText Nothing owner identity
           ctx <- newWorkflowCtx conn messageTestIdentity st
           action ctx,
         mfNotifyCount = \wid -> do
@@ -144,8 +156,9 @@ mkMessageFixture backend = do
             Left err -> fail (show err)
             Right [fork] -> pure fork
             Right other -> fail ("expected one fork, got: " <> show (length other)),
-        mfSettle = \wid ->
-          SystemDB.recordWorkflowOutcome backend wid (OutcomeOutput (Just "null")) >>= either (fail . show) (const (pure ())),
+        mfSettle = \wid@(WorkflowId widText) -> do
+          owner <- ownerFor widText
+          SystemDB.recordWorkflowOutcome backend wid (OutcomeOutput (Just "null")) owner.ownerToken >>= either (fail . show) (const (pure ())),
         mfCheckStep = \wid name step ->
           SystemDB.checkStep backend wid step name >>= either (fail . show) pure,
         mfNotifyIds = \wid -> do

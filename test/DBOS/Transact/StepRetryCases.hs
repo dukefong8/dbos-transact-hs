@@ -256,10 +256,13 @@ scenarioTimeoutAllTimeout fx = do
       options = stepOptionsDefault {maxAttempts = 2, interval = millisDuration 1, timeout = Just (millisDuration 10)}
   runStepScope fx wid $ \wctx -> runStepWith options wctx "slow" body
 
--- | A plain step is not preemptible: cancelling its workflow does not stop
--- it, and it still returns its value once its gate opens.
+-- | A plain step is not preemptible, but its late result is not recorded:
+-- cancelling its workflow does not stop the body, which still computes its
+-- value once the gate opens, while the write the cancel made ownerless is
+-- refused and nothing is checkpointed. Mirrors the oracle's
+-- cancel-during-step ownership case.
 scenarioPlainNotPreemptible :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadMVar m)
-                            => StepRetryFixture m -> m (Either (Error EngineOnly) Int)
+                            => StepRetryFixture m -> m (Either (Error EngineOnly) Int, [StepRecord])
 scenarioPlainNotPreemptible fx = do
   wid <- fx.srfFreshWorkflowId
   gate <- newEmptyMVar
@@ -269,7 +272,9 @@ scenarioPlainNotPreemptible fx = do
   threadDelay 200000
   fx.srfCancel [wid]
   putMVar gate ()
-  wait worker
+  outcome <- wait worker
+  steps <- fx.srfListSteps wid
+  pure (outcome, steps)
 
 -- | A completed step leaves its token alone.
 scenarioTokenQuiet :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m)
@@ -438,10 +443,13 @@ checkTimeoutAllTimeout outcome = case outcome of
     isTimeout StepTimeout {} = True
     isTimeout _ = False
 
--- | The plain step survives cancellation and returns its value.
-checkPlainNotPreemptible :: Either (Error EngineOnly) Int -> Either String ()
-checkPlainNotPreemptible outcome =
-  unless (outcome == Right 7) $ Left ("expected the plain step to complete, got: " <> show outcome)
+-- | The post-cancel record is refused and nothing is checkpointed.
+checkPlainNotPreemptible :: (Either (Error EngineOnly) Int, [StepRecord]) -> Either String ()
+checkPlainNotPreemptible (outcome, steps) = do
+  case outcome of
+    Left (SystemDatabase SystemDB.WorkflowConflict {}) -> pure ()
+    other -> Left ("expected the post-cancel record to be refused, got: " <> show other)
+  unless (null steps) $ Left ("expected no recorded step, got: " <> show steps)
 
 -- | The completed step never saw its token fire.
 checkTokenQuiet :: (Either (Error EngineOnly) Int, Bool) -> Either String ()

@@ -28,7 +28,7 @@ import DBOS.Transact
     retrieveWorkflow)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Datasource (RecordedOutcome (..))
-import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep, withWorkflow)
+import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, testOwner, withStep, withWorkflow)
 import DBOS.Transact.WidgetCases
   ( CheckoutSteps (..),
     lostAckOnce,
@@ -248,7 +248,7 @@ tableIdentity =
 withTableStep :: WidgetStore (IOSim s) -> (forall exec. StepCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
 withTableStep _ body = do
   conn <- simConnectionWith simTracer
-  withWorkflow conn tableIdentity (WorkflowId "widget-tables") Nothing $ \wctx -> do
+  withWorkflow conn tableIdentity (WorkflowId "widget-tables") Nothing (testOwner (WorkflowId "widget-tables")) $ \wctx -> do
     marker <- nextWorkflowMarker wctx
     withStep wctx marker (firstStepStatus 0) body
 

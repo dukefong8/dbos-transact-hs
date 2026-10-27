@@ -15,7 +15,7 @@ module DBOS.Transact.StepTestSim (tests) where
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
-import DBOS.SystemDB (StepRecord (..))
+import DBOS.SystemDB (NewWorkflow (..), StepRecord (..), WorkflowId (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simConnectionWith)
 import DBOS.Transact.StepCases
@@ -50,7 +50,7 @@ import DBOS.Transact
   )
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.Context (withWorkflow)
+import DBOS.Transact.Context (testOwner, withWorkflow)
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 
@@ -66,12 +66,12 @@ simIdentity =
 simRun :: Text -> (forall exec. WorkflowCtx exec (IOSim s) -> IOSim s a) -> IOSim s a
 simRun name action = do
   conn <- simConnectionWith simTracer
-  withWorkflow conn simIdentity (WorkflowId name) Nothing action
+  withWorkflow conn simIdentity (WorkflowId name) Nothing (testOwner (WorkflowId name)) action
 
 -- | One fixture per leaf over a fresh in-memory database: deterministic
--- names, no row creation (Mem records steps without workflow rows),
--- checkpoint reads through the memory backend, and the immediate
--- quiet-token sense (deterministic where there is no race to catch).
+-- names, real row creation (a fenced step write needs the row and its
+-- creator token), checkpoint reads through the memory backend, and the
+-- immediate quiet-token sense (deterministic where there is no race).
 mkStepFixture :: forall s. IOSim s (StepFixture (IOSim s))
 mkStepFixture = do
   mem <- newMemDB
@@ -79,7 +79,11 @@ mkStepFixture = do
     { sfConnection = memConnectionOn mem simTracer,
       sfFreshId = \base -> pure (WorkflowId ("sim-step-" <> base)),
       sfIdentity = simIdentity,
-      sfInitRow = \_ -> pure (),
+      sfInitRow = \wid@(WorkflowId widText) -> do
+        created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "L2StepSim"}) Nothing
+        case created of
+          Left err -> error (show err)
+          Right result -> pure (WorkflowOwner {ownerWorkflowId = wid, ownerToken = result.initResultCreatorXid}),
       sfCheckStep = \wid step name -> do
         placed <- SystemDB.checkStep mem wid step name
         case placed of
@@ -165,5 +169,5 @@ traceEvents = selectTraceEventsDynamic
 tracedRun :: IOSim s (Either (Error EngineOnly) Int)
 tracedRun = do
   conn <- simConnectionWith simTracer
-  withWorkflow conn simIdentity (WorkflowId "sim-step") Nothing $ \wctx ->
+  withWorkflow conn simIdentity (WorkflowId "sim-step") Nothing (testOwner (WorkflowId "sim-step")) $ \wctx ->
     runStep wctx "traced" (const (pure (1 :: Int)))

@@ -22,7 +22,7 @@ import DBOS.Transact.SleepCases
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), newWorkflow, sleepStepName)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
@@ -64,7 +64,16 @@ tests =
 mkSleepFixture :: Postgres.PostgresSystemDB -> (SleepFixture IO -> IO a) -> IO a
 mkSleepFixture backend run = do
   (logger, cleanup) <- acquireLoggerBackend
-  let fixture =
+  let -- Sleeps present the row's own creator token, as an execution built
+      -- from the init result would.
+      ownerFor workflowText = do
+        fetched <- SystemDB.getWorkflow backend (WorkflowId workflowText)
+        case fetched of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId workflowText, ownerToken = token})
+            Nothing -> fail "sleep fixture row has no creator token"
+          _ -> fail "sleep fixture built a context for a row that was never initialized"
+      fixture =
         SleepFixture
           { sfFreshWorkflowId = do
               freshId <- UUID.V4.nextRandom
@@ -73,15 +82,17 @@ mkSleepFixture backend run = do
               case created of
                 Left err -> fail (show err)
                 Right _ -> pure (WorkflowId workflowText),
-            sfRunSleep = \wid duration -> do
+            sfRunSleep = \wid@(WorkflowId widText) duration -> do
               conn <- connOver backend (ioTracer logger)
-              withWorkflow conn sleepTestIdentity wid Nothing (\wctx -> sleepStep wctx duration),
+              owner <- ownerFor widText
+              withWorkflow conn sleepTestIdentity wid Nothing owner (\wctx -> sleepStep wctx duration),
             sfCheckSleep = \wid ->
               SystemDB.checkStep backend wid 0 sleepStepName >>= either (fail . show) pure,
             sfPlainSleep = sleepPlain,
-            sfRunInStep = \wid duration -> do
+            sfRunInStep = \wid@(WorkflowId widText) duration -> do
               conn <- connOver backend (ioTracer logger)
-              withWorkflow conn sleepTestIdentity wid Nothing $ \wctx -> do
+              owner <- ownerFor widText
+              withWorkflow conn sleepTestIdentity wid Nothing owner $ \wctx -> do
                 marker <- nextWorkflowMarker wctx
                 withStep wctx marker (firstStepStatus 0) $ \_stepped -> do
                   before <- nextStepId wctx

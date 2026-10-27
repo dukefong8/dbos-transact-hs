@@ -30,7 +30,7 @@ import DBOS.SystemDB.Types (Duration (..), Outcome (..), Serialization (..), Ser
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..))
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
@@ -208,6 +208,7 @@ runStep wctx name body = do
                     (OutcomeOutput (Just encoded.serializedText))
                     serialization
                     (Just (StepTiming startedAt completedAt))
+                    (ownerToken wctx)
               )
           case written of
             Left err -> pure (Left (TransactError.fromSystemDB err))
@@ -420,6 +421,7 @@ driveStepWith options wctx name placement body =
                           (OutcomeOutput (Just encoded.serializedText))
                           outputSerialization
                           timing
+                          (ownerToken wctx')
                     )
                 Left err ->
                   withSystemDB
@@ -433,6 +435,7 @@ driveStepWith options wctx name placement body =
                           (OutcomeError (TransactError.encodeErrorText err))
                           serialization
                           timing
+                          (ownerToken wctx')
                     )
               case written of
                 Left err -> pure (Left (TransactError.fromSystemDB err))

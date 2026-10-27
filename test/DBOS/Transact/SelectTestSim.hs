@@ -13,7 +13,7 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact.Connection (nextExecutionIdentity)
@@ -39,17 +39,18 @@ simSelectFixture = do
   created <- SystemDB.initWorkflow mem ((newWorkflow "sim-select") {newWorkflowName = Just "SimSelectTest"}) Nothing
   case created of
     Left err -> error (show err)
-    Right _ ->
-      pure
-        SelectFixture
-          { scfRun = \action -> do
-              conn <- memConnectionOn mem simTracer
-              identity <- nextExecutionIdentity conn
-              state <- newWorkflowState "sim-select" Nothing identity
-              ctx <- newWorkflowCtx conn simIdentity state
-              action ctx,
-            scfListSteps = SystemDB.listSteps mem (WorkflowId "sim-select") True Nothing Nothing Nothing >>= either (error . show) pure
-          }
+    Right result ->
+      let owner = WorkflowOwner {ownerWorkflowId = WorkflowId "sim-select", ownerToken = result.initResultCreatorXid}
+       in pure
+            SelectFixture
+              { scfRun = \action -> do
+                  conn <- memConnectionOn mem simTracer
+                  identity <- nextExecutionIdentity conn
+                  state <- newWorkflowState "sim-select" Nothing owner identity
+                  ctx <- newWorkflowCtx conn simIdentity state
+                  action ctx,
+              scfListSteps = SystemDB.listSteps mem (WorkflowId "sim-select") True Nothing Nothing Nothing >>= either (error . show) pure
+            }
 
 tests :: TestTree
 tests =

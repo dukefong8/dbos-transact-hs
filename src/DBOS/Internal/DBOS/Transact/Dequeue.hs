@@ -26,6 +26,7 @@ import DBOS.SystemDB.Types
     SerializedWorkflowValue (..),
     WorkflowFilter (..),
     WorkflowId (..),
+    WorkflowOwner (..),
     WorkflowRecord (..),
     WorkflowStatus (Pending),
     defaultWorkflowFilter,
@@ -473,7 +474,7 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed ow
                             spawnTracked
                               tasks
                               ( finally
-                                  (void (executeRegisteredWorkflow (tasksSpawner tasks (clearCheckpointsFor datasources)) conn identity workflowId workflow input (deadlineOf row.workflowRecordDeadline clock) (Just releaseOnce) ownerToken))
+                                  (void (executeRegisteredWorkflow (tasksSpawner tasks (clearCheckpointsFor datasources)) conn identity workflowId workflow input (deadlineOf row.workflowRecordDeadline clock) (Just releaseOnce) (WorkflowOwner {ownerWorkflowId = workflowId, ownerToken = ownerToken})))
                                   releaseOnce
                               )
                           case spawned of

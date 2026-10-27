@@ -482,14 +482,14 @@ clientSendMessage client destination topic idempotencyKey value = do
             sendTopic = topic,
             sendIdempotencyKey = idempotencyKey
           }
-  written <- withConnection client.conn (\db -> SystemDB.sendMessage db message ((\(Serialization name) -> name) <$> value.serializedSerialization) Nothing False)
+  written <- withConnection client.conn (\db -> SystemDB.sendMessage db message ((\(Serialization name) -> name) <$> value.serializedSerialization) Nothing Nothing False)
   pure written
 
 -- | Send a batch from outside in one transaction: all or none.
 clientSendMessages :: Monad m
                    => Client m -> [SendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 clientSendMessages client messages = do
-  written <- withConnection client.conn (\db -> SystemDB.sendMessages db messages Nothing Nothing False)
+  written <- withConnection client.conn (\db -> SystemDB.sendMessages db messages Nothing Nothing Nothing False)
   pure written
 
 -- | Read another workflow's event from outside, waiting up to the duration.
@@ -527,14 +527,14 @@ clientGetEvent client workflowId key wait = do
 clientCancelWorkflows :: Monad m
                       => Client m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 clientCancelWorkflows client workflowIds includeChildren = do
-  result <- withConnection client.conn (\db -> SystemDB.cancelWorkflows db workflowIds includeChildren Nothing)
+  result <- withConnection client.conn (\db -> SystemDB.cancelWorkflows db workflowIds includeChildren Nothing Nothing)
   pure result
 
 -- | Resume workflows from outside, optionally onto a queue.
 clientResumeWorkflows :: Monad m
                       => Client m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 clientResumeWorkflows client workflowIds queueName = do
-  result <- withConnection client.conn (\db -> SystemDB.resumeWorkflows db workflowIds queueName Nothing)
+  result <- withConnection client.conn (\db -> SystemDB.resumeWorkflows db workflowIds queueName Nothing Nothing)
   pure result
 
 -- | Delete workflows from outside.

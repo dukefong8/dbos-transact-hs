@@ -31,6 +31,8 @@ import DBOS.SystemDB
     StepRecord (..),
     WorkflowFilter (..),
     WorkflowId (..),
+    WorkflowInitResult (initResultCreatorXid),
+    WorkflowOwner (..),
     WorkflowRecord (..),
     WorkflowStatus (..),
     defaultForkOptions,
@@ -106,7 +108,7 @@ import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nu
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Instance (dequeueWorkflows, listWorkflowSteps)
 import DBOS.Transact.Client (clientListWorkflowSteps, clientListWorkflowStepsWith)
-import DBOS.Transact.Context (withWorkflow)
+import DBOS.Transact.Context (testOwner, withWorkflow)
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
 import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.Transact.ContextTest (connOver)
@@ -724,15 +726,15 @@ tests =
         let workflowText = "hs-l2-mgmt-refusal-" <> fresh
             initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2MgmtRefusal"}
         created <- SystemDB.initWorkflow backend initialWorkflow Nothing
-        case created of
+        creator <- case created of
           Left err -> fail (show err)
-          Right _ -> pure ()
+          Right result -> pure result.initResultCreatorXid
         timed <- getLogger
         conn <- connOver backend (ioTracer (fst timed))
         -- Both calls share one scope, so the probe taking step zero proves
         -- the refused fork spent nothing.
         (refused, probe) <-
-          withWorkflow conn mgmtTestIdentity (WorkflowId workflowText) Nothing $ \wctx -> do
+          withWorkflow conn mgmtTestIdentity (WorkflowId workflowText) Nothing (WorkflowOwner {ownerWorkflowId = WorkflowId workflowText, ownerToken = creator}) $ \wctx -> do
             -- An empty forked id must be absent rather than empty: refused
             -- before any id is taken.
             refused <- forkWorkflowsInWorkflow wctx [(forkNew "source") {forkForkedId = Just ""}] defaultForkOptions
@@ -756,12 +758,12 @@ tests =
         let workflowText = "hs-l2-mgmt-empty-" <> fresh
             initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2MgmtEmpty"}
         created <- SystemDB.initWorkflow backend initialWorkflow Nothing
-        case created of
+        creator <- case created of
           Left err -> fail (show err)
-          Right _ -> pure ()
+          Right result -> pure result.initResultCreatorXid
         timed <- getLogger
         conn <- connOver backend (ioTracer (fst timed))
-        emptied <- withWorkflow conn mgmtTestIdentity (WorkflowId workflowText) Nothing $ \wctx ->
+        emptied <- withWorkflow conn mgmtTestIdentity (WorkflowId workflowText) Nothing (WorkflowOwner {ownerWorkflowId = WorkflowId workflowText, ownerToken = creator}) $ \wctx ->
           forkWorkflowsInWorkflow wctx [] defaultForkOptions
         emptied @?= Right []
         listed <- SystemDB.listSteps backend (WorkflowId workflowText) False Nothing Nothing Nothing

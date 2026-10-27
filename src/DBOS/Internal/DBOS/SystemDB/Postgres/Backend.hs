@@ -105,7 +105,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -1430,8 +1430,8 @@ data SleepKind = DurableSleep | DeadlineSleep
 -- Composed from the step methods rather than a transaction, matching the
 -- oracle: the step record *is* the write, and the check-then-record race is
 -- caught by the insert's conflict handling. Mirrors @checkpoint_sleep@.
-checkpointSleep :: PostgresSystemDB -> SleepKind -> WorkflowId -> Int -> Duration -> IO (Either Error Timestamp)
-checkpointSleep env kind wid stepId duration = do
+checkpointSleep :: PostgresSystemDB -> SleepKind -> WorkflowId -> Int -> Duration -> Text -> IO (Either Error Timestamp)
+checkpointSleep env kind wid stepId duration token = do
   startedAt <- timestampNow
   case addTimeout startedAt duration of
     Nothing -> pure (Left (invalidInput "duration" "does not resolve to a representable wake time"))
@@ -1452,10 +1452,11 @@ checkpointSleep env kind wid stepId duration = do
                   (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
                   (Just portableJsonSerialization)
                   (Just (StepTiming startedAt completedAt))
+                  token
 
           case recorded of
             Right () -> pure (Right wakeAt)
-            Left (StepAlreadyRecorded {}) -> do
+            Left (StepNondeterminism {}) -> do
               adopted <- checkStep env wid stepId sleepStepName
               pure $ case adopted of
                 Left err          -> Left err
@@ -2124,9 +2125,9 @@ runFork env sources forkedIds steps options =
 -- until @descendant_forks@ lands; an empty batch still records its step,
 -- because a step id that nothing occupies is a hole a replay has to guess
 -- about.
-sendInternal :: PostgresSystemDB -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> IO (Either Error ())
-sendInternal _ _ messages _ Nothing _ | null messages = pure (Right ())
-sendInternal env stepName messages serialization caller sendToForks = do
+sendInternal :: PostgresSystemDB -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> IO (Either Error ())
+sendInternal _ _ messages _ Nothing _ _ | null messages = pure (Right ())
+sendInternal env stepName messages serialization caller owner sendToForks = do
   -- The duplicate-key refusal applies to the caller's list, before fan-out:
   -- one key fanning out to many recipients is legal. Mirrors the oracle.
   case validateSendKeys messages of
@@ -2135,7 +2136,7 @@ sendInternal env stepName messages serialization caller sendToForks = do
       expanded <- if sendToForks then expandForks env messages else pure (Right messages)
       case expanded of
         Left err         -> pure (Left err)
-        Right recipients -> deliverTo env stepName recipients serialization caller
+        Right recipients -> deliverTo env stepName recipients serialization caller owner
 
 -- | Every message copied once per recipient: the destination itself and
 -- every workflow forked from it, transitively. One send fans out to a whole
@@ -2174,8 +2175,8 @@ descendantForks env roots = go Map.empty Set.empty roots
             else go children' seen' fresh
 
 -- | Delivers a batch once the recipient set is settled.
-deliverTo :: PostgresSystemDB -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> IO (Either Error ())
-deliverTo env stepName messages serialization caller = do
+deliverTo :: PostgresSystemDB -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> IO (Either Error ())
+deliverTo env stepName messages serialization caller owner = do
   fallbacks <- traverse (const (MessageUUID . UUID.toText <$> UUID.V4.nextRandom)) messages
   timing <- StepTiming <$> timestampNow <*> timestampNow
   let destinations = [destination | message <- messages, let Types.WorkflowId destination = message.sendDestinationId]
@@ -2204,7 +2205,18 @@ deliverTo env stepName messages serialization caller = do
             sendParamsSerialization = serialization,
             sendParamsStep = sendStep
           }
-  result <- runTransaction env "send_messages" (Statements.sendMessagesTx params)
+  -- An execution's send opens with its ownership check; a client send
+  -- has no execution and skips it. A refused send delivers nothing.
+  result <-
+    runTransaction env "send_messages" $ do
+      owned <- case owner of
+        Nothing -> pure (Right ())
+        Just o ->
+          let WorkflowId ownerText = o.ownerWorkflowId
+           in Statements.checkOwnerTx ownerText o.ownerToken
+      case owned of
+        Left conflict -> Tx.condemn >> pure (Left conflict)
+        Right () -> Statements.sendMessagesTx params
   pure $ case join result of
     Left err
       | foreignKeyError err ->
@@ -2466,44 +2478,51 @@ instance SystemDB PostgresSystemDB IO where
                   { Statements.initParamParentWorkflowId = Just parentText
                   }
           result <- runTransaction env "init_workflow" $ do
-            row <- Tx.statement () (Statements.initWorkflowStatement params)
-            stored <-
-              Tx.statement
-                ()
-                ( Statements.recordChildWorkflowStatement
-                    Statements.RecordChildWorkflowParams
-                      { recordChildParentId = parentText,
-                        recordChildChildId = new.newWorkflowId,
-                        recordChildStepId = caller.initCallerStepId,
-                        recordChildStepName = caller.initCallerStepName,
-                        recordChildStartedAt = Just (timestampToEpochMs caller.initCallerStartedAt),
-                        recordChildCompletedAt = Just (timestampToEpochMs now),
-                        recordChildApplicationName = env.psdbApplicationName
-                      }
-                )
-            -- The input lands where readers look, in the same commit, and
-            -- only when this attempt created the row: a start that found an
-            -- existing row must not touch the input the workflow was
-            -- recorded with.
-            when (row.creator_xid == Just creatorXid) $
-              void $
-                Tx.statement
-                  (new.newWorkflowId, new.newWorkflowInput)
-                  Statements.initWorkflowInputStatement
-            case (initConflict new row, stored) of
-              (Just err, _) -> do
-                -- The stored row is another workflow's: nothing this call
-                -- wrote commits. Mirrors Rust's commit-time conflict check.
-                Tx.condemn
-                pure (Left err)
-              (Nothing, Just childId)
-                | childId == new.newWorkflowId -> pure (Right (row, stored))
-              (Nothing, _) -> do
-                -- A rival execution owns this parent step: roll the child row
-                -- and the step back rather than leave them pointing at each
-                -- other. Mirrors record_child_workflow_on's conflict.
-                Tx.condemn
-                pure (Left (StepAlreadyRecorded {workflowId = parentText, stepId = caller.initCallerStepId}))
+            -- A stale parent starts nothing: the ownership check opens the
+            -- transaction, so the child row and the parent record never
+            -- commit behind a hand-off.
+            owned <- Statements.checkOwnerTx parentText caller.initCallerToken
+            case owned of
+              Left conflict -> Tx.condemn >> pure (Left conflict)
+              Right () -> do
+                row <- Tx.statement () (Statements.initWorkflowStatement params)
+                stored <-
+                  Tx.statement
+                    ()
+                    ( Statements.recordChildWorkflowStatement
+                        Statements.RecordChildWorkflowParams
+                          { recordChildParentId = parentText,
+                            recordChildChildId = new.newWorkflowId,
+                            recordChildStepId = caller.initCallerStepId,
+                            recordChildStepName = caller.initCallerStepName,
+                            recordChildStartedAt = Just (timestampToEpochMs caller.initCallerStartedAt),
+                            recordChildCompletedAt = Just (timestampToEpochMs now),
+                            recordChildApplicationName = env.psdbApplicationName
+                          }
+                    )
+                -- The input lands where readers look, in the same commit, and
+                -- only when this attempt created the row: a start that found an
+                -- existing row must not touch the input the workflow was
+                -- recorded with.
+                when (row.creator_xid == Just creatorXid) $
+                  void $
+                    Tx.statement
+                      (new.newWorkflowId, new.newWorkflowInput)
+                      Statements.initWorkflowInputStatement
+                case (initConflict new row, stored) of
+                  (Just err, _) -> do
+                    -- The stored row is another workflow's: nothing this call
+                    -- wrote commits. Mirrors Rust's commit-time conflict check.
+                    Tx.condemn
+                    pure (Left err)
+                  (Nothing, Just childId)
+                    | childId == new.newWorkflowId -> pure (Right (row, stored))
+                  (Nothing, _) -> do
+                    -- A rival execution owns this parent step: roll the child row
+                    -- and the step back rather than leave them pointing at each
+                    -- other. Mirrors record_child_workflow_on's conflict.
+                    Tx.condemn
+                    pure (Left (StepNondeterminism {workflowId = parentText, stepId = caller.initCallerStepId}))
           case result of
             Left err
               | queueDeduplicated new err ->
@@ -2563,20 +2582,26 @@ instance SystemDB PostgresSystemDB IO where
     pure (map Types.WorkflowId <$> result)
     where
       Types.WorkflowId widText = wid
-  recordWorkflowOutcome env wid outcome = do
+  recordWorkflowOutcome env wid outcome token = do
     let (output, errorText) = outcomeColumns outcome
         Types.WorkflowId widText = wid
         statusText = workflowStatusText (outcomeStatus outcome)
     -- The status change and the payload commit together, and the payload
     -- lands only behind a change that matched: a refused outcome leaves no
-    -- orphan row behind.
+    -- orphan row behind. The ownership check opens the transaction, so an
+    -- execution the row no longer belongs to records nothing and adopts
+    -- what the owner wrote instead.
     result <-
       runTransaction env "record_workflow_outcome" $ do
-        updated <- Tx.statement () (Statements.recordWorkflowOutcomeStatement widText statusText output errorText)
-        when (updated > 0) $
-          void $
-            Tx.statement () (Statements.recordWorkflowOutputStatement widText output errorText)
-        pure updated
+        owned <- Statements.checkOwnerTx widText token
+        case owned of
+          Left _ -> pure 0
+          Right () -> do
+            updated <- Tx.statement () (Statements.recordWorkflowOutcomeStatement widText statusText output errorText token)
+            when (updated > 0) $
+              void $
+                Tx.statement () (Statements.recordWorkflowOutputStatement widText output errorText)
+            pure updated
     pure $ case result of
       Left err -> Left err
       Right updated
@@ -2664,51 +2689,96 @@ instance SystemDB PostgresSystemDB IO where
     now <- timestampNow
     result <- runSession env "transition_delayed_workflows" (Statements.transitionDelayedSession (timestampToEpochMs now) env.psdbApplicationName)
     pure (fromIntegral <$> result)
-  cancelIfTimedOut env (Types.WorkflowId workflowId) owner =
-    fmap (> 0) <$> runSession env "cancel_if_timed_out" (Session.statement () (Statements.cancelIfTimedOutStatement workflowId owner))
+  cancelIfTimedOut env (Types.WorkflowId workflowId) owner = do
+    -- The ownership check locks the row first, so a hand-off cannot land
+    -- between the verdict and the write; a refused execution reports
+    -- @False@ on the @Bool@ channel, exactly as a missed guard did.
+    outcome <-
+      runTransaction env "cancel_if_timed_out" $ do
+        owned <- Statements.checkOwnerTx workflowId owner
+        case owned of
+          Left _ -> pure 0
+          Right () -> Tx.statement () (Statements.cancelIfTimedOutStatement workflowId (Just owner))
+    pure ((> 0) <$> outcome)
   cancelTimedOutWorkflows env limit =
     fmap (map Types.WorkflowId)
       <$> runSession env "cancel_timed_out_workflows" (Statements.cancelTimedOutWorkflowsSession env.psdbApplicationName limit)
   deadLetterWorkflows env workflowIds minRecoveryAttempts =
     fmap (map Types.WorkflowId)
       <$> runSession env "dead_letter_workflows" (Statements.deadLetterWorkflowsSession (map (\(Types.WorkflowId widText) -> widText) workflowIds) minRecoveryAttempts)
-  cancelWorkflows env workflowIds cancelChildren _caller
+  cancelWorkflows env workflowIds cancelChildren _caller fromWorkflow
     | null workflowIds = pure (Right [])
-    | otherwise = do
-        targets <- if cancelChildren
-          then do
-            descendants <- traverse (\wid -> getWorkflowChildren env wid) workflowIds
-            case sequence descendants of
-              Left err     -> pure (Left err)
-              Right levels -> pure (Right (map unwrap workflowIds <> concatMap (map unwrap) levels))
-          else pure (Right (map unwrap workflowIds))
-        case targets of
-          Left err -> pure (Left err)
-          Right ids -> do
-            result <- runSession env "cancel_workflows" (Statements.cancelBatchSession (List.nub ids))
-            pure (map Types.WorkflowId <$> result)
+    | otherwise =
+        case fromWorkflow >>= (\callerId -> Statements.refuseSelfTarget callerId (map unwrap workflowIds) "cancel") of
+          -- A workflow cannot cancel itself: refused before anything runs.
+          Just err -> pure (Left err)
+          Nothing -> do
+            targets <- if cancelChildren
+              then do
+                descendants <- traverse (\wid -> getWorkflowChildren env wid) workflowIds
+                case sequence descendants of
+                  Left err     -> pure (Left err)
+                  Right levels -> pure (Right (map unwrap workflowIds <> concatMap (map unwrap) levels))
+              else pure (Right (map unwrap workflowIds))
+            case targets of
+              Left err -> pure (Left err)
+              Right ids -> do
+                -- A cascade reaching the caller cancels the tree it is
+                -- inside: refused with the tree named, and nothing written.
+                -- The single cancel statement below keeps the refusal
+                -- atomic: nothing commits before it.
+                refused <- case (fromWorkflow, cancelChildren) of
+                  (Just callerId, True)
+                    | callerId `elem` ids, callerId `notElem` map unwrap workflowIds -> do
+                        root <- rootContaining (map unwrap workflowIds) callerId
+                        pure (Just (invalidInput "workflow_ids" ("workflow " <> callerId <> " cannot cancel the tree of " <> root <> ", which contains it")))
+                  _ -> pure Nothing
+                case refused of
+                  Just err -> pure (Left err)
+                  Nothing -> do
+                    result <- runSession env "cancel_workflows" (Statements.cancelBatchSession (List.nub ids))
+                    pure (map Types.WorkflowId <$> result)
     where
       unwrap (Types.WorkflowId widText) = widText
-  resumeWorkflows env workflowIds queue _caller
+      -- The nearest named ancestor of the caller: what the tree the
+      -- cascade reached it through is called. Falls back to naming every
+      -- target, as the oracle joins them, when the ancestry gives out.
+      rootContaining roots start = go [start] start
+        where
+          go seen current = do
+            found <- getWorkflow env (Types.WorkflowId current)
+            case found of
+              Right (Just row) -> case row.workflowRecordParentWorkflowId of
+                Just (Types.WorkflowId parent)
+                  | parent `elem` roots -> pure parent
+                  | parent `notElem` seen -> go (current : seen) parent
+                  | otherwise -> pure (Text.intercalate ", " roots)
+                _ -> pure (Text.intercalate ", " roots)
+              _ -> pure (Text.intercalate ", " roots)
+  resumeWorkflows env workflowIds queue _caller fromWorkflow
     | null workflowIds = pure (Right [])
-    | otherwise = do
-        existing <- runSession env "resume_workflows" (Statements.existingWorkflowsSession ids)
-        case existing of
-          Left err -> pure (Left err)
-          Right present -> do
-            let missing = [widText | widText <- ids, widText `notElem` present]
-            if not (null missing)
-              then pure (Left (NonExistentWorkflow {workflowIds = missing}))
-              else do
-                -- The oracle defaults a nameless resume onto the internal
-                -- queue; a NULL queue_name would leave the row unclaimed.
-                resumed <- runSession env "resume_workflows" (Statements.resumeWorkflowsSession ids (queue <|> Just (unwrapQueueName internalQueueName)))
-                pure (map Types.WorkflowId <$> resumed)
+    | otherwise =
+        -- A workflow cannot resume itself: refused before anything runs.
+        case fromWorkflow >>= (\callerId -> Statements.refuseSelfTarget callerId ids "resume") of
+          Just err -> pure (Left err)
+          Nothing -> do
+            existing <- runSession env "resume_workflows" (Statements.existingWorkflowsSession ids)
+            case existing of
+              Left err -> pure (Left err)
+              Right present -> do
+                let missing = [widText | widText <- ids, widText `notElem` present]
+                if not (null missing)
+                  then pure (Left (NonExistentWorkflow {workflowIds = missing}))
+                  else do
+                    -- The oracle defaults a nameless resume onto the internal
+                    -- queue; a NULL queue_name would leave the row unclaimed.
+                    resumed <- runSession env "resume_workflows" (Statements.resumeWorkflowsSession ids (queue <|> Just (unwrapQueueName internalQueueName)))
+                    pure (map Types.WorkflowId <$> resumed)
     where
       ids = map unwrap workflowIds
       unwrap (Types.WorkflowId widText) = widText
       unwrapQueueName (QueueName name) = name
-  deleteWorkflows env workflowIds deleteChildren caller
+  deleteWorkflows env workflowIds deleteChildren owner
     | null workflowIds = pure (Right 0)
     | otherwise = do
         children <- if deleteChildren
@@ -2729,24 +2799,40 @@ instance SystemDB PostgresSystemDB IO where
             -- outcome on. Only the caller's own id is checked,
             -- not its ancestry — an ancestor is a target only when it was
             -- named with children, and then the walk above has already put
-            -- the caller in the targets.
-            case caller of
-              Just (Types.WorkflowId callerId, _)
-                | callerId `elem` targets ->
-                    pure
-                      ( Left
-                          ( invalidInput
-                              "workflow_ids"
-                              ( "workflow " <> callerId <> " cannot delete itself: the step checkpoint for the delete "
-                                  <> "is written in the same transaction and would outlive the row it references"
-                              )
-                          )
-                      )
-              _ -> do
-                result <- runSession env "delete_workflows" (Statements.deleteWorkflowsSession targets)
-                pure (fromIntegral <$> result)
+            -- the caller in the targets. The id refused here and the row
+            -- the fence locks are one value, so they cannot disagree.
+            case owner >>= selfDelete targets of
+              Just err -> pure (Left err)
+              Nothing -> do
+                -- A step running the delete opens with its ownership check;
+                -- client and engine deletes skip it. A refused deleter rolls
+                -- the whole removal back.
+                result <-
+                  runTransaction env "delete_workflows" $ do
+                    owned <-
+                      maybe
+                        (pure (Right ()))
+                        (\o -> Statements.checkOwnerTx (unwrap o.ownerWorkflowId) o.ownerToken)
+                        owner
+                    case owned of
+                      Left conflict -> Tx.condemn >> pure (Left conflict)
+                      Right () -> Right <$> Tx.statement targets Statements.deleteWorkflowsStatement
+                pure $ case join result of
+                  Left err -> Left err
+                  Right count -> Right (fromIntegral count)
     where
       unwrap (Types.WorkflowId widText) = widText
+      selfDelete targets o
+        | let Types.WorkflowId callerId = o.ownerWorkflowId, callerId `elem` targets =
+            Just
+              ( invalidInput
+                  "workflow_ids"
+                  ( "workflow " <> callerId <> " cannot delete itself: the step checkpoint for the delete "
+                      <> "is written in the same transaction and would outlive the row it references"
+                  )
+              )
+        | otherwise = Nothing
+
   forkWorkflows env forks options _caller
     | null forks = pure (Right [])
     | otherwise =
@@ -2791,10 +2877,10 @@ instance SystemDB PostgresSystemDB IO where
             if not (null missing)
               then pure (Left (NoForkPoint {workflowIds = missing, stepName = named}))
               else pure (Right [fromMaybe 0 (Map.lookup source resolved) | source <- sources])
-  sendMessage env message serialization caller sendToForks =
-    sendInternal env sendStepName [message] serialization caller sendToForks
-  sendMessages env messages serialization caller sendToForks =
-    sendInternal env sendBulkStepName messages serialization caller sendToForks
+  sendMessage env message serialization caller owner sendToForks =
+    sendInternal env sendStepName [message] serialization caller owner sendToForks
+  sendMessages env messages serialization caller owner sendToForks =
+    sendInternal env sendBulkStepName messages serialization caller owner sendToForks
   rewindWorkflow env (Types.WorkflowId widText) cut sysOpts caller =
     case sysRewindValidate cut sysOpts of
       Left err -> pure (Left err)
@@ -2842,7 +2928,7 @@ instance SystemDB PostgresSystemDB IO where
                 pure (Left err)
               _ -> pure (Left err)
             other -> pure other
-  recv env wid stepId timeoutStepId topic timeout = do
+  recv env wid stepId timeoutStepId topic timeout token = do
     let storedTopic = fromMaybe nullTopicSentinel topic
         widText = unwrap wid
     startedAt <- timestampNow
@@ -2855,7 +2941,7 @@ instance SystemDB PostgresSystemDB IO where
       Right Nothing -> do
         subscription <- subscribe env.psdbNotify (messageKey widText (Just storedTopic))
         ( do
-            deadline <- checkpointSleep env DeadlineSleep wid timeoutStepId timeout
+            deadline <- checkpointSleep env DeadlineSleep wid timeoutStepId timeout token
             case deadline of
               Left err -> pure (Left err)
               Right wakeAt -> do
@@ -2868,16 +2954,25 @@ instance SystemDB PostgresSystemDB IO where
                       runTransaction
                         env
                         "recv"
-                        ( Statements.recvTx
-                            Statements.RecvParams
-                              { recvWorkflowId = widText,
-                                recvStepId = stepId,
-                                recvTopic = storedTopic,
-                                recvStartedAt = timestampToEpochMs startedAt,
-                                recvCompletedAt = timestampToEpochMs completedAt
-                              }
+                        ( do
+                            -- The take opens with the ownership check: the row
+                            -- lock serializes takes, and a stale execution's
+                            -- consume is refused with its record rolled back.
+                            owned <- Statements.checkOwnerTx widText token
+                            case owned of
+                              Left conflict -> Tx.condemn >> pure (Left conflict)
+                              Right () ->
+                                Right
+                                  <$> Statements.recvTx
+                                    Statements.RecvParams
+                                      { recvWorkflowId = widText,
+                                        recvStepId = stepId,
+                                        recvTopic = storedTopic,
+                                        recvStartedAt = timestampToEpochMs startedAt,
+                                        recvCompletedAt = timestampToEpochMs completedAt
+                                      }
                         )
-                    pure $ case taken of
+                    pure $ case join taken of
                       Left err -> Left err
                       Right (Statements.RecvAdopted row) ->
                         fmap (>>= stepEncodedValue) (stepCheckToRecord wid stepId recvStepName row)
@@ -2887,7 +2982,7 @@ instance SystemDB PostgresSystemDB IO where
             `finally` unsubscribe subscription
     where
       unwrap (Types.WorkflowId widText) = widText
-  writeStream env wid stepId key value serialization writtenBy = do
+  writeStream env wid stepId key value serialization writtenBy token = do
     startedAt <- timestampNow
     completedAt <- timestampNow
     let widText = unwrap wid
@@ -2910,19 +3005,29 @@ instance SystemDB PostgresSystemDB IO where
             }
         writeOnce = do
           result <- runTransaction env "write_stream" $ do
-            replay <- case writtenBy of
-              Step     -> pure Nothing
-              Workflow -> Tx.statement (widText, stepId) Statements.checkStepStatement
-            case replay of
-              Just raw -> case stepCheckToRecord wid stepId stepName raw of
-                Left err       -> pure (Left err)
-                Right (Just _) -> pure (Right True)
-                Right Nothing  -> append
-              Nothing -> append
-          pure $ case result of
+            -- The write opens with the ownership check: a stale execution's
+            -- offset claim and step record roll back with the refusal.
+            owned <- Statements.checkOwnerTx widText token
+            case owned of
+              Left conflict -> Tx.condemn >> pure (Left conflict)
+              Right () -> do
+                replay <- case writtenBy of
+                  Step     -> pure Nothing
+                  Workflow -> Tx.statement (widText, stepId) Statements.checkStepStatement
+                case replay of
+                  Just raw -> case stepCheckToRecord wid stepId stepName raw of
+                    Left err       -> pure (Left err)
+                    Right (Just _) -> pure (Right True)
+                    Right Nothing  -> append
+                  Nothing -> append
+          -- The ownership check above refuses a missing row before this
+          -- insert can fail on its foreign key; the mapping stays as the
+          -- oracle keeps it, a defensive mapping rather than the
+          -- missing-row path.
+          pure $ case join result of
             Left (Backend backendError)
               | backendError.backendSqlState == Just "23503" -> Left (NonExistentWorkflow {workflowIds = [widText]})
-            other -> join other
+            other -> other
         append = do
           inserted <- Tx.statement (widText, stepId, key, value, serialization) Statements.streamWriteStatement
           if inserted == 0
@@ -2950,8 +3055,8 @@ instance SystemDB PostgresSystemDB IO where
     go 0
     where
       unwrap (Types.WorkflowId widText) = widText
-  closeStream env wid stepId key writtenBy =
-    writeStream env wid stepId key streamClosedSentinel (Just portableJsonSerialization) writtenBy
+  closeStream env wid stepId key writtenBy token =
+    writeStream env wid stepId key streamClosedSentinel (Just portableJsonSerialization) writtenBy token
   close env = releasePostgresSystemDB env
   checkStep env wid stepId stepName = do
     result <- runSession env "check_step" (Statements.checkStepSession (unwrap wid) stepId)
@@ -2961,7 +3066,7 @@ instance SystemDB PostgresSystemDB IO where
       Right (Just row) -> stepCheckToRecord wid stepId stepName row
     where
       unwrap (Types.WorkflowId widText) = widText
-  recordStep env wid stepId stepName outcome serialization timing
+  recordStep env wid stepId stepName outcome serialization timing token
     | Text.null widText = pure (Left (invalidInput "workflow_id" "must not be empty"))
     | stepId < 0 = pure (Left (invalidInput "step_id" "must not be negative"))
     | otherwise = do
@@ -2979,18 +3084,29 @@ instance SystemDB PostgresSystemDB IO where
                   recordStepApplicationName = env.psdbApplicationName,
                   recordStepChildWorkflowId = Nothing
                 }
-        result <- runSession env "record_step" (Statements.recordStepSession params)
+        -- The ownership check opens the transaction and locks the row, so a
+        -- hand-off cannot land between the verdict and the insert. A refused
+        -- execution condemns the write and reports the conflict; a rival
+        -- record behind a token this call holds is nondeterminism, which the
+        -- timestamp compare still tells apart from this caller's own retry.
+        result <-
+          runTransaction env "record_step" $ do
+            owned <- Statements.checkOwnerTx widText token
+            case owned of
+              Left conflict -> Tx.condemn >> pure (Left conflict)
+              Right () -> do
+                stored <- Tx.statement () (Statements.recordStepStatement params)
+                pure $ case stored == (timestampToEpochMs . (.stepTimingCompletedAt) <$> timing) of
+                  False -> Left (StepNondeterminism {workflowId = widText, stepId = stepId})
+                  True -> Right ()
         case result of
           Left err -> pure (Left err)
-          Right stored -> do
-            let ours = stored == (timestampToEpochMs . (.stepTimingCompletedAt) <$> timing)
-            if not ours
-              then pure (Left (StepAlreadyRecorded {workflowId = widText, stepId = stepId}))
-              else case env.psdbExecutorId of
-                Nothing -> pure (Right ())
-                Just executorId -> do
-                  claimed <- runSession env "record_step" (Statements.claimExecutorSession widText executorId)
-                  pure (() <$ claimed)
+          Right (Left conflict) -> pure (Left conflict)
+          Right (Right ()) -> case env.psdbExecutorId of
+            Nothing -> pure (Right ())
+            Just executorId -> do
+              claimed <- runSession env "record_step" (Statements.claimExecutorSession widText executorId)
+              pure (() <$ claimed)
     where
       widText = case wid of Types.WorkflowId text -> text
   listSteps env wid loadOutput limit offset _caller = do
@@ -3010,8 +3126,8 @@ instance SystemDB PostgresSystemDB IO where
             stepRecordStartedAt = timestampFromEpochMs <$> row.stepRowStartedAt,
             stepRecordCompletedAt = timestampFromEpochMs <$> row.stepRowCompletedAt
           }
-  recordSleep env wid stepId duration = checkpointSleep env DurableSleep wid stepId duration
-  setEvent env wid stepId key value serialization = do
+  recordSleep env wid stepId duration token = checkpointSleep env DurableSleep wid stepId duration token
+  setEvent env wid stepId key value serialization token = do
     startedAt <- timestampNow
     completedAt <- timestampNow
     let params =
@@ -3024,8 +3140,15 @@ instance SystemDB PostgresSystemDB IO where
               setEventStartedAt = timestampToEpochMs startedAt,
               setEventCompletedAt = timestampToEpochMs completedAt
             }
-    result <- runTransaction env "set_event" (Statements.setEventTx params)
-    case result of
+    -- The publish opens with the ownership check, as a take does: a stale
+    -- execution's event and history rows roll back with the refusal.
+    result <-
+      runTransaction env "set_event" $ do
+        owned <- Statements.checkOwnerTx (unwrap wid) token
+        case owned of
+          Left conflict -> Tx.condemn >> pure (Left conflict)
+          Right () -> Right <$> Statements.setEventTx params
+    case join result of
       Left err -> pure (Left err)
       Right row -> do
         -- Committed, so a reader woken by this finds the row. No trigger does
@@ -3051,7 +3174,7 @@ instance SystemDB PostgresSystemDB IO where
       Right Nothing -> do
         deadlineOrError <- case caller of
           Just c -> do
-            woke <- checkpointSleep env DeadlineSleep c.getEventCallerWorkflowId c.getEventCallerTimeoutStepId timeout
+            woke <- checkpointSleep env DeadlineSleep c.getEventCallerWorkflowId c.getEventCallerTimeoutStepId timeout c.getEventCallerToken
             pure (either Left Right woke)
           -- A timeout too large to represent is one that never elapses.
           Nothing -> pure (Right (fromMaybe (Timestamp maxBound) (addTimeout startedAt timeout)))
@@ -3074,8 +3197,15 @@ instance SystemDB PostgresSystemDB IO where
                             getEventRecordStartedAt = timestampToEpochMs startedAt,
                             getEventRecordCompletedAt = timestampToEpochMs completedAt
                           }
-                  recorded <- runTransaction env "get_event" (Statements.getEventRecordTx params)
-                  pure $ case recorded of
+                  -- The record opens with the caller's ownership check: a
+                  -- stale reader's take and record roll back together.
+                  recorded <-
+                    runTransaction env "get_event" $ do
+                      owned <- Statements.checkOwnerTx (unwrap c.getEventCallerWorkflowId) c.getEventCallerToken
+                      case owned of
+                        Left conflict -> Tx.condemn >> pure (Left conflict)
+                        Right () -> Right <$> Statements.getEventRecordTx params
+                  pure $ case join recorded of
                     Left err -> Left err
                     Right Nothing -> Right value
                     Right (Just row) ->
@@ -3570,7 +3700,7 @@ instance SystemDB PostgresSystemDB IO where
                       rowCountWorkflows = fromIntegral (workflows + terminalRows),
                       rowCountSteps = fromIntegral stepRows
                     }
-  recordChildWorkflow env parent child stepId stepName startedAt =
+  recordChildWorkflow env parent child stepId stepName startedAt token =
     case child of
       Types.WorkflowId childText | Text.null childText -> pure (Left (invalidInput "child_workflow_id" "must not be empty"))
       Types.WorkflowId childText -> do
@@ -3585,17 +3715,27 @@ instance SystemDB PostgresSystemDB IO where
                   recordChildCompletedAt = now <$ startedAt,
                   recordChildApplicationName = env.psdbApplicationName
                 }
-        result <- runSession env "record_child_workflow" (Session.statement () (Statements.recordChildWorkflowStatement params))
+        -- The ownership check opens the transaction, as for a step write: a
+        -- refused parent records nothing and reports the conflict.
+        result <-
+          runTransaction env "record_child_workflow" $ do
+            owned <- Statements.checkOwnerTx (unwrap parent) token
+            case owned of
+              Left conflict -> Tx.condemn >> pure (Left conflict)
+              Right () -> do
+                stored <- Tx.statement () (Statements.recordChildWorkflowStatement params)
+                -- The same child is an idempotent retry; a different one (or
+                -- none, where the row already held a non-child step) is
+                -- nondeterminism.
+                pure $ case stored of
+                  Just kept | kept == childText -> Right ()
+                  _ -> Left (StepNondeterminism {workflowId = unwrap parent, stepId = stepId})
         pure $ case result of
           Left err -> Left err
-          -- The same child is an idempotent retry; a different one (or none,
-          -- where the row already held a non-child step) is nondeterminism.
-          Right stored
-            | stored == Just childText -> Right ()
-            | otherwise -> Left (StepAlreadyRecorded {workflowId = unwrap parent, stepId = stepId})
+          Right inner -> inner
     where
       unwrap (Types.WorkflowId widText) = widText
-  recordChildResult env parent stepId child outcome serialization timing
+  recordChildResult env parent stepId child outcome serialization timing token
     | Text.null parentText = pure (Left (invalidInput "workflow_id" "must not be empty"))
     | stepId < 0 = pure (Left (invalidInput "step_id" "must not be negative"))
     | otherwise = do
@@ -3613,18 +3753,25 @@ instance SystemDB PostgresSystemDB IO where
                   recordStepApplicationName = env.psdbApplicationName,
                   recordStepChildWorkflowId = Just childText
                 }
-        result <- runSession env "record_child_result" (Statements.recordStepSession params)
+        -- The ownership check opens the transaction, as for a step write.
+        result <-
+          runTransaction env "record_child_result" $ do
+            owned <- Statements.checkOwnerTx parentText token
+            case owned of
+              Left conflict -> Tx.condemn >> pure (Left conflict)
+              Right () -> do
+                stored <- Tx.statement () (Statements.recordStepStatement params)
+                pure $ case stored == (timestampToEpochMs . (.stepTimingCompletedAt) <$> timing) of
+                  False -> Left (StepNondeterminism {workflowId = parentText, stepId = stepId})
+                  True -> Right ()
         case result of
           Left err -> pure (Left err)
-          Right stored -> do
-            let ours = stored == (timestampToEpochMs . (.stepTimingCompletedAt) <$> timing)
-            if not ours
-              then pure (Left (StepAlreadyRecorded {workflowId = parentText, stepId = stepId}))
-              else case env.psdbExecutorId of
-                Nothing -> pure (Right ())
-                Just executorId -> do
-                  claimed <- runSession env "record_child_result" (Statements.claimExecutorSession parentText executorId)
-                  pure (() <$ claimed)
+          Right (Left conflict) -> pure (Left conflict)
+          Right (Right ()) -> case env.psdbExecutorId of
+            Nothing -> pure (Right ())
+            Just executorId -> do
+              claimed <- runSession env "record_child_result" (Statements.claimExecutorSession parentText executorId)
+              pure (() <$ claimed)
     where
       Types.WorkflowId parentText = parent
       Types.WorkflowId childText = child

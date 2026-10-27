@@ -15,7 +15,7 @@ import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import Data.Text qualified as Text
-import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), newWorkflow, sleepStepName)
+import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact
@@ -46,6 +46,15 @@ simSleepFixture :: forall s. IOSim s (SleepFixture (IOSim s))
 simSleepFixture = do
   mem <- newMemDB
   fresh <- newTVarIO (0 :: Int)
+  let -- Sleeps present the row's own creator token, as an execution built
+      -- from the init result would.
+      ownerFor widText = do
+        fetched <- SystemDB.getWorkflow mem (WorkflowId widText)
+        case fetched of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = token})
+            Nothing -> error "sleep fixture row has no creator token"
+          _ -> error "sleep fixture built a context for a row that was never initialized"
   pure
     SleepFixture
       { sfFreshWorkflowId = do
@@ -55,15 +64,17 @@ simSleepFixture = do
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),
-        sfRunSleep = \wid duration -> do
+        sfRunSleep = \wid@(WorkflowId widText) duration -> do
           conn <- memConnectionOn mem simTracer
-          withWorkflow conn simIdentity wid Nothing (\wctx -> sleepStep wctx duration),
+          owner <- ownerFor widText
+          withWorkflow conn simIdentity wid Nothing owner (\wctx -> sleepStep wctx duration),
         sfCheckSleep = \wid ->
           SystemDB.checkStep mem wid 0 sleepStepName >>= either (error . show) pure,
         sfPlainSleep = sleepPlain,
-        sfRunInStep = \wid duration -> do
+        sfRunInStep = \wid@(WorkflowId widText) duration -> do
           conn <- memConnectionOn mem simTracer
-          withWorkflow conn simIdentity wid Nothing $ \wctx -> do
+          owner <- ownerFor widText
+          withWorkflow conn simIdentity wid Nothing owner $ \wctx -> do
             marker <- nextWorkflowMarker wctx
             withStep wctx marker (firstStepStatus 0) $ \_stepped -> do
               before <- nextStepId wctx

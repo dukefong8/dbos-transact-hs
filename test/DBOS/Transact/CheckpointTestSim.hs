@@ -13,6 +13,7 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
+import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact.Checkpoint (takenPlacement)
 import DBOS.Transact.CheckpointCases
@@ -41,7 +42,7 @@ import DBOS.Transact.CheckpointCases
     scenarioTakenOther,
   )
 import DBOS.Transact.Connection (nextExecutionIdentity)
-import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState)
+import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState, testOwner)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool)
 
@@ -54,7 +55,7 @@ simCheckpointFixture = do
   let simCtx = do
         conn <- memConnectionOn mem simTracer
         identity <- nextExecutionIdentity conn
-        state <- newWorkflowState "wf-1" Nothing identity
+        state <- newWorkflowState "wf-1" Nothing (testOwner (WorkflowId "wf-1")) identity
         newWorkflowCtx conn simIdentity state
   pure
     ( CheckpointFixture

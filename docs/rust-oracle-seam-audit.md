@@ -184,7 +184,7 @@ Type-level gaps and renames:
 `sysdb/error.rs` (17 variants): 17/17 ported in `SystemDB.Error`
 (`Backend`, `Malformed`, `UnknownSerialization`, `ConflictingWorkflow`,
 `InvalidInput`, `QueueDeduplicated`, `WorkflowCancelled`,
-`UnexpectedStep`, `StepAlreadyRecorded`, `NoForkPoint`,
+`UnexpectedStep`, `StepNondeterminism`, `WorkflowConflict`, `NoForkPoint`,
 `NonExistentWorkflow`, `WorkflowNotRewindable`, `RewindInterrupted`,
 `AlreadyRegistered`, `NotRegistered`, `RegisteredByAnother`, plus
 `MaxRecoveryAttemptsExceeded` under the documented `Error` prefix — the

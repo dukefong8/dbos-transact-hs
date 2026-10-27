@@ -132,7 +132,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.SystemDB (AwaitedOutcome (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), WorkflowId (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
+import DBOS.SystemDB (AwaitedOutcome (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), WorkflowId (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SysErr
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
@@ -197,6 +197,9 @@ import DBOS.Transact.Instance (dequeueWorkflows, launchOn, launchOnWithQueues)
 import DBOS.Transact.Workflow (resolveTimeoutDeadline, runOptionsToStartOptions, timeoutBudget)
 import DBOS.Transact.Context
   ( firstStepStatus,
+    nextWorkflowMarker,
+    testOwner,
+    withStep,
     nextWorkflowMarker,
     withStep,
     withSystemDB,
@@ -1100,8 +1103,16 @@ scenarioPlainStepAtStart fx = do
       Nothing -> throwIO (userError "the parent never reached its gate")
       Just () -> pure ()
     planted <-
-      runSystemDB fx.wfSystemDB $ \db ->
-        SystemDB.recordStep db wid 0 "child" (SystemDB.OutcomeOutput (Just "1")) Nothing Nothing
+      runSystemDB fx.wfSystemDB $ \db -> do
+        -- The plant lands while the run owns the id, so it presents the
+        -- row's own creator token, as the execution's write would.
+        found <- SystemDB.getWorkflow db wid
+        creator <- case found of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure token
+            Nothing -> throwIO (userError "planted write needs the row's creator")
+          _ -> throwIO (userError "planted write needs the row")
+        SystemDB.recordStep db wid 0 "child" (SystemDB.OutcomeOutput (Just "1")) Nothing Nothing creator
     case planted of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
@@ -1733,12 +1744,12 @@ scenarioScopedSelect fx = do
     created <-
       runSystemDB fx.wfSystemDB $ \db ->
         SystemDB.initWorkflow db ((newWorkflow widText) {newWorkflowName = Just "L2ScopedSelect"}) Nothing
-    case created of
+    creator <- case created of
       Left err -> throwIO (userError (show err))
-      Right _ -> pure ()
+      Right result -> pure result.initResultCreatorXid
     conn <- fx.wfConn
     outcome <-
-      withWorkflow conn fx.wfIdentity wid Nothing $ \wctx -> do
+      withWorkflow conn fx.wfIdentity wid Nothing (WorkflowOwner {ownerWorkflowId = wid, ownerToken = creator}) $ \wctx -> do
         slow <- pendingStep wctx "slow" (\_ -> threadDelay 30000000 >> pure (Right (2 :: Int)))
         fast <- pendingStep wctx "fast" (\_ -> pure (Right (1 :: Int)))
         selectStep
@@ -2056,7 +2067,15 @@ scenarioStaleAwaitRefused fx = do
       Nothing -> throwIO (userError "the parent never recorded its start")
       Just () -> pure ()
     planted <-
-      runSystemDB fx.wfSystemDB $ \db ->
+      runSystemDB fx.wfSystemDB $ \db -> do
+        -- The plant lands while the run owns the id, so it presents the
+        -- row's own creator token, as the execution's write would.
+        found <- SystemDB.getWorkflow db wid
+        creator <- case found of
+          Right (Just row) -> case row.workflowRecordCreatorXid of
+            Just token -> pure token
+            Nothing -> throwIO (userError "planted write needs the row's creator")
+          _ -> throwIO (userError "planted write needs the row")
         SystemDB.recordChildResult
           db
           wid
@@ -2065,6 +2084,7 @@ scenarioStaleAwaitRefused fx = do
           (SystemDB.OutcomeOutput (Just "7"))
           Nothing
           Nothing
+          creator
     case planted of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()

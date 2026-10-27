@@ -42,9 +42,12 @@ module DBOS.Transact.Context
     -- * What outlives any one call
     WorkflowState,
     newWorkflowState,
+    testOwner,
     withTracer,
     withWorkflowTaskSpawner,
     deadline,
+    ownerToken,
+    workflowOwner,
     stepDepth,
     isSameExecution,
 
@@ -89,7 +92,7 @@ where
 import DBOS.Prelude
 import Data.Kind (Type)
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Timestamp, WorkflowId (..))
+import DBOS.SystemDB.Types (Timestamp, WorkflowId (..), WorkflowOwner (..))
 import DBOS.Transact.Logger (LogCtx (..), SomeTracer)
 import DBOS.Transact.Connection (Connection (..), ExecutionIdentity, nextExecutionIdentity, runSystemDB)
 import DBOS.Transact.Identity (Identity)
@@ -158,21 +161,23 @@ instance Show (StepCtx exec m) where
 
 -- | The parts of a workflow that outlive any one call within it. Mirrors
 -- Rust @WorkflowState@: the id, the deadline the database holds, the step
--- id counter, the marker counter, and the execution's identity.
+-- id counter, the marker counter, the execution's identity, and the owner
+-- token this execution presents on every write it makes.
 data WorkflowState m = WorkflowState
   { workflowId        :: Text,
     deadline          :: Maybe Timestamp,
     nextStepIdRef     :: StrictTVar m Int,
     nextMarkerRef     :: StrictTVar m Int,
     stepDepthRef      :: StrictTVar m Int,
-    executionIdentity :: ExecutionIdentity
+    executionIdentity :: ExecutionIdentity,
+    workflowOwner     :: WorkflowOwner
   }
 
 -- | A workflow's state: the id, the deadline the row carries, and the
 -- identity that tells a re-run of the same id apart from the run itself.
 newWorkflowState :: MonadSTM m
-                 => Text -> Maybe Timestamp -> ExecutionIdentity -> m (WorkflowState m)
-newWorkflowState workflowText deadlineAt identity = do
+                 => Text -> Maybe Timestamp -> WorkflowOwner -> ExecutionIdentity -> m (WorkflowState m)
+newWorkflowState workflowText deadlineAt owner identity = do
   stepRef <- newTVarIO 0
   markerRef <- newTVarIO 0
   depthRef <- newTVarIO 0
@@ -183,7 +188,8 @@ newWorkflowState workflowText deadlineAt identity = do
         nextStepIdRef = stepRef,
         nextMarkerRef = markerRef,
         stepDepthRef = depthRef,
-        executionIdentity = identity
+        executionIdentity = identity,
+        workflowOwner = owner
       }
 
 -- | Rebinds a view to trace resource-lifetime events through the given
@@ -197,6 +203,23 @@ withTracer tracer wctx = wctx {wctxTracer = tracer}
 -- enough (a state field behind the view) to keep as a reader.
 deadline :: WorkflowCtx exec m -> Maybe Timestamp
 deadline wctx = wctx.wctxState.deadline
+
+-- | The token this execution presents on every write it makes: the claim's
+-- token for a dequeued run, the creator token for a direct one. Deep enough
+-- (a state field behind the view) to keep as a reader, like 'deadline'.
+workflowOwner :: WorkflowCtx exec m -> WorkflowOwner
+workflowOwner wctx = wctx.wctxState.workflowOwner
+
+-- | The token text this execution presents on every write it makes.
+-- Mirrors Rust @Ctx::owner_xid@.
+ownerToken :: WorkflowCtx exec m -> Text
+ownerToken wctx = wctx.wctxState.workflowOwner.ownerToken
+
+-- | The fixed owner token test fixtures hold, as a start or a claim would
+-- make its own. Mirrors Rust @TEST_OWNER@: a seam, not behavior — a fixture
+-- that initializes rows derives the real token from the init result instead.
+testOwner :: WorkflowId -> WorkflowOwner
+testOwner wid = WorkflowOwner {ownerWorkflowId = wid, ownerToken = "test-owner"}
 
 -- | Whether two views are the same execution of the same workflow:
 -- pointer identity in the oracle, an opaque per-execution token here.
@@ -405,10 +428,10 @@ instance LogCtx (StepCtx exec m) m where
 -- continuation binds the execution scope — values built inside cannot
 -- escape it, so one run's counters never leak into another's.
 withWorkflow :: MonadSTM m
-             => Connection m -> Identity -> WorkflowId -> Maybe Timestamp -> (forall exec. WorkflowCtx exec m -> m a) -> m a
-withWorkflow conn identity (WorkflowId widText) deadline run = do
+             => Connection m -> Identity -> WorkflowId -> Maybe Timestamp -> WorkflowOwner -> (forall exec. WorkflowCtx exec m -> m a) -> m a
+withWorkflow conn identity (WorkflowId widText) deadline owner run = do
   execution <- nextExecutionIdentity conn
-  state <- newWorkflowState widText deadline execution
+  state <- newWorkflowState widText deadline owner execution
   run =<< newWorkflowCtx conn identity state
 
 -- | Build one execution's workflow view around a state the caller already

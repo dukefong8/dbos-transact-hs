@@ -72,11 +72,11 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowStatus (..), addTimeout, databaseTimeRead, databaseTimeReaches, isTerminal, newWorkflow, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowOwner (..), WorkflowStatus (..), addTimeout, databaseTimeRead, databaseTimeReaches, isTerminal, newWorkflow, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry, clearDatasourceCheckpoints)
-import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), clearSpawnerCheckpoints, deadline, insideAStep, nextStepId, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
+import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), clearSpawnerCheckpoints, deadline, insideAStep, nextStepId, ownerToken, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
@@ -142,7 +142,7 @@ runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId@(Workfl
                 spawnLocal
                   (tasksSpawner tasks (clearCheckpointsFor datasources))
                   ( \spawner ->
-                      executeRegisteredWorkflow spawner conn identity workflowId workflow input (deadlineOf result.initResultDeadline result.initResultClock) Nothing result.initResultCreatorXid
+                      executeRegisteredWorkflow spawner conn identity workflowId workflow input (deadlineOf result.initResultDeadline result.initResultClock) Nothing (WorkflowOwner {ownerWorkflowId = workflowId, ownerToken = result.initResultCreatorXid})
                   )
               executed <- readMVar channel
               case executed of
@@ -265,7 +265,7 @@ deadlineOf at clock = (\instant -> Deadline instant (databaseTimeReaches clock i
 -- before waiting for the timeout's row to settle, as Rust's @time_out@ drops
 -- its slot first.
 executeRegisteredWorkflow :: forall m. (MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
-                          => TaskSpawner m -> Connection m -> Identity -> WorkflowId -> ErasedWorkflow m -> Maybe SerializedWorkflowValue -> Maybe Deadline -> Maybe (m ()) -> Text -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
+                          => TaskSpawner m -> Connection m -> Identity -> WorkflowId -> ErasedWorkflow m -> Maybe SerializedWorkflowValue -> Maybe Deadline -> Maybe (m ()) -> WorkflowOwner -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
 executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowText) workflow input deadline releaseSlot owner = do
   attempted <- try (runBody)
   case attempted of
@@ -303,7 +303,7 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
     -- deadline is the run's budget: the body races the clock, and losing it
     -- cancels the workflow durably, as Rust's deadline does.
     runBody =
-      withWorkflow conn identity workflowId ((.deadlineAt) <$> deadline) $ \wctx -> do
+      withWorkflow conn identity workflowId ((.deadlineAt) <$> deadline) owner $ \wctx -> do
         let scoped = withWorkflowTaskSpawner spawner wctx
             ErasedWorkflow body = workflow
         raced <- case deadline of
@@ -341,7 +341,7 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
     -- second outcome behind a finished row is a supersede, not a write, and
     -- the recorded outcome is the answer.
     recordOutcome outcome fallback = do
-      saved <- runSystemDB conn.connSysdb (\db -> SystemDB.recordWorkflowOutcome db workflowId outcome)
+      saved <- runSystemDB conn.connSysdb (\db -> SystemDB.recordWorkflowOutcome db workflowId outcome owner.ownerToken)
       case saved of
         Left dbError -> do
           runTracer conn.connTracer (WorkflowOutcomeRecordFailed (TransactError.renderTransactError (TransactError.fromSystemDB dbError :: (TransactError.Error TransactError.EngineOnly))))
@@ -371,7 +371,7 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
     -- Mirrors Rust's @time_out@.
     timeOut = do
       maybe (pure ()) id releaseSlot
-      cancelled <- runSystemDB conn.connSysdb (\db -> SystemDB.cancelIfTimedOut db workflowId (Just owner))
+      cancelled <- runSystemDB conn.connSysdb (\db -> SystemDB.cancelIfTimedOut db workflowId owner.ownerToken)
       case cancelled of
         Right True -> runTracer conn.connTracer (WorkflowDeadlineCancelled workflowText)
         Right False -> pure ()
@@ -717,9 +717,9 @@ checkRecordedChild conn parentText stepId stepName stored =
 -- internal step's refusal does. A recording failure is returned in place of
 -- the refusal, as in the oracle. Mirrors @Parent::record_start_error@.
 recordStartError :: (Monad m, MonadTime m)
-                 => Connection m -> Text -> Int -> Text -> Timestamp -> Error
+                 => Connection m -> Text -> Int -> Text -> Timestamp -> Text -> Error
                  -> m (TransactError.Error e)
-recordStartError conn parentText stepId stepName startedAt err = do
+recordStartError conn parentText stepId stepName startedAt token err = do
   completedAt <- timestampNow
   let encoded = encodeWorkflowValue err
       serialization = (\(Serialization tag) -> tag) <$> encoded.serializedSerialization
@@ -735,6 +735,7 @@ recordStartError conn parentText stepId stepName startedAt err = do
             (OutcomeError encoded.serializedText)
             serialization
             (Just (StepTiming startedAt completedAt))
+            token
       )
   pure $ case written of
     Left recordErr -> TransactError.fromSystemDB recordErr
@@ -828,7 +829,7 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
                   spawnLocal
                     (tasksSpawner tasks (clearCheckpointsFor datasources))
                     ( \spawner ->
-                        executeRegisteredWorkflow spawner conn identity (WorkflowId workflowText) workflow input (deadlineOf result.initResultDeadline result.initResultClock) Nothing result.initResultCreatorXid
+                        executeRegisteredWorkflow spawner conn identity (WorkflowId workflowText) workflow input (deadlineOf result.initResultDeadline result.initResultClock) Nothing (WorkflowOwner {ownerWorkflowId = WorkflowId workflowText, ownerToken = result.initResultCreatorXid})
                     )
                 pure (Right (localHandle conn workflowText channel))
 
@@ -913,7 +914,7 @@ startChildWorkflow wctx ref options input = do
           -- of starting the child for real once the key is free.
           recordRefusal refusal
             | shouldRecordStartError refusal =
-                recordStartError conn parentText parentStepId name now refusal
+                recordStartError conn parentText parentStepId name now (ownerToken wctx) refusal
             | otherwise = pure (TransactError.fromSystemDB refusal)
       recorded <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db (WorkflowId parentText) parentStepId name)
       case recorded of
@@ -943,7 +944,8 @@ startChildWorkflow wctx ref options input = do
                   { initCallerParentWorkflowId = WorkflowId parentText,
                     initCallerStepId = parentStepId,
                     initCallerStartedAt = now,
-                    initCallerStepName = name
+                    initCallerStepName = name,
+                    initCallerToken = ownerToken wctx
                   }
           started <- initOrJoin conn new options.startQueue (Just caller)
           case started of
@@ -967,7 +969,7 @@ startChildWorkflow wctx ref options input = do
                           -- The child runs under its parent's spawner, so the
                           -- spawner's clearance drops the child's checkpoints
                           -- on completion exactly like a top-level run's.
-                          executeRegisteredWorkflow childSpawner conn identity (WorkflowId childText) child rawInput (deadlineOf result.initResultDeadline result.initResultClock) Nothing result.initResultCreatorXid
+                          executeRegisteredWorkflow childSpawner conn identity (WorkflowId childText) child rawInput (deadlineOf result.initResultDeadline result.initResultClock) Nothing (WorkflowOwner {ownerWorkflowId = WorkflowId childText, ownerToken = result.initResultCreatorXid})
                       pure (Right (localHandle conn childText channel))
                 _ -> pure (Right (pollingHandle conn childText True))
               pure spawned
@@ -975,7 +977,7 @@ startChildWorkflow wctx ref options input = do
               -- The mapping only, never the holder's own parent link:
               -- it travels on 'InitWorkflowCaller' and cannot be
               -- reached from here.
-              mapped <- runSystemDB conn.connSysdb (\db -> SystemDB.recordChildWorkflow db (WorkflowId parentText) (WorkflowId holder.workflowId) parentStepId name (Just now))
+              mapped <- runSystemDB conn.connSysdb (\db -> SystemDB.recordChildWorkflow db (WorkflowId parentText) (WorkflowId holder.workflowId) parentStepId name (Just now) (ownerToken wctx))
               pure $ case mapped of
                 Left recordErr -> Left (TransactError.fromSystemDB recordErr)
                 Right _        -> Right holder

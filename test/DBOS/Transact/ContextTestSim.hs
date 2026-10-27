@@ -12,6 +12,7 @@ import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic, selectTraceEventsSay)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
+import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (simConnectionWith)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (runTracer)
@@ -22,6 +23,8 @@ import DBOS.Transact.Context
   ( WorkflowCtx (wctxTracer),
     firstStepStatus,
     newWorkflowCtx,
+    newWorkflowState,
+    testOwner,
     newWorkflowState,
     nextWorkflowMarker,
     withStep,
@@ -112,7 +115,7 @@ simFixture =
     { fixtureMkCtx = \name -> do
         conn <- simConnection
         identity <- nextExecutionIdentity conn
-        state <- newWorkflowState name Nothing identity
+        state <- newWorkflowState name Nothing (testOwner (WorkflowId name)) identity
         newWorkflowCtx conn simIdentity state,
       fixtureMkConn = simConnection,
       fixtureIdentity = simIdentity,

@@ -314,12 +314,12 @@ cancelWorkflows :: (MonadMVar m)
                 => DBOS m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflows dbos workflowIds includeChildren =
   withExecutor dbos "cancel workflows" $ \executor ->
-    Management.cancelWorkflows executor.conn workflowIds includeChildren
+    Management.cancelWorkflows executor.conn workflowIds includeChildren Nothing
 
 resumeWorkflows :: (MonadMVar m)
                 => DBOS m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflows dbos workflowIds queueName = do
-  withExecutor dbos "resume workflows" $ \executor -> Management.resumeWorkflows executor.conn workflowIds queueName
+  withExecutor dbos "resume workflows" $ \executor -> Management.resumeWorkflows executor.conn workflowIds queueName Nothing
 
 -- | Moves a delayed workflow's release: brought forward to now, the
 -- supervisor releases it on its next pass. The launched-instance guard
@@ -532,7 +532,7 @@ sendWorkflowMessage dbos destination topic idempotencyKey value = do
               sendTopic = topic,
               sendIdempotencyKey = idempotencyKey
             }
-    written <- withConnection executor.conn (\db -> SystemDB.sendMessage db message ((\(Serialization name) -> name) <$> value.serializedSerialization) Nothing False)
+    written <- withConnection executor.conn (\db -> SystemDB.sendMessage db message ((\(Serialization name) -> name) <$> value.serializedSerialization) Nothing Nothing False)
     pure written
 
 -- | Send a batch from outside in one transaction: all or none.
@@ -540,7 +540,7 @@ sendWorkflowMessages :: (MonadMVar m)
                      => DBOS m -> [SendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWorkflowMessages dbos messages = do
   withExecutor dbos "send messages" $ \executor -> do
-    written <- withConnection executor.conn (\db -> SystemDB.sendMessages db messages Nothing Nothing False)
+    written <- withConnection executor.conn (\db -> SystemDB.sendMessages db messages Nothing Nothing Nothing False)
     pure written
 
 -- | Ids of the most recent workflows with this name, newest first, capped.

@@ -41,7 +41,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
-import DBOS.SystemDB.Error (decodePortableError, encodePortableError)
+import DBOS.SystemDB.Error (Error (..), decodePortableError, encodePortableError)
 import DBOS.SystemDB
   ( Applications (..),
     AwaitedOutcome (..),
@@ -88,6 +88,7 @@ import DBOS.SystemDB
     WorkflowFilter (..),
     WorkflowId (..),
     WorkflowInitResult (..),
+    WorkflowOwner (..),
     WorkflowRecord (..),
     WorkflowStatus (..),
     WrittenBy (..),
@@ -130,7 +131,7 @@ import DBOS.SystemDB
     timestampNow,
     timestampToEpochMs,
     zeroRowCounts)
-import DBOS.SystemDB.Postgres.Statements (CallerStep (..))
+import DBOS.SystemDB.Postgres.Statements (CallerStep (..), refuseSelfTarget)
 import DBOS.Transact
   ( DBOS,
     Executor,
@@ -194,7 +195,7 @@ instance SystemDB MockSystemDB (IOSim s) where
     _ (WorkflowId wid) -> pure (Right (Just (mockWorkflow (WorkflowId wid))))
   listWorkflows = \cases _ filter _ -> pure (Right (map (mockWorkflow . WorkflowId) filter.workflowFilterWorkflowIds))
   getWorkflowChildren = \cases _ _ -> pure (Right [mockChildId])
-  recordWorkflowOutcome = \cases _ _ _ -> pure (Right Recorded)
+  recordWorkflowOutcome = \cases _ _ _ _ -> pure (Right Recorded)
   awaitWorkflowResult = \cases _ _ _ _ -> pure (Right (AwaitedSucceeded (Just mockOutput) (Just mockSerialization)))
   -- Placeholder, not a mirror: 'MockSystemDB' answers every call with a
   -- canned value (see the module doc), so an empty first-wait gets the
@@ -212,25 +213,25 @@ instance SystemDB MockSystemDB (IOSim s) where
   cancelIfTimedOut = \cases _ _ _ -> pure (Right False)
   cancelTimedOutWorkflows = \cases _ _ -> pure (Right [])
   deadLetterWorkflows = \cases _ ids _ -> pure (Right ids)
-  cancelWorkflows = \cases _ ids _ _ -> pure (Right (filter (/= WorkflowId "never-existed") ids))
+  cancelWorkflows = \cases _ ids _ _ _ -> pure (Right (filter (/= WorkflowId "never-existed") ids))
   resumeWorkflows = \cases
-    _ ids _ _ | WorkflowId "never-existed" `elem` ids -> pure (Left (NonExistentWorkflow {workflowIds = map (\(WorkflowId wid) -> wid) ids}))
-    _ ids _ _ -> pure (Right ids)
+    _ ids _ _ _ | WorkflowId "never-existed" `elem` ids -> pure (Left (NonExistentWorkflow {workflowIds = map (\(WorkflowId wid) -> wid) ids}))
+    _ ids _ _ _ -> pure (Right ids)
   deleteWorkflows = \cases _ ids _ _ -> pure (Right (fromIntegral (length ids)))
   forkWorkflows = \cases _ forks _ _ -> pure (Right (map (\fork -> WorkflowId fork.forkSourceId) forks))
   forkFrom = \cases _ ids _ _ _ -> pure (Right ids)
   rewindWorkflow = \cases _ _ _ _ _ -> pure (Right ())
-  sendMessage = \cases _ _ _ _ _ -> pure (Right ())
-  sendMessages = \cases _ _ _ _ _ -> pure (Right ())
-  recv = \cases _ _ _ _ _ _ -> pure (Right (Just (EncodedValue mockMessageBody (Just mockSerialization))))
-  writeStream = \cases _ _ _ _ _ _ _ -> pure (Right ())
-  closeStream = \cases _ _ _ _ _ -> pure (Right ())
+  sendMessage = \cases _ _ _ _ _ _ -> pure (Right ())
+  sendMessages = \cases _ _ _ _ _ _ -> pure (Right ())
+  recv = \cases _ _ _ _ _ _ _ -> pure (Right (Just (EncodedValue mockMessageBody (Just mockSerialization))))
+  writeStream = \cases _ _ _ _ _ _ _ _ -> pure (Right ())
+  closeStream = \cases _ _ _ _ _ _ -> pure (Right ())
   close = \cases _ -> pure ()
   checkStep = \cases _ _ _ _ -> pure (Right Nothing)
-  recordStep = \cases _ _ _ _ _ _ _ -> pure (Right ())
+  recordStep = \cases _ _ _ _ _ _ _ _ -> pure (Right ())
   listSteps = \cases _ wid _ _ _ _ -> pure (Right [mockStep wid 0 "mock-step"])
-  recordSleep = \cases _ _ _ _ -> pure (Right mockTimestamp)
-  setEvent = \cases _ _ _ _ _ _ -> pure (Right ())
+  recordSleep = \cases _ _ _ _ _ -> pure (Right mockTimestamp)
+  setEvent = \cases _ _ _ _ _ _ _ -> pure (Right ())
   getEvent = \cases _ _ _ _ _ -> pure (Right (Just (EncodedValue mockEventBody (Just mockSerialization))))
   getAllNotifications = \cases _ _ -> pure (Right [mockNotification])
   getAllEvents = \cases _ _ -> pure (Right [mockEvent])
@@ -261,8 +262,8 @@ instance SystemDB MockSystemDB (IOSim s) where
   updateScheduleLastFiredAt = \cases _ _ _ -> pure (Right ())
   deleteSchedule = \cases _ _ _ -> pure (Right ())
   renameApplication = \cases _ _ _ _ -> pure (Right zeroRowCounts)
-  recordChildWorkflow = \cases _ _ _ _ _ _ -> pure (Right ())
-  recordChildResult = \cases _ _ _ _ _ _ _ -> pure (Right ())
+  recordChildWorkflow = \cases _ _ _ _ _ _ _ -> pure (Right ())
+  recordChildResult = \cases _ _ _ _ _ _ _ _ -> pure (Right ())
 
 -- * The sim backend wrapped in a connection
 
@@ -634,23 +635,35 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     creator <- atomically (simOwnerText db)
     outcome <- atomically $ do
       rows <- readTVar db.memRows
-      case Map.lookup new.newWorkflowId rows of
-        Just row -> case initConflict row of
-          Just conflict -> pure (Left conflict)
-          Nothing -> pure (Right row)
-        Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
-          (Just queue, Just key) -> do
-            held <- readTVar db.memDedup
-            case Map.lookup (queue, key) held of
-              Just _ ->
-                pure (Left (QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queue, deduplicationId = key}))
-              Nothing -> do
-                writeTVar db.memDedup (Map.insert (queue, key) new.newWorkflowId held)
-                inserted <- insertFresh rows now creator
-                pure (Right inserted)
-          _ -> do
-            inserted <- insertFresh rows now creator
-            pure (Right inserted)
+      -- A stale parent starts nothing: the check opens the write, as the
+      -- SQL take-tx does, so the child row and the parent record never
+      -- commit behind a hand-off.
+      let owned = case caller of
+            Nothing -> Right ()
+            Just call ->
+              let WorkflowId parentText = call.initCallerParentWorkflowId
+               in case Map.lookup parentText rows of
+                    Just row | row.workflowRecordOwnerXid == Just call.initCallerToken -> Right ()
+                    _ -> Left (WorkflowConflict {workflowId = parentText})
+      case owned of
+        Left conflict -> pure (Left conflict)
+        Right () -> case Map.lookup new.newWorkflowId rows of
+          Just row -> case initConflict row of
+            Just conflict -> pure (Left conflict)
+            Nothing -> pure (Right row)
+          Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
+            (Just queue, Just key) -> do
+              held <- readTVar db.memDedup
+              case Map.lookup (queue, key) held of
+                Just _ ->
+                  pure (Left (QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queue, deduplicationId = key}))
+                Nothing -> do
+                  writeTVar db.memDedup (Map.insert (queue, key) new.newWorkflowId held)
+                  inserted <- insertFresh rows now creator
+                  pure (Right inserted)
+            _ -> do
+              inserted <- insertFresh rows now creator
+              pure (Right inserted)
     clock <- databaseTimeRead (timestampToEpochMs now)
     -- Should-execute compares the row's creator to this call's token, as
     -- the SQL finish does: a fresh insert's stored creator always matches,
@@ -734,17 +747,20 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   getWorkflowChildren db (WorkflowId wid) = do
     rows <- readTVarIO db.memRows
     pure (Right [row.workflowRecordId | row <- Map.elems rows, row.workflowRecordParentWorkflowId == Just (WorkflowId wid)])
-  recordWorkflowOutcome db (WorkflowId wid) outcome = atomically $ do
+  recordWorkflowOutcome db (WorkflowId wid) outcome token = atomically $ do
     rows <- readTVar db.memRows
     case Map.lookup wid rows of
-      Nothing -> pure (Right Recorded)
-      Just row -> do
+      -- Only a PENDING row still owned by this call records: anything else
+      -- is AlreadyFinished, and the caller adopts what the row holds, as
+      -- the SQL outcome's status-and-owner gate decides.
+      Just row | row.workflowRecordStatus == Pending && row.workflowRecordOwnerXid == Just token -> do
         -- Finishing releases the deduplication key, as the SQL outcome's
         -- @deduplication_id = null@ does: a key left on a finished row
         -- would be held forever, and the unique index spans every status.
         -- The hold drops only while it still names this workflow, so a
-        -- reassigned key is never clobbered.
-        let row' = (memApplyOutcome outcome row) {workflowRecordDeduplicationId = Nothing}
+        -- reassigned key is never clobbered. Finishing also clears the
+        -- owner, as the SQL outcome does: the row belongs to nobody.
+        let row' = (memApplyOutcome outcome row) {workflowRecordDeduplicationId = Nothing, workflowRecordOwnerXid = Nothing}
         writeTVar db.memRows (Map.insert wid row' rows)
         case (row.workflowRecordQueueName, row.workflowRecordDeduplicationId) of
           (Just queue, Just key) -> do
@@ -754,6 +770,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               _ -> pure ()
           _ -> pure ()
         pure (Right Recorded)
+      _ -> pure (Right AlreadyFinished)
     where
       memApplyOutcome (OutcomeOutput output) row =
         row {workflowRecordStatus = Success, workflowRecordOutput = output}
@@ -783,7 +800,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       rows <- readTVar db.memRows
       case Map.lookup wid rows of
         Just row
-          | memTimedOut now row && row.workflowRecordOwnerXid == owner -> do
+          | memTimedOut now row && row.workflowRecordOwnerXid == Just owner -> do
               writeTVar db.memRows (Map.insert wid (memTimedOutRow now row) rows)
               pure (Right True)
         _ -> pure (Right False)
@@ -823,7 +840,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           parked = [WorkflowId widText | widText <- requested, Just row <- [Map.lookup widText rows], row.workflowRecordStatus == Pending, row.workflowRecordRecoveryAttempts >= minRecoveryAttempts]
       writeTVar db.memRows rows'
       pure (Right parked)
-  cancelWorkflows db ids withChildren _ = atomically $ do
+  cancelWorkflows db ids withChildren _ fromWorkflow = atomically $ do
     rows <- readTVar db.memRows
     -- Transitive descendants, like the backend's per-id traverse through
     -- 'descendantsSession': one level would leave a grandchild tree
@@ -833,6 +850,15 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           | withChildren = nub (requested <> concatMap (memChildTree rows) requested)
           | otherwise = requested
         (moved, rows') = Map.mapAccumWithKey move [] rows
+        -- A workflow cannot cancel itself, nor the tree it is inside:
+        -- refused before anything moves, as the SQL cancel refuses.
+        refused = (fromWorkflow >>= (\callerId -> refuseSelfTarget callerId requested "cancel"))
+          <|> case (fromWorkflow, withChildren) of
+            (Just callerId, True)
+              | callerId `elem` targets, callerId `notElem` requested ->
+                  Just (InvalidInput {field = "workflow_ids", detail = "workflow " <> callerId <> " cannot cancel the tree of " <> memRootContaining rows requested callerId <> ", which contains it"})
+              | otherwise -> Nothing
+            _ -> Nothing
         move acc wid row
           -- Mirrors the SQL guard: anything but a finished row moves.
           | wid `elem` targets && row.workflowRecordStatus `notElem` [Success, Error, Cancelled] =
@@ -847,11 +873,21 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                   }
               )
           | otherwise = (acc, row)
-    writeTVar db.memRows rows'
-    pure (Right moved)
-  resumeWorkflows db ids queue _
+    case refused of
+      Just err -> pure (Left err)
+      Nothing -> do
+        writeTVar db.memRows rows'
+        pure (Right moved)
+  resumeWorkflows db ids queue _ fromWorkflow
     | null ids = pure (Right [])
+    -- A workflow cannot resume itself: refused before anything runs,
+    -- as the SQL resume refuses.
+    | Just err <- fromWorkflow >>= (\callerId -> refuseSelfTarget callerId [wid | WorkflowId wid <- ids] "resume") =
+        pure (Left err)
     | otherwise = do
+        rows <- readTVarIO db.memRows
+        let missing = [wid | WorkflowId wid <- ids, Map.notMember wid rows]
+        rows <- readTVarIO db.memRows
         rows <- readTVarIO db.memRows
         let missing = [wid | WorkflowId wid <- ids, Map.notMember wid rows]
         case missing of
@@ -876,12 +912,23 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                   | otherwise = (acc, row)
             writeTVar db.memRows rows'
             pure (Right moved)
-  deleteWorkflows db ids _ _ = atomically $ do
+  deleteWorkflows db ids _ owner = atomically $ do
     rows <- readTVar db.memRows
-    let gone = length (filter (`Map.member` rows) [wid | WorkflowId wid <- ids])
-    writeTVar db.memRows (foldr Map.delete rows [wid | WorkflowId wid <- ids])
-    modifyTVar db.memSteps (Map.filterWithKey (\(wid, _) _ -> wid `notElem` [w | WorkflowId w <- ids]))
-    pure (Right (fromIntegral gone))
+    -- A step running the delete opens with its ownership check: a stale
+    -- execution removes nothing. Client and engine deletes skip it. The row
+    -- checked is named by the same value the fence reads its token from.
+    case owner of
+      Just o ->
+        case Map.lookup (widTextOf o.ownerWorkflowId) rows of
+          Just row | row.workflowRecordOwnerXid == Just o.ownerToken -> remove rows
+          _ -> pure (Left (WorkflowConflict {workflowId = widTextOf o.ownerWorkflowId}))
+      Nothing -> remove rows
+    where
+      remove rows = do
+        let gone = length (filter (`Map.member` rows) [wid | WorkflowId wid <- ids])
+        writeTVar db.memRows (foldr Map.delete rows [wid | WorkflowId wid <- ids])
+        modifyTVar db.memSteps (Map.filterWithKey (\(wid, _) _ -> wid `notElem` [w | WorkflowId w <- ids]))
+        pure (Right (fromIntegral gone))
   forkWorkflows db forks options _
     | null forks = pure (Right [])
     | otherwise = case (forkOptionsValidate options, traverse forkValidate forks) of
@@ -917,23 +964,36 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     Left err -> pure (Left err)
     Right () -> memRewind db wid cut sysOpts caller
   checkStep db (WorkflowId wid) stepId _name = Right . Map.lookup (wid, stepId) <$> readTVarIO db.memSteps
-  recordStep db (WorkflowId wid) stepId name outcome serialization timing = atomically $ do
-    steps <- readTVar db.memSteps
-    let prior = Map.lookup (wid, stepId) steps
-        entry =
-          StepRecord
-            { stepRecordWorkflowId = WorkflowId wid,
-              stepRecordStepId = stepId,
-              stepRecordStepName = name,
-              stepRecordOutput = case outcome of OutcomeOutput output -> output; _ -> memPriorOutput prior,
-              stepRecordError = case outcome of OutcomeError message -> Just message; _ -> Nothing,
-              stepRecordChildWorkflowId = prior >>= (.stepRecordChildWorkflowId),
-              stepRecordSerialization = serialization,
-              stepRecordStartedAt = timing >>= (Just . (.stepTimingStartedAt)),
-              stepRecordCompletedAt = timing >>= (Just . (.stepTimingCompletedAt))
-            }
-    writeTVar db.memSteps (Map.insert (wid, stepId) entry steps)
-    pure (Right ())
+  recordStep db (WorkflowId wid) stepId name outcome serialization timing token = atomically $ do
+    rows <- readTVar db.memRows
+    case Map.lookup wid rows of
+      -- The row's current owner is the only writer: anything else is a
+      -- superseded execution reporting the conflict, as the SQL
+      -- @check_owner_on@ refuses it.
+      Just row | row.workflowRecordOwnerXid == Just token -> do
+        steps <- readTVar db.memSteps
+        let prior = Map.lookup (wid, stepId) steps
+            entry =
+              StepRecord
+                { stepRecordWorkflowId = WorkflowId wid,
+                  stepRecordStepId = stepId,
+                  stepRecordStepName = name,
+                  stepRecordOutput = case outcome of OutcomeOutput output -> output; _ -> memPriorOutput prior,
+                  stepRecordError = case outcome of OutcomeError message -> Just message; _ -> Nothing,
+                  stepRecordChildWorkflowId = prior >>= (.stepRecordChildWorkflowId),
+                  stepRecordSerialization = serialization,
+                  stepRecordStartedAt = timing >>= (Just . (.stepTimingStartedAt)),
+                  stepRecordCompletedAt = timing >>= (Just . (.stepTimingCompletedAt))
+                }
+        -- A rival record behind a token this call holds is nondeterminism,
+        -- told apart from this caller's own retry by the completion time.
+        case prior of
+          Just kept | kept.stepRecordCompletedAt /= entry.stepRecordCompletedAt ->
+            pure (Left (StepNondeterminism {workflowId = wid, stepId = stepId}))
+          _ -> do
+            writeTVar db.memSteps (Map.insert (wid, stepId) entry steps)
+            pure (Right ())
+      _ -> pure (Left (WorkflowConflict {workflowId = wid}))
     where
       memPriorOutput (Just record) = record.stepRecordOutput
       memPriorOutput Nothing = Nothing
@@ -947,25 +1007,38 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           | loadOutput = record
           | otherwise = record {stepRecordOutput = Nothing, stepRecordError = Nothing}
     pure (Right (map strip page))
-  recordChildWorkflow db parent child stepId name _time = atomically $ do
-    steps <- readTVar db.memSteps
-    let WorkflowId parentText = parent
-        entry = case Map.lookup (parentText, stepId) steps of
-          Just record -> record {stepRecordChildWorkflowId = Just child}
-          Nothing ->
-            StepRecord
-              { stepRecordWorkflowId = parent,
-                stepRecordStepId = stepId,
-                stepRecordStepName = name,
-                stepRecordOutput = Nothing,
-                stepRecordError = Nothing,
-                stepRecordChildWorkflowId = Just child,
-                stepRecordSerialization = Nothing,
-                stepRecordStartedAt = Nothing,
-                stepRecordCompletedAt = Nothing
-              }
-    writeTVar db.memSteps (Map.insert (parentText, stepId) entry steps)
-    pure (Right ())
+  recordChildWorkflow db parent child stepId name _time token = atomically $ do
+    rows <- readTVar db.memRows
+    case Map.lookup parentText rows of
+      -- Only the row's current owner records the start: anything else is a
+      -- superseded execution reporting the conflict.
+      Just row | row.workflowRecordOwnerXid == Just token -> do
+        steps <- readTVar db.memSteps
+        let entry = case Map.lookup (parentText, stepId) steps of
+              Just record -> record {stepRecordChildWorkflowId = Just child}
+              Nothing ->
+                StepRecord
+                  { stepRecordWorkflowId = parent,
+                    stepRecordStepId = stepId,
+                    stepRecordStepName = name,
+                    stepRecordOutput = Nothing,
+                    stepRecordError = Nothing,
+                    stepRecordChildWorkflowId = Just child,
+                    stepRecordSerialization = Nothing,
+                    stepRecordStartedAt = Nothing,
+                    stepRecordCompletedAt = Nothing
+                  }
+        -- The same child is an idempotent retry; a different one (or none,
+        -- where the row already held a non-child step) is nondeterminism.
+        case Map.lookup (parentText, stepId) steps of
+          Just kept | kept.stepRecordChildWorkflowId /= Just child ->
+            pure (Left (StepNondeterminism {workflowId = parentText, stepId = stepId}))
+          _ -> do
+            writeTVar db.memSteps (Map.insert (parentText, stepId) entry steps)
+            pure (Right ())
+      _ -> pure (Left (WorkflowConflict {workflowId = parentText}))
+    where
+      WorkflowId parentText = parent
   getDeduplicationKeyHolder db queue key = do
     held <- readTVarIO db.memDedup
     pure (Right (WorkflowId <$> Map.lookup (queue, key) held))
@@ -1008,67 +1081,82 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       writeTVar db.memRows rows'
       pure (Right (fromIntegral moved))
   clearQueueAssignment _ = clearQueueAssignment MockSystemDB
-  sendMessage db message serialization caller sendToForks = memSend db sendStepName [message] serialization caller sendToForks
-  sendMessages db messages serialization caller sendToForks = memSend db sendBulkStepName messages serialization caller sendToForks
+  sendMessage db message serialization caller owner sendToForks = memSend db sendStepName [message] serialization caller owner sendToForks
+  sendMessages db messages serialization caller owner sendToForks = memSend db sendBulkStepName messages serialization caller owner sendToForks
   -- A parked reader blocks on the messages TVar, so a send genuinely
   -- wakes it; the engine's own duration bounds the wait. The deadline sleep
   -- step is recorded before the wait, unconditionally like the live
   -- checkpoint, so a replay that waited has the same remainder left; the
   -- recv step with no output records the absence a timeout produced, so a
   -- replay adopts it.
-  recv db wid stepId timeoutStepId topic duration = do
+  recv db wid stepId timeoutStepId topic duration token = do
     let WorkflowId widText = wid
         storedTopic = fromMaybe nullTopicSentinel topic
     replayed <- atomically (Map.lookup (widText, stepId) <$> readTVar db.memSteps)
     case replayed of
       Just record -> pure (Right (memEncodedFromStep record))
       Nothing -> do
-        slept <- recordSleep db wid timeoutStepId duration
+        slept <- recordSleep db wid timeoutStepId duration token
         case slept of
           Left err -> pure (Left err)
           Right _ -> do
-            waited <- memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memTakeMessage db widText storedTopic))
-            case waited of
-              Just (uuid, value) -> do
-                memRecordRecvStep db wid stepId recvStepName (Just value)
-                atomically $ do
-                  notifications <- readTVar db.memNotifications
-                  writeTVar db.memNotifications (Map.adjust (map (markConsumed uuid)) widText notifications)
-                  consumed <- readTVar db.memConsumedBy
-                  writeTVar db.memConsumedBy (Map.insert (widText, uuid) stepId consumed)
-                pure (Right (Just value))
-              Nothing -> do
-                memRecordRecvStep db wid stepId recvStepName Nothing
-                pure (Right Nothing)
-  writeStream db wid@(WorkflowId widText) stepId key value serialization writtenBy = do
+            -- The take opens with the ownership check, as the SQL take-tx
+            -- does: a stale execution's consume is refused before anything
+            -- is taken, so the message stays parked for the owner.
+            rights <- atomically $ do
+              rows <- readTVar db.memRows
+              pure $ case Map.lookup widText rows of
+                Just row | row.workflowRecordOwnerXid == Just token -> Right ()
+                _ -> Left (WorkflowConflict {workflowId = widText})
+            case rights of
+              Left conflict -> pure (Left conflict)
+              Right () -> do
+                waited <- memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memTakeMessage db widText storedTopic))
+                case waited of
+                  Just (uuid, value) -> do
+                    memRecordRecvStep db wid stepId recvStepName (Just value)
+                    atomically $ do
+                      notifications <- readTVar db.memNotifications
+                      writeTVar db.memNotifications (Map.adjust (map (markConsumed uuid)) widText notifications)
+                      consumed <- readTVar db.memConsumedBy
+                      writeTVar db.memConsumedBy (Map.insert (widText, uuid) stepId consumed)
+                    pure (Right (Just value))
+                  Nothing -> do
+                    memRecordRecvStep db wid stepId recvStepName Nothing
+                    pure (Right Nothing)
+  writeStream db wid@(WorkflowId widText) stepId key value serialization writtenBy token = do
     let stepName = if isStreamClosed value serialization then closeStreamStepName else writeStreamStepName
-    replay <- case writtenBy of
-      Step -> pure (Right Nothing)
-      Workflow -> checkStep db wid stepId stepName
-    case replay of
-      Left err -> pure (Left err)
-      Right (Just _) -> pure (Right ())
-      Right Nothing -> do
-        now <- memDbNow db
-        atomically $ do
-          rows <- readTVar db.memRows
-          case Map.lookup widText rows of
-            Nothing -> pure (Left (NonExistentWorkflow {workflowIds = [widText]}))
-            Just _ -> do
+    now <- memDbNow db
+    -- The write opens with the ownership check, before the replay adopt, as
+    -- the oracle orders it: a stale execution is refused rather than handed
+    -- the recorded answer. The check shares the append's transaction, so no
+    -- hand-off can land between them. A missing row is refused the same way,
+    -- as the SQL check refuses what no select finds.
+    atomically $ do
+      rows <- readTVar db.memRows
+      case Map.lookup widText rows of
+        Just row | row.workflowRecordOwnerXid == Just token -> do
+          -- A replay must not append a second entry. Only a workflow-level
+          -- write records a step to find; a step-level write is replayed by
+          -- its step being replayed.
+          steps <- readTVar db.memSteps
+          case writtenBy of
+            Workflow | Map.member (widText, stepId) steps -> pure (Right ())
+            _ -> do
               streams <- readTVar db.memStreams
               let streamKey' = (widText, key)
                   entries = fromMaybe [] (Map.lookup streamKey' streams)
                   entry = StreamRecord {streamKey = key, streamOffset = length entries, streamValue = value, streamSerialization = serialization, streamStepId = stepId}
               writeTVar db.memStreams (Map.insert streamKey' (entries <> [entry]) streams)
               when (writtenBy == Workflow) $ do
-                steps <- readTVar db.memSteps
                 let record = StepRecord {stepRecordWorkflowId = wid, stepRecordStepId = stepId, stepRecordStepName = stepName, stepRecordOutput = Nothing, stepRecordError = Nothing, stepRecordChildWorkflowId = Nothing, stepRecordSerialization = Nothing, stepRecordStartedAt = Just now, stepRecordCompletedAt = Just now}
                 writeTVar db.memSteps (Map.insert (widText, stepId) record steps)
               pure (Right ())
-  closeStream db wid stepId key writtenBy =
-    writeStream db wid stepId key streamClosedSentinel (Just portableJsonSerialization) writtenBy
+        _ -> pure (Left (WorkflowConflict {workflowId = widText}))
+  closeStream db wid stepId key writtenBy token =
+    writeStream db wid stepId key streamClosedSentinel (Just portableJsonSerialization) writtenBy token
   close _ = close MockSystemDB
-  recordSleep db wid stepId duration = do
+  recordSleep db wid stepId duration token = do
     now <- memDbNow db
     case addTimeout now duration of
       Nothing -> pure (Left (invalidInput "duration" "does not resolve to a representable wake time"))
@@ -1089,25 +1177,46 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
                 Nothing
                 (Just (StepTiming now wakeAt))
+                token
             case recorded of
+              -- A rival recorded this sleep between the check and the write:
+              -- adopt its wake time, as the live checkpoint does, rather than
+              -- disagree with a record the workflow will replay.
+              Left (StepNondeterminism {}) -> do
+                adopted <- checkStep db wid stepId sleepStepName
+                case adopted of
+                  Right (Just step) -> case step.stepRecordOutput >>= readMaybe . Text.unpack of
+                    Just millis -> pure (Right (timestampFromEpochMs millis))
+                    Nothing -> pure (Left (Malformed "sleep reported as recorded but cannot be read back"))
+                  Left err -> pure (Left err)
+                  Right Nothing -> pure (Left (Malformed "sleep reported as recorded but cannot be read back"))
               Left err -> pure (Left err)
               Right () -> pure (Right wakeAt)
-  setEvent db wid stepId key value serialization = do
-    -- A replay adopts the recorded publish instead of republishing it,
-    -- mirroring PG's conflict adoption.
-    existing <- checkStep db wid stepId setEventStepName
-    case existing of
-      Left err -> pure (Left err)
-      Right (Just _) -> pure (Right ())
-      Right Nothing -> do
-        now <- memDbNow db
-        atomically $ do
-          events <- readTVar db.memEvents
-          writeTVar db.memEvents (Map.insert (widTextOf wid, key) (EncodedValue value serialization) events)
-          history <- readTVar db.memEventHistory
-          writeTVar db.memEventHistory (Map.insert (widTextOf wid, key, stepId) (EncodedValue value serialization) history)
-          memInsertStep db wid stepId setEventStepName (Just value) serialization now
-          pure (Right ())
+              Left err -> pure (Left err)
+              Right () -> pure (Right wakeAt)
+  setEvent db wid stepId key value serialization token = do
+    now <- memDbNow db
+    -- The publish opens with the ownership check, before the replay adopt,
+    -- as the oracle orders it: a stale execution is refused rather than
+    -- handed the recorded answer. The check shares the publish's
+    -- transaction, so no hand-off can land between them.
+    atomically $ do
+      rows <- readTVar db.memRows
+      case Map.lookup (widTextOf wid) rows of
+        Just row | row.workflowRecordOwnerXid == Just token -> do
+          -- A replay adopts the recorded publish instead of republishing it,
+          -- mirroring PG's conflict adoption.
+          steps <- readTVar db.memSteps
+          case Map.member (widTextOf wid, stepId) steps of
+            True -> pure (Right ())
+            False -> do
+              events <- readTVar db.memEvents
+              writeTVar db.memEvents (Map.insert (widTextOf wid, key) (EncodedValue value serialization) events)
+              history <- readTVar db.memEventHistory
+              writeTVar db.memEventHistory (Map.insert (widTextOf wid, key, stepId) (EncodedValue value serialization) history)
+              memInsertStep db wid stepId setEventStepName (Just value) serialization now
+              pure (Right ())
+        _ -> pure (Left (WorkflowConflict {workflowId = widTextOf wid}))
   -- A recorded getEvent step is the answer (value or recorded absence);
   -- otherwise the reader blocks on the events TVar until the value lands
   -- or its duration passes.
@@ -1142,6 +1251,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                         (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
                         Nothing
                         (Just (StepTiming now now))
+                        c.getEventCallerToken
                     case recorded of
                       Left err -> pure (Left err)
                       Right () -> pure (Right wakeAt)
@@ -1157,9 +1267,19 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 case caller of
                   Nothing -> pure (Right waited)
                   Just c -> do
-                    completedAt <- memDbNow db
-                    atomically (memInsertStep db c.getEventCallerWorkflowId c.getEventCallerStepId getEventStepName ((.encodedValue) <$> waited) (waited >>= (.encodedSerialization)) completedAt)
-                    pure (Right waited)
+                    -- The record opens with the caller's ownership check: a
+                    -- stale reader's take and record roll back together.
+                    rights <- atomically $ do
+                      rows <- readTVar db.memRows
+                      pure $ case Map.lookup (widTextOf c.getEventCallerWorkflowId) rows of
+                        Just row | row.workflowRecordOwnerXid == Just c.getEventCallerToken -> Right ()
+                        _ -> Left (WorkflowConflict {workflowId = widTextOf c.getEventCallerWorkflowId})
+                    case rights of
+                      Left conflict -> pure (Left conflict)
+                      Right () -> do
+                        completedAt <- memDbNow db
+                        atomically (memInsertStep db c.getEventCallerWorkflowId c.getEventCallerStepId getEventStepName ((.encodedValue) <$> waited) (waited >>= (.encodedSerialization)) completedAt)
+                        pure (Right waited)
   getAllNotifications db (WorkflowId widText) = do
     notifications <- readTVarIO db.memNotifications
     pure (Right (fromMaybe [] (Map.lookup widText notifications)))
@@ -1449,24 +1569,34 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   renameApplication _ = renameApplication MockSystemDB
   -- The child's result lands under the await's own step id, named for the
   -- cross-SDK contract as the live backend names it.
-  recordChildResult db parent stepId child outcome serialization timing = atomically $ do
-    steps <- readTVar db.memSteps
-    let WorkflowId parentText = parent
-        prior = Map.lookup (parentText, stepId) steps
-        entry =
-          StepRecord
-            { stepRecordWorkflowId = parent,
-              stepRecordStepId = stepId,
-              stepRecordStepName = getResultStepName,
-              stepRecordOutput = case outcome of OutcomeOutput output -> output; _ -> prior >>= (.stepRecordOutput),
-              stepRecordError = case outcome of OutcomeError message -> Just message; _ -> Nothing,
-              stepRecordChildWorkflowId = Just child,
-              stepRecordSerialization = serialization,
-              stepRecordStartedAt = timing >>= (Just . (.stepTimingStartedAt)),
-              stepRecordCompletedAt = timing >>= (Just . (.stepTimingCompletedAt))
-            }
-    writeTVar db.memSteps (Map.insert (parentText, stepId) entry steps)
-    pure (Right ())
+  recordChildResult db parent stepId child outcome serialization timing token = atomically $ do
+    rows <- readTVar db.memRows
+    case Map.lookup parentText rows of
+      -- Only the row's current owner records the result, as for a step.
+      Just row | row.workflowRecordOwnerXid == Just token -> do
+        steps <- readTVar db.memSteps
+        let prior = Map.lookup (parentText, stepId) steps
+            entry =
+              StepRecord
+                { stepRecordWorkflowId = parent,
+                  stepRecordStepId = stepId,
+                  stepRecordStepName = getResultStepName,
+                  stepRecordOutput = case outcome of OutcomeOutput output -> output; _ -> prior >>= (.stepRecordOutput),
+                  stepRecordError = case outcome of OutcomeError message -> Just message; _ -> Nothing,
+                  stepRecordChildWorkflowId = Just child,
+                  stepRecordSerialization = serialization,
+                  stepRecordStartedAt = timing >>= (Just . (.stepTimingStartedAt)),
+                  stepRecordCompletedAt = timing >>= (Just . (.stepTimingCompletedAt))
+                }
+        case prior of
+          Just kept | kept.stepRecordCompletedAt /= entry.stepRecordCompletedAt ->
+            pure (Left (StepNondeterminism {workflowId = parentText, stepId = stepId}))
+          _ -> do
+            writeTVar db.memSteps (Map.insert (parentText, stepId) entry steps)
+            pure (Right ())
+      _ -> pure (Left (WorkflowConflict {workflowId = parentText}))
+    where
+      WorkflowId parentText = parent
 
 -- | Forks onto fresh rows, copying the source's history below the fork
 -- point: the fork replays what came before and runs what follows. A fork
@@ -1579,6 +1709,22 @@ memChildTree rows root = go [] [root]
                 wid `notElem` seen
             ]
        in go (seen <> children) (rest <> children)
+
+-- | The nearest named ancestor of a workflow: what the tree a cancel
+-- cascade reached it through is called. Falls back to naming every target,
+-- as the oracle joins them, when the ancestry gives out. Mirrors the SQL
+-- cancel's @rootContaining@ walk over the rows already in hand.
+memRootContaining :: Map Text WorkflowRecord -> [Text] -> Text -> Text
+memRootContaining rows roots start = go [start] start
+  where
+    go seen current = case Map.lookup current rows of
+      Just row -> case row.workflowRecordParentWorkflowId of
+        Just (WorkflowId parent)
+          | parent `elem` roots -> parent
+          | parent `notElem` seen -> go (current : seen) parent
+          | otherwise -> Text.intercalate ", " roots
+        _ -> Text.intercalate ", " roots
+      _ -> Text.intercalate ", " roots
 
 widTextOf :: WorkflowId -> Text
 widTextOf (WorkflowId widText) = widText
@@ -1821,8 +1967,8 @@ simCallerEncoding (Just name) = Left (UnknownSerialization {name})
 -- notification per delivery so 'getAllNotifications' sees them, and record
 -- the caller's step. A send writes the messages TVar, which is what wakes
 -- a parked 'recv'.
-memSend :: MemSystemDB s -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Bool -> IOSim s (Either Error ())
-memSend db stepName messages serialization caller sendToForks = do
+memSend :: MemSystemDB s -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> IOSim s (Either Error ())
+memSend db stepName messages serialization caller owner sendToForks = do
   now <- memDbNow db
   -- The duplicate-key refusal applies to the caller's list, before fan-out,
   -- exactly as live checks: one key fanning out is legal.
@@ -1834,12 +1980,17 @@ memSend db stepName messages serialization caller sendToForks = do
       seen <- readTVar db.memMessageIds
       notifications <- readTVar db.memNotifications
       steps <- readTVar db.memSteps
-      -- A replay must not send again, and a position whose recorded name is
-      -- not this send's is refused: the same verdict the live transaction
-      -- reaches through 'checkCallerStep'.
-      case verifyCallerStep stepName caller rows steps of
-        CallerRefused err -> pure (Left err)
-        CallerReplayed _ -> pure (Right ())
+      -- An execution's send opens with its ownership check, before the
+      -- caller-step verdicts: a stale execution delivers nothing.
+      let owned = case owner of
+            Nothing -> Right ()
+            Just o -> case Map.lookup (widTextOf o.ownerWorkflowId) rows of
+              Just row | row.workflowRecordOwnerXid == Just o.ownerToken -> Right ()
+              _ -> Left (WorkflowConflict {workflowId = widTextOf o.ownerWorkflowId})
+      case (owned, verifyCallerStep stepName caller rows steps) of
+        (Left conflict, _) -> pure (Left conflict)
+        (_, CallerRefused err) -> pure (Left err)
+        (_, CallerReplayed _) -> pure (Right ())
         _ -> do
           let topicOf m = maybe nullTopicSentinel (\(Topic topic) -> topic) m.sendTopic
               bodyOf m = EncodedValue m.sendMessageBody.serializedText serialization

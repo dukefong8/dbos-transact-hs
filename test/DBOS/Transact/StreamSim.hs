@@ -92,9 +92,9 @@ tests =
       simCase simEventFixture "a stream read error stays an error through the vector adapter" scenarioStreamReaderError checkStreamReaderError traceSilent,
       simCase simEventFixture "a decode failure advances to the next stream value" scenarioStreamDecodeFailure checkStreamDecodeFailure traceSilent,
       testCase "writeStream succeeds against the mock SystemDB" $
-        run (writeStream backend (WorkflowId "wf-1") 0 "key" "\"v\"" Nothing Workflow) @?= Right (),
+        run (writeStream backend (WorkflowId "wf-1") 0 "key" "\"v\"" Nothing Workflow "mock-token") @?= Right (),
       testCase "closeStream succeeds against the mock SystemDB" $
-        run (closeStream backend (WorkflowId "wf-1") 0 "key" Workflow) @?= Right (),
+        run (closeStream backend (WorkflowId "wf-1") 0 "key" Workflow "mock-token") @?= Right (),
       testCase "readStreamValues returns values and producer status" $
         run (readStreamValues backend (WorkflowId "wf-1") "key" 0 1) @?= Right (StreamRead Pending [EncodedValue "mock-stream" (Just "portable_json")]),
       testCase "getAllStreamEntries returns mock entries" $ do

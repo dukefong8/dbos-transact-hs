@@ -15,6 +15,7 @@ module DBOS.Transact.ContextTest
   ( tests,
     ctxOver,
     connOver,
+    testIdentity,
     Fixture (..),
     appLogEvents,
     appLogLines,
@@ -103,6 +104,8 @@ import DBOS.Transact.Context
     firstStepStatus,
     newWorkflowCtx,
     newWorkflowState,
+    testOwner,
+    newWorkflowState,
     nextAttempt,
     nextStepId,
     nextWorkflowMarker,
@@ -181,7 +184,7 @@ ctxOver :: PostgresSystemDB -> SomeTracer IO -> Text -> IO (WorkflowCtx exec IO)
 ctxOver backend tracer workflowText = do
   conn <- connOver backend tracer
   identity <- nextExecutionIdentity conn
-  state <- newWorkflowState workflowText Nothing identity
+  state <- newWorkflowState workflowText Nothing (testOwner (WorkflowId workflowText)) identity
   newWorkflowCtx conn testIdentity state
 
 -- | The shared tree over a real backend and a FastLogger tracer.
@@ -292,7 +295,7 @@ scenarioSharedCounter :: MonadSTM m => Fixture m -> m (Int, Int)
 scenarioSharedCounter fx = do
   conn <- fx.fixtureMkConn
   identity <- nextExecutionIdentity conn
-  state <- newWorkflowState "wf-1" Nothing identity
+  state <- newWorkflowState "wf-1" Nothing (testOwner (WorkflowId "wf-1")) identity
   first <- newWorkflowCtx conn fx.fixtureIdentity state
   second <- newWorkflowCtx conn fx.fixtureIdentity state
   (,) <$> nextStepId first <*> nextStepId second
@@ -302,8 +305,8 @@ scenarioRerunIdentity fx = do
   conn <- fx.fixtureMkConn
   firstId <- nextExecutionIdentity conn
   secondId <- nextExecutionIdentity conn
-  firstState <- newWorkflowState "wf-1" Nothing firstId
-  secondState <- newWorkflowState "wf-1" Nothing secondId
+  firstState <- newWorkflowState "wf-1" Nothing (testOwner (WorkflowId "wf-1")) firstId
+  secondState <- newWorkflowState "wf-1" Nothing (testOwner (WorkflowId "wf-1")) secondId
   first <- newWorkflowCtx conn fx.fixtureIdentity firstState
   second <- newWorkflowCtx conn fx.fixtureIdentity secondState
   pure (isSameExecution first first, isSameExecution first second)
@@ -318,8 +321,8 @@ scenarioNestedRunners fx = do
   conn <- fx.fixtureMkConn
   outerId <- nextExecutionIdentity conn
   innerId <- nextExecutionIdentity conn
-  outerState <- newWorkflowState "wf-1" Nothing outerId
-  innerState <- newWorkflowState "wf-1" Nothing innerId
+  outerState <- newWorkflowState "wf-1" Nothing (testOwner (WorkflowId "wf-1")) outerId
+  innerState <- newWorkflowState "wf-1" Nothing (testOwner (WorkflowId "wf-1")) innerId
   outer <- newWorkflowCtx conn fx.fixtureIdentity outerState
   inner <- newWorkflowCtx conn fx.fixtureIdentity innerState
   pure (workflowId outer, workflowId inner, isSameExecution outer inner)
@@ -380,7 +383,7 @@ scenarioConcurrentIsolation fx = do
   let child name box = do
         conn <- fx.fixtureMkConn
         identity <- nextExecutionIdentity conn
-        state <- newWorkflowState name Nothing identity
+        state <- newWorkflowState name Nothing (testOwner (WorkflowId name)) identity
         ctx <- newWorkflowCtx conn fx.fixtureIdentity state
         putMVar box (workflowId ctx)
   a <- async (child "a" first)
@@ -393,11 +396,11 @@ scenarioExecCounters :: MonadSTM m => Fixture m -> m ((Int, Int), Int)
 scenarioExecCounters fx = do
   conn <- fx.fixtureMkConn
   let ident = fx.fixtureIdentity
-  first <- withWorkflow conn ident (WorkflowId "wf-1") Nothing $ \wctx -> do
+  first <- withWorkflow conn ident (WorkflowId "wf-1") Nothing (testOwner (WorkflowId "wf-1")) $ \wctx -> do
     a <- nextStepId wctx
     b <- nextStepId wctx
     pure (a, b)
-  second <- withWorkflow conn ident (WorkflowId "wf-1") Nothing $ \wctx ->
+  second <- withWorkflow conn ident (WorkflowId "wf-1") Nothing (testOwner (WorkflowId "wf-1")) $ \wctx ->
     nextStepId wctx
   pure (first, second)
 
@@ -421,7 +424,7 @@ scenarioStepView :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Text, Maybe St
 scenarioStepView fx = do
   conn <- fx.fixtureMkConn
   let ident = fx.fixtureIdentity
-  withWorkflow conn ident (WorkflowId "wf-9") Nothing $ \wctx -> do
+  withWorkflow conn ident (WorkflowId "wf-9") Nothing (testOwner (WorkflowId "wf-9")) $ \wctx -> do
     marker <- nextWorkflowMarker wctx
     withStep wctx marker (firstStepStatus 7) $ \sctx ->
       pure (workflowId sctx.stepCtxWorkflow, stepCtxStatus sctx)
