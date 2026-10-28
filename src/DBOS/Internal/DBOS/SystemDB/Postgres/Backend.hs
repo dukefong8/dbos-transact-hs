@@ -3419,7 +3419,7 @@ instance SystemDB PostgresSystemDB IO where
               case afterPartitionConcurrency of
                 Just 0 -> pure []
                 _ -> do
-                  latest <- Tx.statement app Statements.latestVersionNameStatement
+                  latest <- Statements.latestVersionNameTx app
                   let isLatest = maybe True (== applicationVersion) latest
                       candidatesStatement =
                         if hasSharedBudget
@@ -3450,7 +3450,7 @@ instance SystemDB PostgresSystemDB IO where
         Just 0 -> pure (Right [])
         _ -> do
           result <- runTransaction env "start_queued_partitioned_workflows" $ do
-            latest <- Tx.statement app Statements.latestVersionNameStatement
+            latest <- Statements.latestVersionNameTx app
             let isLatest = maybe True (== applicationVersion) latest
                 cap = fromIntegral dequeueSweepCap
                 sweepLimit = maybe cap (min cap) maxTasks

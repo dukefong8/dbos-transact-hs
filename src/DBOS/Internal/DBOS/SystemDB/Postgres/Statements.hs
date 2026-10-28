@@ -107,7 +107,9 @@ module DBOS.SystemDB.Postgres.Statements
     dequeuePartitionRateLimitCountStatement,
     dequeueConcurrencyCountStatement,
     dequeuePartitionConcurrencyCountStatement,
-    latestVersionNameStatement,
+    latestVersionNamedStatement,
+    latestVersionUnnamedStatement,
+    latestVersionNameTx,
     dequeueCandidatesNowaitStatement,
     dequeueCandidatesSkipLockedStatement,
     dequeueClaimStatement,
@@ -806,15 +808,25 @@ data VersionRowRaw = VersionRowRaw
   }
   deriving stock (Eq, Show)
 
+-- | One version row, as the listing and the latest-lookup both decode it.
+versionRowDecoder :: Decoders.Row VersionRowRaw
+versionRowDecoder =
+  VersionRowRaw
+    <$> Decoders.column (Decoders.nonNullable Decoders.text)
+    <*> Decoders.column (Decoders.nonNullable Decoders.text)
+    <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+    <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+    <*> Decoders.column (Decoders.nullable Decoders.text)
 -- | The versions this handle may see: its own application's plus the
--- unclaimed. One statement serves the listing, the latest, and the holder
--- read, since they differ only in ordering and bounds. Hand-written rather
+-- unclaimed. One statement serves the listing and the holder read, since
+-- they differ only in ordering and bounds. Hand-written rather
 -- than typedSql: a select of the whole table would infer IHP's model type
 -- for @application_versions@, which this layer does not have.
 versionsStatement :: Text -> Bool -> Statement.Statement (Maybe Text) [VersionRowRaw]
 versionsStatement orderClause limitOne =
   Statement.preparable sql encoder decoder
   where
+    decoder = Decoders.rowList versionRowDecoder
     sql =
       "select version_id, version_name, version_timestamp, created_at, application_name \
       \from dbos.application_versions \
@@ -822,15 +834,6 @@ versionsStatement orderClause limitOne =
         <> orderClause
         <> (if limitOne then " limit 1" else "")
     encoder = Encoders.param (Encoders.nullable Encoders.text)
-    decoder =
-      Decoders.rowList
-        ( VersionRowRaw
-            <$> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-        )
 
 -- | The application that holds a name, if any, so the caller can decide
 -- whether to claim it. Mirrors @resolve_owning_application@'s read.
@@ -868,11 +871,59 @@ listApplicationVersionsSession :: Maybe Text -> Session.Session [VersionRowRaw]
 listApplicationVersionsSession applicationName =
   Session.statement applicationName (versionsStatement "order by version_timestamp desc" False)
 
+-- | The newest version this handle may see, if any. Two probes rather than
+-- one filter with an @OR@: the owned probe and the unclaimed probe each read
+-- one entry of the @(application_name, version_timestamp)@ index, so the
+-- lookup never walks past a peer's newer versions. An unnamed handle reads
+-- one entry of the timestamp index instead. Mirrors @latest_version_sql@.
+latestVersionNamedStatement :: Statement.Statement Text (Maybe VersionRowRaw)
+latestVersionNamedStatement =
+  Statement.preparable sql encoder decoder
+  where
+    sql =
+      "(select version_id, version_name, version_timestamp, created_at, application_name \
+      \from dbos.application_versions \
+      \where application_name = $1 \
+      \order by application_name, version_timestamp desc limit 1) \
+      \union all \
+      \(select version_id, version_name, version_timestamp, created_at, application_name \
+      \from dbos.application_versions \
+      \where application_name is null \
+      \order by application_name, version_timestamp desc limit 1) \
+      \order by version_timestamp desc limit 1"
+    encoder = Encoders.param (Encoders.nonNullable Encoders.text)
+    decoder = Decoders.rowMaybe versionRowDecoder
+
+-- | The newest version any handle may see, if any: one entry of the
+-- timestamp index. Mirrors the unnamed arm of @latest_version_sql@.
+latestVersionUnnamedStatement :: Statement.Statement () (Maybe VersionRowRaw)
+latestVersionUnnamedStatement =
+  Statement.preparable sql encoder decoder
+  where
+    sql =
+      "select version_id, version_name, version_timestamp, created_at, application_name \
+      \from dbos.application_versions \
+      \order by version_timestamp desc limit 1"
+    encoder = Encoders.noParams
+    decoder = Decoders.rowMaybe versionRowDecoder
+
 -- | The newest version this handle may see, if any. Mirrors
 -- @get_latest_application_version@.
 latestApplicationVersionSession :: Maybe Text -> Session.Session (Maybe VersionRowRaw)
 latestApplicationVersionSession applicationName =
-  fmap listToMaybe (Session.statement applicationName (versionsStatement "order by version_timestamp desc" True))
+  case applicationName of
+    Nothing   -> Session.statement () latestVersionUnnamedStatement
+    Just name -> Session.statement name latestVersionNamedStatement
+
+-- | The newest visible version's name, for the dequeue's @is_latest@
+-- check: a version row that is not the newest is only claimable when the
+-- version predicate names it exactly.
+latestVersionNameTx :: Maybe Text -> Tx.Transaction (Maybe Text)
+latestVersionNameTx applicationName = do
+  found <- case applicationName of
+    Nothing   -> Tx.statement () latestVersionUnnamedStatement
+    Just name -> Tx.statement name latestVersionNamedStatement
+  pure ((.versionRowName) <$> found)
 
 -- | Moves a version's timestamp, claiming a nameless row for the owner the
 -- caller resolved. Mirrors @update_application_version_timestamp@.
@@ -2486,18 +2537,6 @@ dequeuePartitionConcurrencyCountStatement =
         <> contramap (\(_, _, queue) -> queue) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8)))
-
--- | The newest visible application version's name, for the dequeue's
--- @is_latest@ check: a version row that is not the newest is only claimable
--- when the version predicate names it exactly.
-latestVersionNameStatement :: Statement.Statement (Maybe Text) (Maybe Text)
-latestVersionNameStatement =
-  Statement.preparable
-    ( "select version_name from dbos.application_versions \
-      \where ($1::text is null or application_name = $1 or application_name is null) \
-      \order by version_timestamp desc limit 1" )
-    (Encoders.param (Encoders.nullable Encoders.text))
-    (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.text)))
 
 -- | The candidates for one claim: the queue's eligible head, priority first,
 -- locked so a rival process cannot take them. @$5@ says the caller's version

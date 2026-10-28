@@ -621,7 +621,7 @@ lifecycleTests getBackend =
           result <- runSession env "probe" migrationVersionSession
           case result of
             Right (Just (DbosMigration version)) ->
-              assertBool ("expected at least migration 123, got: " <> show version) (version >= 123)
+              assertBool ("expected at least migration 125, got: " <> show version) (version >= 125)
             other -> fail ("expected an applied migration version, got: " <> show other),
       -- The dispatch times a claimed row's deadline from the database's
       -- clock, so the seam has to answer with it, not the host's.
@@ -1910,7 +1910,81 @@ versionTests getBackend =
           refused <- createApplicationVersion env versionName Nothing
           case refused of
             Left (RegisteredByAnother {}) -> pure ()
-            other -> fail ("expected RegisteredByAnother, got: " <> show other)
+            other -> fail ("expected RegisteredByAnother, got: " <> show other),
+      -- Twin of the oracle's per-owner latest-version case: with a peer's
+      -- versions newer than ours, each application still sees its own
+      -- latest (or the unclaimed one), and each probe reads one index
+      -- entry rather than walking past the peer's history. Exact names
+      -- are unassertable on a shared database (a concurrent case's
+      -- rows, and its brief far-future stamps, win any newest-read they
+      -- overlap), so the verdicts pin application membership instead:
+      -- the probes must never leak a peer's rows, and an application
+      -- with no rows of its own must still see the unclaimed ones. The
+      -- planted rows carry ancient timestamps, so they never become
+      -- anyone's latest and disturb no other case.
+      testCase "each application sees its own and unclaimed versions" $ do
+        unique <- freshWorkflowId
+        let prefix = "slice6-" <> Text.take 8 unique
+            ours = prefix <> "-ours"
+            peer = prefix <> "-peer"
+            ghost = prefix <> "-ghost"
+            perOwner = 10000
+            plant =
+              Session.statement (prefix, perOwner) $
+                Statement.preparable
+                  "insert into dbos.application_versions (version_id, version_name, version_timestamp, created_at, application_name) \
+                  \select $1 || '-v-' || g::text, $1 || '-v-' || g::text, g, g, \
+                  \case when g <= $2 then $1 || '-ours' when g <= 2 * $2 then null else $1 || '-peer' end \
+                  \from generate_series(1, 3 * $2) g"
+                  (contramap fst (Encoders.param (Encoders.nonNullable Encoders.text)) <> contramap snd (Encoders.param (Encoders.nonNullable Encoders.int8)))
+                  Decoders.rowsAffected
+            explain query =
+              Session.statement () $
+                Statement.preparable
+                  ("explain " <> query)
+                  Encoders.noParams
+                  (Decoders.rowList (Decoders.column (Decoders.nonNullable Decoders.text)))
+            appOf info = info.versionInfoApplicationName
+        withBackend getBackend $ \env -> do
+          planted <- runSession env "plant versions" plant
+          planted @?= Right (fromIntegral (3 * perOwner))
+          -- An application with no rows of its own still sees the
+          -- unclaimed ones, and only those.
+          ghostLatest <- getLatestApplicationVersion env (Just ghost)
+          case ghostLatest of
+            Right (Just info) -> appOf info @?= Nothing
+            other -> fail ("expected an unclaimed version, got: " <> show other)
+          -- Our rows and the unclaimed ones are visible; the peer's never.
+          oursLatest <- getLatestApplicationVersion env (Just ours)
+          case oursLatest of
+            Right (Just info) -> assertBool ("expected our rows only, got: " <> show info) (appOf info == Just ours || appOf info == Nothing)
+            other -> fail ("expected our latest, got: " <> show other)
+          peerLatest <- getLatestApplicationVersion env (Just peer)
+          case peerLatest of
+            Right (Just info) -> assertBool ("expected peer rows only, got: " <> show info) (appOf info == Just peer || appOf info == Nothing)
+            other -> fail ("expected the peer latest, got: " <> show other)
+          namedPlan <-
+            runSession env "explain named" $
+              explain "(select version_id, version_name, version_timestamp, created_at, application_name from dbos.application_versions where application_name = 'x' order by application_name, version_timestamp desc limit 1) union all (select version_id, version_name, version_timestamp, created_at, application_name from dbos.application_versions where application_name is null order by application_name, version_timestamp desc limit 1) order by version_timestamp desc limit 1"
+          case namedPlan of
+            Right rows -> assertBool ("expected the owner index in the plan, got: " <> show rows) (any (Text.isInfixOf "idx_application_versions_owner_timestamp") rows)
+            other -> fail ("expected a plan, got: " <> show other)
+          unnamedPlan <-
+            runSession env "explain unnamed" $
+              explain "select version_id, version_name, version_timestamp, created_at, application_name from dbos.application_versions order by version_timestamp desc limit 1"
+          case unnamedPlan of
+            Right rows -> assertBool ("expected the timestamp index in the plan, got: " <> show rows) (any (Text.isInfixOf "idx_application_versions_timestamp") rows)
+            other -> fail ("expected a plan, got: " <> show other)
+          -- Remove the planted rows: unique to this test, so no other case
+          -- can miss them, and the shared table stays lean.
+          removed <-
+            runSession env "remove versions" $
+              Session.statement prefix $
+                Statement.preparable
+                  "delete from dbos.application_versions where version_name like $1 || '%'"
+                  (Encoders.param (Encoders.nonNullable Encoders.text))
+                  Decoders.rowsAffected
+          removed @?= Right (fromIntegral (3 * perOwner))
     ]
 
 -- | Renaming an application's rows: in-flight rows in one transaction,

@@ -428,6 +428,16 @@ sources![
         "123_add_workflow_status_creator_xid.sql",
         Applies::Always
     ),
+    (
+        124,
+        "124_create_application_versions_timestamp_index.sql",
+        Applies::Always
+    ),
+    (
+        125,
+        "125_create_application_versions_owner_timestamp_index.sql",
+        Applies::Always
+    ),
 ];
 
 /// Asks whether the `notifications` primary key already exists, so migration 10 can skip its
@@ -476,7 +486,22 @@ pub const LOCAL_MIGRATIONS: u32 = 47;
 pub const SHARED_MIGRATION_BASE: u32 = 100;
 
 /// The highest migration defined here, and the version a fully migrated database records.
-pub const SHARED_MIGRATIONS: u32 = 121;
+///
+/// Computed from [`SOURCES`], so listing a new file there is what raises it.
+pub const SHARED_MIGRATIONS: u32 = highest_version(SOURCES);
+
+/// The highest version among `sources`, or 0 when there are none.
+const fn highest_version(sources: &[MigrationSource]) -> u32 {
+    let mut highest = 0;
+    let mut i = 0;
+    while i < sources.len() {
+        if sources[i].version > highest {
+            highest = sources[i].version;
+        }
+        i += 1;
+    }
+    highest
+}
 
 /// Which SQL dialect the system database speaks.
 ///
