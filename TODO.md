@@ -197,6 +197,42 @@ Ported in one slice (adopted an uncommitted #110 draft, then #109 on top):
 - The restored emission propagated to one more trace that had pinned the
   silence (`restarting a finished id adopts`); updated with its comment.
 
+### Dual-binary 40P01 (deferred until caught up to Rust, 2026-10-27)
+
+- Standing rule stays: never run two live suite binaries concurrently
+  (AGENTS.md rule 8). Triage so far (2026-10-27, no commit):
+  - The reported `40P01` did NOT reproduce in 2 dual full-suite runs with
+    `log_lock_waits` on: zero server deadlocks, zero lock waits, zero
+    sysdb retries. What reproduced instead is cross-binary *progress*
+    failure — one binary slow (307 s) with 300 s tasty timeouts on queue
+    tests whose rows sat `ENQUEUED`, unlocked, app/version-matching, and
+    one stale queue-limits read (`NeverUpdate` returned `Nothing` after
+    `AlwaysUpdate` wrote 3; `LeaveExisting` is `do nothing`, names verified
+    unique, so no writer found yet).
+  - Structural facts established: workflow UUIDs are random per run and
+    engines use app-scoped backends, so same-tuple writes across binaries
+    are nearly impossible except via NULL-app rows (only cross-visible
+    population, ~222 rows, mostly old litter) and the constant
+    `_dbos_internal_queue` row. Claim/supervisor scoping is app-narrowed
+    (verified in code + DB). Stuck-row trap confirmed by reading only:
+    unregistered-dispatch releases the worker slot but never resets the
+    row (Dequeue.hs:467-470) — the oracle documents this as known upstream
+    hole #24, so the port is faithful here.
+  - Load-bearing gaps regardless of trigger: `withRetry` is unbounded
+    (Retry.hs:136-151, no attempt cap) so any persistent Transient failure
+    hangs instead of failing; ~22k `PENDING`+owned litter rows accumulate
+    from interrupted runs (partly ours, from killed runs).
+  - Cleanup done: `log_lock_waits` reset to off (verified). Server logs
+    (`docker logs postgres`) DO show deadlock DETAIL when it fires — use
+    them on the next repro. Repro so far: dual full suites hang 2/2;
+    single-test dual loops pass 3/3; legacy-input test hung solo 1/10
+    (321 s, then passed — needs explanation).
+  - Next steps on revisit: (1) catch a hang live with pg wait-event +
+    ungranted-lock sampling (missed twice); (2) explain the CRUD
+    NULL-limits read (xmin-level check: overwrite vs delete+recreate);
+    (3) decide on bounded retries + unclaim-on-unrunnable-dispatch (needs
+    ADR — diverges from the oracle's known hole).
+
 ### Registry dual-stack (2026-10-27)
 
 - `RegistryTest` split into `RegistryCases` (10 shared scenarios + pure
@@ -296,6 +332,12 @@ Ported in one slice (adopted an uncommitted #110 draft, then #109 on top):
   - Slice gate (2026-10-27, final): watcher green (89/89); binary 902/903 in ~20s, sole failure the known tick-flake (9th datapoint, isolation-green); psql recency proof 957 `workflow_status` rows (471 SUCCESS / 288 PENDING / 101 ENQUEUED / 56 ERROR / 37 CANCELLED / 2 MAX_RECOVERY / 2 DELAYED) + 88 notifications.
   `WorkflowConflict`, per-domain, `StepNondeterminism`, outcome token).
   Later: #127 receivers, #113 idle timeout.
+
+### Pending oracle commits (reviewed 2026-10-28, unported, in this order)
+
+- Slice 6 (#106 `739f985`, version-index lookups): vendor migrations 124/125, ceiling probe 123→125, rewrite `latestVersionNameStatement` to the two-probe UNION ALL form for both the dequeue check and `getLatestApplicationVersion`, index-scan evidence test. Mechanical; no behavior change, only plan shapes.
+- Slice 7 (#133 `99677cc`, WorkflowKey naming): `methodWorkflowKey` constructor; `EnqueueOptions` loses `className`/`configName`, `clientEnqueueWorkflow*` takes `WorkflowKey`; engine `AlreadyRegistered`/`NotRegistered` carry `WorkflowKey` (render + JSON). Compiler-driven sweep.
+- Slice 8 (#132 `3abe8a5`, patch/deprecate_patch): new `Patch` module (PendingStep-shaped, per-poll placement checks), `PATCH_PREFIX` in step_names, peek+CAS over `nextStepIdRef`, marker via fenced `recordStep`, `PatchNondeterminism` engine error; live+Mem twins of the 668-line oracle test. Biggest of the three; shares slice 5's fenced `recordStep`.
 
 ### Child-start replay + fork replacement (Rust #108 `2540e18`, #107 `547eb9f`, 2026-10-20)
 
@@ -1150,4 +1192,4 @@ the last module flips.
   accessors deleted, `StepStatus` oracle-shaped; public fields are
   camelCase (ADR-0023) while SQL/Aeson/config keys and log prose keep
   Rust spelling.
-- `hasql` pinned to the repo's 1.10 range in probes (2.x moved `acquire`).
+- `hasql` pinned to the repo's 2.x range in probes (`>=2.0.1 && <2.1`, matching `ihp-typed-sql`; 2.x moved `acquire` behind an explicit `Pqi.adapter`).

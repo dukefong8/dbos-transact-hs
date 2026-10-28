@@ -63,6 +63,6 @@ env:
 		base containers foldl stm-containers unordered-containers vector template-haskell \
 		aeson bytestring text rerefined safe-wild-cards strict-wrapper time uuid \
 		contra-tracer contravariant fast-logger io-sim io-classes mtl transformers \
-		hasql ihp-typed-sql hasql-pool hasql-transaction hasql-postgresql-types \
+		hasql ihp-typed-sql hasql-pool hasql-transaction hasql-postgresql-types pqi-ffi \
 		ihp-hsx ihp-router lucid2 wai warp http-types unix \
 		breakpoint nothunks rapid silently tasty tasty-hunit tasty-golden

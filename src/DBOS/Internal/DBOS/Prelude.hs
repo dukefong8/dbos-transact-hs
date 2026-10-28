@@ -26,7 +26,6 @@ module DBOS.Prelude
 where
 
 import Control.Applicative as Base
-import Control.Arrow as Base hiding (first, second)
 import Data.Bifunctor as Base
 import Data.Bits as Base
 import Data.Bool as Base

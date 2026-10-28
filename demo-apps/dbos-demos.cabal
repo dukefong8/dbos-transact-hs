@@ -73,7 +73,7 @@ executable demo-apps
     bytestring,
     containers,
     dbos-transact-hs,
-    hasql >=1.10 && <1.11,
+    hasql >=2.0.1 && <2.1,
     http-types,
     ihp-hsx,
     ihp-hsx:ihp-hsx-lucid2,

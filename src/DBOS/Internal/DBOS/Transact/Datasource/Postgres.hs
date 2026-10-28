@@ -41,6 +41,7 @@ import Hasql.Pool qualified as Pool
 import Hasql.Pool.Config qualified as PoolConfig
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
+import Pqi.Ffi qualified as Pqi
 
 -- | An application database behind a transactional-step datasource: a
 -- pool for sessions plus the settings to open per-transaction
@@ -79,6 +80,7 @@ acquireAppDataSourceIn schema url maxConnections = do
   let settings = ConnSettings.connectionString url
   pool <-
     Pool.acquire
+      Pqi.adapter
       ( PoolConfig.settings
           [ PoolConfig.size (fromIntegral maxConnections),
             PoolConfig.acquisitionTimeout 10,
@@ -255,7 +257,7 @@ toDataSource app =
   where
     acquireConn :: IO Connection.Connection
     acquireConn = do
-      acquired <- Connection.acquire app.appSettings
+      acquired <- Connection.acquire Pqi.adapter app.appSettings
       case acquired of
         Left ce ->
           throwIO

@@ -122,6 +122,7 @@ import IHP.TypedSql.Hasql (sqlExecTypedSession, sqlQueryTypedSession, typedSql)
 import IHP.TypedSql.Id (Id' (..))
 import IHP.TypedSql.Row (TypedSqlRow (..))
 import IHP.TypedSql.RowType (SqlRow)
+import Pqi.Ffi qualified as Pqi
 import System.Environment (lookupEnv)
 import System.Timeout qualified as Timeout
 
@@ -859,25 +860,32 @@ classifyUsageError usage =
 -- connections is a failure to obtain one); @XX@ reads the message for a
 -- transport failure wearing an internal-error code; everything else the
 -- server reports is permanent. A failure with no SQLSTATE never reached the
--- database: a lost connection may pass, while driver, script and type
--- failures will not.
+-- database: a lost connection may pass, while driver and type failures will
+-- not. A script's server error carries the same SQLSTATE a statement's does
+-- (hasql 2 reports BEGIN/COMMIT/ROLLBACK failures separately), so both take
+-- one verdict.
 sessionKind :: Errors.SessionError -> BackendErrorKind
 sessionKind sessionError = case sessionError of
   Errors.ConnectionSessionError _ -> Connection
-  Errors.StatementSessionError _ _ _ _ _ (Errors.ServerStatementError (Errors.ServerError code message _ _ _)) ->
-    case Text.take 2 code of
-      "40"                              -> Transient
-      "08"                              -> Connection
-      "53"                              -> Connection
-      "57"                              -> Connection
-      "XX" | isTransportFailure message -> Connection
-      _                                 -> Permanent
+  Errors.StatementSessionError _ _ _ _ _ (Errors.ServerStatementError serverError) -> serverKind serverError
+  Errors.ScriptSessionError _ serverError -> serverKind serverError
   _ -> Permanent
+
+-- | The retry verdict for one server-reported error, by SQLSTATE class.
+serverKind :: Errors.ServerError -> BackendErrorKind
+serverKind (Errors.ServerError code message _ _ _) = case Text.take 2 code of
+  "40"                              -> Transient
+  "08"                              -> Connection
+  "53"                              -> Connection
+  "57"                              -> Connection
+  "XX" | isTransportFailure message -> Connection
+  _                                 -> Permanent
 
 -- | The SQLSTATE a session failure carries, if the server reported one.
 sessionSqlState :: Errors.SessionError -> Maybe Text
 sessionSqlState (Errors.StatementSessionError _ _ _ _ _ (Errors.ServerStatementError (Errors.ServerError code _ _ _ _))) = Just code
-sessionSqlState _                                                                                                        = Nothing
+sessionSqlState (Errors.ScriptSessionError _ (Errors.ServerError code _ _ _ _)) = Just code
+sessionSqlState _ = Nothing
 
 -- | Connection-establishment failures: networking trouble and uncategorized
 -- libpq errors may pass; authentication and compatibility failures will not.
@@ -1030,6 +1038,7 @@ acquirePostgresSystemDB :: Config -> SomeTracer IO -> IO PostgresSystemDB
 acquirePostgresSystemDB config tracer = do
   pool <-
     Pool.acquire
+      Pqi.adapter
       ( PoolConfig.settings
           [ PoolConfig.size (fromIntegral config.configMaxConnections),
             PoolConfig.acquisitionTimeout 10,
@@ -3780,6 +3789,7 @@ acquirePool :: IO Pool.Pool
 acquirePool = do
   settings <- getConnectionSettings
   Pool.acquire
+    Pqi.adapter
     ( PoolConfig.settings
         [ PoolConfig.size 8,
           PoolConfig.acquisitionTimeout 10,

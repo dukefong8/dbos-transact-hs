@@ -24,12 +24,13 @@ Key facts (all observed in-repo, Oct 2026):
 - `make widget-db` bootstraps the `widget_store` schema, which the
   `dbos-demos` package needs at compile time for `typedSql` describe —
   run it before building, even though no demo is driven.
-- `cabal build` / `cabal test` do **not** resolve in this repo
-  (`dbos-demos` pins `hasql < 1.11`; sibling `ihp-typed-sql` needs
-  `hasql >= 2.0.1` — `Cabal-7107`, reproduced Oct 2026). Verification
-  builds the suite with standalone `ghc --make` (exact command in Launch)
-  and runs the binary directly. Never "fix" this by editing version pins
-  during a verification run — record it, don't paper over it.
+- `cabal build` / `cabal test` resolve since the hasql-2 migration
+  (main package and `dbos-demos` both pin `hasql >=2.0.1 && <2.1`,
+  matching sibling `ihp-typed-sql`). Verification usually builds the
+  suite with standalone `ghc --make` (exact command in Launch) and runs
+  the binary directly — the faster loop for `--pattern` selection.
+  Never "fix" version pins during a verification run — record it, don't
+  paper over it.
 - The watcher (`make dev`) runs sim tests only and never touches the live
   database, so a suite-binary run composes freely alongside it — no
   idling, no fixture deadlock.
