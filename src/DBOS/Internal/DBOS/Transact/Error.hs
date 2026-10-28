@@ -1,4 +1,3 @@
-{-# LANGUAGE EmptyCase         #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -14,11 +13,12 @@ module DBOS.Transact.Error
   ( Error (..),
     EngineOnly,
     DurableError,
-    mapApplication,
     liftEngine,
     renderTransactError,
     controlOf,
     fromSystemDB,
+    fromRegistryError,
+    fromSerializationError,
     Failure (..),
     failureOf,
     failureError,
@@ -36,16 +36,21 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Int (Int64)
 import Data.Text (pack, unpack)
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Void (Void, absurd)
 import DBOS.Prelude
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Duration, durationAsMillis)
+import DBOS.Transact.Registry (RegistryError, WorkflowKey (..), decodeRegistryErrorPayload, encodeRegistryErrorPayload, renderRegistryError, renderWorkflowKey)
+import DBOS.Transact.Registry qualified as Registry
+import DBOS.Transact.Serialization (SerializationError, decodeSerializationError, encodeSerializationError, renderSerializationError)
+import DBOS.Transact.Serialization qualified as Serialization
 
 -- | The error channel of a workflow that declares no failure of its own.
 -- Rust's @EngineOnly@: uninhabited, so an engine error can be carried into
 -- any channel by a total conversion rather than a panic waiting for an
--- input that cannot arrive.
-data EngineOnly
-  deriving stock (Eq, Show)
+-- input that cannot arrive. A synonym for 'Void': aeson already ships both
+-- 'Void' JSON instances with matching behavior, so no orphan instances.
+type EngineOnly = Void
 
 -- | What an application may fail with, inside 'ErrorApplication'. Rust's
 -- @DurableError@: a recorded failure has to survive a column, so the
@@ -80,7 +85,7 @@ data Error e
   | -- | Registration happened after the launch snapshot was taken.
     AlreadyLaunched {operation :: Text}
   | -- | A workflow identity was registered more than once.
-    AlreadyRegistered {key :: Text}
+    AlreadyRegistered {key :: WorkflowKey}
   | -- | A workflow input, result, or failure could not be encoded.
     ErrorSerialization {what :: Text, message :: Text}
   | -- | A serialized workflow input, result, or failure could not be decoded.
@@ -96,7 +101,7 @@ data Error e
   | -- | A previously recorded operation failed with an untyped message.
     StepFailed {step :: Text, message :: Text}
   | -- | A workflow key did not exist in the executor's immutable snapshot.
-    NotRegistered {key :: Text}
+    NotRegistered {key :: WorkflowKey}
   | -- | The SystemDB did not grant this attempt the workflow execution claim.
     WorkflowClaimLost {workflowId :: Text}
   | -- | Shutdown cancelled the workflow while this caller waited for it. Its
@@ -134,48 +139,15 @@ data Error e
   | -- | Every attempt failed. Carries all of them, oldest first. Mirrors
     -- Rust @Error::MaxStepRetriesExceeded@.
     MaxStepRetriesExceeded {step :: Text, attempts :: Int, errors :: [Error e]}
-  deriving stock (Eq, Show)
-
--- | Re-targets this error at another application channel. One match over
--- the engine's variants, kept in one place so 'liftEngine' shares the list
--- rather than carrying a copy; the nested errors of
--- 'MaxStepRetriesExceeded' recurse. (The oracle's blanket @impl<E> From<E>
--- for Error<E>@ is spelled with the constructor directly — 'Left .
--- ErrorApplication' — with no helper in between.)
-mapApplication :: (e -> f) -> Error e -> Error f
-mapApplication f = \case
-  ErrorApplication err -> ErrorApplication (f err)
-  ErrorConfig detail -> ErrorConfig detail
-  NotLaunched operation -> NotLaunched operation
-  InsideStep operation -> InsideStep operation
-  AlreadyLaunched operation -> AlreadyLaunched operation
-  AlreadyRegistered key -> AlreadyRegistered key
-  ErrorSerialization what message -> ErrorSerialization what message
-  Deserialization what message -> Deserialization what message
-  UnknownSerialization {name} -> UnknownSerialization {name}
-  SystemDatabase err -> SystemDatabase err
-  StepFailed step message -> StepFailed step message
-  NotRegistered key -> NotRegistered key
-  WorkflowClaimLost workflowId -> WorkflowClaimLost workflowId
-  Interrupted workflowId -> Interrupted workflowId
-  WorkflowFailed workflowId message -> WorkflowFailed workflowId message
-  AwaitedWorkflowCancelled workflowId -> AwaitedWorkflowCancelled workflowId
-  ErrorMaxRecoveryAttemptsExceeded workflowId recoveryAttempts -> ErrorMaxRecoveryAttemptsExceeded workflowId recoveryAttempts
-  NotInWorkflow operation -> NotInWorkflow operation
-  WrongInstance operation -> WrongInstance operation
-  InvalidArgument operation detail -> InvalidArgument operation detail
-  StepBuiltElsewhere step built polled -> StepBuiltElsewhere step built polled
-  StepTimeout step limit -> StepTimeout step limit
-  StreamTimeout workflowText key limit -> StreamTimeout workflowText key limit
-  MaxStepRetriesExceeded step attempts errors -> MaxStepRetriesExceeded step attempts (map (mapApplication f) errors)
+  deriving stock (Eq, Show, Functor)
 
 -- | Rust @Error::lift@: an engine error carried into any workflow's
 -- channel. Total because 'EngineOnly' is uninhabited.
 liftEngine :: Error EngineOnly -> Error e
-liftEngine = mapApplication absurd
+liftEngine = fmap absurd
 
-absurd :: EngineOnly -> a
-absurd impossible = case impossible of {}
+-- * Human rendering: prose per constructor, delegated to owner modules
+-- where a fragment owns the variant.
 
 -- | The human-readable rendering, in the oracle's @Display@ shape. An
 -- application failure renders as itself; Rust delegates to the payload's
@@ -194,14 +166,14 @@ renderErrorWithoutApplication = \case
   ErrorConfig detail -> "invalid configuration: " <> detail
   NotLaunched operation -> "cannot " <> operation <> " before DBOS is launched"
   InsideStep operation -> operation <> " cannot be called from within a step"
-  AlreadyLaunched operation -> "cannot " <> operation <> " after DBOS is launched"
-  AlreadyRegistered key -> "a workflow is already registered as " <> key
-  ErrorSerialization what message -> "could not serialize the workflow " <> what <> ": " <> message
-  Deserialization what message -> "could not deserialize the workflow " <> what <> ": " <> message
-  UnknownSerialization {name} -> "serialization " <> name <> " is not available"
+  AlreadyLaunched operation -> renderRegistryError (Registry.AlreadyLaunched operation)
+  AlreadyRegistered key -> renderRegistryError (Registry.AlreadyRegistered key)
+  ErrorSerialization what message -> renderSerializationError (Serialization.ErrorSerialization {what = what, message = message})
+  Deserialization what message -> renderSerializationError (Serialization.Deserialization {what = what, message = message})
+  UnknownSerialization {name} -> renderSerializationError (Serialization.UnknownSerialization {name = name})
   SystemDatabase err -> SystemDBError.renderError err
   StepFailed step message -> "the step " <> step <> " failed: " <> message
-  NotRegistered key -> "no workflow is registered as " <> key
+  NotRegistered key -> "no workflow is registered as " <> renderWorkflowKey key
   WorkflowClaimLost workflowId -> "the workflow " <> workflowId <> " is already being run elsewhere"
   Interrupted workflowId -> "the workflow " <> workflowId <> " was interrupted by shutdown and left PENDING"
   WorkflowFailed workflowId message -> "the workflow " <> workflowId <> " failed: " <> message
@@ -223,14 +195,7 @@ instance (Show e, Typeable e) => Exception (Error e) where
   displayException = unpack . renderTransactError
 
 
--- | The engine-only channel holds no value, so it never encodes and never
--- parses: both instances are absurd for 'toJSON' and a refusal for
--- 'parseJSON', which is what a workflow that declares no failure deserves.
-instance ToJSON EngineOnly where
-  toJSON impossible = case impossible of {}
-
-instance FromJSON EngineOnly where
-  parseJSON _ = fail "the engine-only error channel holds no application failure"
+-- * Wire envelope: tags stay central, payloads are owned per fragment.
 
 -- | The structured form of an error: the whole tagged envelope, which the
 -- portable record carries in its @data@ field and a replay decodes. Mirrors
@@ -242,11 +207,11 @@ instance ToJSON e => ToJSON (Error e) where
     ErrorConfig detail -> tagged "ErrorConfig" (toJSON detail)
     NotLaunched operation -> tagged "NotLaunched" (object ["operation" .= operation])
     InsideStep operation -> tagged "InsideStep" (object ["operation" .= operation])
-    AlreadyLaunched operation -> tagged "AlreadyLaunched" (object ["operation" .= operation])
-    AlreadyRegistered key -> tagged "AlreadyRegistered" (object ["key" .= key])
-    ErrorSerialization what message -> tagged "ErrorSerialization" (object ["what" .= what, "message" .= message])
-    Deserialization what message -> tagged "Deserialization" (object ["what" .= what, "message" .= message])
-    UnknownSerialization {name} -> tagged "UnknownSerialization" (object ["name" .= name])
+    AlreadyLaunched operation -> tagged "AlreadyLaunched" (encodeRegistryErrorPayload (Registry.AlreadyLaunched operation))
+    AlreadyRegistered key -> tagged "AlreadyRegistered" (encodeRegistryErrorPayload (Registry.AlreadyRegistered key))
+    ErrorSerialization what message -> tagged "ErrorSerialization" (encodeSerializationError (Serialization.ErrorSerialization {what = what, message = message}))
+    Deserialization what message -> tagged "Deserialization" (encodeSerializationError (Serialization.Deserialization {what = what, message = message}))
+    UnknownSerialization {name} -> tagged "UnknownSerialization" (encodeSerializationError (Serialization.UnknownSerialization {name = name}))
     SystemDatabase err -> tagged "SystemDatabase" (toJSON err)
     StepFailed step message -> tagged "StepFailed" (object ["step" .= step, "message" .= message])
     NotRegistered key -> tagged "NotRegistered" (object ["key" .= key])
@@ -274,32 +239,34 @@ instance ToJSON e => ToJSON (Error e) where
 instance FromJSON e => FromJSON (Error e) where
   parseJSON = withObject "Error" $ \fields -> case KeyMap.toList fields of
     [(tag, payload)] -> case tag of
-      "ErrorApplication"         -> ErrorApplication <$> parseJSON payload
-      "ErrorConfig"                -> ErrorConfig <$> parseJSON payload
-      "NotLaunched"           -> withObject "NotLaunched" (\o -> NotLaunched <$> o .: "operation") payload
-      "InsideStep"                 -> withObject "InsideStep" (\o -> InsideStep <$> o .: "operation") payload
-      "AlreadyLaunched"       -> withObject "AlreadyLaunched" (\o -> AlreadyLaunched <$> o .: "operation") payload
-      "AlreadyRegistered"     -> withObject "AlreadyRegistered" (\o -> AlreadyRegistered <$> o .: "key") payload
-      "ErrorSerialization"         -> withObject "ErrorSerialization" (\o -> ErrorSerialization <$> o .: "what" <*> o .: "message") payload
-      "Deserialization"       -> withObject "Deserialization" (\o -> Deserialization <$> o .: "what" <*> o .: "message") payload
-      "UnknownSerialization"  -> withObject "UnknownSerialization" (\o -> UnknownSerialization <$> o .: "name") payload
-      "SystemDatabase"        -> SystemDatabase <$> parseJSON payload
-      "StepFailed"                 -> withObject "StepFailed" (\o -> StepFailed <$> o .: "step" <*> o .: "message") payload
-      "NotRegistered" -> withObject "NotRegistered" (\o -> NotRegistered <$> o .: "key") payload
-      "WorkflowClaimLost"     -> withObject "WorkflowClaimLost" (\o -> WorkflowClaimLost <$> o .: "workflowId") payload
-      "Interrupted"                -> withObject "Interrupted" (\o -> Interrupted <$> o .: "workflowId") payload
-      "WorkflowFailed"        -> withObject "WorkflowFailed" (\o -> WorkflowFailed <$> o .: "workflowId" <*> o .: "message") payload
-      "AwaitedWorkflowCancelled"   -> withObject "AwaitedWorkflowCancelled" (\o -> AwaitedWorkflowCancelled <$> o .: "workflowId") payload
-      "MaxRecoveryAttemptsExceeded"    -> withObject "MaxRecoveryAttemptsExceeded" (\o -> ErrorMaxRecoveryAttemptsExceeded <$> o .: "workflowId" <*> o .: "recoveryAttempts") payload
-      "NotInWorkflow"              -> withObject "NotInWorkflow" (\o -> NotInWorkflow <$> o .: "operation") payload
-      "WrongInstance"              -> withObject "WrongInstance" (\o -> WrongInstance <$> o .: "operation") payload
-      "InvalidArgument"            -> withObject "InvalidArgument" (\o -> InvalidArgument <$> o .: "operation" <*> o .: "detail") payload
-      "StepBuiltElsewhere"         -> withObject "StepBuiltElsewhere" (\o -> StepBuiltElsewhere <$> o .: "step" <*> o .: "built" <*> o .: "polled") payload
-      "StepTimeout"                -> withObject "StepTimeout" (\o -> StepTimeout <$> o .: "step" <*> o .: "timeout") payload
-      "StreamTimeout"              -> withObject "StreamTimeout" (\o -> StreamTimeout <$> o .: "workflowId" <*> o .: "key" <*> o .: "timeout") payload
-      "MaxStepRetriesExceeded"     -> withObject "MaxStepRetriesExceeded" (\o -> MaxStepRetriesExceeded <$> o .: "step" <*> o .: "attempts" <*> o .: "errors") payload
-      _                            -> fail ("unknown error variant " <> show tag)
+      "ErrorApplication"            -> ErrorApplication <$> parseJSON payload
+      "ErrorConfig"                 -> ErrorConfig <$> parseJSON payload
+      "NotLaunched"                 -> withObject "NotLaunched" (\o -> NotLaunched <$> o .: "operation") payload
+      "InsideStep"                  -> withObject "InsideStep" (\o -> InsideStep <$> o .: "operation") payload
+      "AlreadyLaunched"             -> fromRegistryError <$> decodeRegistryErrorPayload "AlreadyLaunched" payload
+      "AlreadyRegistered"           -> fromRegistryError <$> decodeRegistryErrorPayload "AlreadyRegistered" payload
+      "ErrorSerialization"          -> fromSerializationError <$> decodeSerializationError "ErrorSerialization" payload
+      "Deserialization"             -> fromSerializationError <$> decodeSerializationError "Deserialization" payload
+      "UnknownSerialization"        -> fromSerializationError <$> decodeSerializationError "UnknownSerialization" payload
+      "SystemDatabase"              -> SystemDatabase <$> parseJSON payload
+      "StepFailed"                  -> withObject "StepFailed" (\o -> StepFailed <$> o .: "step" <*> o .: "message") payload
+      "NotRegistered"               -> withObject "NotRegistered" (\o -> NotRegistered <$> o .: "key") payload
+      "WorkflowClaimLost"           -> withObject "WorkflowClaimLost" (\o -> WorkflowClaimLost <$> o .: "workflowId") payload
+      "Interrupted"                 -> withObject "Interrupted" (\o -> Interrupted <$> o .: "workflowId") payload
+      "WorkflowFailed"              -> withObject "WorkflowFailed" (\o -> WorkflowFailed <$> o .: "workflowId" <*> o .: "message") payload
+      "AwaitedWorkflowCancelled"    -> withObject "AwaitedWorkflowCancelled" (\o -> AwaitedWorkflowCancelled <$> o .: "workflowId") payload
+      "MaxRecoveryAttemptsExceeded" -> withObject "MaxRecoveryAttemptsExceeded" (\o -> ErrorMaxRecoveryAttemptsExceeded <$> o .: "workflowId" <*> o .: "recoveryAttempts") payload
+      "NotInWorkflow"               -> withObject "NotInWorkflow" (\o -> NotInWorkflow <$> o .: "operation") payload
+      "WrongInstance"               -> withObject "WrongInstance" (\o -> WrongInstance <$> o .: "operation") payload
+      "InvalidArgument"             -> withObject "InvalidArgument" (\o -> InvalidArgument <$> o .: "operation" <*> o .: "detail") payload
+      "StepBuiltElsewhere"          -> withObject "StepBuiltElsewhere" (\o -> StepBuiltElsewhere <$> o .: "step" <*> o .: "built" <*> o .: "polled") payload
+      "StepTimeout"                 -> withObject "StepTimeout" (\o -> StepTimeout <$> o .: "step" <*> o .: "timeout") payload
+      "StreamTimeout"               -> withObject "StreamTimeout" (\o -> StreamTimeout <$> o .: "workflowId" <*> o .: "key" <*> o .: "timeout") payload
+      "MaxStepRetriesExceeded"      -> withObject "MaxStepRetriesExceeded" (\o -> MaxStepRetriesExceeded <$> o .: "step" <*> o .: "attempts" <*> o .: "errors") payload
+      _                             -> fail ("unknown error variant " <> show tag)
     _ -> fail "an error records exactly one tagged variant"
+
+-- * Classification: control signals pass through, everything else records.
 
 -- | The oracle's @Error::control@: a cancellation, an interruption, and the
 -- system-database failures that are signals about the execution rather than
@@ -324,6 +291,23 @@ fromSystemDB = \case
   SystemDBError.UnknownSerialization {name} -> UnknownSerialization {name}
   err -> SystemDatabase err
 
+-- | Lift a registry refusal into a caller's channel. The registry owns the
+-- refusal vocabulary; the envelope (tag, prose, wire) stays here so
+-- recorded rows keep their shape. 'Datasource' maps through this too: its
+-- freeze refusal is the same vocabulary, not a workflow registration.
+fromRegistryError :: RegistryError -> Error e
+fromRegistryError = \case
+  Registry.AlreadyRegistered key -> AlreadyRegistered key
+  Registry.AlreadyLaunched operation -> AlreadyLaunched operation
+
+-- | Lift a codec outcome into a caller's channel. Codec construction sites
+-- build the owned type and map through here, keeping one construction path.
+fromSerializationError :: SerializationError -> Error e
+fromSerializationError = \case
+  Serialization.ErrorSerialization what message -> ErrorSerialization what message
+  Serialization.Deserialization what message -> Deserialization what message
+  Serialization.UnknownSerialization name -> UnknownSerialization name
+
 -- | How an erased workflow failed. Mirrors Rust @Failure@: the recorded
 -- envelope, which a replay decodes, or an engine control signal, which is
 -- never recorded as an outcome.
@@ -347,7 +331,7 @@ failureOf err = case controlOf err of
 -- keeps the raw text.
 failureError :: FromJSON e => Text -> Failure -> Error e
 failureError workflowText failure = case failure of
-  FailureControl engine -> liftEngine engine
+  FailureControl engine   -> liftEngine engine
   FailureRecorded payload -> decodeRecordedError workflowText payload
 
 -- | The recorded-failure fallback shared by 'failureError' and the handle
@@ -363,8 +347,10 @@ decodeRecordedError workflowText payload =
     fallbackText text = case jsonValue text of
       Just value -> case portableRecordOf value of
         Just (name, message, _) -> name <> ": " <> message
-        Nothing -> text
+        Nothing                 -> text
       Nothing -> text
+
+-- * Portable codec: the cross-SDK @{name, message, data}@ record.
 
 -- | Encode an error as the error column holds it: the portable error record
 -- other SDKs read (@{name, message, data}@), with the port's structured
@@ -388,7 +374,7 @@ portableMessage :: ToJSON e => Error e -> Text
 portableMessage err = case err of
   ErrorApplication value -> case toJSON value of
     String text -> text
-    _ -> decodeUtf8 (LBS.toStrict (encode value))
+    _           -> decodeUtf8 (LBS.toStrict (encode value))
   other -> renderErrorWithoutApplication other
 
 -- | The constructor spelling used as the portable record's name. The tagged
@@ -397,7 +383,7 @@ portableErrorName :: ToJSON e => Error e -> Text
 portableErrorName err = case toJSON err of
   Object fields -> case KeyMap.toList fields of
     [(tag, _)] -> Key.toText tag
-    _ -> "Error"
+    _          -> "Error"
   _ -> "Error"
 
 -- | Decode an error column back into the caller's channel. A portable record
@@ -412,11 +398,11 @@ decodeErrorText payload =
       Just (name, message, Just structured) ->
         case fromJSON structured of
           Success err -> Right err
-          Error _ -> Left (name <> ": " <> message)
+          Error _     -> Left (name <> ": " <> message)
       Just (name, message, Nothing) -> Left (name <> ": " <> message)
       Nothing ->
         case fromJSON value of
-          Success err -> Right err
+          Success err   -> Right err
           Error message -> Left (pack message)
 
 -- | The portable view of a recorded error for a reader with no error type of
@@ -431,12 +417,12 @@ recordedErrorView text = do
     Just (name, message, structured) -> Just (name, message, structured)
     Nothing -> case (fromJSON value :: Result (Error Value)) of
       Success err -> Just (portableErrorName err, portableMessage err, Just (toJSON err))
-      Error _ -> Nothing
+      Error _     -> Nothing
 
 jsonValue :: Text -> Maybe Value
 jsonValue text = case eitherDecodeStrict' (encodeUtf8 text) of
   Right value -> Just value
-  Left _ -> Nothing
+  Left _      -> Nothing
 
 portableRecordOf :: Value -> Maybe (Text, Text, Maybe Value)
 portableRecordOf (Object fields)
@@ -445,5 +431,5 @@ portableRecordOf (Object fields)
       Just (textOf name, textOf message, KeyMap.lookup "data" fields)
   where
     textOf (String text) = text
-    textOf value = decodeUtf8 (LBS.toStrict (encode value))
+    textOf value         = decodeUtf8 (LBS.toStrict (encode value))
 portableRecordOf _ = Nothing

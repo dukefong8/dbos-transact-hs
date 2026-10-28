@@ -92,6 +92,7 @@ import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
 import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
 import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
+import DBOS.Transact.Registry (WorkflowKey (..))
 import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
 import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Submitted (..), enqueueNew, initOrJoin, storedPriority, validateEnqueue)
 import Hasql.Transaction qualified as Tx
@@ -287,8 +288,6 @@ clientSendMessageInTx client operation callerWrites message serialization fallba
 data EnqueueOptions = EnqueueOptions
   { queue      :: Enqueue,
     workflowId :: Maybe Text,
-    className  :: Maybe Text,
-    configName :: Maybe Text,
     appName    :: Maybe Text,
     appVersion :: Maybe Text,
     timeout    :: Maybe Duration,
@@ -306,21 +305,19 @@ enqueueOptionsOn shape =
   EnqueueOptions
     { queue = shape,
       workflowId = Nothing,
-      className = Nothing,
-      configName = Nothing,
       appName = Nothing,
       appVersion = Nothing,
       timeout = Nothing,
       attributes = Nothing
     }
 
--- | Enqueues a workflow by name, onto a queue, and hands back a polling
--- handle to it. Asks for nothing else: the client's app name is stamped,
--- no version is recorded, and the id is generated.
+-- | Enqueues a workflow, onto a queue, and hands back a polling
+-- handle to it. The workflow is the key it was registered under; a free
+-- function's name alone converts into one. Mirrors @Client::enqueue@.
 clientEnqueueWorkflow :: MonadSTM m
-                      => Client m -> Text -> Text -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
-clientEnqueueWorkflow client workflowName queueName input =
-  clientEnqueueWorkflowWith client workflowName (enqueueOptionsNew queueName) input
+                      => Client m -> WorkflowKey -> Text -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+clientEnqueueWorkflow client workflow queueName input =
+  clientEnqueueWorkflowWith client workflow (enqueueOptionsNew queueName) input
 
 -- | 'clientEnqueueWorkflow', with something to say about how. A call that
 -- names no version records none — which the dequeue admits only from the
@@ -328,8 +325,8 @@ clientEnqueueWorkflow client workflowName queueName input =
 -- executors running exactly that code. A deduplication collision is refused,
 -- unless the policy asks to join the holder instead.
 clientEnqueueWorkflowWith :: MonadSTM m
-                          => Client m -> Text -> EnqueueOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
-clientEnqueueWorkflowWith client workflowName options input = do
+                          => Client m -> WorkflowKey -> EnqueueOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+clientEnqueueWorkflowWith client workflow options input = do
   case validateEnqueue options.queue of
     Left err -> pure (Left err)
     Right () -> do
@@ -344,9 +341,9 @@ clientEnqueueWorkflowWith client workflowName options input = do
             Nothing   -> client.conn.connAppName
           new =
             (newWorkflow workflowText)
-              { newWorkflowName = Just workflowName,
-                newWorkflowClassName = options.className,
-                newWorkflowConfigName = options.configName,
+              { newWorkflowName = Just workflow.name,
+                newWorkflowClassName = workflow.className,
+                newWorkflowConfigName = workflow.configName,
                 newWorkflowInput = (.serializedText) <$> rawInput,
                 newWorkflowSerialization = serialization,
                 newWorkflowQueueName = Just shape.name,
@@ -380,8 +377,8 @@ clientEnqueueWorkflowWith client workflowName options input = do
 -- condemns the whole transaction; an identical row is a no-op join. The
 -- returned handle is polling, and is only usable once the transaction
 -- commits.
-clientEnqueueWorkflowInTx :: Client IO -> Text -> Text -> Tx.Transaction () -> EnqueueOptions -> Maybe WorkflowInput -> IO (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle IO e))
-clientEnqueueWorkflowInTx client workflowName operation callerWrites options input =
+clientEnqueueWorkflowInTx :: Client IO -> WorkflowKey -> Text -> Tx.Transaction () -> EnqueueOptions -> Maybe WorkflowInput -> IO (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle IO e))
+clientEnqueueWorkflowInTx client workflow operation callerWrites options input =
   case validateEnqueue options.queue of
     Left err -> pure (Left err)
     Right () -> case options.queue.duplicationPolicy of
@@ -400,9 +397,9 @@ clientEnqueueWorkflowInTx client workflowName operation callerWrites options inp
               Nothing -> client.conn.connAppName
             new =
               (newWorkflow workflowText)
-                { newWorkflowName = Just workflowName,
-                  newWorkflowClassName = options.className,
-                  newWorkflowConfigName = options.configName,
+                { newWorkflowName = Just workflow.name,
+                  newWorkflowClassName = workflow.className,
+                  newWorkflowConfigName = workflow.configName,
                   newWorkflowInput = (.serializedText) <$> rawInput,
                   newWorkflowSerialization = serialization,
                   newWorkflowQueueName = Just shape.name,

@@ -1,27 +1,37 @@
-{-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Internal workflow registry. Mirrors @registry.rs@: registration turns a
 -- named body into a JSON-in / JSON-out closure the executor can call knowing
--- only a row. Bodies take the pool explicitly — there is no ambient context —
--- plus the workflow id their steps run under and the stored input, if any.
+-- only a row. This module owns the workflow identity ('WorkflowKey') and the
+-- registration refusal vocabulary ('RegistryError'), and the dumb
+-- key-to-body map between them. Bodies take the pool explicitly — there is
+-- no ambient context — plus the workflow id their steps run under and the
+-- stored input, if any.
+--
+-- The map is generic over the stored body so this module never names the
+-- engine's error channel: the erased bodies live in
+-- @DBOS.Transact.Workflow@, which every consumer already imports and which
+-- imports none of them back. That shape is what lets the key live here
+-- (ADR-0041, superseding ADR-0040's leaf): @Registry@ imports only
+-- 'Prelude', Aeson, and containers, so the central error module can import
+-- the key back without closing a cycle.
 module DBOS.Transact.Registry
   ( WorkflowKey (..),
     newWorkflowKey,
+    methodWorkflowKey,
     instanceWorkflowKey,
     workflowKeyFromRow,
     renderWorkflowKey,
-    WorkflowRef (..),
-    refName,
-    registerWorkflowRef,
-    ErasedWorkflow (..),
+    RegistryError (..),
+    renderRegistryError,
+    encodeRegistryErrorPayload,
+    decodeRegistryErrorPayload,
     Registry,
     Snapshot,
     newRegistry,
     bindRegistryInstance,
     registryInstanceId,
-    registerTypedWorkflow,
     registerErasedWorkflow,
     snapshotRegistry,
     thawRegistry,
@@ -32,14 +42,11 @@ module DBOS.Transact.Registry
 where
 
 import DBOS.Prelude
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson.Types (Parser)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.SystemDB.Types (SerializedWorkflowValue)
-import DBOS.Transact.Serialization (CodecError (..), codecUnknownTag, decodeWorkflowInput, encodeWorkflowValue)
-import DBOS.Transact.Context (WorkflowCtx)
-import DBOS.Transact.Error qualified as TransactError
 
 -- | The identity stored in @workflow_status@: a workflow name, optionally
 -- qualified by its class and configured instance. Mirrors @WorkflowKey@ in
@@ -55,6 +62,10 @@ data WorkflowKey = WorkflowKey
 -- | A free function's workflow identity.
 newWorkflowKey :: Text -> WorkflowKey
 newWorkflowKey workflowName = WorkflowKey workflowName Nothing Nothing
+
+-- | A class-bound workflow's identity, with no configured instance.
+methodWorkflowKey :: Text -> Text -> WorkflowKey
+methodWorkflowKey workflowName className = WorkflowKey workflowName (Just className) Nothing
 
 -- | A method workflow's configured identity.
 instanceWorkflowKey :: Text -> Text -> Text -> WorkflowKey
@@ -77,95 +88,65 @@ renderWorkflowKey (WorkflowKey name className configName) =
     (Just className', Nothing) -> name <> "/" <> className'
     _ -> name
 
--- | A registered workflow, holding where it was registered and under which
--- identity. Mirrors Rust @WorkflowRef@: what registration returns and what
--- a call site holds. The registry stores only the erased body; the argument
--- and result types were checked once at registration rather than at every
--- invocation by string. The port holds no type parameters — application
--- values cross the boundary already serialized, as 'ErasedWorkflow' does —
--- and no 'DBOS' handle: drivers that need a launched executor take it
--- explicitly (see 'DBOS.Transact.Instance'). A launch does bind the
--- reference's registry to its connection ('bindRegistryInstance'), which
--- is what 'DBOS.Transact.Workflow.startChildWorkflow' compares against the
--- running context to refuse a child started through another instance
--- (ADR-0018, reversing the earlier "never pins an instance" note for
--- exactly that refusal).
-data WorkflowRef m e = WorkflowRef
-  { refRegistry :: Registry m,
-    refKey :: WorkflowKey
-  }
+-- | Rust's derived serde shape (@name@/@class_name@/@config_name@), so a
+-- recorded error carrying a key decodes back to the key on any SDK.
+-- Optional fields accept absence like Rust's derived @Deserialize@ does.
+instance ToJSON WorkflowKey where
+  toJSON (WorkflowKey name className configName) =
+    object ["name" .= name, "class_name" .= className, "config_name" .= configName]
 
-instance Show (WorkflowRef m e) where
-  show ref = "WorkflowRef " <> Text.unpack (renderWorkflowKey ref.refKey)
+instance FromJSON WorkflowKey where
+  parseJSON = withObject "WorkflowKey" $ \fields ->
+    WorkflowKey <$> fields .: "name" <*> fields .:? "class_name" .!= Nothing <*> fields .:? "config_name" .!= Nothing
 
--- | The workflow's name: the bare name, not the full identity triple.
-refName :: WorkflowRef m e -> Text
-refName ref = case ref.refKey of WorkflowKey name _ _ -> name
+-- | A registration refusal: the identity was already taken, or registration
+-- happened after the launch snapshot was taken. Owned here (both sites
+-- construct it) so the registry never names the engine error channel; the
+-- central envelope maps each arm onto its wire variant
+-- ('fromRegistryError'), keeping tags and prose byte-identical. The second
+-- registry ('Datasource') reuses the same vocabulary for its own freeze
+-- refusal rather than minting a parallel one.
+data RegistryError
+  = AlreadyRegistered {key :: WorkflowKey}
+  | AlreadyLaunched {operation :: Text}
+  deriving stock (Eq, Show)
 
--- | Register a typed workflow and hand back a reference to it. Only before
--- launch snapshots the registry; a duplicate identity is refused.
---
--- Bodies take the scoped workflow view: the converted shape, where a body
--- can only reach the scoped entries. The old context-level entry was
--- deleted once every caller converted (C5b).
-registerWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
-                    => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
-registerWorkflowRef registry key body = do
-  registered <- registerTypedWorkflow registry key body
-  pure ((\() -> WorkflowRef registry key) <$> registered)
+-- | The refusal's prose, in the oracle's @Display@ shape. The engine's
+-- existing render path delegates here for these two arms.
+renderRegistryError :: RegistryError -> Text
+renderRegistryError = \case
+  AlreadyRegistered key -> "a workflow is already registered as " <> renderWorkflowKey key
+  AlreadyLaunched operation -> "cannot " <> operation <> " after DBOS is launched"
 
--- | The type-erased workflow body the engine resolves from a stored key.
--- Application values and the application error channel have already been
--- serialized by the registration boundary; the body takes the explicit
--- context it runs in. Mirrors the oracle's @ErasedWorkflow@, whose failure
--- channel is @Failure@ for the same reason: recovery and dequeue resolve
--- bodies by name and have no application error type to name.
-newtype ErasedWorkflow m = ErasedWorkflow
-  { -- | The stored body, run at whatever execution the caller's scope
-    -- names: the rank-2 field is why converted and unconverted bodies can
-    -- share one registry.
-    runErasedWorkflow :: forall exec. Maybe SerializedWorkflowValue -> WorkflowCtx exec m -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
-  }
+-- | The exception mechanism carries the human rendering, matching the
+-- central envelope's instance for these variants.
+instance Exception RegistryError where
+  displayException = Text.unpack . renderRegistryError
 
--- | Register a typed workflow and erase its JSON input and output types at
--- the registry boundary. The stored representation is the same serialized
--- value used by workflow rows and operation checkpoints.
--- | Register a typed workflow whose body takes the scoped workflow view:
--- the only shape left, now that the engine has no context-level entries —
--- every durable call the body makes takes the view it was handed or one
--- derived from it. The type-erased form is the same either way, so the
--- registry seam is unchanged.
-registerTypedWorkflow :: forall argument result e m. (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
-                      => Registry m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-registerTypedWorkflow registry key body =
-  registerErasedWorkflow registry key $ ErasedWorkflow $ \input wctx ->
-    case decodeWorkflowInput "argument" input of
-      Left err -> pure (Left (TransactError.FailureControl (codecError "argument" err :: TransactError.Error TransactError.EngineOnly)))
-      Right argument -> do
-        result <- body argument wctx
-        pure $ case result of
-          Left err -> Left (TransactError.failureOf err)
-          Right value -> Right (Just (encodeWorkflowValue value))
-  where
-    codecError :: Text -> CodecError -> TransactError.Error engine
-    codecError what err =
-      case codecUnknownTag err of
-        Just tag -> TransactError.UnknownSerialization {name = tag}
-        Nothing -> case err of
-          CodecNotJson _ input -> TransactError.Deserialization what input
-          CodecTypeMismatch _ message -> TransactError.Deserialization what (Text.pack message)
-          CodecUnknownSerialization _ tag -> TransactError.UnknownSerialization {name = tag}
+-- | The refusal's payload object, without the envelope. Tags stay central:
+-- the envelope owns tag spellings, the fragment owns payloads.
+encodeRegistryErrorPayload :: RegistryError -> Value
+encodeRegistryErrorPayload = \case
+  AlreadyRegistered key -> object ["key" .= key]
+  AlreadyLaunched operation -> object ["operation" .= operation]
+
+decodeRegistryErrorPayload :: Text -> Value -> Parser RegistryError
+decodeRegistryErrorPayload "AlreadyRegistered" payload = withObject "AlreadyRegistered" (\o -> AlreadyRegistered <$> o .: "key") payload
+decodeRegistryErrorPayload "AlreadyLaunched" payload = withObject "AlreadyLaunched" (\o -> AlreadyLaunched <$> o .: "operation") payload
+decodeRegistryErrorPayload tag _ = fail ("unknown registry error variant " <> show tag)
 
 -- | The mutable set of registrations. Its lock protects both the map and
 -- whether launch has frozen it, so insertion cannot slip past a snapshot.
-newtype Registry m = Registry (StrictMVar m (RegistryState m))
+-- Generic over the stored body: instantiations live with the erasure
+-- boundary, never here.
+newtype Registry m b = Registry (StrictMVar m (RegistryState m b))
 
-data RegistryState m = RegistryState (Map WorkflowKey (ErasedWorkflow m)) Bool (Maybe Text)
+data RegistryState m b = RegistryState (Map WorkflowKey b) Bool (Maybe Text)
 
 -- | The immutable set held by one launched executor.
-newtype Snapshot m = Snapshot (Map WorkflowKey (ErasedWorkflow m))
+newtype Snapshot m b = Snapshot (Map WorkflowKey b)
 
-newRegistry :: MonadMVar m => m (Registry m)
+newRegistry :: MonadMVar m => m (Registry m b)
 newRegistry = Registry <$> newMVar (RegistryState Map.empty False Nothing)
 
 -- | Binds the connection a launch installed to this registry. A reference
@@ -173,53 +154,53 @@ newRegistry = Registry <$> newMVar (RegistryState Map.empty False Nothing)
 -- child start compares against the running context to refuse
 -- @WrongInstance@; before a launch the registry names no connection, so a
 -- reference to it is @NotLaunched@.
-bindRegistryInstance :: MonadMVar m => Registry m -> Text -> m ()
+bindRegistryInstance :: MonadMVar m => Registry m b -> Text -> m ()
 bindRegistryInstance (Registry stateVar) instanceId =
   modifyMVar_ stateVar $ \(RegistryState workflows frozen _) ->
     pure (RegistryState workflows frozen (Just instanceId))
 
 -- | The connection this registry was launched over, if it has been.
-registryInstanceId :: MonadMVar m => Registry m -> m (Maybe Text)
+registryInstanceId :: MonadMVar m => Registry m b -> m (Maybe Text)
 registryInstanceId (Registry stateVar) =
   readMVar stateVar >>= \(RegistryState _ _ instanceId) -> pure instanceId
 
 -- | Add a type-erased workflow unless the full identity is already present
 -- or launch has taken its snapshot.
 registerErasedWorkflow :: MonadMVar m
-                       => Registry m -> WorkflowKey -> ErasedWorkflow m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+                       => Registry m b -> WorkflowKey -> b -> m (Either RegistryError ())
 registerErasedWorkflow (Registry stateVar) key workflow =
   modifyMVar stateVar $ \state@(RegistryState workflows frozen instanceId) ->
     if frozen
-      then pure (state, Left (TransactError.AlreadyLaunched "register_workflow"))
+      then pure (state, Left (AlreadyLaunched "register_workflow"))
       else
         case Map.lookup key workflows of
-          Just _ -> pure (state, Left (TransactError.AlreadyRegistered (renderWorkflowKey key)))
+          Just _ -> pure (state, Left (AlreadyRegistered key))
           Nothing -> pure (RegistryState (Map.insert key workflow workflows) False instanceId, Right ())
 
 -- | Freeze registrations and take an immutable snapshot atomically.
-snapshotRegistry :: MonadMVar m => Registry m -> m (Snapshot m)
+snapshotRegistry :: MonadMVar m => Registry m b -> m (Snapshot m b)
 snapshotRegistry (Registry stateVar) =
   modifyMVar stateVar $ \(RegistryState workflows _ instanceId) ->
     pure (RegistryState workflows True instanceId, Snapshot workflows)
 
 -- | Reopen the registry after a failed launch or executor shutdown.
-thawRegistry :: MonadMVar m => Registry m -> m ()
+thawRegistry :: MonadMVar m => Registry m b -> m ()
 thawRegistry (Registry stateVar) =
   modifyMVar_ stateVar $ \(RegistryState workflows _ instanceId) ->
     pure (RegistryState workflows False instanceId)
 
-lookupSnapshotWorkflow :: WorkflowKey -> Snapshot m -> Maybe (ErasedWorkflow m)
+lookupSnapshotWorkflow :: WorkflowKey -> Snapshot m b -> Maybe b
 lookupSnapshotWorkflow key (Snapshot workflows) = Map.lookup key workflows
 
 -- | The body registered under a key, read from the live registry rather
 -- than from a launch snapshot. Equivalent to the snapshot for as long as
 -- an executor holds it — launch freezes registration — and it is what a
 -- call site holding only a 'WorkflowRef' can reach.
-lookupRegistryWorkflow :: MonadMVar m => WorkflowKey -> Registry m -> m (Maybe (ErasedWorkflow m))
+lookupRegistryWorkflow :: MonadMVar m => WorkflowKey -> Registry m b -> m (Maybe b)
 lookupRegistryWorkflow key registry = case registry of
   Registry mvar -> do
     RegistryState workflows _ _ <- readMVar mvar
     pure (Map.lookup key workflows)
 
-snapshotSize :: Snapshot m -> Int
+snapshotSize :: Snapshot m b -> Int
 snapshotSize (Snapshot workflows) = Map.size workflows

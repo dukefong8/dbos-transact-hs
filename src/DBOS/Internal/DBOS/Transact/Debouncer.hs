@@ -33,9 +33,9 @@ import DBOS.Transact.Context (WorkflowCtx (wctxConn), insideAStep, nextStepId, w
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), pollingHandle)
 import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor, startWorkflow)
-import DBOS.Transact.Registry (WorkflowKey (..), WorkflowRef (..), refName, registryInstanceId)
+import DBOS.Transact.Registry (WorkflowKey (..), registryInstanceId)
 import DBOS.Transact.Serialization (WorkflowInput (..), unWorkflowInput)
-import DBOS.Transact.Workflow (Enqueue (..), Timeout (..), StartOptions (..), childWorkflowId, enqueueNew, startChildWorkflow, startOptionsDefault)
+import DBOS.Transact.Workflow (Enqueue (..), Timeout (..), StartOptions (..), WorkflowRef (..), childWorkflowId, enqueueNew, refName, startChildWorkflow, startOptionsDefault)
 
 -- | What to debounce: which queue the user workflow finally runs on, how
 -- long to wait past the first trigger at most, and which application the

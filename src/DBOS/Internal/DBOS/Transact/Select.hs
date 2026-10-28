@@ -56,7 +56,8 @@ import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx (wctxConn), ownerToken, workflowId)
 import DBOS.Transact.Error qualified as TransactError
-import DBOS.Transact.Serialization (CodecError, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError, SerializationError, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization qualified as Serialization
 
 -- | What 'checkSelect' found: a winner already recorded, or a race still
 -- to run. Two states rather than an 'Option' beside a loose index, so the
@@ -138,7 +139,7 @@ checkSelect wctx branches = do
         Right (Just recorded) ->
           case decodeWorkflowValue "the branch that won a select" (Just (SerializedWorkflowValue (fromMaybe "" recorded.stepRecordOutput) (Serialization <$> recorded.stepRecordSerialization))) :: Either CodecError Int of
             Left err -> case codecUnknownTag err of
-              Just tag -> pure (Left (TransactError.UnknownSerialization {name = tag}))
+              Just tag -> pure (Left (TransactError.fromSerializationError (Serialization.UnknownSerialization {name = tag})))
               Nothing ->
                 pure
                   ( Left

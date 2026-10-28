@@ -7,14 +7,16 @@
 module DBOS.Transact.ErrorTest (tests) where
 
 import DBOS.Prelude
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), fromJSON, object, withObject, (.:), (.=))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
   (
     EngineOnly,
     Error (..),
+    WorkflowKey,
+    newWorkflowKey,
   )
-import DBOS.Transact.Error (Failure (..), controlOf, decodeErrorText, encodeErrorText, failureOf, fromSystemDB, liftEngine, mapApplication)
+import DBOS.Transact.Error (Failure (..), controlOf, decodeErrorText, encodeErrorText, failureOf, fromSystemDB, liftEngine)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -63,7 +65,7 @@ tests =
           @?= (SystemDatabase (SystemDB.Malformed "bad") :: Error CardDeclined),
       testCase "re-targeting recurses into the nested retry errors" $ do
         let err = MaxStepRetriesExceeded {step = "s", attempts = 2, errors = [ErrorApplication (CardDeclined {attempts = 1})]} :: Error CardDeclined
-        mapApplication (const "boom") err
+        fmap (const "boom") err
           @?= (MaxStepRetriesExceeded {step = "s", attempts = 2, errors = [ErrorApplication "boom"]} :: Error String),
       testCase "the renamed constructors record under their bare tags" $ do
         -- Engine-only variants that never reach a recorded row (the
@@ -73,12 +75,17 @@ tests =
             renamed =
               [ NotLaunched {operation = "op"},
                 AlreadyLaunched {operation = "op"},
-                AlreadyRegistered {key = "k"},
+                AlreadyRegistered {key = newWorkflowKey "k"},
                 Deserialization {what = "in", message = "bad"},
                 UnknownSerialization {name = "pickle"},
-                NotRegistered {key = "k"},
+                NotRegistered {key = newWorkflowKey "k"},
                 WorkflowClaimLost {workflowId = "wf"},
                 WorkflowFailed {workflowId = "wf", message = "bad"}
               ]
-        mapM_ (\err -> decodeErrorText (encodeErrorText err) @?= Right err) renamed
+        mapM_ (\err -> decodeErrorText (encodeErrorText err) @?= Right err) renamed,
+      testCase "a key with missing optional fields decodes like Rust" $ do
+        -- Rust's derived Deserialize treats absent Option fields as None;
+        -- aeson's .: does not, so the key instance uses .:? instead.
+        (fromJSON (object ["name" .= ("x" :: Text)]) :: Result WorkflowKey)
+          @?= Success (newWorkflowKey "x")
     ]

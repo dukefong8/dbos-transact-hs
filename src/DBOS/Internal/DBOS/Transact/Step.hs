@@ -33,7 +33,8 @@ import DBOS.Transact.Connection (Connection (..))
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
-import DBOS.Transact.Serialization (CodecError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError, SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization qualified as Serialization
 import System.Log.FastLogger (ToLogStr (..))
 
 data StepError
@@ -249,8 +250,8 @@ replayStep name stepId record =
             Right value -> Right value
   where
     codecFailure err = case codecUnknownTag err of
-      Just tag -> TransactError.UnknownSerialization {name = tag}
-      Nothing -> TransactError.Deserialization "result" (codecErrorText err)
+      Just tag -> TransactError.fromSerializationError (Serialization.UnknownSerialization {name = tag})
+      Nothing -> TransactError.fromSerializationError (Serialization.Deserialization "result" (codecErrorText err))
 
 -- | How a step retries, times out and decides. Mirrors Rust @StepOptions@.
 -- Defaults are the three-way majority: one attempt (no retrying), a

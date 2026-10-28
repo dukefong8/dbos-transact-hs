@@ -28,6 +28,10 @@ module DBOS.Transact.Serialization
   ( CodecError (..),
     codecErrorText,
     codecUnknownTag,
+    SerializationError (..),
+    renderSerializationError,
+    encodeSerializationError,
+    decodeSerializationError,
     PortableArgs (..),
     WorkflowInput (..),
     unWorkflowInput,
@@ -41,7 +45,8 @@ module DBOS.Transact.Serialization
 where
 
 import DBOS.Prelude
-import Data.Aeson (FromJSON, Result (..), ToJSON, Value (..), eitherDecodeStrict, encode, fromJSON, object, toJSON, (.=))
+import Data.Aeson (FromJSON, Result (..), ToJSON, Value (..), eitherDecodeStrict, encode, fromJSON, object, toJSON, withObject, (.:), (.=))
+import Data.Aeson.Types (Parser)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy (toStrict)
 import Data.Map.Strict (Map)
@@ -73,6 +78,43 @@ codecUnknownTag :: CodecError -> Maybe Text
 codecUnknownTag = \case
   CodecUnknownSerialization _ tag -> Just tag
   _ -> Nothing
+
+-- | A codec outcome as an engine error: what could not be encoded or
+-- decoded, or the serialization tag this build cannot read. Owned here
+-- (the codec already lives here) so the serialize/deserialize boundary
+-- names its own failures; the central envelope maps each arm onto its wire
+-- variant ('fromSerializationError'), keeping tags and prose byte-identical.
+-- Constructor names stay verbatim per the one-type-one-name rule; central's
+-- same-named constructors are resolved by qualification at the mapping
+-- sites, never by renaming.
+data SerializationError
+  = ErrorSerialization {what :: Text, message :: Text}
+  | Deserialization {what :: Text, message :: Text}
+  | UnknownSerialization {name :: Text}
+  deriving stock (Eq, Show)
+
+-- | The outcome's prose, in the oracle's @Display@ shape.
+renderSerializationError :: SerializationError -> Text
+renderSerializationError = \case
+  ErrorSerialization what message -> "could not serialize the workflow " <> what <> ": " <> message
+  Deserialization what message -> "could not deserialize the workflow " <> what <> ": " <> message
+  UnknownSerialization name -> "serialization " <> name <> " is not available"
+
+-- | The tag's payload object, without the envelope. Tags themselves stay
+-- central: the envelope owns tag spellings, the fragment owns payloads.
+encodeSerializationError :: SerializationError -> Value
+encodeSerializationError = \case
+  ErrorSerialization what message -> object ["what" .= what, "message" .= message]
+  Deserialization what message -> object ["what" .= what, "message" .= message]
+  UnknownSerialization name -> object ["name" .= name]
+
+-- | The payload back into the owned type. No control case exists for codec
+-- outcomes, so there is no predicate arm: every codec failure records.
+decodeSerializationError :: Text -> Value -> Parser SerializationError
+decodeSerializationError "ErrorSerialization" payload = withObject "ErrorSerialization" (\o -> ErrorSerialization <$> o .: "what" <*> o .: "message") payload
+decodeSerializationError "Deserialization" payload = withObject "Deserialization" (\o -> Deserialization <$> o .: "what" <*> o .: "message") payload
+decodeSerializationError "UnknownSerialization" payload = withObject "UnknownSerialization" (\o -> UnknownSerialization <$> o .: "name") payload
+decodeSerializationError tag _ = fail ("unknown serialization error variant " <> show tag)
 
 -- | How a Haskell workflow argument maps onto the portable positional list.
 -- Unit is the one special case: it means no arguments, not one @null@

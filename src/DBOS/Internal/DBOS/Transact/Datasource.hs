@@ -72,10 +72,13 @@ import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderErro
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..))
 import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, withStep, withSystemDB, workflowId)
-import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
+import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText, fromRegistryError, fromSerializationError)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization qualified as Serialization
+import DBOS.Transact.Registry (RegistryError, newWorkflowKey)
+import DBOS.Transact.Registry qualified as Registry
 import GHC.Stack (HasCallStack)
 import Hasql.Statement qualified as Statement
 import System.Log.FastLogger (ToLogStr (..))
@@ -407,8 +410,8 @@ replayRecorded :: (FromJSON a, FromJSON e) => Text -> RecordedOutcome -> Either 
 replayRecorded stepName = \case
   RecordedOutput text -> case decodeWorkflowValue "result" (Just (SerializedWorkflowValue text Nothing)) of
     Left err    -> Left (case codecUnknownTag err of
-      Just tag -> UnknownSerialization {name = tag}
-      Nothing -> Deserialization "result" (codecErrorText err))
+      Just tag -> fromSerializationError (Serialization.UnknownSerialization {name = tag})
+      Nothing -> fromSerializationError (Serialization.Deserialization "result" (codecErrorText err)))
     Right value -> Right value
   RecordedError text -> case decodeErrorText text of
     Left _    -> Left (StepFailed stepName ("recorded transaction error is not decodable: " <> text))
@@ -502,11 +505,11 @@ registerDataSource :: MonadMVar m
 registerDataSource registry source = do
   frozen <- readMVar registry.dsrFrozen
   if frozen
-    then pure (Left (AlreadyLaunched "register_datasource"))
+    then pure (Left (fromRegistryError (Registry.AlreadyLaunched "register_datasource")))
     else
       modifyMVar registry.dsrSources $ \sources ->
         case find ((== source.dsName) . (.dsName)) sources of
-          Just _  -> pure (sources, Left (AlreadyRegistered ("datasource " <> source.dsName)))
+          Just _  -> pure (sources, Left (fromRegistryError (Registry.AlreadyRegistered (newWorkflowKey ("datasource " <> source.dsName)))))
           Nothing -> pure (source : sources, Right ())
 
 -- | The registered datasources, oldest first.

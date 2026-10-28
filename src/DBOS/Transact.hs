@@ -24,6 +24,7 @@ module DBOS.Transact
     WorkflowName (..),
     WorkflowKey (..),
     newWorkflowKey,
+    methodWorkflowKey,
     WorkflowRef,
     WorkflowCtx,
     runWorkflow,
@@ -36,6 +37,10 @@ module DBOS.Transact
     Error (..),
     EngineOnly,
     DurableError,
+    RegistryError,
+    renderRegistryError,
+    SerializationError,
+    renderSerializationError,
 
   -- workflow-introspection: ids, records, statuses, handles, fan-out
     WorkflowId (..),
@@ -325,13 +330,13 @@ import DBOS.Transact.Logger (logDebug, logError, logInfo, logWarn)
 import DBOS.Transact.Management (ListWorkflowStepsOptions (..), PortableWorkflowError (..), StepFailure (..), StepInfo (..), StepOutcome (..), StepOutput (..), cancelWorkflowsInWorkflow, defaultListWorkflowStepsOptions, deleteWorkflowsInWorkflow, forkFromInWorkflow, forkWorkflowsInWorkflow, listWorkflowStepsInWorkflow, listWorkflowStepsWithInWorkflow, listWorkflowsInWorkflow, resumeWorkflowsInWorkflow, rewindWorkflowsInWorkflow, setWorkflowDelayInWorkflow, updateWorkflowAttributesInWorkflow)
 import DBOS.Transact.Message (Forks (..), Message (..), SendBulkOptions (..), SendOptions (..), recv, send, sendBulk, sendBulkOptionsDefault, sendBulkWith, sendOptionsDefault, sendWith)
 import DBOS.Transact.Queue (Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), defaultQueueChange, defaultQueueOptions, deleteQueue, listQueues, queue, registerQueue, updateQueue)
-import DBOS.Transact.Registry (WorkflowKey (..), WorkflowRef, newWorkflowKey)
+import DBOS.Transact.Registry (RegistryError, WorkflowKey (..), methodWorkflowKey, newWorkflowKey, renderRegistryError)
 import DBOS.Transact.Select (SelectArm (..), Winner (..), selectStep)
-import DBOS.Transact.Serialization (CodecError (..), PortableArgs (..), WorkflowInput, decodeWorkflowInput, decodeWorkflowValue, encodeWorkflowInput, encodeWorkflowValue)
+import DBOS.Transact.Serialization (CodecError (..), PortableArgs (..), SerializationError, WorkflowInput, decodeWorkflowInput, decodeWorkflowValue, encodeWorkflowInput, encodeWorkflowValue, renderSerializationError)
 import DBOS.Transact.Sleep (pendingSleep, sleepPlain, sleepStep)
 import DBOS.Transact.Step (StepError (..), StepOptions (..), pendingStep, pendingStepWith, runNestedStep, runStep, runStepWith, stepOptionsDefault)
 import DBOS.Transact.Stream (ReadStreamOptions (..), StreamReader, closeStream, defaultReadStreamOptions, foldVectorStream, readStream, readStreamFrom, toVectorStream, writeStream)
 import DBOS.Transact.Wait (joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Timeout (..), enqueueNew, runOptionsDefault, startChildWorkflow, startOptionsDefault)
+import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Timeout (..), WorkflowRef, enqueueNew, runOptionsDefault, startChildWorkflow, startOptionsDefault)
 
 import DBOS.SystemDB.Types (Applications (..), ApplicationVersion (..), Change (..), Duration, ForkOptions (..), ForkPoint (..), IdempotencyKey (..), PollingConcurrency (PollingDefault, PollingUnlimited), RateLimit (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Timestamp, Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultRewindOptions, defaultWorkflowFilter, isTerminal, millisDuration, pollingAtMost, secondsDuration, timestampFromEpochMs, timestampToEpochMs, workflowStatusText)

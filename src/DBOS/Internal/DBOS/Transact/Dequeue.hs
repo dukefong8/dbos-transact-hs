@@ -46,7 +46,8 @@ import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTra
 import DBOS.Transact.Registry (Snapshot, lookupSnapshotWorkflow, renderWorkflowKey, workflowKeyFromRow)
 import DBOS.SystemDB.Retry (SysdbEvent (..))
 import DBOS.Transact.Workflow
-  ( Tasks,
+  ( ErasedWorkflow,
+    Tasks,
     clearCheckpointsFor,
     deadlineOf,
     executeRegisteredWorkflow,
@@ -209,7 +210,7 @@ workerBudget limits running
 -- contended flag the caller backs off on. Announcements go through the
 -- connection's tracer.
 pollOnce :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-         => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> DataSourceRegistry m -> m (Bool, [WorkflowId])
+         => Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Tasks m -> Running m -> QueueRecord -> DataSourceRegistry m -> m (Bool, [WorkflowId])
 pollOnce conn identity workflows tasks running queue datasources = do
   if not (resolvedIsPartitioned limits)
     then do
@@ -385,7 +386,7 @@ admission status recoveryAttempts
 -- if this one is still starting. Walked in claim order, not in the order
 -- the read came back, because claim order is what priority is for.
 dispatchClaimed :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-                => Connection m -> Identity -> Snapshot m -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> Text -> DataSourceRegistry m -> m ()
+                => Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> Text -> DataSourceRegistry m -> m ()
 dispatchClaimed conn identity workflows tasks running queue partition claimed ownerToken datasources
   | null claimed = pure ()
   | otherwise = do
@@ -466,7 +467,7 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed ow
                       case lookupSnapshotWorkflow key workflows of
                         Nothing -> do
                           releaseSlot slot
-                          runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError (TransactError.NotRegistered (renderWorkflowKey key) :: TransactError.Error TransactError.EngineOnly)))
+                          runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError (TransactError.NotRegistered key :: TransactError.Error TransactError.EngineOnly)))
                         Just workflow -> do
                           gate <- newMVar False
                           let releaseOnce = modifyMVar_ gate (\done -> if done then pure True else releaseSlot slot >> pure True)
@@ -536,7 +537,7 @@ internalQueueRecord =
 -- point: a contended queue stays backed off rather than rediscovering the
 -- contention.
 pollQueue :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-          => Tasks m -> Connection m -> Identity -> Snapshot m -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> DataSourceRegistry m -> m ()
+          => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> DataSourceRegistry m -> m ()
 pollQueue tasks conn identity workflows queues running name datasources = go (secondsDuration 1)
   where
     go interval = do
@@ -562,7 +563,7 @@ pollQueue tasks conn identity workflows queues running name datasources = go (se
 -- | The supervisor: transition, rebuild the set, spawn and reap one worker
 -- per queue, and sleep a second.
 superviseForever :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-                 => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> DataSourceRegistry m -> m ()
+                 => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Maybe [Text] -> DataSourceRegistry m -> m ()
 superviseForever tasks conn identity workflows listenQueues datasources = do
   queues <- newTVarIO Map.empty
   workers <- newTVarIO Map.empty
@@ -606,7 +607,7 @@ superviseForever tasks conn identity workflows listenQueues datasources = do
 -- the supervisor skips it: the synthetic record's no-limit cadence always
 -- wins, and the row's presence is said out loud.
 dequeuePass :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-            => Tasks m -> Connection m -> Identity -> Snapshot m -> Maybe [Text] -> DataSourceRegistry m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
+            => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Maybe [Text] -> DataSourceRegistry m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeuePass tasks conn identity workflows listenQueues datasources = do
   passStart <- getCurrentTime
   transitioned <- runSystemDB conn.connSysdb (\db -> SystemDB.transitionDelayedWorkflows db)

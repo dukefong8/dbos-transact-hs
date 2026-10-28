@@ -73,7 +73,8 @@ import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Applications, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
-import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, unWorkflowInput)
+import DBOS.Transact.Serialization (CodecError (..), SerializationError, WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, unWorkflowInput)
+import DBOS.Transact.Serialization qualified as Serialization
 import DBOS.Transact.Config (Config (..))
 import DBOS.Transact.Config qualified as Config
 import DBOS.Transact.Connection (Connection (..), releaseConnection, acquireConnection, withConnection)
@@ -88,18 +89,17 @@ import DBOS.Transact.Management (ManagementEvent (..), StepInfo)
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
 import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, snapshotDatasources, thawDataSourceRegistry)
 import DBOS.Transact.Datasource qualified as Datasource (registerDataSource)
-import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, WorkflowRef, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, registerTypedWorkflow, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
-import DBOS.Transact.Registry qualified as Registry (registerWorkflowRef)
+import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
 import DBOS.Transact.TimeoutSweep (spawnTimeoutSweep)
-import DBOS.Transact.Workflow (RunOptions (..), StartOptions, Tasks, abortAll, newTasks, runRegisteredWorkflow, spawnTracked)
-import DBOS.Transact.Workflow qualified as Workflow (enqueueWorkflow, runWorkflowRef, startWorkflow)
+import DBOS.Transact.Workflow (ErasedWorkflow, RunOptions (..), StartOptions, Tasks, WorkflowRef, abortAll, newTasks, runRegisteredWorkflow, spawnTracked)
+import DBOS.Transact.Workflow qualified as Workflow (enqueueWorkflow, registerTypedWorkflow, registerWorkflowRef, runWorkflowRef, startWorkflow)
 
 -- | An instance is the application's stable configuration and registry;
 -- its executor slot is empty until launch and may be filled again after a
 -- shutdown. The lifecycle lock serializes launch against shutdown.
 data DBOS m = DBOS
   { dbos_config    :: Config,
-    dbos_registry  :: Registry m,
+    dbos_registry  :: Registry m (ErasedWorkflow m),
     dbos_datasources :: DataSourceRegistry m,
     dbos_executor  :: StrictMVar m (Maybe (Executor m)),
     dbos_lifecycle :: StrictMVar m ()
@@ -115,7 +115,7 @@ data Executor m = Executor
   { conn          :: Connection m,
     identity      :: Identity,
     datasources   :: DataSourceRegistry m,
-    workflows     :: Snapshot m,
+    workflows     :: Snapshot m (ErasedWorkflow m),
     listen_queues :: Maybe [Text],
     tasks         :: Tasks m,
     releaseTracer :: m ()
@@ -146,12 +146,12 @@ newDBOS config' = do
 -- at a time.
 registerWorkflow :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
                  => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-registerWorkflow dbos key body = registerTypedWorkflow dbos.dbos_registry key body
+registerWorkflow dbos key body = Workflow.registerTypedWorkflow dbos.dbos_registry key body
 
 -- | 'registerWorkflowRef' for a reference-typed workflow body.
 registerWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
                     => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
-registerWorkflowRef dbos key body = Registry.registerWorkflowRef dbos.dbos_registry key body
+registerWorkflowRef dbos key body = Workflow.registerWorkflowRef dbos.dbos_registry key body
 
 isLaunched :: MonadMVar m => DBOS m -> m Bool
 isLaunched dbos = maybe False (const True) <$> readMVar dbos.dbos_executor
@@ -279,7 +279,7 @@ enqueueWorkflow :: (MonadMVar m)
 enqueueWorkflow dbos key workflowId input queueName = do
   withExecutor dbos "enqueue a workflow" $ \executor ->
     case lookupSnapshotWorkflow key executor.workflows of
-      Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
+      Nothing -> pure (Left (TransactError.NotRegistered key))
       Just _ ->
         Workflow.enqueueWorkflow
           executor.conn
@@ -475,8 +475,8 @@ getWorkflowEvent dbos workflowId key wait = do
     Right (Just stored) ->
       case decodeWorkflowValue "event value" (Just stored) of
         Left err -> Left (case codecUnknownTag err of
-          Just tag -> TransactError.UnknownSerialization {name = tag}
-          Nothing -> TransactError.Deserialization "event value" (codecErrorText err))
+          Just tag -> TransactError.fromSerializationError (Serialization.UnknownSerialization {name = tag})
+          Nothing -> TransactError.fromSerializationError (Serialization.Deserialization "event value" (codecErrorText err)))
         Right value -> Right (Just value)
 
 -- | The raw, tag-preserving outside read. Internal to the port; apps use
@@ -507,8 +507,8 @@ getAllEvents dbos workflowId = do
     decode record =
       case (decodeWorkflowValue "event value" (Just (SerializedWorkflowValue record.eventValue (Serialization <$> record.eventSerialization))) :: Either CodecError Value) of
         Left err -> Left (case codecUnknownTag err of
-          Just tag -> TransactError.UnknownSerialization {name = tag}
-          Nothing -> TransactError.Deserialization "event value" (codecErrorText err))
+          Just tag -> TransactError.fromSerializationError (Serialization.UnknownSerialization {name = tag})
+          Nothing -> TransactError.fromSerializationError (Serialization.Deserialization "event value" (codecErrorText err)))
         Right value -> Right (record.eventKey, value)
 
 -- | The full row, not just the status enum: Python's @retrieve_workflow(...)
@@ -663,7 +663,7 @@ launchExecutor dbos executor = do
       modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
       pure (Right executor)
 
-startExecutor :: Config -> Identity -> Snapshot IO -> DataSourceRegistry IO -> SomeTracer IO -> IO () -> IO (Either (TransactError.Error TransactError.EngineOnly) (Executor IO))
+startExecutor :: Config -> Identity -> Snapshot IO (ErasedWorkflow IO) -> DataSourceRegistry IO -> SomeTracer IO -> IO () -> IO (Either (TransactError.Error TransactError.EngineOnly) (Executor IO))
 startExecutor config' identity' workflowsSnapshot sources tracer releaseTracer = do
   when (snapshotSize workflowsSnapshot == 0) $
     runTracer tracer EngineNoWorkflows

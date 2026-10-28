@@ -88,6 +88,7 @@ import DBOS.Transact
     enqueueOptionsOn,
     handleResult,
     launchWithEnvironment,
+    methodWorkflowKey,
     newDBOS,
     newWorkflowKey,
     registerDataSource,
@@ -171,7 +172,7 @@ tests =
             -- claimed by the latest registered version, and this shared
             -- database always has a newer nameless row.
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (21 :: Int)))
+            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (21 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right handle -> do
@@ -227,8 +228,8 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            first <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (21 :: Int)))
-            second <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (99 :: Int)))
+            first <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (21 :: Int)))
+            second <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (99 :: Int)))
             case (first, second) of
               (Right holder, Right joiner) -> do
                 joiner.workflowId @?= holder.workflowId
@@ -282,7 +283,7 @@ tests =
           enqueued <-
             clientEnqueueWorkflowWith
               client
-              "no-such-function"
+              (newWorkflowKey "no-such-function")
               (enqueueOptionsNew queueName) {workflowId = Just workflowText}
               Nothing
           case enqueued of
@@ -302,22 +303,22 @@ tests =
             options =
               (enqueueOptionsOn shape)
                 { workflowId = Just workflowText,
-                  className = Just "cls",
-                  configName = Just "cfg",
                   appVersion = Just "v1",
                   timeout = Just (secondsDuration 30),
                   attributes = Just (Map.fromList [("k", String "v")])
                 }
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          enqueued <- clientEnqueueWorkflowWith client "double" options Nothing
+          enqueued <- clientEnqueueWorkflowWith client (methodWorkflowKey "double" "cls") options Nothing
           case enqueued of
             Left err -> fail (show err)
             Right _ -> pure ()
           row <- readRow getBackend (WorkflowId workflowText)
           case row of
-            WorkflowRecord {workflowRecordName = name, workflowRecordQueueName = queue, workflowRecordPriority = priority, workflowRecordDeduplicationId = dedup, workflowRecordApplicationVersion = version, workflowRecordTimeout = budget, workflowRecordAttributes = attributes, workflowRecordStatus = status} -> do
+            WorkflowRecord {workflowRecordName = name, workflowRecordClassName = className, workflowRecordConfigName = configName, workflowRecordQueueName = queue, workflowRecordPriority = priority, workflowRecordDeduplicationId = dedup, workflowRecordApplicationVersion = version, workflowRecordTimeout = budget, workflowRecordAttributes = attributes, workflowRecordStatus = status} -> do
               name @?= Just "double"
+              className @?= Just "cls"
+              configName @?= Nothing
               queue @?= Just queueName
               priority @?= 3
               dedup @?= Just ("opts-" <> suffix)
@@ -358,7 +359,7 @@ tests =
             unpolled <-
               clientEnqueueWorkflowWith
                 client
-                "adopt"
+                (newWorkflowKey "adopt")
                 (enqueueOptionsNew unpolledQueue) {workflowId = Just unpolledText}
                 (Just (encodeWorkflowInput (7 :: Int)))
             case unpolled of
@@ -374,7 +375,7 @@ tests =
             adopted <-
               clientEnqueueWorkflowWith
                 client
-                "adopt"
+                (newWorkflowKey "adopt")
                 ((enqueueOptionsNew adoptedQueue) {workflowId = Just adoptedText, appVersion = Just appVersion})
                 (Just (encodeWorkflowInput (7 :: Int)))
             case adopted of
@@ -396,8 +397,8 @@ tests =
             workflowText = "hs-l2-client-idkey-id-" <> suffix
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          first <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
-          second <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+          first <- clientEnqueueWorkflowWith client (newWorkflowKey "double") (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+          second <- clientEnqueueWorkflowWith client (newWorkflowKey "double") (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
           case (first, second) of
             (Right holder, Right joiner) -> joiner.workflowId @?= holder.workflowId
             (Left err, _) -> fail ("the first enqueue failed: " <> show err)
@@ -409,7 +410,7 @@ tests =
         -- without invalidating the client, so a later call reconnects.
         closeClient client
         closeClient client
-        enqueued <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew "hs-l2-client-closed-q") Nothing
+        enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") (enqueueOptionsNew "hs-l2-client-closed-q") Nothing
         case enqueued of
           Left err -> fail ("expected the pool to reconnect, got: " <> show err)
           Right _ -> pure (),
@@ -455,7 +456,7 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- clientEnqueueWorkflowWith client "receiver" options Nothing
+            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "receiver") options Nothing
             handle <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -511,7 +512,7 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- clientEnqueueWorkflowWith client "batcher" options Nothing
+            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "batcher") options Nothing
             batch <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -563,7 +564,7 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- clientEnqueueWorkflowWith client "txreceiver" options Nothing
+            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "txreceiver") options Nothing
             receiver <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -847,7 +848,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            enqueued <- clientEnqueueWorkflowWith client "double" (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
             case enqueued of
               Left err -> fail (show err)
               Right _ -> pure ()
@@ -1045,7 +1046,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            enqueued <- clientEnqueueWorkflow client "double" queueName (Just (encodeWorkflowInput (21 :: Int)))
+            enqueued <- clientEnqueueWorkflow client (newWorkflowKey "double") queueName (Just (encodeWorkflowInput (21 :: Int)))
             handle <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -1251,7 +1252,7 @@ tests =
               Right _ -> pure ()
             let options :: EnqueueOptions
                 options = (enqueueOptionsOn ((enqueueNew queueName) {delay = Just (secondsDuration 3600)})) {workflowId = Just workflowText}
-            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (1 :: Int)))
+            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (1 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right _ -> pure ()
@@ -1285,7 +1286,7 @@ tests =
               (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
               (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
               (\_ -> do
-                enqueued <- clientEnqueueWorkflowInTx client "double" "enq-commit" (Tx.statement "row-1" (insertProbe table)) (enqueueOptionsNew queueName) (Just (encodeWorkflowInput (7 :: Int)))
+                enqueued <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-commit" (Tx.statement "row-1" (insertProbe table)) (enqueueOptionsNew queueName) (Just (encodeWorkflowInput (7 :: Int)))
                 handle <- case enqueued of
                   Left err -> fail (show err)
                   Right handle -> pure handle
@@ -1310,11 +1311,11 @@ tests =
             (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
             (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
             (\_ -> do
-              first <- clientEnqueueWorkflowInTx client "double" "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
+              first <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
               case first of
                 Left err -> fail (show err)
                 Right _ -> pure ()
-              second <- clientEnqueueWorkflowInTx client "double" "enq-repeat" (Tx.statement "row-2" (insertProbe table)) options Nothing
+              second <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-repeat" (Tx.statement "row-2" (insertProbe table)) options Nothing
               case second of
                 Left err -> fail (show err)
                 Right _ -> pure ()
@@ -1339,11 +1340,11 @@ tests =
             (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
             (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
             (\_ -> do
-              first <- clientEnqueueWorkflowInTx client "double" "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
+              first <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
               case first of
                 Left err -> fail (show err)
                 Right _ -> pure ()
-              conflicted <- clientEnqueueWorkflowInTx client "rival" "enq-rival" (Tx.statement "row-2" (insertProbe table)) rival Nothing
+              conflicted <- clientEnqueueWorkflowInTx client (newWorkflowKey "rival") "enq-rival" (Tx.statement "row-2" (insertProbe table)) rival Nothing
               case conflicted of
                 Left (SystemDatabase (SystemDBError.ConflictingWorkflow {})) -> pure ()
                 other -> fail ("expected the rival enqueue condemned, got: " <> show other)
@@ -1365,7 +1366,7 @@ tests =
             (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
             (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
             (\_ -> do
-              refused <- clientEnqueueWorkflowInTx client "double" "enq-join" (Tx.statement "row-1" (insertProbe table)) options Nothing
+              refused <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-join" (Tx.statement "row-1" (insertProbe table)) options Nothing
               case refused of
                 Left (InvalidArgument operation _)
                   | operation == "enqueue in transaction" -> pure ()
@@ -1401,7 +1402,7 @@ tests =
               Right _ -> pure ()
             let options :: EnqueueOptions
                 options = (enqueueOptionsNew queueName) {workflowId = Just queuedText}
-            enqueued <- clientEnqueueWorkflowWith client "double" options (Just (encodeWorkflowInput (2 :: Int)))
+            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (2 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right handle -> handle.workflowId @?= queuedText

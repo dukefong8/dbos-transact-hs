@@ -13,6 +13,13 @@
 module DBOS.Transact.Workflow
   ( runRegisteredWorkflow,
     runRegisteredWorkflowWithRow,
+    -- * Erased registration boundary (moved from Registry under ADR-0041;
+    -- the map, the key, and the refusal vocabulary stay there)
+    ErasedWorkflow (..),
+    WorkflowRef (..),
+    refName,
+    registerWorkflowRef,
+    registerTypedWorkflow,
     enqueueWorkflow,
     Enqueue (..),
     DuplicationPolicy (..),
@@ -61,7 +68,7 @@ import DBOS.Prelude
 -- the oracle matches with @join.is_cancelled()@. Nothing here forks,
 -- throws, or waits through base; all effects stay on io-classes.
 import Control.Exception (AsyncException (..))
-import Data.Aeson (FromJSON, Value (..), fromJSON)
+import Data.Aeson (FromJSON, ToJSON, Value (..), fromJSON)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -81,8 +88,10 @@ import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (runTracer)
-import DBOS.Transact.Registry (ErasedWorkflow (..), Snapshot, WorkflowKey (..), WorkflowRef (refKey, refRegistry), lookupRegistryWorkflow, lookupSnapshotWorkflow, refName, registryInstanceId, renderWorkflowKey)
-import DBOS.Transact.Serialization (WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, encodeWorkflowValue, unWorkflowInput)
+import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey (..), lookupRegistryWorkflow, lookupSnapshotWorkflow, registryInstanceId, renderWorkflowKey)
+import DBOS.Transact.Registry qualified as Registry (registerErasedWorkflow)
+import DBOS.Transact.Serialization (CodecError (..), SerializationError, WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowInput, decodeWorkflowValue, encodeAttributes, encodeWorkflowValue, unWorkflowInput)
+import DBOS.Transact.Serialization qualified as Serialization
 import DBOS.Transact.Step (WorkflowEvent (..))
 
 -- | Attempts before a workflow is parked as
@@ -94,7 +103,7 @@ maxRecoveryAttempts = 100
 -- The connection, resolved identity and task registry belong to the
 -- executor; the body takes the explicit context it runs in.
 runRegisteredWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
-                      => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+                      => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runRegisteredWorkflow tasks conn identity snapshot key workflowId input datasources = runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId input (workflowNewWorkflow conn identity key workflowId input Nothing) datasources
 
 -- | The execute-or-adopt core both runners share: one init decides whether
@@ -111,10 +120,10 @@ runRegisteredWorkflow tasks conn identity snapshot key workflowId input datasour
 -- rather than as a hang.
 
 runRegisteredWorkflowWithRow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
-                             => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+                             => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId@(WorkflowId workflowText) input new datasources =
   case lookupSnapshotWorkflow key snapshot of
-    Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
+    Nothing -> pure (Left (TransactError.NotRegistered key))
     Just workflow -> do
       initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new Nothing)
       case initialized of
@@ -771,7 +780,7 @@ debounceCreation queue now = case queue of
 -- handle must not stop the run — while a queued row is the supervisor's,
 -- as the oracle returns a polling handle for enqueues.
 startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-              => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+              => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflow tasks conn identity snapshot ref options input datasources =
   case traverse validateEnqueue options.startQueue of
     Left err -> pure (Left (TransactError.liftEngine err))
@@ -823,7 +832,7 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
               runTracer conn.connTracer (WorkflowAlreadyOwned workflowText)
               pure (Right (pollingHandle conn workflowText True))
           | otherwise -> case lookupSnapshotWorkflow key snapshot of
-              Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
+              Nothing -> pure (Left (TransactError.NotRegistered key))
               Just workflow -> do
                 channel <-
                   spawnLocal
@@ -833,6 +842,87 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
                     )
                 pure (Right (localHandle conn workflowText channel))
 
+-- | A registered workflow, holding where it was registered and under which
+-- identity. Mirrors Rust @WorkflowRef@: what registration returns and what
+-- a call site holds. The registry stores only the erased body; the argument
+-- and result types were checked once at registration rather than at every
+-- invocation by string. The port holds no type parameters — application
+-- values cross the boundary already serialized, as 'ErasedWorkflow' does —
+-- and no 'DBOS' handle: drivers that need a launched executor take it
+-- explicitly (see 'DBOS.Transact.Instance'). A launch does bind the
+-- reference's registry to its connection ('bindRegistryInstance'), which
+-- is what 'startChildWorkflow' compares against the
+-- running context to refuse a child started through another instance
+-- (ADR-0018, reversing the earlier "never pins an instance" note for
+-- exactly that refusal).
+data WorkflowRef m e = WorkflowRef
+  { refRegistry :: Registry m (ErasedWorkflow m),
+    refKey :: WorkflowKey
+  }
+
+instance Show (WorkflowRef m e) where
+  show ref = "WorkflowRef " <> Text.unpack (renderWorkflowKey ref.refKey)
+
+-- | The workflow's name: the bare name, not the full identity triple.
+refName :: WorkflowRef m e -> Text
+refName ref = case ref.refKey of WorkflowKey name _ _ -> name
+
+-- | The type-erased workflow body the engine resolves from a stored key.
+-- Application values and the application error channel have already been
+-- serialized by the registration boundary; the body takes the explicit
+-- context it runs in. Mirrors the oracle's @ErasedWorkflow@, whose failure
+-- channel is @Failure@ for the same reason: recovery and dequeue resolve
+-- bodies by name and have no application error type to name.
+newtype ErasedWorkflow m = ErasedWorkflow
+  { -- | The stored body, run at whatever execution the caller's scope
+    -- names: the rank-2 field is why converted and unconverted bodies can
+    -- share one registry.
+    runErasedWorkflow :: forall exec. Maybe SerializedWorkflowValue -> WorkflowCtx exec m -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
+  }
+
+-- | Register a typed workflow and hand back a reference to it. Only before
+-- launch snapshots the registry; a duplicate identity is refused.
+--
+-- Bodies take the scoped workflow view: the converted shape, where a body
+-- can only reach the scoped entries. The old context-level entry was
+-- deleted once every caller converted (C5b).
+registerWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
+                    => Registry m (ErasedWorkflow m) -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
+registerWorkflowRef registry key body = do
+  registered <- registerTypedWorkflow registry key body
+  pure ((\() -> WorkflowRef registry key) <$> registered)
+
+-- | Register a typed workflow and erase its JSON input and output types at
+-- the registry boundary. The stored representation is the same serialized
+-- value used by workflow rows and operation checkpoints.
+-- | Register a typed workflow whose body takes the scoped workflow view:
+-- the only shape left, now that the engine has no context-level entries —
+-- every durable call the body makes takes the view it was handed or one
+-- derived from it. The type-erased form is the same either way, so the
+-- registry seam is unchanged.
+registerTypedWorkflow :: forall argument result e m. (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
+                      => Registry m (ErasedWorkflow m) -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+registerTypedWorkflow registry key body = do
+  registered <-
+    Registry.registerErasedWorkflow registry key $ ErasedWorkflow $ \input wctx ->
+      case decodeWorkflowInput "argument" input of
+        Left err -> pure (Left (TransactError.FailureControl (TransactError.fromSerializationError (codecError "argument" err))))
+        Right argument -> do
+          result <- body argument wctx
+          pure $ case result of
+            Left err -> Left (TransactError.failureOf err)
+            Right value -> Right (Just (encodeWorkflowValue value))
+  pure (first TransactError.fromRegistryError registered)
+  where
+    codecError :: Text -> CodecError -> SerializationError
+    codecError what err =
+      case codecUnknownTag err of
+        Just tag -> Serialization.UnknownSerialization {name = tag}
+        Nothing -> case err of
+          CodecNotJson _ input -> Serialization.Deserialization what input
+          CodecTypeMismatch _ message -> Serialization.Deserialization what (Text.pack message)
+          CodecUnknownSerialization _ tag -> Serialization.UnknownSerialization {name = tag}
+
 -- | Runs the referenced workflow durably and waits for its result: one
 -- init records the row with everything the options name, then the shared
 -- execute-or-adopt core spawns the body when this call owns the row or
@@ -840,7 +930,7 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
 -- second init would always read back the start's foreign owner and poll a
 -- row nothing runs — so the record and the decision are one upsert.
 runWorkflowRef :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
-               => Tasks m -> Connection m -> Identity -> Snapshot m -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+               => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflowRef tasks conn identity snapshot ref options input datasources = do
   now <- timestampNow
   generated <- generatedWorkflowId conn
@@ -962,7 +1052,7 @@ startChildWorkflow wctx ref options input = do
                   | result.initResultShouldExecute && not (isTerminal result.initResultStatus) && result.initResultStatus /= MaxRecoveryAttemptsExceeded && result.initResultStatus /= Enqueued && result.initResultStatus /= Delayed -> do
                   resolved <- lookupRegistryWorkflow key (ref.refRegistry)
                   case resolved of
-                    Nothing -> pure (Left (TransactError.NotRegistered (renderWorkflowKey key)))
+                    Nothing -> pure (Left (TransactError.NotRegistered key))
                     Just child -> do
                       channel <-
                         spawnLocal spawner $ \childSpawner ->

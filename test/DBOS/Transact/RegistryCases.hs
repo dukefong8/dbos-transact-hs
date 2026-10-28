@@ -20,6 +20,7 @@ module DBOS.Transact.RegistryCases
     checkInstanceDistinct,
     checkKeyTriple,
     checkMalformedReported,
+    checkMethodDistinct,
     checkReferenceIdentity,
     checkSnapshotReopen,
     checkZeroArgCall,
@@ -30,6 +31,7 @@ module DBOS.Transact.RegistryCases
     scenarioInstanceDistinct,
     scenarioKeyTriple,
     scenarioMalformedReported,
+    scenarioMethodDistinct,
     scenarioReferenceIdentity,
     scenarioSnapshotReopen,
     scenarioZeroArgCall,
@@ -45,20 +47,23 @@ import DBOS.Transact.Context (testOwner, withWorkflow)
 import DBOS.Transact.Error (Error (..), Failure (..))
 import DBOS.Transact.Identity (Identity)
 import DBOS.Transact.Registry
-  ( ErasedWorkflow (..),
-    WorkflowRef (refKey),
-    instanceWorkflowKey,
+  ( instanceWorkflowKey,
     lookupSnapshotWorkflow,
+    methodWorkflowKey,
     newRegistry,
-    refName,
     registerErasedWorkflow,
-    registerTypedWorkflow,
-    registerWorkflowRef,
     renderWorkflowKey,
     snapshotRegistry,
     snapshotSize,
     thawRegistry,
     workflowKeyFromRow,
+  )
+import DBOS.Transact.Workflow
+  ( ErasedWorkflow (..),
+    WorkflowRef (refKey),
+    refName,
+    registerTypedWorkflow,
+    registerWorkflowRef,
   )
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, unWorkflowInput)
 
@@ -146,6 +151,23 @@ checkInstanceDistinct :: (Bool, Text) -> Either String ()
 checkInstanceDistinct (distinct, rendered)
   | not distinct = Left "expected the triple to differ from the bare name"
   | rendered /= "shared/Checkout/eu" = Left ("expected the qualified spelling, got: " <> Text.unpack rendered)
+  | otherwise = Right ()
+
+-- | A class-bound key with no instance is its own identity: it differs
+-- from the bare name and from the configured instance, and renders the
+-- pair. Mirrors @WorkflowKey::method@.
+scenarioMethodDistinct :: forall m. Monad m => RegistryFixture m -> m (Bool, Bool, Text)
+scenarioMethodDistinct _ = do
+  let free = newWorkflowKey "shared"
+      method = methodWorkflowKey "shared" "Checkout"
+      configured = instanceWorkflowKey "shared" "Checkout" "eu"
+  pure (free /= method, method /= configured, renderWorkflowKey method)
+
+checkMethodDistinct :: (Bool, Bool, Text) -> Either String ()
+checkMethodDistinct (fromFree, fromConfigured, rendered)
+  | not fromFree = Left "expected the method key to differ from the bare name"
+  | not fromConfigured = Left "expected the method key to differ from the configured instance"
+  | rendered /= "shared/Checkout" = Left ("expected the pair spelling, got: " <> Text.unpack rendered)
   | otherwise = Right ()
 
 -- | Empty class and config names resolve like nulls.

@@ -27,6 +27,7 @@ import DBOS.Transact.RegistryCases
     checkInstanceDistinct,
     checkKeyTriple,
     checkMalformedReported,
+    checkMethodDistinct,
     checkReferenceIdentity,
     checkSnapshotReopen,
     checkZeroArgCall,
@@ -37,6 +38,7 @@ import DBOS.Transact.RegistryCases
     scenarioInstanceDistinct,
     scenarioKeyTriple,
     scenarioMalformedReported,
+    scenarioMethodDistinct,
     scenarioReferenceIdentity,
     scenarioSnapshotReopen,
     scenarioZeroArgCall,
@@ -86,6 +88,7 @@ tests =
       simCase simFixture "empty class and config names resolve like nulls" scenarioEmptyNamesResolve checkEmptyNamesResolve traceSilent,
       simCase simFixture "an erased workflow round-trips through json" scenarioErasedRoundTrip checkErasedRoundTrip traceSilent,
       simCase simFixture "a malformed argument is reported rather than panicking" scenarioMalformedReported checkMalformedReported traceSilent,
+      simCase simFixture "a class-bound key with no instance is its own identity" scenarioMethodDistinct checkMethodDistinct traceSilent,
       simCase simFixture "a reference holds the identity it registered under" scenarioReferenceIdentity checkReferenceIdentity traceSilent,
       simCase simFixture "a reference to a duplicate identity is refused" scenarioDuplicateRefRefused checkDuplicateRefRefused traceSilent,
       simCase simFixture "a zero argument workflow is called with no input at all" scenarioZeroArgCall checkZeroArgCall traceSilent

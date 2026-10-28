@@ -28,8 +28,9 @@ import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Checkpoint (StepPlacement (..), placeCall)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx, ownerToken, stepId, withSystemDB, workflowId)
-import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText)
-import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText, fromSerializationError)
+import DBOS.Transact.Serialization (SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization qualified as Serialization
 
 data ReadStreamOptions = ReadStreamOptions
   { pollingInterval :: Maybe Duration,
@@ -227,8 +228,8 @@ readStreamWith place runDb caller wid key initialOffset options = do
           _ -> pure (Right ())
         isClose encoded = isStreamClosed encoded.encodedValue encoded.encodedSerialization
         decodeFailure codecError = case codecUnknownTag codecError of
-          Just tag -> UnknownSerialization {name = tag}
-          Nothing -> Deserialization "stream value" (codecErrorText codecError)
+          Just tag -> fromSerializationError (Serialization.UnknownSerialization {name = tag})
+          Nothing -> fromSerializationError (Serialization.Deserialization "stream value" (codecErrorText codecError))
 
 writeStream :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (Either (Error EngineOnly) ())
 writeStream wctx key value = do

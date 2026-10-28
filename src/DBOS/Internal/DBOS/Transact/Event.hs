@@ -18,7 +18,8 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), getEventStepName, setEventStepName)
-import DBOS.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization (SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Serialization qualified as Serialization
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx, insideAStep, nextStepId, ownerToken, stepCtxBoundary, withSystemDB, workflowId)
@@ -118,8 +119,8 @@ adoptEventValue found = case found of
   Right (Just encoded) ->
     case decodeWorkflowValue "event value" (Just (toStoredValue encoded)) of
       Left err -> Left (case codecUnknownTag err of
-        Just tag -> TransactError.UnknownSerialization {name = tag}
-        Nothing -> TransactError.Deserialization "event value" (codecErrorText err))
+        Just tag -> TransactError.fromSerializationError (Serialization.UnknownSerialization {name = tag})
+        Nothing -> TransactError.fromSerializationError (Serialization.Deserialization "event value" (codecErrorText err)))
       Right value -> Right (Just value)
   where
     toStoredValue encoded =

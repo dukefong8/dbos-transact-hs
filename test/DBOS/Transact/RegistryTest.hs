@@ -24,6 +24,7 @@ import DBOS.Transact.RegistryCases
     checkInstanceDistinct,
     checkKeyTriple,
     checkMalformedReported,
+    checkMethodDistinct,
     checkReferenceIdentity,
     checkSnapshotReopen,
     checkZeroArgCall,
@@ -34,6 +35,7 @@ import DBOS.Transact.RegistryCases
     scenarioInstanceDistinct,
     scenarioKeyTriple,
     scenarioMalformedReported,
+    scenarioMethodDistinct,
     scenarioReferenceIdentity,
     scenarioSnapshotReopen,
     scenarioZeroArgCall,
@@ -79,6 +81,7 @@ tests =
         liveCase (liveFixture <$> getBackend) "empty class and config names resolve like nulls" scenarioEmptyNamesResolve checkEmptyNamesResolve,
         liveCase (liveFixture <$> getBackend) "an erased workflow round-trips through json" scenarioErasedRoundTrip checkErasedRoundTrip,
         liveCase (liveFixture <$> getBackend) "a malformed argument is reported rather than panicking" scenarioMalformedReported checkMalformedReported,
+        liveCase (liveFixture <$> getBackend) "a class-bound key with no instance is its own identity" scenarioMethodDistinct checkMethodDistinct,
         liveCase (liveFixture <$> getBackend) "a reference holds the identity it registered under" scenarioReferenceIdentity checkReferenceIdentity,
         liveCase (liveFixture <$> getBackend) "a reference to a duplicate identity is refused" scenarioDuplicateRefRefused checkDuplicateRefRefused,
         liveCase (liveFixture <$> getBackend) "a zero argument workflow is called with no input at all" scenarioZeroArgCall checkZeroArgCall
