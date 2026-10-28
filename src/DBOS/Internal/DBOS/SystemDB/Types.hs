@@ -96,6 +96,8 @@ module DBOS.SystemDB.Types
     initialStatus,
     sleepStepName,
     recvStepName,
+    patchMarkerPrefix,
+    patchMarkerName,
     defaultChange,
     changeSet,
     changeIsLeave,
@@ -451,6 +453,18 @@ sleepStepName = "DBOS.sleep"
 -- | The step name @recv@ records. A cross-SDK constant.
 recvStepName :: Text
 recvStepName = "DBOS.recv"
+
+-- | What a patch marker's step name starts with: the marker for the patch
+-- named @v2@ is recorded as @DBOS.patch-v2@. A marker records that an
+-- execution took a patch's new path: a row with this name and nothing else
+-- at the position the patch was reached at, which is what a replay looks
+-- for there. Mirrors Rust @step_names::PATCH_PREFIX@.
+patchMarkerPrefix :: Text
+patchMarkerPrefix = "DBOS.patch-"
+
+-- | The marker step name for a patch of this name.
+patchMarkerName :: Text -> Text
+patchMarkerName name = patchMarkerPrefix <> name
 
 -- | Whether a partial update touches a field. The third state a plain
 -- 'Maybe' cannot carry: for a nullable column, "leave it alone" and "set it

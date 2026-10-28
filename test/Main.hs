@@ -35,6 +35,8 @@ import DBOS.Transact.MessageTest qualified as MessageTest
 import DBOS.Transact.MessageTestSim qualified as MessageSim
 import DBOS.Transact.OutboxTest qualified as OutboxTest
 import DBOS.Transact.OutboxTestSim qualified as OutboxSim
+import DBOS.Transact.PatchTest qualified as PatchTest
+import DBOS.Transact.PatchTestSim qualified as PatchSim
 import DBOS.Transact.QueueTest qualified as QueueTest
 import DBOS.Transact.QueueTestSim qualified as QueueSim
 import DBOS.Transact.RegistryTest qualified as RegistryTest
@@ -103,6 +105,8 @@ import Test.Tasty.Options (OptionSet)
 -- $> tasty MessageSim.tests
 --- $> tasty OutboxTest.tests
 -- $> tasty OutboxSim.tests
+--- $> tasty PatchTest.tests
+-- $> tasty PatchSim.tests
 --- $> tasty QueueTest.tests
 -- $> tasty QueueSim.tests
 --- $> tasty RegistryTest.tests
@@ -180,6 +184,7 @@ tests =
     , ManagementTest.tests
     , MessageTest.tests
     , OutboxTest.tests
+    , PatchTest.tests
     , QueueTest.tests
     , RegistryTest.tests
     , SelectTest.tests

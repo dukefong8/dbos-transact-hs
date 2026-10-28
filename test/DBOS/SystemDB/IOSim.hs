@@ -963,7 +963,16 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   rewindWorkflow db (WorkflowId wid) cut sysOpts caller = case sysRewindValidate cut sysOpts of
     Left err -> pure (Left err)
     Right () -> memRewind db wid cut sysOpts caller
-  checkStep db (WorkflowId wid) stepId _name = Right . Map.lookup (wid, stepId) <$> readTVarIO db.memSteps
+  checkStep db (WorkflowId wid) stepId name = do
+    steps <- readTVarIO db.memSteps
+    -- A row recorded under another name is the old code's step, refused
+    -- like Postgres refuses it: the name check @operation_outputs@
+    -- applies is what a patch asks about.
+    pure $ case Map.lookup (wid, stepId) steps of
+      Nothing -> Right Nothing
+      Just record
+        | record.stepRecordStepName == name -> Right (Just record)
+        | otherwise -> Left (UnexpectedStep {workflowId = wid, stepId = stepId, expected = name, recorded = record.stepRecordStepName})
   recordStep db (WorkflowId wid) stepId name outcome serialization timing token = atomically $ do
     rows <- readTVar db.memRows
     case Map.lookup wid rows of

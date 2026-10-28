@@ -76,6 +76,7 @@ library dbos-transact-internals
     DBOS.Transact.Logger
     DBOS.Transact.Management
     DBOS.Transact.Message
+    DBOS.Transact.Patch
     DBOS.Transact.Queue
     DBOS.Transact.Recovery
     DBOS.Transact.Registry
@@ -176,6 +177,9 @@ test-suite test
     DBOS.Transact.OutboxCases
     DBOS.Transact.OutboxTest
     DBOS.Transact.OutboxTestSim
+    DBOS.Transact.PatchCases
+    DBOS.Transact.PatchTest
+    DBOS.Transact.PatchTestSim
     DBOS.Transact.WaitCases
     DBOS.Transact.WaitTest
     DBOS.Transact.WaitTestSim

@@ -82,6 +82,8 @@ module DBOS.Transact.Context
 
     -- * Execution readers
     nextStepId,
+    peekStepId,
+    claimStepId,
     nextWorkflowMarker,
     workflowId,
     stepCtxStatus,
@@ -482,6 +484,25 @@ nextStepId wctx = atomically $ do
     current <- readTVar wctx.wctxState.nextStepIdRef
     writeTVar wctx.wctxState.nextStepIdRef (current + 1)
     pure current
+
+-- | The id the next call will take, without taking it. For a call that has
+-- to look at a position before deciding whether to occupy it — a patch —
+-- paired with 'claimStepId' to learn whether anything else took the
+-- position while it looked. Mirrors Rust @Ctx::peek_step_id@.
+peekStepId :: MonadSTM m => WorkflowCtx exec m -> m Int
+peekStepId wctx = readTVarIO wctx.wctxState.nextStepIdRef
+
+-- | Takes @stepId@ if it is still the next id, reporting whether it was.
+-- One compare-and-swap, so the check and the take are a single step:
+-- 'False' means some other call of this execution took an id since
+-- @stepId@ was peeked, and the counter is left as that call left it.
+-- Mirrors Rust @Ctx::claim_step_id@.
+claimStepId :: MonadSTM m => WorkflowCtx exec m -> Int -> m Bool
+claimStepId wctx stepId' = atomically $ do
+  current <- readTVar wctx.wctxState.nextStepIdRef
+  if current == stepId'
+    then writeTVar wctx.wctxState.nextStepIdRef (current + 1) >> pure True
+    else pure False
 
 -- | Mint the next attempt marker in this execution. Markers spend their
 -- own sequence beside the step ids, as in the oracle.

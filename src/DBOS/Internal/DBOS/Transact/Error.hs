@@ -136,6 +136,13 @@ data Error e
     StepTimeout {step :: Text, timeout :: Duration}
   | -- | No stream value arrived before the per-value read timeout.
     StreamTimeout {streamWorkflowId :: Text, streamKey :: Text, streamTimeout :: Maybe Duration}
+  | -- | Another durable call of the same workflow took the step position a
+    -- patch was built at. Refused rather than recorded elsewhere: a patch
+    -- fixes its position where it is built but occupies it only once it has
+    -- read the history there, so a call built in between took the position
+    -- first. A workflow's outcome, like 'StepBuiltElsewhere'. Mirrors Rust
+    -- @Error::PatchNondeterminism@.
+    PatchNondeterminism {workflowId :: Text, patch :: Text, stepId :: Int}
   | -- | Every attempt failed. Carries all of them, oldest first. Mirrors
     -- Rust @Error::MaxStepRetriesExceeded@.
     MaxStepRetriesExceeded {step :: Text, attempts :: Int, errors :: [Error e]}
@@ -185,6 +192,7 @@ renderErrorWithoutApplication = \case
   StepBuiltElsewhere step built polled -> "step " <> step <> " was built " <> built <> " but polled " <> polled <> ": a step takes its id where it is built"
   StepTimeout step limit -> "the step " <> step <> " exceeded its " <> pack (show (durationAsMillis limit)) <> "ms timeout"
   StreamTimeout workflowText key limit -> "reading stream " <> key <> " from workflow " <> workflowText <> " timed out" <> maybe "" (\duration -> " after " <> pack (show (durationAsMillis duration)) <> "ms") limit
+  PatchNondeterminism workflowId patch stepId -> "patch " <> patch <> " in workflow " <> workflowId <> " lost step " <> pack (show stepId) <> " to a call built before it was awaited: await a patch where it is written, from sequential workflow code"
   MaxStepRetriesExceeded step attempts _ -> "the step " <> step <> " failed after " <> pack (show attempts) <> " attempts"
 
 -- | Haskell best practice for the oracle's @Display@: the 'Exception'
@@ -228,6 +236,7 @@ instance ToJSON e => ToJSON (Error e) where
     StepBuiltElsewhere step built polled -> tagged "StepBuiltElsewhere" (object ["step" .= step, "built" .= built, "polled" .= polled])
     StepTimeout step limit -> tagged "StepTimeout" (object ["step" .= step, "timeout" .= limit])
     StreamTimeout workflowText key limit -> tagged "StreamTimeout" (object ["workflowId" .= workflowText, "key" .= key, "timeout" .= limit])
+    PatchNondeterminism workflowId patch stepId -> tagged "PatchNondeterminism" (object ["workflowId" .= workflowId, "patch" .= patch, "stepId" .= stepId])
     MaxStepRetriesExceeded step attempts errors -> tagged "MaxStepRetriesExceeded" (object ["step" .= step, "attempts" .= attempts, "errors" .= errors])
     where
       tagged tag payload = object [tag .= payload]
@@ -262,6 +271,7 @@ instance FromJSON e => FromJSON (Error e) where
       "StepBuiltElsewhere"          -> withObject "StepBuiltElsewhere" (\o -> StepBuiltElsewhere <$> o .: "step" <*> o .: "built" <*> o .: "polled") payload
       "StepTimeout"                 -> withObject "StepTimeout" (\o -> StepTimeout <$> o .: "step" <*> o .: "timeout") payload
       "StreamTimeout"               -> withObject "StreamTimeout" (\o -> StreamTimeout <$> o .: "workflowId" <*> o .: "key" <*> o .: "timeout") payload
+      "PatchNondeterminism"         -> withObject "PatchNondeterminism" (\o -> PatchNondeterminism <$> o .: "workflowId" <*> o .: "patch" <*> o .: "stepId") payload
       "MaxStepRetriesExceeded"      -> withObject "MaxStepRetriesExceeded" (\o -> MaxStepRetriesExceeded <$> o .: "step" <*> o .: "attempts" <*> o .: "errors") payload
       _                             -> fail ("unknown error variant " <> show tag)
     _ -> fail "an error records exactly one tagged variant"

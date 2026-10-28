@@ -221,6 +221,12 @@ module DBOS.Transact
     pendingSleep,
     sleepPlain,
 
+  -- pattern-patch
+    patchStep,
+    deprecatePatchStep,
+    pendingPatch,
+    pendingDeprecatePatch,
+
   -- pattern-idempotency: WorkflowId, StartOptions.startWorkflowId (see Workflow)
 
   -- pattern-debouncing (TypeScript Debouncer; no Rust counterpart, ADR-0028)
@@ -329,6 +335,7 @@ import DBOS.Transact.Instance (DBOS, Executor, cancelWorkflow, cancelWorkflows, 
 import DBOS.Transact.Logger (logDebug, logError, logInfo, logWarn)
 import DBOS.Transact.Management (ListWorkflowStepsOptions (..), PortableWorkflowError (..), StepFailure (..), StepInfo (..), StepOutcome (..), StepOutput (..), cancelWorkflowsInWorkflow, defaultListWorkflowStepsOptions, deleteWorkflowsInWorkflow, forkFromInWorkflow, forkWorkflowsInWorkflow, listWorkflowStepsInWorkflow, listWorkflowStepsWithInWorkflow, listWorkflowsInWorkflow, resumeWorkflowsInWorkflow, rewindWorkflowsInWorkflow, setWorkflowDelayInWorkflow, updateWorkflowAttributesInWorkflow)
 import DBOS.Transact.Message (Forks (..), Message (..), SendBulkOptions (..), SendOptions (..), recv, send, sendBulk, sendBulkOptionsDefault, sendBulkWith, sendOptionsDefault, sendWith)
+import DBOS.Transact.Patch (deprecatePatchStep, patchStep, pendingDeprecatePatch, pendingPatch)
 import DBOS.Transact.Queue (Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), defaultQueueChange, defaultQueueOptions, deleteQueue, listQueues, queue, registerQueue, updateQueue)
 import DBOS.Transact.Registry (RegistryError, WorkflowKey (..), methodWorkflowKey, newWorkflowKey, renderRegistryError)
 import DBOS.Transact.Select (SelectArm (..), Winner (..), selectStep)

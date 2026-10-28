@@ -87,5 +87,8 @@ tests =
         -- Rust's derived Deserialize treats absent Option fields as None;
         -- aeson's .: does not, so the key instance uses .:? instead.
         (fromJSON (object ["name" .= ("x" :: Text)]) :: Result WorkflowKey)
-          @?= Success (newWorkflowKey "x")
+          @?= Success (newWorkflowKey "x"),
+      testCase "patch nondeterminism round-trips under its own tag" $ do
+        let err = PatchNondeterminism {workflowId = "wf", patch = "v2", stepId = 0} :: Error CardDeclined
+        decodeErrorText (encodeErrorText err) @?= Right err
     ]
