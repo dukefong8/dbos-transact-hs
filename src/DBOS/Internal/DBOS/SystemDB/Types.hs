@@ -46,6 +46,13 @@ module DBOS.SystemDB.Types
     durationSince,
     timestampToIso8601,
     timestampFromIso8601,
+    WorkflowKey (..),
+    newWorkflowKey,
+    methodWorkflowKey,
+    instanceWorkflowKey,
+    workflowKeyFromRow,
+    renderWorkflowKey,
+    workflowRecordKey,
     NewWorkflow (..),
     WorkflowRecord (..),
     Change (..),
@@ -182,7 +189,7 @@ where
 import DBOS.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, withObject, withScientific, withText, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, withObject, withScientific, withText, (.:), (.:?), (.!=), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Set qualified as Set
 import DBOS.SystemDB.Error (Error, invalidInput)
@@ -302,7 +309,7 @@ data NewWorkflow = NewWorkflow
     newWorkflowQueuePartitionKey  :: Maybe Text,
     newWorkflowDelay              :: Maybe Duration,
     newWorkflowIsDebounced        :: Bool,
-    newWorkflowDebounceDeadline   :: Maybe Timestamp,
+    newWorkflowDebounceTimeout    :: Maybe Duration,
     newWorkflowTimeout            :: Maybe Duration,
     newWorkflowDeadline           :: Maybe Timestamp,
     newWorkflowExecutorId         :: Maybe Text,
@@ -333,7 +340,7 @@ newWorkflow workflowId =
       newWorkflowQueuePartitionKey = Nothing,
       newWorkflowDelay = Nothing,
       newWorkflowIsDebounced = False,
-      newWorkflowDebounceDeadline = Nothing,
+      newWorkflowDebounceTimeout = Nothing,
       newWorkflowTimeout = Nothing,
       newWorkflowDeadline = Nothing,
       newWorkflowExecutorId = Nothing,
@@ -355,7 +362,7 @@ validateNewWorkflow new
   | Text.null new.newWorkflowId = Left (invalidInput "workflow_id" "must not be empty")
   | otherwise = case findEmpty optionalFields of
       Just field -> Left (invalidInput field "must be absent rather than empty")
-      Nothing -> case findBadDuration [("delay", new.newWorkflowDelay), ("timeout", new.newWorkflowTimeout)] of
+      Nothing -> case findBadDuration [("delay", new.newWorkflowDelay), ("timeout", new.newWorkflowTimeout), ("debounce_timeout", new.newWorkflowDebounceTimeout)] of
         Just err -> Left err
         Nothing    -> validateAttributes new.newWorkflowAttributes
   where
@@ -375,9 +382,9 @@ validateNewWorkflow new
       Just (field, _) -> Just field
       Nothing         -> Nothing
     -- One field at a time, in oracle order: a zero duration is refused
-    -- before storability is asked, and delay reports before timeout,
-    -- exactly as @validate_positive_duration@ loops them. Mirrors Rust
-    -- @NewWorkflow::validate@.
+    -- before storability is asked, and delay reports before timeout
+    -- before debounce_timeout, exactly as @validate_positive_duration@
+    -- loops them. Mirrors Rust @NewWorkflow::validate@.
     findBadDuration [] = Nothing
     findBadDuration ((field, duration) : rest) = case duration of
       Nothing -> findBadDuration rest
@@ -406,6 +413,59 @@ initialStatus new = case (new.newWorkflowQueueName, new.newWorkflowDelay) of
   (Nothing, _)      -> Pending
   (Just _, Nothing) -> Enqueued
   (Just _, Just _)  -> Delayed
+
+-- | What identifies a workflow, as the @workflow_status@ row stores it.
+-- Three columns rather than one name, because that is what Conductor and
+-- Console resolve against and what a configured instance needs. Mirrors
+-- @WorkflowKey@ in Rust @sysdb/types.rs@ (moved there from @registry.rs@
+-- in #135, and here from @DBOS.Transact.Registry@ for the same reason:
+-- the system-database layer names keys without depending on the engine).
+data WorkflowKey = WorkflowKey
+  { name :: Text,
+    className :: Maybe Text,
+    configName :: Maybe Text
+  }
+  deriving stock (Eq, Ord, Show)
+
+-- | A free function's workflow identity.
+newWorkflowKey :: Text -> WorkflowKey
+newWorkflowKey workflowName = WorkflowKey workflowName Nothing Nothing
+
+-- | A class-bound workflow's identity, with no configured instance.
+methodWorkflowKey :: Text -> Text -> WorkflowKey
+methodWorkflowKey workflowName className = WorkflowKey workflowName (Just className) Nothing
+
+-- | A method workflow's configured identity.
+instanceWorkflowKey :: Text -> Text -> Text -> WorkflowKey
+instanceWorkflowKey workflowName className configName =
+  WorkflowKey workflowName (Just className) (Just configName)
+
+-- | Rebuild an identity from a status row. Rust normalizes empty class and
+-- config names to absence so rows written by Java and Python resolve alike.
+workflowKeyFromRow :: Text -> Maybe Text -> Maybe Text -> WorkflowKey
+workflowKeyFromRow name className configName =
+  WorkflowKey name (nonEmpty className) (nonEmpty configName)
+  where
+    nonEmpty = (>>= \value -> if value == "" then Nothing else Just value)
+
+-- | The identity's stable external spelling.
+renderWorkflowKey :: WorkflowKey -> Text
+renderWorkflowKey (WorkflowKey name className configName) =
+  case (className, configName) of
+    (Just className', Just configName') -> name <> "/" <> className' <> "/" <> configName'
+    (Just className', Nothing) -> name <> "/" <> className'
+    _ -> name
+
+-- | Rust's derived serde shape (@name@/@class_name@/@config_name@), so a
+-- recorded error carrying a key decodes back to the key on any SDK.
+-- Optional fields accept absence like Rust's derived @Deserialize@ does.
+instance ToJSON WorkflowKey where
+  toJSON (WorkflowKey name className configName) =
+    object ["name" .= name, "class_name" .= className, "config_name" .= configName]
+
+instance FromJSON WorkflowKey where
+  parseJSON = withObject "WorkflowKey" $ \fields ->
+    WorkflowKey <$> fields .: "name" <*> fields .:? "class_name" .!= Nothing <*> fields .:? "config_name" .!= Nothing
 
 -- | A row of @workflow_status@. Mirrors Rust @WorkflowRecord@: shaped like
 -- the row, not like the domain — fields mirror columns one for one,
@@ -453,6 +513,15 @@ data WorkflowRecord = WorkflowRecord
     workflowRecordAttributes         :: Maybe Text
   }
   deriving stock (Eq, Show)
+
+-- | The identity the row belongs to, if it names one: an absent or empty
+-- name is no key, as empty spells absence on rows written elsewhere.
+-- Mirrors Rust @WorkflowRecord::key@.
+workflowRecordKey :: WorkflowRecord -> Maybe WorkflowKey
+workflowRecordKey row = case row.workflowRecordName of
+  Nothing -> Nothing
+  Just "" -> Nothing
+  Just name -> Just (workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName)
 
 -- | The step names the engine records for its own operations. Stored
 -- contract: each lands in @operation_outputs.function_name@, where a replay
@@ -1332,12 +1401,10 @@ data VersionInfo = VersionInfo
 -- transposing two would compile. No smart constructor, for the same reason.
 -- Mirrors Rust @DebounceRequest@.
 data DebounceRequest = DebounceRequest
-  { debounceRequestWorkflowName    :: Text,
-    debounceRequestClassName       :: Maybe Text,
-    debounceRequestConfigName      :: Maybe Text,
+  { debounceRequestWorkflow        :: WorkflowKey,
     debounceRequestQueueName       :: Text,
     debounceRequestDeduplicationId :: Text,
-    debounceRequestDelayUntil      :: Timestamp,
+    debounceRequestPeriod          :: Duration,
     debounceRequestInputs          :: Maybe Text,
     debounceRequestSerialization   :: Maybe Text,
     debounceRequestApplicationName :: Maybe Text
@@ -1345,26 +1412,39 @@ data DebounceRequest = DebounceRequest
   deriving stock (Eq, Show)
 
 -- | Rejects the values no writer could have stored, so a bounce cannot
--- silently match nothing. Mirrors @DebounceRequest::validate@.
+-- silently match nothing. The period is held to the rule @delay@ is: a
+-- positive duration that fits in milliseconds. The key is matched on all
+-- three parts, so a bounce extends only the same workflow; an empty class
+-- or instance is absent rather than a value, and matching one would find
+-- no row. Mirrors @DebounceRequest::validate@.
 debounceValidate :: DebounceRequest -> Either Error ()
 debounceValidate request
-  | Text.null request.debounceRequestWorkflowName =
-      Left (invalidInput "workflow_name" "must not be empty")
-  | Text.null request.debounceRequestQueueName =
-      Left (invalidInput "queue_name" "must not be empty")
-  | Text.null request.debounceRequestDeduplicationId =
-      Left (invalidInput "deduplication_id" "must not be empty")
-  | otherwise = case findEmpty optionals of
-      Just field -> Left (invalidInput field "must be absent rather than empty")
-      Nothing    -> Right ()
+  | durationIsZero request.debounceRequestPeriod =
+      Left (invalidInput "period" "must be a positive, non-zero duration")
+  | otherwise = case durationToMs "period" request.debounceRequestPeriod of
+      Left err -> Left err
+      Right _ -> case findRequired required of
+        Just field -> Left (invalidInput field "must not be empty")
+        Nothing -> case findEmpty optionals of
+          Just field -> Left (invalidInput field "must be absent rather than empty")
+          Nothing -> Right ()
   where
+    WorkflowKey workflowName className configName = request.debounceRequestWorkflow
+    required =
+      [ ("workflow.name", workflowName),
+        ("queue_name", request.debounceRequestQueueName),
+        ("deduplication_id", request.debounceRequestDeduplicationId)
+      ]
     optionals =
-      [ ("class_name", request.debounceRequestClassName),
-        ("config_name", request.debounceRequestConfigName),
+      [ ("workflow.class_name", className),
+        ("workflow.config_name", configName),
         ("inputs", request.debounceRequestInputs),
         ("serialization", request.debounceRequestSerialization),
         ("application_name", request.debounceRequestApplicationName)
       ]
+    findRequired fields = case find (Text.null . snd) fields of
+      Just (field, _) -> Just field
+      Nothing         -> Nothing
     findEmpty fields = case find (maybe False Text.null . snd) fields of
       Just (field, _) -> Just field
       Nothing         -> Nothing

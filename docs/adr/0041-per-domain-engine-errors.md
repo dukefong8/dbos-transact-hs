@@ -125,6 +125,19 @@ old rows.
   erasure boundary homed in `Workflow`; Rust `error.rs` maps to central
   `Error` plus the `Registry`-homed and `Serialization`-homed fragments.
   No constructor changes owner without amending this ADR.
+- Amendment 2026-10-28 (S10-U1): the oracle itself moved `WorkflowKey`
+  (`registry.rs` → `sysdb/types.rs` in #135, so the sysdb layer names keys
+  without depending on the engine), and the port follows: `WorkflowKey`
+  (type, smart constructors, `workflowKeyFromRow`, render, JSON,
+  `workflowRecordKey`) now lives in `DBOS.SystemDB.Types`. `RegistryError`
+  stays homed in `Registry` and names the imported key. Double-move
+  history: ADR-0040 leaf → this ADR's Registry merge → this move. The move
+  is DAG-safe: `Types` imports only Prelude/Aeson/containers/Set/
+  `SystemDB.Error`/time (the key needs Aeson+Text), and no module under
+  `DBOS.SystemDB.*` imports `Registry` or the engine error channel — only
+  the sanctioned `Transact.Logger` seam — so the new `Registry→Types` and
+  `Transact.Error→Types` edges close no cycle. Facade export list
+  unchanged (import source lines only).
 - Every new engine variant in a homed fragment touches two places (fragment
   type plus central mapping arm). The compiler enforces both. Variants in
   the central remainder touch one place plus delegated logic arms.

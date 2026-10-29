@@ -85,3 +85,25 @@ structurally absent: every path answers the bounced or enqueued row's id.
   but not queue-scoped: a due DELAYED row moves to ENQUEUED (releasing a
   debounced key) on every queue, listened or not. The timeout-cap case
   keeps its row undue for exactly this reason.
+
+## Amendment 2026-10-28 (S10 engine U4a/b: Rust #135 surface)
+
+- `DebounceOptions` (per-call id only) plus `debounceWith` and
+  `debounceOptionsDefault`: a fresh row takes an offered id it does not
+  know; a reused one is a conflict, never a join (the sysdb debounced arm
+  refuses). No stored-id counterpart exists to refuse, and the queue
+  options a debounce owns are built internally, so the oracle's
+  stored-id/owned-options refusals have no trigger here; app-name shape
+  validation stays at config/launch like every other surface.
+- `refuseDurations` replaces the `checkPeriod` message: period and
+  timeout go through the database's own storability check and report as
+  `InvalidArgument` to `"debounce a workflow"` (the `refusedArgument`
+  mapping), so the surface cannot disagree with the write.
+- `classifyBounce` compares the whole key (config included, empty as
+  absent) and names the refusing holder; a same-key unowned holder
+  retries after `retryPauseMicros` (100ms, `MonadDelay` on the three
+  entries) instead of busy-looping.
+- Facade grows by `DebounceOptions (..)`, `debounceOptionsDefault`,
+  `debounceWith`, `debounceOperation` (DebouncerClient rides the next
+  unit with its approval). The deduplication-id respelling is a separate
+  wire decision (adopted with its own ADR) and does not ride this note.

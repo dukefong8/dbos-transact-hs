@@ -87,6 +87,7 @@ import DBOS.SystemDB
     messageTo,
     newSchedule,
     millisDuration,
+    newWorkflowKey,
     newWorkflow,
     parseApplicationName,
     secondsDuration,
@@ -97,6 +98,7 @@ import DBOS.SystemDB
     timestampToEpochMs,
   )
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
+import DBOS.SystemDB.Postgres.Backend qualified as Backend
 import DBOS.SystemDB.Postgres
   ( Config (..),
     DbosMigration (..),
@@ -1726,6 +1728,55 @@ queueTests getBackend =
           case refused of
             Left (InvalidInput {}) -> pure ()
             other -> fail ("expected InvalidInput, got: " <> show other),
+      testCase "a retried insert keeps the input a bounce wrote since" $ do
+        -- Mirrors Rust a_retried_insert_keeps_the_input_a_bounce_wrote_since:
+        -- the same creator token finds its own row (a lost acknowledgement,
+        -- staged through the init seam), and the retry must not undo the
+        -- bounce's input replacement.
+        unique <- freshWorkflowId
+        let wid = "hs-l2-init-retry-" <> Text.take 8 unique
+            name = "q-" <> Text.take 8 unique
+            key = "dedup-" <> Text.take 8 unique
+            creator = "twin-creator-" <> unique
+            new input =
+              (newWorkflow wid)
+                { newWorkflowName = Just "bouncer",
+                  newWorkflowQueueName = Just name,
+                  newWorkflowDeduplicationId = Just key,
+                  newWorkflowDelay = Just (secondsDuration 60),
+                  newWorkflowIsDebounced = True,
+                  newWorkflowInput = Just input
+                }
+            request =
+              DebounceRequest
+                { debounceRequestWorkflow = newWorkflowKey "bouncer",
+                  debounceRequestQueueName = name,
+                  debounceRequestDeduplicationId = key,
+                  debounceRequestPeriod = secondsDuration 1,
+                  debounceRequestInputs = Just "{\"n\":2}",
+                  debounceRequestSerialization = Nothing,
+                  debounceRequestApplicationName = Nothing
+                }
+        withBackend getBackend $ \env -> do
+          now <- timestampNow
+          first <- Backend.initWorkflowAs env (new "{\"n\":1}") creator now
+          case first of
+            Left err -> fail ("expected the first insert to create, got: " <> show err)
+            Right created -> created.initResultShouldExecute @?= True
+          bounced <- debounceDelayedWorkflow env request Nothing
+          case bounced of
+            Left err -> fail ("expected the bounce to extend, got: " <> show err)
+            Right _ -> pure ()
+          -- A visibly later stamp: real retries arrive after backoff, and
+          -- the same-millisecond retry would read inserted and undo the
+          -- bounce this test guards.
+          later <- pure (timestampFromEpochMs (timestampToEpochMs now + 1000))
+          retried <- Backend.initWorkflowAs env (new "{\"n\":1}") creator later
+          case retried of
+            Left err -> fail ("expected the retry to join its own row, got: " <> show err)
+            Right joined -> joined.initResultShouldExecute @?= True
+          (input, _, _) <- payloadRows env wid
+          input @?= Just "{\"n\":2}",
       testCase "recording the launch twice with the same child is idempotent" $ do
         parent <- freshWorkflowId
         child <- freshWorkflowId
@@ -1848,12 +1899,10 @@ latestVersion env = do
 bounceRequest :: Text -> Text -> DebounceRequest
 bounceRequest queueName key =
   DebounceRequest
-    { debounceRequestWorkflowName = "bouncer",
-      debounceRequestClassName = Nothing,
-      debounceRequestConfigName = Nothing,
+    { debounceRequestWorkflow = newWorkflowKey "bouncer",
       debounceRequestQueueName = queueName,
       debounceRequestDeduplicationId = key,
-      debounceRequestDelayUntil = timestampFromEpochMs 2000,
+      debounceRequestPeriod = millisDuration 2000,
       debounceRequestInputs = Just "{\"n\":2}",
       debounceRequestSerialization = Nothing,
       debounceRequestApplicationName = Nothing

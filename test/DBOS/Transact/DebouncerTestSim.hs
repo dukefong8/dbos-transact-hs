@@ -36,7 +36,14 @@ tests =
       simCase simDebouncerFixture "a second debounce coalesces onto the same row" scenarioSecondDebounceCoalesces checkSecondDebounceCoalesces traceSecondDebounceCoalesces,
       simCase simDebouncerFixture "a foreign holder refuses the debounce" scenarioForeignHolderRefused checkForeignHolderRefused traceForeignHolderRefused,
       simCase simDebouncerFixture "debouncing inside a workflow records a step" scenarioInWorkflowDebounceRecordsStep checkInWorkflowDebounceRecordsStep traceInWorkflowDebounceRecordsStep,
-      simCase simDebouncerFixture "a timeout caps the extension" scenarioTimeoutCapsExtension checkTimeoutCapsExtension traceTimeoutCapsExtension
+      simCase simDebouncerFixture "a timeout caps the extension" scenarioTimeoutCapsExtension checkTimeoutCapsExtension traceTimeoutCapsExtension,
+      simCase simDebouncerFixture "a debounced creation lands its release on the deadline" scenarioDebouncedCapAtCreation checkDebouncedCapAtCreation traceDebouncedCapAtCreation,
+      simCase simDebouncerFixture "a pinned id names the fresh row" scenarioPinnedIdNamesFreshRow checkPinnedIdNamesFreshRow tracePinnedId,
+      simCase simDebouncerFixture "a pinned id reused across cycles is a conflict" scenarioPinnedIdReusedAcrossCycles checkPinnedIdReusedAcrossCycles tracePinnedId,
+      simCase simDebouncerFixture "a zero or unstorable debounce duration is refused" scenarioDebounceDurationsRefused checkDebounceDurationsRefused tracePinnedId,
+      simCase simDebouncerFixture "a cancelled debounce frees its key" scenarioCancelledDebounceFreesKey checkCancelledDebounceFreesKey tracePinnedId,
+      simCase simDebouncerFixture "a debounce inside a step is refused" scenarioDebounceInsideStepRefused checkDebounceInsideStepRefused tracePinnedId,
+      simCase simDebouncerFixture "a key collision between workflows is refused" scenarioKeyCollisionRefused checkKeyCollisionRefused tracePinnedId
     ]
 
 simDebouncerFixture :: forall s. IOSim s (DebouncerFixture (IOSim s))
@@ -73,6 +80,20 @@ simDebouncerFixture = do
           Right joined -> pure (Right joined.workflowId)
           Left err -> pure (Left err)
   _ <- registerWorkflow dbos (newWorkflowKey "debounce-parent") parentBody >>= either (fail . show) pure
+  -- The in-step refusal's parent: its step calls the debounce, which the
+  -- step boundary refuses. Only the refusal case runs it.
+  let stepParentBody :: forall exec. Text -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
+      stepParentBody _ wctx = do
+        outcome <- runStep wctx "attempt" $ \_ -> do
+          debounced <- debounceInWorkflow wctx targetRef (debouncerNew {debouncerQueueName = Just targetQueue}) "in-step-key" (secondsDuration 3) Nothing
+          case debounced of
+            Left (InsideStep operation) -> pure operation
+            Left err -> throwIO (userError (show err))
+            Right joined -> pure ("unexpected-row:" <> joined.workflowId)
+        case outcome of
+          Right operation -> pure (Right operation)
+          Left err -> pure (Left err)
+  _ <- registerWorkflow dbos (newWorkflowKey "debounce-in-step-parent") stepParentBody >>= either (fail . show) pure
   exec <- memLaunchOnWith mem simTracer dbos (Just [targetQueue])
   _ <- registerQueue dbos targetQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure
   _ <- registerQueue dbos foreignQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure
@@ -116,6 +137,20 @@ traceFirstDebounceDelays :: forall a. SimTrace a -> IO ()
 traceFirstDebounceDelays tr = do
   -- The user id is engine-generated, so no workflow event pins it; the
   -- shared check asserts the row, outputs, and run count.
+  selectTraceEventsDynamic tr @?= [EngineRecovered 0, EngineLaunched "sim-app" "sim-executor" "0.0.0"]
+
+-- | The capped creation announces nothing row-specific: the user id is
+-- engine-generated, so the shared check asserts the release against the
+-- deadline, not the trace.
+traceDebouncedCapAtCreation :: forall a. SimTrace a -> IO ()
+traceDebouncedCapAtCreation tr = do
+  selectTraceEventsDynamic tr @?= [EngineRecovered 0, EngineLaunched "sim-app" "sim-executor" "0.0.0"]
+
+-- | The pinned creation, the refused reuse, and the refused durations
+-- announce nothing row-specific: the user ids are engine-generated, so
+-- the shared checks judge the rows and verdicts, not the trace.
+tracePinnedId :: forall a. SimTrace a -> IO ()
+tracePinnedId tr = do
   selectTraceEventsDynamic tr @?= [EngineRecovered 0, EngineLaunched "sim-app" "sim-executor" "0.0.0"]
 
 traceSecondDebounceCoalesces :: forall a. SimTrace a -> IO ()

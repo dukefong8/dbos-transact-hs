@@ -79,7 +79,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowOwner (..), WorkflowStatus (..), addTimeout, databaseTimeRead, databaseTimeReaches, isTerminal, newWorkflow, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowStatus (..), databaseTimeRead, databaseTimeReaches, isTerminal, newWorkflow, renderWorkflowKey, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry, clearDatasourceCheckpoints)
@@ -88,7 +88,7 @@ import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (runTracer)
-import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey (..), lookupRegistryWorkflow, lookupSnapshotWorkflow, registryInstanceId, renderWorkflowKey)
+import DBOS.Transact.Registry (Registry, Snapshot, lookupRegistryWorkflow, lookupSnapshotWorkflow, registryInstanceId)
 import DBOS.Transact.Registry qualified as Registry (registerErasedWorkflow)
 import DBOS.Transact.Serialization (CodecError (..), SerializationError, WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowInput, decodeWorkflowValue, encodeAttributes, encodeWorkflowValue, unWorkflowInput)
 import DBOS.Transact.Serialization qualified as Serialization
@@ -755,21 +755,18 @@ recordStartError conn parentText stepId stepName startedAt token err = do
 -- at the debounce deadline), the debounced mark, the stamped deadline, and
 -- the acting application. A plain enqueue contributes nothing beyond its
 -- delay: no mark, no deadline, the identity's application.
-debounceCreation :: Maybe Enqueue -> Timestamp -> (Maybe Duration, Bool, Maybe Timestamp, Maybe Text)
-debounceCreation queue now = case queue of
+debounceCreation :: Maybe Enqueue -> (Maybe Duration, Bool, Maybe Duration, Maybe Text)
+debounceCreation queue = case queue of
+  -- The release cap lives in the init statement, which resolves the delay
+  -- and the timeout against one database-clock reading: a Haskell-side
+  -- minimum would split the reading the oracle keeps single.
   Just shape | shape.isDebounced ->
-    ( cappedDelay shape.delay shape.debounceTimeout,
+    ( shape.delay,
       True,
-      shape.debounceTimeout >>= addTimeout now,
+      shape.debounceTimeout,
       shape.applicationName
     )
   _ -> (queue >>= (.delay), False, Nothing, Nothing)
-  where
-    -- The earlier of the period's wake and the timeout's deadline, as
-    -- durations from the same now the deadline stamps above.
-    cappedDelay delay timeout = case (delay, timeout) of
-      (Just period, Just limit) -> Just (min period limit)
-      (delayed, _)              -> delayed
 
 -- | Starts the referenced workflow durably and returns a handle to it,
 -- without waiting. Called outside a workflow this starts a root; the
@@ -791,7 +788,7 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
           workflowText = maybe generated (\(WorkflowId offered) -> offered) options.startWorkflowId
           deadline' = resolveTimeoutDeadline options.startTimeout Nothing
           base = workflowNewWorkflow conn identity key (WorkflowId workflowText) input ((.name) <$> options.startQueue)
-          (debouncedDelay, debounced, debouncedDeadline, debounceApp) = debounceCreation options.startQueue now
+          (debouncedDelay, debounced, debouncedTimeout, debounceApp) = debounceCreation options.startQueue
           new =
             base
               { newWorkflowDeduplicationId = options.startQueue >>= (.deduplicationId),
@@ -799,8 +796,14 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
                 newWorkflowQueuePartitionKey = options.startQueue >>= (.partitionKey),
                 newWorkflowDelay = debouncedDelay,
                 newWorkflowIsDebounced = debounced,
-                newWorkflowDebounceDeadline = debouncedDeadline,
+                newWorkflowDebounceTimeout = debouncedTimeout,
                 newWorkflowApplicationName = debounceApp <|> Just identity.identityAppName,
+                -- A row written for another application carries no version: the
+                -- runner resolves the target's latest, as the oracle's
+                -- @for_another_app@ writes @application_version = None@.
+                newWorkflowApplicationVersion = case debounceApp of
+                  Just app | app /= identity.identityAppName -> Nothing
+                  _ -> Just identity.identityAppVersion,
                 newWorkflowTimeout = timeoutBudget options.startTimeout,
                 newWorkflowDeadline = deadline',
                 newWorkflowAttributes = encodeAttributes options.startAttributes
@@ -1015,7 +1018,7 @@ startChildWorkflow wctx ref options input = do
         Right Nothing -> do
           let childDeadline = resolveTimeoutDeadline options.startTimeout (deadline wctx)
               base = workflowNewWorkflow conn identity key (WorkflowId childText) rawInput ((.name) <$> options.startQueue)
-              (debouncedDelay, debounced, debouncedDeadline, debounceApp) = debounceCreation options.startQueue now
+              (debouncedDelay, debounced, debouncedTimeout, debounceApp) = debounceCreation options.startQueue
               new =
                 base
                   { newWorkflowDeduplicationId = options.startQueue >>= (.deduplicationId),
@@ -1023,8 +1026,14 @@ startChildWorkflow wctx ref options input = do
                     newWorkflowQueuePartitionKey = options.startQueue >>= (.partitionKey),
                     newWorkflowDelay = debouncedDelay,
                     newWorkflowIsDebounced = debounced,
-                    newWorkflowDebounceDeadline = debouncedDeadline,
+                    newWorkflowDebounceTimeout = debouncedTimeout,
                     newWorkflowApplicationName = debounceApp <|> Just identity.identityAppName,
+                    -- A row written for another application carries no version: the
+                    -- runner resolves the target's latest, as the oracle's
+                    -- @for_another_app@ writes @application_version = None@.
+                    newWorkflowApplicationVersion = case debounceApp of
+                      Just app | app /= identity.identityAppName -> Nothing
+                      _ -> Just identity.identityAppVersion,
                     newWorkflowTimeout = timeoutBudget options.startTimeout,
                     newWorkflowDeadline = childDeadline,
                     newWorkflowAttributes = encodeAttributes options.startAttributes

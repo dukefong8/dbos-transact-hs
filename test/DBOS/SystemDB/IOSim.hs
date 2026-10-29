@@ -88,6 +88,7 @@ import DBOS.SystemDB
     WorkflowFilter (..),
     WorkflowId (..),
     WorkflowInitResult (..),
+    WorkflowKey (..),
     WorkflowOwner (..),
     WorkflowRecord (..),
     WorkflowStatus (..),
@@ -561,7 +562,7 @@ memFreshRow new caller creator =
       workflowRecordTimeout = new.newWorkflowTimeout,
       workflowRecordDeadline = new.newWorkflowDeadline,
       workflowRecordDelayUntil = Nothing,
-      workflowRecordDebounceDeadline = new.newWorkflowDebounceDeadline,
+      workflowRecordDebounceDeadline = Nothing,
       workflowRecordIsDebounced = new.newWorkflowIsDebounced,
       workflowRecordAttributes = new.newWorkflowAttributes
     }
@@ -619,6 +620,26 @@ memTimedOutRow now row =
       workflowRecordCompletedAt = Just now
     }
 
+-- | The holds a write releases, as index-key/row pairs: the SQL
+-- deduplication index keys on the row's @(queue, deduplication_id)@, so
+-- any write that clears the id — outcome, release, cancel — or removes
+-- the row must drop the entry, or a later enqueue under the key spins
+-- forever against a stale hold. A hold drops only while the index still
+-- names its row, so a reassigned key is never clobbered.
+dropMemHolds :: Map Text WorkflowRecord -> [Text] -> Map (Text, Text) Text -> Map (Text, Text) Text
+dropMemHolds oldRows moved held = foldr drop held (releasedHolds oldRows moved)
+  where
+    releasedHolds rows wids =
+      [ ((queue, key), wid)
+      | wid <- wids,
+        Just row <- [Map.lookup wid rows],
+        Just queue <- [row.workflowRecordQueueName],
+        Just key <- [row.workflowRecordDeduplicationId]
+      ]
+    drop (indexKey, wid) index = case Map.lookup indexKey index of
+      Just holder | holder == wid -> Map.delete indexKey index
+      _ -> index
+
 instance SystemDB (MemSystemDB s) (IOSim s) where
   databaseTime db = do
     -- The sim's clock, as every simulated write reads it: a test advances
@@ -652,7 +673,27 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
         Right () -> case Map.lookup new.newWorkflowId rows of
           Just row -> case initConflict row of
             Just conflict -> pure (Left conflict)
-            Nothing -> pure (Right row)
+            Nothing
+              | new.newWorkflowIsDebounced && row.workflowRecordCreatorXid /= Just creator ->
+                  -- A debounced creation must be new: a reused pinned id
+                  -- joins nothing. The holder's own key races back to the
+                  -- bounce; anything else is a conflict. Mirrors the
+                  -- oracle's debounced conflict arm; the row keeps its
+                  -- deduplication id only while it waits, so a matching
+                  -- one is a holder of the key.
+                  case (new.newWorkflowDeduplicationId, new.newWorkflowQueueName) of
+                    (Just deduplicationId, Just queueName)
+                      | row.workflowRecordDeduplicationId == Just deduplicationId && row.workflowRecordQueueName == Just queueName ->
+                          pure (Left QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queueName, deduplicationId = deduplicationId})
+                    _ ->
+                      pure
+                        ( Left
+                            ConflictingWorkflow
+                              { workflowId = new.newWorkflowId,
+                                detail = "a debounce enqueues a new workflow, but a workflow with this id already exists"
+                              }
+                        )
+              | otherwise -> pure (Right row)
           Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
             (Just queue, Just key) -> do
               held <- readTVar db.memDedup
@@ -698,9 +739,16 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               Nothing
                 | initialStatus new == Pending -> new.newWorkflowTimeout >>= addTimeout now
                 | otherwise -> Nothing
+            -- The release is the delay from now, capped at the debounce
+            -- deadline, as the init statement resolves both: a delay
+            -- longer than the timeout lands on the deadline exactly.
+            cappedRelease = case (saturateTimeout now <$> new.newWorkflowDelay, saturateTimeout now <$> new.newWorkflowDebounceTimeout) of
+              (Just release, Just deadline) -> Just (min release deadline)
+              (release, _) -> release
             row =
               (memFreshRow new caller creator)
-                { workflowRecordDelayUntil = saturateTimeout now <$> new.newWorkflowDelay,
+                { workflowRecordDelayUntil = cappedRelease,
+                  workflowRecordDebounceDeadline = saturateTimeout now <$> new.newWorkflowDebounceTimeout,
                   workflowRecordDeadline = deadlineAt
                 }
         writeTVar db.memRows (Map.insert new.newWorkflowId row rows)
@@ -764,13 +812,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
         -- owner, as the SQL outcome does: the row belongs to nobody.
         let row' = (memApplyOutcome outcome row) {workflowRecordDeduplicationId = Nothing, workflowRecordOwnerXid = Nothing}
         writeTVar db.memRows (Map.insert wid row' rows)
-        case (row.workflowRecordQueueName, row.workflowRecordDeduplicationId) of
-          (Just queue, Just key) -> do
-            held <- readTVar db.memDedup
-            case Map.lookup (queue, key) held of
-              Just holder | holder == wid -> writeTVar db.memDedup (Map.delete (queue, key) held)
-              _ -> pure ()
-          _ -> pure ()
+        modifyTVar db.memDedup (dropMemHolds rows [wid])
         pure (Right Recorded)
       _ -> pure (Right AlreadyFinished)
     where
@@ -849,8 +891,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       writeTVar db.memRows rows'
       pure (Right parked)
   cancelWorkflows db ids withChildren _ fromWorkflow = atomically $ do
-    rows <- readTVar db.memRows
-    -- Transitive descendants, like the backend's per-id traverse through
+    rows <- readTVar db.memRows    -- Transitive descendants, like the backend's per-id traverse through
     -- 'descendantsSession': one level would leave a grandchild tree
     -- half-cancelled.
     let requested = [wid | WorkflowId wid <- ids]
@@ -885,6 +926,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       Just err -> pure (Left err)
       Nothing -> do
         writeTVar db.memRows rows'
+        modifyTVar db.memDedup (dropMemHolds rows [wid | WorkflowId wid <- moved])
         pure (Right moved)
   resumeWorkflows db ids queue _ fromWorkflow
     | null ids = pure (Right [])
@@ -936,6 +978,9 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
         let gone = length (filter (`Map.member` rows) [wid | WorkflowId wid <- ids])
         writeTVar db.memRows (foldr Map.delete rows [wid | WorkflowId wid <- ids])
         modifyTVar db.memSteps (Map.filterWithKey (\(wid, _) _ -> wid `notElem` [w | WorkflowId w <- ids]))
+        -- Deleted rows take their holds with them, as deleting drops the
+        -- SQL index entries.
+        modifyTVar db.memDedup (dropMemHolds rows [wid | WorkflowId wid <- ids])
         pure (Right (fromIntegral gone))
   forkWorkflows db forks options _
     | null forks = pure (Right [])
@@ -1081,6 +1126,19 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 _ -> Just recoveryQueue
             }
     writeTVar db.memRows (foldr (\(widText, row) -> Map.insert widText (requeue row)) rows candidates)
+    -- The index follows the row: the hold moves from the old queue to the
+    -- recovery queue with it, as the SQL update re-keys the entry.
+    let rekey (widText, row) index = case (row.workflowRecordQueueName, row.workflowRecordDeduplicationId) of
+          (Just oldQueue, Just key) ->
+            let newQueue
+                  | Text.null oldQueue = recoveryQueue
+                  | otherwise = oldQueue
+                dropped = case Map.lookup (oldQueue, key) index of
+                  Just holder | holder == widText -> Map.delete (oldQueue, key) index
+                  _ -> index
+             in Map.insert (newQueue, key) widText dropped
+          _ -> index
+    modifyTVar db.memDedup (\held -> foldr rekey held candidates)
     pure (Right [WorkflowId widText | (widText, _) <- candidates])
   -- Delayed rows whose deadline has passed are enqueued; a debounced
   -- holder releases its key, as the SQL transition does.
@@ -1096,6 +1154,11 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               }
           (moved, rows') = Map.mapAccum (\n row -> if due row then (n + 1, move row) else (n, row)) (0 :: Int) rows
       writeTVar db.memRows rows'
+      -- A released debounced key frees its hold with it, as clearing the
+      -- column drops the SQL index entry.
+      modifyTVar
+        db.memDedup
+        (dropMemHolds rows [wid | (wid, row) <- Map.toList rows, row.workflowRecordIsDebounced, due row])
       pure (Right (fromIntegral moved))
   clearQueueAssignment _ = clearQueueAssignment MockSystemDB
   sendMessage db message serialization caller owner sendToForks = memSend db sendStepName [message] serialization caller owner sendToForks
@@ -1828,7 +1891,7 @@ memDebounce db request caller = case debounceValidate request of
           | Just stored <- Map.lookup (widTextOf callerWid, callerStep) steps ->
               pure (memReplayDebounce callerWid callerStep stored)
         _ -> do
-          let (bounced, rows') = memBounce scope request rows
+          let (bounced, rows') = memBounce scope request now rows
           writeTVar db.memRows rows'
           case caller of
             Nothing -> pure (Right bounced)
@@ -1837,15 +1900,18 @@ memDebounce db request caller = case debounceValidate request of
               pure (Right bounced)
 
 -- | The bounce itself, as pure row surgery: extend the one DELAYED
--- debounced row holding the key (capped at its deadline, inputs replaced),
--- or describe whoever holds the key, or report it free. First in key
--- order, as the SQL update's single returning row is.
-memBounce :: Maybe Text -> DebounceRequest -> Map Text WorkflowRecord -> (Debounce, Map Text WorkflowRecord)
-memBounce scope request rows = case Map.lookupMin (Map.filter isBouncable rows) of
+-- debounced row holding the key (the period from the clock, capped at its
+-- deadline, inputs replaced), or describe whoever holds the key, or report
+-- it free. First in key order, as the SQL update's single returning row
+-- is. The class and instance match null-agnostically, as the update's
+-- @NULLIF@ does: an empty string is absence on either side.
+memBounce :: Maybe Text -> DebounceRequest -> Timestamp -> Map Text WorkflowRecord -> (Debounce, Map Text WorkflowRecord)
+memBounce scope request now rows = case Map.lookupMin (Map.filter isBouncable rows) of
   Just (wid, row) ->
-    let capped = case row.workflowRecordDebounceDeadline of
-          Just deadline | deadline < request.debounceRequestDelayUntil -> deadline
-          _ -> request.debounceRequestDelayUntil
+    let release = saturateTimeout now request.debounceRequestPeriod
+        capped = case row.workflowRecordDebounceDeadline of
+          Just deadline | deadline < release -> deadline
+          _ -> release
         row' =
           row
             { workflowRecordDelayUntil = Just capped,
@@ -1860,18 +1926,20 @@ memBounce scope request rows = case Map.lookupMin (Map.filter isBouncable rows) 
   where
     queue = request.debounceRequestQueueName
     key = request.debounceRequestDeduplicationId
+    WorkflowKey workflowName className configName = request.debounceRequestWorkflow
     isHolder row = row.workflowRecordQueueName == Just queue && row.workflowRecordDeduplicationId == Just key
     -- The update's guard, conjunct for conjunct: name and class and config
-    -- agree (@is not distinct from@ treats two absences as agreement), the
-    -- row still waits, it debounces, and the scope admits it.
+    -- agree (empty spells absence on either side), the row still waits, it
+    -- debounces, and the scope admits it.
     isBouncable row =
       isHolder row
-        && row.workflowRecordName == Just request.debounceRequestWorkflowName
-        && row.workflowRecordClassName == request.debounceRequestClassName
-        && row.workflowRecordConfigName == request.debounceRequestConfigName
+        && row.workflowRecordName == Just workflowName
+        && absent row.workflowRecordClassName == absent className
+        && absent row.workflowRecordConfigName == absent configName
         && row.workflowRecordStatus == Delayed
         && row.workflowRecordIsDebounced
         && (scope == Nothing || row.workflowRecordApplicationName == scope || row.workflowRecordApplicationName == Nothing)
+    absent = (>>= \value -> if value == "" then Nothing else Just value)
 
 -- | The holder as the domain describes it: what holds the key, not merely
 -- that something does, so the caller can tell a collision from a

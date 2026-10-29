@@ -32,7 +32,14 @@ tests =
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a second debounce coalesces onto the same row" scenarioSecondDebounceCoalesces checkSecondDebounceCoalesces,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a foreign holder refuses the debounce" scenarioForeignHolderRefused checkForeignHolderRefused,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "debouncing inside a workflow records a step" scenarioInWorkflowDebounceRecordsStep checkInWorkflowDebounceRecordsStep,
-          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a timeout caps the extension" scenarioTimeoutCapsExtension checkTimeoutCapsExtension
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a timeout caps the extension" scenarioTimeoutCapsExtension checkTimeoutCapsExtension,
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a debounced creation lands its release on the deadline" scenarioDebouncedCapAtCreation checkDebouncedCapAtCreation,
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a pinned id names the fresh row" scenarioPinnedIdNamesFreshRow checkPinnedIdNamesFreshRow,
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a pinned id reused across cycles is a conflict" scenarioPinnedIdReusedAcrossCycles checkPinnedIdReusedAcrossCycles,
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a zero or unstorable debounce duration is refused" scenarioDebounceDurationsRefused checkDebounceDurationsRefused,
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a cancelled debounce frees its key" scenarioCancelledDebounceFreesKey checkCancelledDebounceFreesKey,
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a debounce inside a step is refused" scenarioDebounceInsideStepRefused checkDebounceInsideStepRefused,
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a key collision between workflows is refused" scenarioKeyCollisionRefused checkKeyCollisionRefused
         ]
 
 acquireSuiteBackend :: IO Postgres.PostgresSystemDB
@@ -81,6 +88,20 @@ withDebouncerFixture getBackend getTracer body = do
           Right joined -> pure (Right joined.workflowId)
           Left err -> pure (Left err)
   _ <- registerWorkflow dbos (newWorkflowKey "debounce-parent") parentBody >>= either (fail . show) pure
+  -- The in-step refusal's parent: its step calls the debounce, which the
+  -- step boundary refuses. Only the refusal case runs it.
+  let stepParentBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+      stepParentBody _ wctx = do
+        outcome <- runStep wctx "attempt" $ \_ -> do
+          debounced <- debounceInWorkflow wctx targetRef (debouncerNew {debouncerQueueName = Just targetQueue}) "in-step-key" (secondsDuration 3) Nothing
+          case debounced of
+            Left (InsideStep operation) -> pure operation
+            Left err -> throwIO (userError (show err))
+            Right joined -> pure ("unexpected-row:" <> joined.workflowId)
+        case outcome of
+          Right operation -> pure (Right operation)
+          Left err -> pure (Left err)
+  _ <- registerWorkflow dbos (newWorkflowKey "debounce-in-step-parent") stepParentBody >>= either (fail . show) pure
   exec <- launch dbos >>= either (fail . show) pure
   _ <- registerQueue dbos targetQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure
   _ <- registerQueue dbos foreignQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure

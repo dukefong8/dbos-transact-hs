@@ -40,8 +40,8 @@ import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Void (Void, absurd)
 import DBOS.Prelude
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, durationAsMillis)
-import DBOS.Transact.Registry (RegistryError, WorkflowKey (..), decodeRegistryErrorPayload, encodeRegistryErrorPayload, renderRegistryError, renderWorkflowKey)
+import DBOS.SystemDB.Types (Duration, WorkflowKey (..), durationAsMillis, renderWorkflowKey)
+import DBOS.Transact.Registry (RegistryError, decodeRegistryErrorPayload, encodeRegistryErrorPayload, renderRegistryError)
 import DBOS.Transact.Registry qualified as Registry
 import DBOS.Transact.Serialization (SerializationError, decodeSerializationError, encodeSerializationError, renderSerializationError)
 import DBOS.Transact.Serialization qualified as Serialization

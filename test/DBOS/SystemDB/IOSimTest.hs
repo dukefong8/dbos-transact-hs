@@ -66,6 +66,7 @@ import DBOS.SystemDB
     newQueue,
     newSchedule,
     newWorkflow,
+    newWorkflowKey,
     parseApplicationName,
     secondsDuration,
     timestampFromEpochMs,
@@ -303,12 +304,10 @@ queueTests =
         }
     debounceRequest =
       DebounceRequest
-        { debounceRequestWorkflowName = "wf",
-          debounceRequestClassName = Nothing,
-          debounceRequestConfigName = Nothing,
+        { debounceRequestWorkflow = newWorkflowKey "wf",
           debounceRequestQueueName = "q",
           debounceRequestDeduplicationId = "key",
-          debounceRequestDelayUntil = at,
+          debounceRequestPeriod = secondsDuration 1,
           debounceRequestInputs = Nothing,
           debounceRequestSerialization = Nothing,
           debounceRequestApplicationName = Nothing
@@ -390,6 +389,49 @@ memTests =
         firstExecute @?= True
         secondExecute @?= False
         owner @?= Just firstCreator,
+      -- Twin of the live debounced-conflict arms: a debounced insert that
+      -- meets its key holder by id loses the key (the race answers as the
+      -- lost deduplication would), while any other occupant is a
+      -- conflict. A retry of the same insert then keeps the input a
+      -- bounce replaced, as the write guards on a fresh insert.
+      testCase "a debounced insert meeting its holder by id loses the key" $ do
+        (lost, conflicted, kept) <- runMem $ do
+          mem <- newMemDB
+          let base =
+                (newWorkflow "wf-b")
+                  { newWorkflowName = Just "bouncer",
+                    newWorkflowQueueName = Just "q",
+                    newWorkflowDeduplicationId = Just "key",
+                    newWorkflowDelay = Just (secondsDuration 60),
+                    newWorkflowIsDebounced = True,
+                    newWorkflowInput = Just "{\"n\":1}"
+                  }
+              bounce =
+                DebounceRequest
+                  { debounceRequestWorkflow = newWorkflowKey "bouncer",
+                    debounceRequestQueueName = "q",
+                    debounceRequestDeduplicationId = "key",
+                    debounceRequestPeriod = secondsDuration 1,
+                    debounceRequestInputs = Just "{\"n\":2}",
+                    debounceRequestSerialization = Nothing,
+                    debounceRequestApplicationName = Nothing
+                  }
+          _ <- orFailSim =<< initWorkflow mem base Nothing
+          lost <- initWorkflow mem base Nothing
+          conflicted <- initWorkflow mem (base {newWorkflowDeduplicationId = Just "other"}) Nothing
+          _ <- orFailSim =<< debounceDelayedWorkflow mem bounce Nothing
+          -- A re-init under another token loses the key again; what matters
+          -- is the input it must not touch.
+          _ <- initWorkflow mem base Nothing
+          kept <- orJustSim "the bounced row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-b")
+          pure (lost, conflicted, kept.workflowRecordInput)
+        case lost of
+          Left (QueueDeduplicated {queueName = "q", deduplicationId = "key"}) -> pure ()
+          other -> fail ("expected the holder's QueueDeduplicated, got: " <> show other)
+        case conflicted of
+          Left (ConflictingWorkflow {}) -> pure ()
+          other -> fail ("expected ConflictingWorkflow, got: " <> show other)
+        kept @?= Just "{\"n\":2}",
       -- Twin of the live stale-parent case: the refused start creates no
       -- child row.
       testCase "a stale parent starts nothing" $ do

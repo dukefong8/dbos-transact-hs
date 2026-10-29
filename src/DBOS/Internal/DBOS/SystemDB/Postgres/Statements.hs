@@ -593,14 +593,20 @@ data InitWorkflowParams = InitWorkflowParams
     initParamSerialization      :: Maybe Text,
     initParamAttributes         :: Maybe Text,
     initParamScheduleName       :: Maybe Text,
-    initParamDebounceDeadline   :: Maybe Int64,
+    initParamDebounceTimeoutMs     :: Maybe Int64,
     initParamIsDebounced        :: Bool,
     initParamApplicationName    :: Maybe Text
   }
   deriving stock (Eq, Show)
 
 -- | The columns @init_workflow@ reads back: enough to decide whether this
--- caller created the row.
+-- caller created the row. @inserted@ tells this statement's own insert
+-- from a found row: the insert stamps @created_at@ with the bound stamp,
+-- so equality with it holds only for the row this attempt wrote — a retry
+-- after a lost acknowledgement carries a fresh stamp and reads false.
+-- Mirrors the oracle's @inserted@ (@created_at = now()@ there; the bound
+-- stamp here, as this init binds its stamps rather than reading the
+-- database clock for them).
 type WorkflowInitRaw =
   SqlRow
     '[ '("recovery_attempts", Maybe Int64),
@@ -609,9 +615,11 @@ type WorkflowInitRaw =
        '("class_name", Maybe Text),
        '("config_name", Maybe Text),
        '("queue_name", Maybe Text),
+       '("deduplication_id", Maybe Text),
        '("workflow_deadline_epoch_ms", Maybe Int64),
        '("creator_xid", Maybe Text),
        '("serialization", Maybe Text),
+       '("inserted", Maybe Bool),
        '("db_now", Maybe Int64)
      ]
 
@@ -639,7 +647,7 @@ initWorkflowStatement params =
        debounce_deadline_epoch_ms, is_debounced, application_name, creator_xid)
     values
       (${initParamWorkflowId}, ${initParamStatus}, ${initParamName}, ${initParamClassName}, ${initParamConfigName},
-       ${initParamQueueName}, ${initParamDeduplicationId}, ${initParamPriority}, ${initParamQueuePartitionKey}, case when ${initParamDelayMs}::bigint is null then null when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end,
+       ${initParamQueueName}, ${initParamDeduplicationId}, ${initParamPriority}, ${initParamQueuePartitionKey}, case when ${initParamDelayMs}::bigint is null then null when ${initParamDebounceTimeoutMs}::bigint is null then case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end else least(case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end, case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDebounceTimeoutMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDebounceTimeoutMs}::bigint) end) end,
        ${initParamAuthenticatedUser}, ${initParamAssumedRole}, ${initParamAuthenticatedRoles},
        ${initParamExecutorId}, ${initParamApplicationVersion}, ${initParamApplicationId},
        ${initParamCreatedAt}, ${initParamUpdatedAt}, ${initParamInitialAttempts},
@@ -648,11 +656,12 @@ initWorkflowStatement params =
            then (extract(epoch from now()) * 1000)::bigint + ${initParamTimeoutMs}
          end),
        ${initParamParentWorkflowId}, case when ${initParamStatus} = 'PENDING' then ${initParamCreatorXid} end, ${initParamSerialization}, ${initParamAttributes}::text::jsonb, ${initParamScheduleName},
-       ${initParamDebounceDeadline}, ${initParamIsDebounced}, ${initParamApplicationName}, ${initParamCreatorXid})
+       case when ${initParamDebounceTimeoutMs}::bigint is null then null when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDebounceTimeoutMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDebounceTimeoutMs}::bigint) end, ${initParamIsDebounced}, ${initParamApplicationName}, ${initParamCreatorXid})
     on conflict (workflow_uuid) do update set
       creator_xid = dbos.workflow_status.creator_xid
     returning recovery_attempts, status, name, class_name::text, config_name::text, queue_name,
-      workflow_deadline_epoch_ms, creator_xid, serialization,
+      deduplication_id, workflow_deadline_epoch_ms, creator_xid, serialization,
+      created_at is not distinct from ${initParamCreatedAt} as inserted,
       (extract(epoch from clock_timestamp()) * 1000)::bigint as db_now
   |]
   where
@@ -2699,14 +2708,16 @@ partitionSweepFlipStatement =
 
 -- Debounce: the delayed-workflow bounce (postgres.rs debounce_delayed_workflow)
 
--- | The bounce: extends a delayed row's deadline without ever pushing it
--- past its debounce deadline, replaces its inputs, and returns the workflow
--- it bounced, if any.
+-- | The bounce: extends a delayed row's release by the period from the
+-- database clock, without ever pushing it past its debounce deadline,
+-- replaces its inputs, and returns the workflow it bounced, if any. The
+-- class and instance match null-agnostically, as rows written elsewhere
+-- spell absence as the empty string. Mirrors the oracle's bounce update.
 data DebounceBounceParams = DebounceBounceParams
   { debounceBounceWorkflowName    :: Text,
     debounceBounceQueueName       :: Text,
     debounceBounceDeduplicationId :: Text,
-    debounceBounceDelayUntil      :: Int64,
+    debounceBouncePeriodMs        :: Int64,
     debounceBounceSerialization   :: Maybe Text,
     debounceBounceApplicationName :: Maybe Text,
     debounceBounceClassName       :: Maybe Text,
@@ -2718,19 +2729,19 @@ debounceBounceStatement =
   Statement.preparable
     ( "update dbos.workflow_status set \
       \delay_until_epoch_ms = case when debounce_deadline_epoch_ms is not null \
-      \and debounce_deadline_epoch_ms < $4 then debounce_deadline_epoch_ms else $4 end, \
+      \and debounce_deadline_epoch_ms < case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - ($4::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + ($4::bigint) end then debounce_deadline_epoch_ms else case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - ($4::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + ($4::bigint) end end, \
       \serialization = $5, \
       \updated_at = (extract(epoch from now()) * 1000)::bigint, \
       \application_name = coalesce(application_name, $6) \
       \where name = $1 and queue_name = $2 and deduplication_id = $3 \
-      \and class_name is not distinct from $7 and config_name is not distinct from $8 \
+      \and nullif(class_name, '') is not distinct from nullif($7, '') and nullif(config_name, '') is not distinct from nullif($8, '') \
       \and status = 'DELAYED' and is_debounced = true \
       \and ($6::text is null or application_name = $6 or application_name is null) \
       \returning workflow_uuid" )
     ( contramap (.debounceBounceWorkflowName) (Encoders.param (Encoders.nonNullable Encoders.text))
         <> contramap (.debounceBounceQueueName) (Encoders.param (Encoders.nonNullable Encoders.text))
         <> contramap (.debounceBounceDeduplicationId) (Encoders.param (Encoders.nonNullable Encoders.text))
-        <> contramap (.debounceBounceDelayUntil) (Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> contramap (.debounceBouncePeriodMs) (Encoders.param (Encoders.nonNullable Encoders.int8))
         <> contramap (.debounceBounceSerialization) (Encoders.param (Encoders.nullable Encoders.text))
         <> contramap (.debounceBounceApplicationName) (Encoders.param (Encoders.nullable Encoders.text))
         <> contramap (.debounceBounceClassName) (Encoders.param (Encoders.nullable Encoders.text))

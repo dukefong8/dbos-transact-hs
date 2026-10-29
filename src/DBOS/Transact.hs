@@ -229,11 +229,19 @@ module DBOS.Transact
 
   -- pattern-idempotency: WorkflowId, StartOptions.startWorkflowId (see Workflow)
 
-  -- pattern-debouncing (TypeScript Debouncer; no Rust counterpart, ADR-0028)
+  -- pattern-debouncing (TypeScript Debouncer options; Rust debouncer.rs engine surface, S10)
+    DebounceOptions (..),
     Debouncer (..),
+    DebouncerClient (..),
+    debouncerClientNew,
     debouncerNew,
+    debounceOptionsDefault,
     debounce,
+    debounceWith,
+    debounceClient,
+    debounceClientWith,
     debounceInWorkflow,
+    debounceOperation,
 
   -- * Durable streams
     StreamReader,
@@ -326,7 +334,7 @@ import DBOS.Transact.Connection ()
 import DBOS.Transact.Context (StepCtx, WorkflowCtx, stepCtxCancellationToken, workflowId)
 import DBOS.Transact.Datasource (DataSource (..), IsolationLevel (..), TransactionConfig (..), Tx (..), runTxOutside, runTxStep, transactionConfigDefault)
 import DBOS.Transact.Datasource.Postgres (AppDataSource, acquireAppDataSource, acquireAppDataSourceIn, acquireAppDataSourceInFromEnv, releaseAppDataSource, runAppSession, toDataSource, verifyAppDataSource)
-import DBOS.Transact.Debouncer (Debouncer (..), debounce, debounceInWorkflow, debouncerNew)
+import DBOS.Transact.Debouncer (DebounceOptions (..), Debouncer (..), DebouncerClient (..), debounce, debounceClient, debounceClientWith, debounceInWorkflow, debounceOperation, debounceOptionsDefault, debounceWith, debouncerClientNew, debouncerNew)
 import DBOS.Transact.Error (DurableError, EngineOnly, Error (..), decodeErrorText)
 import DBOS.Transact.Event (getEvent, pendingGetEvent, pendingSetEvent, setEvent)
 import DBOS.Transact.Handle (WorkflowHandle (..), awaitChild, handleResult, handleStatus, pendingAwait, pollingHandle)
@@ -337,7 +345,7 @@ import DBOS.Transact.Management (ListWorkflowStepsOptions (..), PortableWorkflow
 import DBOS.Transact.Message (Forks (..), Message (..), SendBulkOptions (..), SendOptions (..), recv, send, sendBulk, sendBulkOptionsDefault, sendBulkWith, sendOptionsDefault, sendWith)
 import DBOS.Transact.Patch (deprecatePatchStep, patchStep, pendingDeprecatePatch, pendingPatch)
 import DBOS.Transact.Queue (Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), defaultQueueChange, defaultQueueOptions, deleteQueue, listQueues, queue, registerQueue, updateQueue)
-import DBOS.Transact.Registry (RegistryError, WorkflowKey (..), methodWorkflowKey, newWorkflowKey, renderRegistryError)
+import DBOS.Transact.Registry (RegistryError, renderRegistryError)
 import DBOS.Transact.Select (SelectArm (..), Winner (..), selectStep)
 import DBOS.Transact.Serialization (CodecError (..), PortableArgs (..), SerializationError, WorkflowInput, decodeWorkflowInput, decodeWorkflowValue, encodeWorkflowInput, encodeWorkflowValue, renderSerializationError)
 import DBOS.Transact.Sleep (pendingSleep, sleepPlain, sleepStep)
@@ -346,4 +354,4 @@ import DBOS.Transact.Stream (ReadStreamOptions (..), StreamReader, closeStream, 
 import DBOS.Transact.Wait (joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
 import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Timeout (..), WorkflowRef, enqueueNew, runOptionsDefault, startChildWorkflow, startOptionsDefault)
 
-import DBOS.SystemDB.Types (Applications (..), ApplicationVersion (..), Change (..), Duration, ForkOptions (..), ForkPoint (..), IdempotencyKey (..), PollingConcurrency (PollingDefault, PollingUnlimited), RateLimit (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Timestamp, Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultRewindOptions, defaultWorkflowFilter, isTerminal, millisDuration, pollingAtMost, secondsDuration, timestampFromEpochMs, timestampToEpochMs, workflowStatusText)
+import DBOS.SystemDB.Types (Applications (..), ApplicationVersion (..), Change (..), Duration, ForkOptions (..), ForkPoint (..), IdempotencyKey (..), PollingConcurrency (PollingDefault, PollingUnlimited), RateLimit (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Timestamp, Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowKey (..), WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultRewindOptions, defaultWorkflowFilter, isTerminal, methodWorkflowKey, millisDuration, newWorkflowKey, pollingAtMost, secondsDuration, timestampFromEpochMs, timestampToEpochMs, workflowStatusText)

@@ -43,6 +43,9 @@ class Monad m => SystemDB db m where
   -- answer arrived: what a wait for a deadline the database set is measured
   -- from. Mirrors Rust @SystemDatabase::database_time@.
   databaseTime :: db -> m (Either Error DatabaseTime)
+  -- | Starts a workflow row, joining the stored one under a repeated id.
+  -- A debounced creation is never joined: an id that already names a row
+  -- is a conflict (or the holder's key racing back to the bounce).
   initWorkflow :: db -> NewWorkflow -> Maybe InitWorkflowCaller -> m (Either Error WorkflowInitResult)
   getWorkflow :: db -> WorkflowId -> m (Either Error (Maybe WorkflowRecord))
   listWorkflows :: db -> WorkflowFilter -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowRecord])

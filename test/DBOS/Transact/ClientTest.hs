@@ -76,6 +76,11 @@ import DBOS.Transact
     closeClient,
     configFromEnv,
     connectClient,
+    DebounceOptions (..),
+    debounceClient,
+    debounceClientWith,
+    debounceOptionsDefault,
+    debouncerClientNew,
     defaultQueueChange,
     defaultQueueOptions,
     defaultReadStreamOptions,
@@ -104,6 +109,7 @@ import DBOS.Transact
     RewindOptions (rewindStartStep),
     WorkflowKey,
     clientWorkflowStatus,
+    clientWorkflowRecord,
     WorkflowHandle (workflowId),
     WorkflowDelay (..),
     recv,
@@ -183,6 +189,125 @@ tests =
                     let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
                     assertEqual "the app ran the client's enqueue" (Right 42) decoded
                   other -> fail (show other),
+      testCase "a client debounce coalesces onto one delayed row" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-debounce-" <> Text.take 12 suffix
+            appVersion = "hs-l2-client-debounce-version-" <> suffix
+            executorId = "hs-l2-client-debounce-executor-" <> suffix
+            queueName = "hs-l2-client-debounce-q-" <> Text.take 12 suffix
+            key = newWorkflowKey "double"
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [queueName]}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
+          case queueRegistered of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            let dc = debouncerClientNew client key ((enqueueOptionsNew queueName) {appVersion = Just appVersion})
+            created <- debounceClient dc "user-7" (secondsDuration 3) (Just (encodeWorkflowInput (21 :: Int)))
+            wid1 <- case created of
+              Left err -> fail (show err)
+              Right joined -> pure joined.workflowId
+            found <- clientWorkflowRecord client (WorkflowId wid1)
+            case found of
+              Right (Just row) -> do
+                row.workflowRecordStatus @?= Delayed
+                assertBool "the row holds the key" (row.workflowRecordDeduplicationId /= Nothing)
+                row.workflowRecordIsDebounced @?= True
+              other -> fail ("expected the debounced row, got: " <> show other)
+            coincided <- debounceClient dc "user-7" (secondsDuration 3) (Just (encodeWorkflowInput (22 :: Int)))
+            wid2 <- case coincided of
+              Left err -> fail (show err)
+              Right joined -> pure joined.workflowId
+            wid2 @?= wid1
+            _ <- dequeueWorkflows dbos
+            result <- resultWf (clientRetrieveWorkflow client wid1)
+            case result of
+              Right (Just stored) -> do
+                let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
+                assertEqual "the last inputs won" (Right 44) decoded
+              other -> fail (show other),
+      testCase "a client debounce with a reused pinned id is a conflict" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-pinned-" <> Text.take 12 suffix
+            appVersion = "hs-l2-client-pinned-version-" <> suffix
+            executorId = "hs-l2-client-pinned-executor-" <> suffix
+            queueName = "hs-l2-client-pinned-q-" <> Text.take 12 suffix
+            key = newWorkflowKey "double"
+            offered = WorkflowId ("hs-l2-client-pinned-id-" <> suffix)
+            WorkflowId offeredText = offered
+            options = debounceOptionsDefault {debounceOptionsWorkflowId = Just offered}
+            body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value wctx = runStep wctx "double" (const (pure (value * 2)))
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId, configListenQueues = Just [queueName]}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflow dbos key body
+          case registered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchClientExec dbos isolatedEnvironment
+          queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
+          case queueRegistered of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            let dc = debouncerClientNew client key ((enqueueOptionsNew queueName) {appVersion = Just appVersion})
+            created <- debounceClientWith dc "user-9" (secondsDuration 1) (Just (encodeWorkflowInput (21 :: Int))) options
+            wid1 <- case created of
+              Left err -> fail (show err)
+              Right joined -> pure joined.workflowId
+            wid1 @?= offeredText
+            _ <- dequeueWorkflows dbos
+            ran <- resultWf (clientRetrieveWorkflow client wid1)
+            case ran of
+              Right (Just _) -> pure ()
+              other -> fail ("expected the first cycle to run, got: " <> show other)
+            reused <- debounceClientWith dc "user-9" (secondsDuration 1) (Just (encodeWorkflowInput (22 :: Int))) options
+            case reused of
+              Left (SystemDatabase (SystemDBError.ConflictingWorkflow {})) -> pure ()
+              other -> fail ("expected a conflict, not a join, got: " <> show other),
+      testCase "a client debounce owning queue options is refused" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-debounce-owned-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-debounce-owned-q-" <> Text.take 12 suffix
+            key = newWorkflowKey "double"
+        config0 <- configFromEnv appName
+        let config = config0 {configExecutorId = Just ("hs-l2-client-debounce-owned-exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            let tryOpts label opts = do
+                  refused <- debounceClient (debouncerClientNew client key opts) "user-1" (secondsDuration 1) Nothing
+                  case refused of
+                    Left (InvalidArgument operation detail) -> do
+                      operation @?= "debounce a workflow"
+                      assertBool (label <> " names the queue") (("queue `" <> queueName <> "`") `Text.isInfixOf` detail)
+                    other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+            tryOpts "dedup" ((enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {deduplicationId = Just "k"}})
+            tryOpts "delay" ((enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {delay = Just (secondsDuration 1)}})
+            stored <- debounceClient (debouncerClientNew client key (enqueueOptionsNew queueName) {workflowId = Just "stored"}) "user-1" (secondsDuration 1) Nothing
+            case stored of
+              Left (InvalidArgument operation detail) -> do
+                operation @?= "debounce a workflow"
+                assertBool "names the per-call options" ("DebounceOptions.workflow_id" `Text.isInfixOf` detail)
+              other -> fail ("expected a stored-id refusal, got: " <> show other),
       testCase "an enqueue no queue could honour is refused before any write" $ do
         let both = (enqueueNew "q") {deduplicationId = Just "key", partitionKey = Just "part"}
         case validateEnqueue both of

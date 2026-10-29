@@ -3,27 +3,20 @@
 
 -- | Internal workflow registry. Mirrors @registry.rs@: registration turns a
 -- named body into a JSON-in / JSON-out closure the executor can call knowing
--- only a row. This module owns the workflow identity ('WorkflowKey') and the
--- registration refusal vocabulary ('RegistryError'), and the dumb
--- key-to-body map between them. Bodies take the pool explicitly — there is
+-- only a row. This module owns the registration refusal vocabulary
+-- ('RegistryError') and the dumb key-to-body map; the workflow identity
+-- ('WorkflowKey') lives in 'DBOS.SystemDB.Types', where the oracle moved it
+-- in #135 so the system-database layer names keys without depending on the
+-- engine (ADR-0041 amendment). Bodies take the pool explicitly — there is
 -- no ambient context — plus the workflow id their steps run under and the
 -- stored input, if any.
 --
 -- The map is generic over the stored body so this module never names the
 -- engine's error channel: the erased bodies live in
 -- @DBOS.Transact.Workflow@, which every consumer already imports and which
--- imports none of them back. That shape is what lets the key live here
--- (ADR-0041, superseding ADR-0040's leaf): @Registry@ imports only
--- 'Prelude', Aeson, and containers, so the central error module can import
--- the key back without closing a cycle.
+-- imports none of them back.
 module DBOS.Transact.Registry
-  ( WorkflowKey (..),
-    newWorkflowKey,
-    methodWorkflowKey,
-    instanceWorkflowKey,
-    workflowKeyFromRow,
-    renderWorkflowKey,
-    RegistryError (..),
+  ( RegistryError (..),
     renderRegistryError,
     encodeRegistryErrorPayload,
     decodeRegistryErrorPayload,
@@ -42,62 +35,12 @@ module DBOS.Transact.Registry
 where
 
 import DBOS.Prelude
+import DBOS.SystemDB.Types (WorkflowKey (..), renderWorkflowKey)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-
--- | The identity stored in @workflow_status@: a workflow name, optionally
--- qualified by its class and configured instance. Mirrors @WorkflowKey@ in
--- Rust @registry.rs@. The database treats NULL and the empty string as the
--- same absence at this registration boundary.
-data WorkflowKey = WorkflowKey
-  { name :: Text,
-    className :: Maybe Text,
-    configName :: Maybe Text
-  }
-  deriving stock (Eq, Ord, Show)
-
--- | A free function's workflow identity.
-newWorkflowKey :: Text -> WorkflowKey
-newWorkflowKey workflowName = WorkflowKey workflowName Nothing Nothing
-
--- | A class-bound workflow's identity, with no configured instance.
-methodWorkflowKey :: Text -> Text -> WorkflowKey
-methodWorkflowKey workflowName className = WorkflowKey workflowName (Just className) Nothing
-
--- | A method workflow's configured identity.
-instanceWorkflowKey :: Text -> Text -> Text -> WorkflowKey
-instanceWorkflowKey workflowName className configName =
-  WorkflowKey workflowName (Just className) (Just configName)
-
--- | Rebuild an identity from a status row. Rust normalizes empty class and
--- config names to absence so rows written by Java and Python resolve alike.
-workflowKeyFromRow :: Text -> Maybe Text -> Maybe Text -> WorkflowKey
-workflowKeyFromRow name className configName =
-  WorkflowKey name (nonEmpty className) (nonEmpty configName)
-  where
-    nonEmpty = (>>= \value -> if value == "" then Nothing else Just value)
-
--- | The identity's stable external spelling.
-renderWorkflowKey :: WorkflowKey -> Text
-renderWorkflowKey (WorkflowKey name className configName) =
-  case (className, configName) of
-    (Just className', Just configName') -> name <> "/" <> className' <> "/" <> configName'
-    (Just className', Nothing) -> name <> "/" <> className'
-    _ -> name
-
--- | Rust's derived serde shape (@name@/@class_name@/@config_name@), so a
--- recorded error carrying a key decodes back to the key on any SDK.
--- Optional fields accept absence like Rust's derived @Deserialize@ does.
-instance ToJSON WorkflowKey where
-  toJSON (WorkflowKey name className configName) =
-    object ["name" .= name, "class_name" .= className, "config_name" .= configName]
-
-instance FromJSON WorkflowKey where
-  parseJSON = withObject "WorkflowKey" $ \fields ->
-    WorkflowKey <$> fields .: "name" <*> fields .:? "class_name" .!= Nothing <*> fields .:? "config_name" .!= Nothing
 
 -- | A registration refusal: the identity was already taken, or registration
 -- happened after the launch snapshot was taken. Owned here (both sites

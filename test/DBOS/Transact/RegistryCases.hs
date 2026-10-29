@@ -41,22 +41,19 @@ where
 import DBOS.Prelude
 import Data.Text qualified as Text
 import DBOS.SystemDB (WorkflowId (..))
+import DBOS.SystemDB.Types (WorkflowKey (..), instanceWorkflowKey, methodWorkflowKey, renderWorkflowKey, workflowKeyFromRow)
 import DBOS.Transact (EngineOnly, Error, SerializedWorkflowValue (..), WorkflowCtx, newWorkflowKey)
 import DBOS.Transact.Connection (Connection)
 import DBOS.Transact.Context (testOwner, withWorkflow)
 import DBOS.Transact.Error (Error (..), Failure (..))
 import DBOS.Transact.Identity (Identity)
 import DBOS.Transact.Registry
-  ( instanceWorkflowKey,
-    lookupSnapshotWorkflow,
-    methodWorkflowKey,
+  ( lookupSnapshotWorkflow,
     newRegistry,
     registerErasedWorkflow,
-    renderWorkflowKey,
     snapshotRegistry,
     snapshotSize,
     thawRegistry,
-    workflowKeyFromRow,
   )
 import DBOS.Transact.Workflow
   ( ErasedWorkflow (..),

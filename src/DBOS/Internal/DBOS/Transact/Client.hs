@@ -82,7 +82,7 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
+import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowKey (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, withConnection)
 import DBOS.Transact.Error qualified as TransactError
@@ -92,7 +92,6 @@ import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
 import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
 import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
-import DBOS.Transact.Registry (WorkflowKey (..))
 import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
 import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Submitted (..), enqueueNew, initOrJoin, storedPriority, validateEnqueue)
 import Hasql.Transaction qualified as Tx
@@ -351,6 +350,8 @@ clientEnqueueWorkflowWith client workflow options input = do
                 newWorkflowPriority = storedPriority shape,
                 newWorkflowQueuePartitionKey = shape.partitionKey,
                 newWorkflowDelay = shape.delay,
+                newWorkflowIsDebounced = shape.isDebounced,
+                newWorkflowDebounceTimeout = shape.debounceTimeout,
                 newWorkflowTimeout = options.timeout,
                 newWorkflowDeadline = Nothing,
                 newWorkflowAttributes = encodeAttributes options.attributes,

@@ -55,6 +55,7 @@ module DBOS.SystemDB.Postgres.Backend
     sendBatchInTx,
     sendMessageInTx,
     enqueueInTx,
+    initWorkflowAs,
     legacySetEvent,
     setEventSession,
     takeNotificationSession,
@@ -105,7 +106,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -1282,6 +1283,7 @@ initParams :: Maybe Text -> NewWorkflow -> WorkflowStatus -> Bool -> Text -> Tim
 initParams applicationName new status queued creatorXid now = do
   delayMs <- traverse (durationToMs "delay") new.newWorkflowDelay
   timeoutMs <- traverse (durationToMs "timeout") new.newWorkflowTimeout
+  debounceTimeoutMs <- traverse (durationToMs "debounce_timeout") new.newWorkflowDebounceTimeout
   pure
     ( Statements.InitWorkflowParams
         { initParamWorkflowId = new.newWorkflowId,
@@ -1310,7 +1312,7 @@ initParams applicationName new status queued creatorXid now = do
       initParamSerialization = new.newWorkflowSerialization,
       initParamAttributes = new.newWorkflowAttributes,
       initParamScheduleName = new.newWorkflowScheduleName,
-      initParamDebounceDeadline = timestampToEpochMs <$> new.newWorkflowDebounceDeadline,
+      initParamDebounceTimeoutMs = debounceTimeoutMs,
       initParamIsDebounced = new.newWorkflowIsDebounced,
       initParamApplicationName = new.newWorkflowApplicationName <|> applicationName
     })
@@ -1348,7 +1350,9 @@ initConflict new row =
 -- | What the upsert's row says about whether this call may run the workflow.
 -- Mirrors the oracle's checks, in its order: an unreadable status is
 -- malformed, a different function under the same id is a conflict, a
--- differing queue is only a warning (the stored queue wins). Whether this
+-- differing queue is only a warning (the stored queue wins), a debounced
+-- creation that found a row it did not write is refused (the holder's own
+-- key races back to the bounce, anything else is a conflict). Whether this
 -- attempt created the row — its own insert, or a retry of it after a lost
 -- acknowledgement — decides execution: anything else joins, whatever has
 -- become of the row since. A row a timeout or a cancel left without an
@@ -1360,6 +1364,7 @@ finishInit env new creatorXid row =
     Just raw -> case parseWorkflowStatus raw of
       Left _ -> pure (Left (Malformed ("unknown workflow status \"" <> raw <> "\"")))
       Right status -> do
+        let shouldExecute = row.creator_xid == Just creatorXid
         case initConflict new row of
           Just err -> pure (Left err)
           Nothing -> do
@@ -1367,22 +1372,86 @@ finishInit env new creatorXid row =
               runTracer
                 env.psdbLog
                 (SysdbQueueMismatch new.newWorkflowId)
-            let shouldExecute = row.creator_xid == Just creatorXid
-                recoveryAttempts = fromMaybe 0 row.recovery_attempts
-            clock <- databaseTimeRead (fromMaybe 0 row.db_now)
-            pure
-              ( Right
-                  WorkflowInitResult
-                    { initResultStatus = status,
-                      initResultRecoveryAttempts = recoveryAttempts,
-                      initResultDeadline = timestampFromEpochMs <$> row.workflow_deadline_epoch_ms,
-                      initResultClock = clock,
-                      initResultCreatorXid = creatorXid,
-                      initResultSerialization = row.serialization,
-                      initResultShouldExecute = shouldExecute
-                    }
+            case debouncedRefusal new row shouldExecute of
+              Just err -> pure (Left err)
+              Nothing -> do
+                let recoveryAttempts = fromMaybe 0 row.recovery_attempts
+                clock <- databaseTimeRead (fromMaybe 0 row.db_now)
+                pure
+                  ( Right
+                      WorkflowInitResult
+                        { initResultStatus = status,
+                          initResultRecoveryAttempts = recoveryAttempts,
+                          initResultDeadline = timestampFromEpochMs <$> row.workflow_deadline_epoch_ms,
+                          initResultClock = clock,
+                          initResultCreatorXid = creatorXid,
+                          initResultSerialization = row.serialization,
+                          initResultShouldExecute = shouldExecute
+                        }
                   )
 
+-- | A debounced creation must be a new workflow: its bounce found no
+-- waiting holder, so an id that already names a row is a conflict — a
+-- reused pinned id joins nothing and drops the call's input. Unless the
+-- row holds the very key this debounce is after: a concurrent debounce
+-- pinned to the same id inserted first, and the deduplication index never
+-- saw the overlap; the race gets the lost-deduplication answer, so the
+-- debounce bounces again and coalesces. A row keeps its deduplication id
+-- only while it waits, so a matching one is a holder of the key. Mirrors
+-- the oracle's debounced conflict arm.
+debouncedRefusal :: NewWorkflow -> Statements.WorkflowInitRaw -> Bool -> Maybe Error
+debouncedRefusal new row shouldExecute
+  | new.newWorkflowIsDebounced && not shouldExecute =
+      case (new.newWorkflowDeduplicationId, new.newWorkflowQueueName) of
+        (Just deduplicationId, Just queueName)
+          | row.deduplication_id == Just deduplicationId && row.queue_name == Just queueName ->
+              Just QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queueName, deduplicationId = deduplicationId}
+        _ ->
+          Just
+            ConflictingWorkflow
+              { workflowId = new.newWorkflowId,
+                detail = "a debounce enqueues a new workflow, but a workflow with this id already exists"
+              }
+  | otherwise = Nothing
+
+-- | The plain init body with the attempt's identity hoisted out, so a test
+-- can stage a retry after a lost acknowledgement under the same token:
+-- the second call finds its own row and must not rewrite an input a
+-- bounce replaced meanwhile. Mirrors the oracle's @init_workflow_as@
+-- seam, which exists for exactly that test.
+initWorkflowAs :: PostgresSystemDB -> NewWorkflow -> Text -> Timestamp -> IO (Either Error WorkflowInitResult)
+initWorkflowAs env new creatorXid now = case validateNewWorkflow new of
+  Left err -> pure (Left err)
+  Right () -> do
+    let status = initialStatus new
+        queued = status == Enqueued || status == Delayed
+    case initParams env.psdbApplicationName new status queued creatorXid now of
+      Left err -> pure (Left err)
+      Right params -> do
+        -- The status row and the input commit together, so a crash can
+        -- never leave one without the other; the input lands only when
+        -- this statement created the row.
+        result <- runTransaction env "init_workflow" $ do
+          row <- Tx.statement () (Statements.initWorkflowStatement params)
+          when (row.creator_xid == Just creatorXid && fromMaybe False row.inserted) $
+            void $
+              Tx.statement
+                (new.newWorkflowId, new.newWorkflowInput)
+                Statements.initWorkflowInputStatement
+          pure row
+        case result of
+          Left err
+            | queueDeduplicated new err ->
+                pure
+                  ( Left
+                      QueueDeduplicated
+                        { workflowId = new.newWorkflowId,
+                          queueName = fromMaybe "" new.newWorkflowQueueName,
+                          deduplicationId = fromMaybe "" new.newWorkflowDeduplicationId
+                        }
+                  )
+            | otherwise -> pure (Left err)
+          Right row -> finishInit env new creatorXid row
 
 -- | Maps the row the step check returned: no status is malformed, a
 -- cancelled workflow is reported, an absent step is 'Nothing', a renamed
@@ -1560,19 +1629,25 @@ validateSweepLimits limits
       Left (invalidInput "queue" "a partitioned sweep needs partition concurrency 1 and no other limit")
   | otherwise = Right ()
 
--- | The values a bounce writes.
-debounceBounceParams :: DebounceRequest -> Maybe Text -> Statements.DebounceBounceParams
-debounceBounceParams request app =
-  Statements.DebounceBounceParams
-    { debounceBounceWorkflowName = request.debounceRequestWorkflowName,
-      debounceBounceQueueName = request.debounceRequestQueueName,
-      debounceBounceDeduplicationId = request.debounceRequestDeduplicationId,
-      debounceBounceDelayUntil = timestampToEpochMs request.debounceRequestDelayUntil,
-      debounceBounceSerialization = request.debounceRequestSerialization,
-      debounceBounceApplicationName = app,
-      debounceBounceClassName = request.debounceRequestClassName,
-      debounceBounceConfigName = request.debounceRequestConfigName
-    }
+-- | The values a bounce writes. Total on validated requests: validation
+-- holds the period to a storable one, so the conversion cannot fail
+-- after it — the 'Either' is defense in depth, as the oracle's
+-- @Bounce::request@ cannot fail for the same reason.
+debounceBounceParams :: DebounceRequest -> Maybe Text -> Either Error Statements.DebounceBounceParams
+debounceBounceParams request app = do
+  periodMs <- durationToMs "period" request.debounceRequestPeriod
+  let WorkflowKey workflowName className configName = request.debounceRequestWorkflow
+  pure
+    Statements.DebounceBounceParams
+      { debounceBounceWorkflowName = workflowName,
+        debounceBounceQueueName = request.debounceRequestQueueName,
+        debounceBounceDeduplicationId = request.debounceRequestDeduplicationId,
+        debounceBouncePeriodMs = periodMs,
+        debounceBounceSerialization = request.debounceRequestSerialization,
+        debounceBounceApplicationName = app,
+        debounceBounceClassName = className,
+        debounceBounceConfigName = configName
+      }
 
 -- | The holder row as the domain value.
 debounceHeld :: Statements.DebounceHolderRaw -> Debounce
@@ -1717,37 +1792,40 @@ debounceCallerTx app callerWid callerText callerStep startedAt completedAt reque
         Right _  -> pure (replayedDebounce callerWid callerStep raw)
       Nothing -> pure (Left (Malformed "unreachable: recorded step vanished"))
     _ -> do
-      bounced <- Tx.statement (debounceBounceParams request app) Statements.debounceBounceStatement
-      value <- case bounced of
-        Just workflowId -> do
-          -- The bounce replaces the held workflow's inputs, which readers
-          -- find in @workflow_input@ before the legacy column.
-          void $ Tx.statement (workflowId, request.debounceRequestInputs) Statements.debounceInputStatement
-          pure (Right (Debounced {debounceWorkflowId = workflowId}))
-        Nothing -> do
-          holder <- Tx.statement (request.debounceRequestQueueName, request.debounceRequestDeduplicationId) Statements.debounceHolderStatement
-          pure (Right (maybe DebounceUnheld debounceHeld holder))
-      case value of
+      case debounceBounceParams request app of
         Left err -> pure (Left err)
-        Right debounce -> do
-          _ <-
-            Tx.statement
-              ()
-              ( Statements.recordStepStatement
-                  Statements.RecordStepParams
-                  { recordStepWorkflowId = callerText,
-                    recordStepStepId = callerStep,
-                    recordStepStepName = debounceStepName,
-                    recordStepOutput = Just (decodeUtf8 (LBS.toStrict (Aeson.encode debounce))),
-                    recordStepError = Nothing,
-                    recordStepSerialization = Just portableJsonSerialization,
-                    recordStepStartedAt = Just (timestampToEpochMs startedAt),
-                    recordStepCompletedAt = Just completedAt,
-                    recordStepApplicationName = app,
-                    recordStepChildWorkflowId = Nothing
-                  }
-              )
-          pure (Right debounce)
+        Right params -> do
+          bounced <- Tx.statement params Statements.debounceBounceStatement
+          value <- case bounced of
+            Just workflowId -> do
+              -- The bounce replaces the held workflow's inputs, which readers
+              -- find in @workflow_input@ before the legacy column.
+              void $ Tx.statement (workflowId, request.debounceRequestInputs) Statements.debounceInputStatement
+              pure (Right (Debounced {debounceWorkflowId = workflowId}))
+            Nothing -> do
+              holder <- Tx.statement (request.debounceRequestQueueName, request.debounceRequestDeduplicationId) Statements.debounceHolderStatement
+              pure (Right (maybe DebounceUnheld debounceHeld holder))
+          case value of
+            Left err -> pure (Left err)
+            Right debounce -> do
+              _ <-
+                Tx.statement
+                  ()
+                  ( Statements.recordStepStatement
+                      Statements.RecordStepParams
+                      { recordStepWorkflowId = callerText,
+                        recordStepStepId = callerStep,
+                        recordStepStepName = debounceStepName,
+                        recordStepOutput = Just (decodeUtf8 (LBS.toStrict (Aeson.encode debounce))),
+                        recordStepError = Nothing,
+                        recordStepSerialization = Just portableJsonSerialization,
+                        recordStepStartedAt = Just (timestampToEpochMs startedAt),
+                        recordStepCompletedAt = Just completedAt,
+                        recordStepApplicationName = app,
+                        recordStepChildWorkflowId = Nothing
+                      }
+                  )
+              pure (Right debounce)
 
 -- | A workflow id as the text the statements bind. A top-level helper
 -- rather than a local one so the transaction bodies below can use it without
@@ -2338,7 +2416,7 @@ enqueueInTx new applicationName creatorXid now = do
     Left err -> pure (Left err)
     Right params -> do
       row <- Tx.statement () (Statements.initWorkflowStatement params)
-      when (row.creator_xid == Just creatorXid) $
+      when (row.creator_xid == Just creatorXid && fromMaybe False row.inserted) $
         void $
           Tx.statement
             (new.newWorkflowId, new.newWorkflowInput)
@@ -2519,7 +2597,7 @@ instance SystemDB PostgresSystemDB IO where
                     -- only when this attempt created the row: a start that found an
                     -- existing row must not touch the input the workflow was
                     -- recorded with.
-                    when (row.creator_xid == Just creatorXid) $
+                    when (row.creator_xid == Just creatorXid && fromMaybe False row.inserted) $
                       void $
                         Tx.statement
                           (new.newWorkflowId, new.newWorkflowInput)
@@ -2557,35 +2635,7 @@ instance SystemDB PostgresSystemDB IO where
         Right () -> do
           creatorXid <- UUID.toText <$> UUID.V4.nextRandom
           now <- timestampNow
-          let status = initialStatus new
-              queued = status == Enqueued || status == Delayed
-          case initParams env.psdbApplicationName new status queued creatorXid now of
-            Left err -> pure (Left err)
-            Right params -> do
-              -- The status row and the input commit together, so a crash can
-              -- never leave one without the other; the input lands only when
-              -- this attempt created the row.
-              result <- runTransaction env "init_workflow" $ do
-                row <- Tx.statement () (Statements.initWorkflowStatement params)
-                when (row.creator_xid == Just creatorXid) $
-                  void $
-                    Tx.statement
-                      (new.newWorkflowId, new.newWorkflowInput)
-                      Statements.initWorkflowInputStatement
-                pure row
-              case result of
-                Left err
-                  | queueDeduplicated new err ->
-                      pure
-                        ( Left
-                            QueueDeduplicated
-                              { workflowId = new.newWorkflowId,
-                                queueName = fromMaybe "" new.newWorkflowQueueName,
-                                deduplicationId = fromMaybe "" new.newWorkflowDeduplicationId
-                              }
-                        )
-                  | otherwise -> pure (Left err)
-                Right row -> finishInit env new creatorXid row
+          initWorkflowAs env new creatorXid now
   getWorkflow env wid = do
     result <- runSession env "get_workflow" (Statements.getWorkflowSession widText)
     pure (result >>= traverse workflowRecordFromRow)
@@ -3532,16 +3582,19 @@ instance SystemDB PostgresSystemDB IO where
         Left err -> pure (Left err)
         Right () -> do
           let app = request.debounceRequestApplicationName <|> env.psdbApplicationName
-          result <- runTransaction env "debounce_delayed_workflow" $ do
-            bounced <- Tx.statement (debounceBounceParams request app) Statements.debounceBounceStatement
-            case bounced of
-              Just workflowId -> do
-                void $ Tx.statement (workflowId, request.debounceRequestInputs) Statements.debounceInputStatement
-                pure (Debounced {debounceWorkflowId = workflowId})
-              Nothing -> do
-                holder <- Tx.statement (request.debounceRequestQueueName, request.debounceRequestDeduplicationId) Statements.debounceHolderStatement
-                pure (maybe DebounceUnheld debounceHeld holder)
-          pure result
+          case debounceBounceParams request app of
+            Left err -> pure (Left err)
+            Right params -> do
+              result <- runTransaction env "debounce_delayed_workflow" $ do
+                bounced <- Tx.statement params Statements.debounceBounceStatement
+                case bounced of
+                  Just workflowId -> do
+                    void $ Tx.statement (workflowId, request.debounceRequestInputs) Statements.debounceInputStatement
+                    pure (Debounced {debounceWorkflowId = workflowId})
+                  Nothing -> do
+                    holder <- Tx.statement (request.debounceRequestQueueName, request.debounceRequestDeduplicationId) Statements.debounceHolderStatement
+                    pure (maybe DebounceUnheld debounceHeld holder)
+              pure result
 
 -- | The caller's bounce as one commit: a recorded step is the answer and
 -- the work never re-runs; otherwise the bounce runs and its output is

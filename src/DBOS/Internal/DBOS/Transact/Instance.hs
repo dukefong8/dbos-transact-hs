@@ -72,7 +72,7 @@ import Data.Map.Strict qualified as Map
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Applications, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter)
+import DBOS.SystemDB.Types (Applications, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult, WorkflowKey, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter, renderWorkflowKey)
 import DBOS.Transact.Serialization (CodecError (..), SerializationError, WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, unWorkflowInput)
 import DBOS.Transact.Serialization qualified as Serialization
 import DBOS.Transact.Config (Config (..))
@@ -89,7 +89,7 @@ import DBOS.Transact.Management (ManagementEvent (..), StepInfo)
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
 import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, snapshotDatasources, thawDataSourceRegistry)
 import DBOS.Transact.Datasource qualified as Datasource (registerDataSource)
-import DBOS.Transact.Registry (Registry, Snapshot, WorkflowKey, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, renderWorkflowKey, snapshotRegistry, snapshotSize, thawRegistry)
+import DBOS.Transact.Registry (Registry, Snapshot, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, snapshotRegistry, snapshotSize, thawRegistry)
 import DBOS.Transact.TimeoutSweep (spawnTimeoutSweep)
 import DBOS.Transact.Workflow (ErasedWorkflow, RunOptions (..), StartOptions, Tasks, WorkflowRef, abortAll, newTasks, runRegisteredWorkflow, spawnTracked)
 import DBOS.Transact.Workflow qualified as Workflow (enqueueWorkflow, registerTypedWorkflow, registerWorkflowRef, runWorkflowRef, startWorkflow)

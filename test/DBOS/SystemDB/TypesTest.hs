@@ -9,7 +9,7 @@ import DBOS.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
-import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, newQueue, newSchedule, newWorkflow, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, portableJsonSerialization, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, renameFromApplication, renderApplicationName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
+import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodWorkflowKey, newQueue, newSchedule, newWorkflow, newWorkflowKey, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, portableJsonSerialization, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, renameFromApplication, renderApplicationName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
 import DBOS.Transact
   (
   IdempotencyKey (..),
@@ -182,16 +182,20 @@ newWorkflowTests =
         validateNewWorkflow ((newWorkflow "wf") {newWorkflowDelay = Just noWait})
           @?= Left (invalidInput "delay" "must be a positive, non-zero duration")
         validateNewWorkflow ((newWorkflow "wf") {newWorkflowTimeout = Just noWait})
-          @?= Left (invalidInput "timeout" "must be a positive, non-zero duration"),
+          @?= Left (invalidInput "timeout" "must be a positive, non-zero duration")
+        validateNewWorkflow ((newWorkflow "wf") {newWorkflowDebounceTimeout = Just noWait})
+          @?= Left (invalidInput "debounce_timeout" "must be a positive, non-zero duration"),
       testCase "rejects a delay and a timeout too long to store" $ do
-        -- Mirrors Rust an_oversized_workflow_duration_does_not_validate,
-        -- minus debounce_timeout, which rides S10 with its field: 1e16 s
-        -- constructs (below Word64) but its milliseconds exceed Int64.
+        -- Mirrors Rust an_oversized_workflow_duration_does_not_validate:
+        -- 1e16 s constructs (below Word64) but its milliseconds exceed
+        -- Int64. Debounce_timeout rides the same loop, last.
         huge <- expectJust "durationFromSecs 1e16" (durationFromSecs 1e16)
         validateNewWorkflow ((newWorkflow "wf") {newWorkflowDelay = Just huge})
           @?= Left (invalidInput "delay" "must fit in milliseconds as a 64-bit integer")
         validateNewWorkflow ((newWorkflow "wf") {newWorkflowTimeout = Just huge})
-          @?= Left (invalidInput "timeout" "must fit in milliseconds as a 64-bit integer"),
+          @?= Left (invalidInput "timeout" "must fit in milliseconds as a 64-bit integer")
+        validateNewWorkflow ((newWorkflow "wf") {newWorkflowDebounceTimeout = Just huge})
+          @?= Left (invalidInput "debounce_timeout" "must fit in milliseconds as a 64-bit integer"),
       testCase "rejects attributes that are not a JSON object" $ do
         case validateNewWorkflow ((newWorkflow "wf") {newWorkflowAttributes = Just "[1, 2]"}) of
           Left (InvalidInput {field = "attributes"}) -> pure ()
@@ -543,24 +547,43 @@ debounceTests =
   testGroup
     "Debounces"
     [ testCase "rejects bounces that could silently match nothing" $ do
+        wait <- expectJust "durationFromMs 1000" (durationFromMs 1000)
         let request =
               DebounceRequest
-                { debounceRequestWorkflowName = "wf",
-                  debounceRequestClassName = Nothing,
-                  debounceRequestConfigName = Nothing,
+                { debounceRequestWorkflow = newWorkflowKey "wf",
                   debounceRequestQueueName = "q",
                   debounceRequestDeduplicationId = "k",
-                  debounceRequestDelayUntil = timestampFromEpochMs 1700000000000,
+                  debounceRequestPeriod = wait,
                   debounceRequestInputs = Nothing,
                   debounceRequestSerialization = Nothing,
                   debounceRequestApplicationName = Nothing
                 }
         debounceValidate request
           @?= Right ()
-        debounceValidate (request {debounceRequestWorkflowName = ""})
-          @?= Left (invalidInput "workflow_name" "must not be empty")
-        debounceValidate (request {debounceRequestClassName = Just ""})
-          @?= Left (invalidInput "class_name" "must be absent rather than empty")
+        debounceValidate (request {debounceRequestWorkflow = newWorkflowKey ""})
+          @?= Left (invalidInput "workflow.name" "must not be empty")
+        debounceValidate (request {debounceRequestWorkflow = methodWorkflowKey "wf" ""})
+          @?= Left (invalidInput "workflow.class_name" "must be absent rather than empty"),
+      testCase "rejects a bounce period that is zero or too long to store" $ do
+        -- Mirrors Rust a_bounce_refuses_a_zero_or_unstorable_period: the
+        -- period is held to the rule delay is.
+        noWait <- expectJust "durationFromMs 0" (durationFromMs 0)
+        wait <- expectJust "durationFromMs 1000" (durationFromMs 1000)
+        huge <- expectJust "durationFromSecs 1e16" (durationFromSecs 1e16)
+        let base =
+              DebounceRequest
+                { debounceRequestWorkflow = newWorkflowKey "wf",
+                  debounceRequestQueueName = "q",
+                  debounceRequestDeduplicationId = "k",
+                  debounceRequestPeriod = wait,
+                  debounceRequestInputs = Nothing,
+                  debounceRequestSerialization = Nothing,
+                  debounceRequestApplicationName = Nothing
+                }
+        debounceValidate (base {debounceRequestPeriod = noWait})
+          @?= Left (invalidInput "period" "must be a positive, non-zero duration")
+        debounceValidate (base {debounceRequestPeriod = huge})
+          @?= Left (invalidInput "period" "must fit in milliseconds as a 64-bit integer")
     ]
 
 outcomeTests :: TestTree

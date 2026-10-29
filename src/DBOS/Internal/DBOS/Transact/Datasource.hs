@@ -70,14 +70,14 @@ import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderError)
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..))
+import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..), newWorkflowKey)
 import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText, fromRegistryError, fromSerializationError)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
 import DBOS.Transact.Serialization (SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Serialization qualified as Serialization
-import DBOS.Transact.Registry (RegistryError, newWorkflowKey)
+import DBOS.Transact.Registry (RegistryError)
 import DBOS.Transact.Registry qualified as Registry
 import GHC.Stack (HasCallStack)
 import Hasql.Statement qualified as Statement

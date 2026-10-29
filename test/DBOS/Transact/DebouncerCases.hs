@@ -24,12 +24,27 @@ module DBOS.Transact.DebouncerCases
     checkInWorkflowDebounceRecordsStep,
     scenarioTimeoutCapsExtension,
     checkTimeoutCapsExtension,
+    scenarioDebouncedCapAtCreation,
+    checkDebouncedCapAtCreation,
+    scenarioPinnedIdNamesFreshRow,
+    checkPinnedIdNamesFreshRow,
+    scenarioPinnedIdReusedAcrossCycles,
+    checkPinnedIdReusedAcrossCycles,
+    scenarioDebounceDurationsRefused,
+    checkDebounceDurationsRefused,
+    scenarioCancelledDebounceFreesKey,
+    checkCancelledDebounceFreesKey,
+    scenarioDebounceInsideStepRefused,
+    checkDebounceInsideStepRefused,
+    scenarioKeyCollisionRefused,
+    checkKeyCollisionRefused,
   )
 where
 
 import DBOS.Prelude
 import DBOS.SystemDB (Timestamp (..), WorkflowRecord (..), debounceStepName)
 import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.Transact (StepInfo (..), defaultListWorkflowStepsOptions)
 import DBOS.Transact.Management (stepInfoFromRecord)
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
@@ -103,7 +118,236 @@ checkFirstDebounceDelays (atCreate, key, isDebounced, hasDeadline, settled, outp
   | runs /= 1 = Left ("expected exactly one user run, got: " <> show runs)
   | otherwise = Right ()
 
--- | A second debounce inside the window extends the delay, replaces the
+-- | A debounced creation with a delay longer than its timeout lands its
+-- release on the deadline exactly: the init resolves both against one
+-- clock reading and caps the release at the deadline. Returns the
+-- release and the deadline side by side.
+scenarioDebouncedCapAtCreation :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                               => DebouncerFixture m ->
+                                  m (Maybe Timestamp, Maybe Timestamp)
+scenarioDebouncedCapAtCreation fx = do
+  tag <- fx.dbFreshTag "debounce-capped"
+  let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue, debouncerTimeout = Just (secondsDuration 60)}
+  created <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 3600) (Just (encodeWorkflowInput ("one" :: Text)))
+  userWid <- case created of
+    Right joined -> pure (WorkflowId joined.workflowId)
+    Left err -> throwIO (userError ("expected the capped debounce to create a row, got: " <> show err))
+  row <- fx.dbReadRow userWid
+  case row of
+    Just found -> pure (found.workflowRecordDelayUntil, found.workflowRecordDebounceDeadline)
+    Nothing -> throwIO (userError "expected the debounced row")
+
+-- | The release reads exactly the deadline: a 3600s delay under a 60s
+-- timeout never escapes the deadline.
+checkDebouncedCapAtCreation :: (Maybe Timestamp, Maybe Timestamp) -> Either String ()
+checkDebouncedCapAtCreation (release, deadline)
+  | deadline == Nothing = Left "expected the capped row to carry its deadline"
+  | release /= deadline = Left ("expected the release capped at the deadline, got: " <> show (release, deadline))
+  | otherwise = Right ()
+
+-- | A pinned id names the fresh row: the call that enqueues with an id
+-- the store does not know takes it, and the row reads DELAYED under it.
+-- Returns whether the created id is the offered one, with the row status.
+scenarioPinnedIdNamesFreshRow :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                             => DebouncerFixture m ->
+                                m (Bool, Maybe WorkflowStatus)
+scenarioPinnedIdNamesFreshRow fx = do
+  tag <- fx.dbFreshTag "debounce-pinned"
+  offered <- fx.dbFreshWid "debounce-pinned-offered"
+  let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
+      options = debounceOptionsDefault {debounceOptionsWorkflowId = Just offered}
+  created <- debounceWith fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 3) (Just (encodeWorkflowInput ("one" :: Text))) options
+  case created of
+    Left err -> throwIO (userError ("expected the pinned debounce to create a row, got: " <> show err))
+    Right joined -> do
+      row <- fx.dbReadRow (WorkflowId joined.workflowId)
+      case row of
+        Just found -> pure (WorkflowId joined.workflowId == offered, Just found.workflowRecordStatus)
+        Nothing -> throwIO (userError "expected the pinned row")
+
+-- | The created id is the offered one, and the row waits delayed under it.
+checkPinnedIdNamesFreshRow :: (Bool, Maybe WorkflowStatus) -> Either String ()
+checkPinnedIdNamesFreshRow (pinned, status) = do
+  unless pinned $ Left "expected the fresh row to take the offered id"
+  unless (status == Just Delayed) $ Left ("expected the pinned row DELAYED, got: " <> show status)
+
+-- | A pinned id reused after its workflow ran is a conflict, not a join:
+-- the first cycle runs to SUCCESS under the id, and the second call with
+-- the same id is refused before anything is written. Mirrors Rust
+-- @a_pinned_id_reused_after_its_workflow_ran_is_a_conflict_not_a_join@.
+-- Returns the first cycle's terminal status plus the second verdict.
+scenarioPinnedIdReusedAcrossCycles :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                                   => DebouncerFixture m ->
+                                      m (Maybe WorkflowStatus, Either (Error EngineOnly) ())
+scenarioPinnedIdReusedAcrossCycles fx = do
+  tag <- fx.dbFreshTag "debounce-reuse"
+  offered <- fx.dbFreshWid "debounce-reuse-offered"
+  let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
+      options = debounceOptionsDefault {debounceOptionsWorkflowId = Just offered}
+  created <- debounceWith fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 1) (Just (encodeWorkflowInput ("one" :: Text))) options
+  case created of
+    Left err -> throwIO (userError ("expected the first cycle to create a row, got: " <> show err))
+    Right _ -> pure ()
+  settled <- fx.dbAwaitUser offered
+  reused <- debounceWith fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 1) (Just (encodeWorkflowInput ("two" :: Text))) options
+  pure (settled, void reused)
+
+-- | The first cycle ran, and the reuse is refused as a conflicting
+-- workflow rather than joined.
+checkPinnedIdReusedAcrossCycles :: (Maybe WorkflowStatus, Either (Error EngineOnly) ()) -> Either String ()
+checkPinnedIdReusedAcrossCycles (settled, verdict) = do
+  unless (settled == Just Success) $ Left ("expected the first cycle SUCCESS, got: " <> show settled)
+  case verdict of
+    Left (SystemDatabase (SystemDBError.ConflictingWorkflow {})) -> Right ()
+    other -> Left ("expected a ConflictingWorkflow refusal, got: " <> show other)
+
+-- | A zero or unstorable period, and a zero timeout, are refused as
+-- argument refusals to this operation before anything is written: no row
+-- is created. Mirrors Rust @refuse_durations@. Returns the three
+-- verdicts.
+scenarioDebounceDurationsRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                                => DebouncerFixture m ->
+                                   m ( Either (Error EngineOnly) (),
+                                       Either (Error EngineOnly) (),
+                                       Either (Error EngineOnly) ()
+                                     )
+scenarioDebounceDurationsRefused fx = do
+  tag <- fx.dbFreshTag "debounce-refused"
+  huge <- case SystemDB.durationFromSecs 1e16 of
+    Nothing -> throwIO (userError "durationFromSecs 1e16 did not construct")
+    Just duration -> pure duration
+  let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
+      input = Just (encodeWorkflowInput ("one" :: Text))
+  zeroPeriod <- debounce fx.dbDBOS fx.dbTargetRef def tag (millisDuration 0) input
+  hugePeriod <- debounce fx.dbDBOS fx.dbTargetRef def tag huge input
+  zeroTimeout <- debounce fx.dbDBOS fx.dbTargetRef (def {debouncerTimeout = Just (millisDuration 0)}) tag (secondsDuration 1) input
+  pure (void zeroPeriod, void hugePeriod, void zeroTimeout)
+
+-- | Each refusal names the operation and the offending field.
+checkDebounceDurationsRefused :: ( Either (Error EngineOnly) (),
+                                  Either (Error EngineOnly) (),
+                                  Either (Error EngineOnly) ()
+                                ) -> Either String ()
+checkDebounceDurationsRefused (zeroPeriod, hugePeriod, zeroTimeout) = do
+  case zeroPeriod of
+    Left (InvalidArgument operation detail) -> do
+      unless (operation == "debounce a workflow") $ Left ("expected the debounce operation, got: " <> show operation)
+      unless (detail == "`period` must be a positive, non-zero duration") $ Left ("expected the period refusal, got: " <> show detail)
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case hugePeriod of
+    Left (InvalidArgument operation detail) -> do
+      unless (operation == "debounce a workflow") $ Left ("expected the debounce operation, got: " <> show operation)
+      unless (detail == "`period` must fit in milliseconds as a 64-bit integer") $ Left ("expected the period storability refusal, got: " <> show detail)
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case zeroTimeout of
+    Left (InvalidArgument operation detail) -> do
+      unless (operation == "debounce a workflow") $ Left ("expected the debounce operation, got: " <> show operation)
+      unless (detail == "`debounce_timeout` must be a positive, non-zero duration") $ Left ("expected the timeout refusal, got: " <> show detail)
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+
+-- | A cancelled debounced row frees its key: cancelling the holder
+-- clears the deduplication id, so the next debounce for the key starts a
+-- fresh row instead of joining or refusing. Mirrors Rust
+-- @a_cancelled_debounced_workflow_frees_its_key@. Returns the cancelled
+-- status, the fresh status, whether the ids differ, and whether the fresh
+-- row holds the key.
+scenarioCancelledDebounceFreesKey :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                                  => DebouncerFixture m ->
+                                     m (Maybe WorkflowStatus, Maybe WorkflowStatus, Bool, Bool)
+scenarioCancelledDebounceFreesKey fx = do
+  tag <- fx.dbFreshTag "debounce-cancelled"
+  let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
+  created <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 60) (Just (encodeWorkflowInput ("one" :: Text)))
+  wid1 <- case created of
+    Left err -> throwIO (userError ("expected the first debounce to create a row, got: " <> show err))
+    Right joined -> pure (WorkflowId joined.workflowId)
+  cancelled <- cancelWorkflow fx.dbDBOS wid1
+  case cancelled of
+    Left err -> throwIO (userError ("expected the cancel to land, got: " <> show err))
+    Right () -> pure ()
+  coincided <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 60) (Just (encodeWorkflowInput ("two" :: Text)))
+  wid2 <- case coincided of
+    Left err -> throwIO (userError ("expected the second debounce to start fresh, got: " <> show err))
+    Right joined -> pure (WorkflowId joined.workflowId)
+  row1 <- fx.dbReadRow wid1
+  row2 <- fx.dbReadRow wid2
+  case (row1, row2) of
+    (Just cancelledRow, Just freshRow) ->
+      pure
+        ( Just cancelledRow.workflowRecordStatus,
+          Just freshRow.workflowRecordStatus,
+          wid1 /= wid2,
+          freshRow.workflowRecordDeduplicationId /= Nothing
+        )
+    _ -> throwIO (userError "expected both the cancelled and the fresh row")
+
+-- | The holder cancelled, the next debounce started fresh and delayed,
+-- holding the key.
+checkCancelledDebounceFreesKey :: (Maybe WorkflowStatus, Maybe WorkflowStatus, Bool, Bool) -> Either String ()
+checkCancelledDebounceFreesKey (cancelled, fresh, differ, held)
+  | cancelled /= Just Cancelled = Left ("expected the holder CANCELLED, got: " <> show cancelled)
+  | fresh /= Just Delayed = Left ("expected the fresh row DELAYED, got: " <> show fresh)
+  | not differ = Left "expected the fresh debounce to take a new id"
+  | not held = Left "expected the fresh row to hold the key"
+  | otherwise = Right ()
+
+-- | A debounce inside a step is refused: steps record their own work,
+-- and a debounce is a workflow-level call. Mirrors Rust
+-- @a_debounce_inside_a_step_is_refused@. Returns the refused operation.
+scenarioDebounceInsideStepRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                                 => DebouncerFixture m ->
+                                    m Text
+scenarioDebounceInsideStepRefused fx = do
+  tag <- fx.dbFreshTag "debounce-in-step"
+  parentWid <- fx.dbFreshWid "debounce-in-step"
+  (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow fx.dbExecutor (newWorkflowKey "debounce-in-step-parent") parentWid (Just (encodeWorkflowInput tag))
+  case ran of
+    Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+      Right operation -> pure operation
+      Left err -> throwIO (userError (show err))
+    other -> throwIO (userError ("expected the parent to report the refusal, got: " <> show other))
+
+-- | The refusal names the debouncing operation.
+checkDebounceInsideStepRefused :: Text -> Either String ()
+checkDebounceInsideStepRefused operation
+  | operation == "debouncing a workflow" = Right ()
+  | otherwise = Left ("expected the debouncing refusal, got: " <> show operation)
+
+-- | A key collision between unrelated workflows is refused, not
+-- hijacked: a bounce whose deduplication id spells the same as another
+-- workflow's key extends nothing, because the whole keys differ. Mirrors
+-- Rust @a_key_collision_between_two_workflows_is_refused@ and pins the
+-- collision refusal ADR-0042 relies on. Returns whether the bounce was
+-- refused.
+scenarioKeyCollisionRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                           => DebouncerFixture m ->
+                              m Bool
+scenarioKeyCollisionRefused fx = do
+  tag <- fx.dbFreshTag "debounce-collision"
+  let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
+      -- The target spells "echo-<tag>"; plant the other workflow under
+      -- the identical deduplication id with a different key.
+      key = "other-" <> tag
+  planted <-
+    startWorkflow
+      fx.dbExecutor
+      fx.dbOtherRef
+      (startOptionsDefault {startQueue = Just ((enqueueNew fx.dbTargetQueue) {deduplicationId = Just ("echo-" <> key)})})
+      Nothing
+  case (planted :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) of
+    Left err -> throwIO (userError ("expected the colliding row planted, got: " <> show err))
+    Right _ -> pure ()
+  debounced <- debounce fx.dbDBOS fx.dbTargetRef def key (secondsDuration 3) (Just (encodeWorkflowInput ("one" :: Text)))
+  case debounced of
+    Left (SystemDatabase (SystemDBError.QueueDeduplicated {})) -> pure True
+    Left err -> throwIO (userError ("expected a collision refusal, got: " <> show err))
+    Right joined -> throwIO (userError ("expected no user row, got: " <> show joined.workflowId))
+
+-- | The collision refused with a deduplication error.
+checkKeyCollisionRefused :: Bool -> Either String ()
+checkKeyCollisionRefused refused
+  | refused = Right ()
+  | otherwise = Left "expected the key collision to refuse the debounce"
 -- inputs, and returns the same user id; one run carries the last inputs.
 -- Returns whether both handles agree, the delays, then the settled
 -- status, outputs, and run count.
@@ -151,27 +395,28 @@ checkSecondDebounceCoalesces (sameId, delay1, delay2, settled, outputs, runs)
 -- refusal and the run count.
 scenarioForeignHolderRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => DebouncerFixture m ->
-                                m (Bool, Int)
+                                m (Bool, Bool, Int)
 scenarioForeignHolderRefused fx = do
   tag <- fx.dbFreshTag "debounce-foreign"
   let def = debouncerNew {debouncerQueueName = Just fx.dbForeignQueue}
       key = "echo-" <> tag
   planted <- startWorkflow fx.dbExecutor fx.dbOtherRef (startOptionsDefault {startQueue = Just ((enqueueNew fx.dbForeignQueue) {deduplicationId = Just key})}) Nothing
-  _ <- case (planted :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) of
-    Right _ -> pure ()
+  holderWid <- case (planted :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) of
+    Right joined -> pure joined.workflowId
     Left err -> throwIO (userError ("expected the foreign row planted, got: " <> show err))
   debounced <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 3) (Just (encodeWorkflowInput ("one" :: Text)))
-  refused <- case debounced of
-    Left (SystemDatabase SystemDB.QueueDeduplicated {}) -> pure True
+  named <- case debounced of
+    Left (SystemDatabase (SystemDBError.QueueDeduplicated {SystemDBError.workflowId = holder})) -> pure holder
     Left err -> throwIO (userError ("expected a deduplication refusal, got: " <> show err))
     Right joined -> throwIO (userError ("expected no user row, got: " <> show joined.workflowId))
   runs <- fx.dbUserRuns
-  pure (refused, runs)
+  pure (named == holderWid, True, runs)
 
--- | The foreign key refuses with a deduplication error and nothing runs.
-checkForeignHolderRefused :: (Bool, Int) -> Either String ()
-checkForeignHolderRefused (refused, runs)
+-- | The foreign key refuses naming its holder, and nothing runs.
+checkForeignHolderRefused :: (Bool, Bool, Int) -> Either String ()
+checkForeignHolderRefused (named, refused, runs)
   | not refused = Left "expected the foreign holder to refuse the debounce"
+  | not named = Left "expected the refusal to name the holder, not the pinned id"
   | runs /= 0 = Left ("expected no user run, got: " <> show runs)
   | otherwise = Right ()
 

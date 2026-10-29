@@ -37,13 +37,14 @@ import DBOS.SystemDB.Types
     timestampNow,
     timestampToEpochMs,
     databaseTimeRead,
+    workflowRecordKey,
     workflowStatusText)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
-import DBOS.Transact.Registry (Snapshot, lookupSnapshotWorkflow, renderWorkflowKey, workflowKeyFromRow)
+import DBOS.Transact.Registry (Snapshot, lookupSnapshotWorkflow)
 import DBOS.SystemDB.Retry (SysdbEvent (..))
 import DBOS.Transact.Workflow
   ( ErasedWorkflow,
@@ -452,18 +453,20 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed ow
                     Right (_ : _) -> runTracer conn.connTracer (DequeuedBudgetSpent workflowText row.workflowRecordRecoveryAttempts maxRecoveryAttempts)
                     Right [] -> pure ()
                 Run -> do
-                  case row.workflowRecordName of
+                  case workflowRecordKey row of
                     Nothing -> do
                       releaseSlot slot
                       runTracer conn.connTracer (DequeuedRowSkipped workflowText)
-                    Just name -> do
+                    Just key -> do
                       -- Reconstruct the call the row describes and spawn it:
                       -- the claim already read everything needed, so no
                       -- init re-submits the row. The claim's token travels
                       -- with the execution, which presents it on every
-                      -- write it makes. Mirrors @dequeue.rs@ @dispatch@.
-                      let key = workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName
-                          input = (\raw -> SerializedWorkflowValue raw (Serialization <$> row.workflowRecordSerialization)) <$> row.workflowRecordInput
+                      -- write it makes. A row without a name skips like a
+                      -- nameless one: the oracle's @WorkflowRecord::key@
+                      -- treats an empty name as no key either. Mirrors
+                      -- @dequeue.rs@ @dispatch@.
+                      let input = (\raw -> SerializedWorkflowValue raw (Serialization <$> row.workflowRecordSerialization)) <$> row.workflowRecordInput
                       case lookupSnapshotWorkflow key workflows of
                         Nothing -> do
                           releaseSlot slot
