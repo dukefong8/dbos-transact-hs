@@ -29,13 +29,17 @@ module DBOS.Transact.DeadlinesCases
     checkSweepCancelsAbandoned,
     scenarioSkewHoldsBudget,
     checkSkewHoldsBudget,
+    scenarioDelayedReleaseAhead,
+    checkDelayedReleaseAhead,
+    scenarioDelayedHoldBehind,
+    checkDelayedHoldBehind,
     scenarioFinishedIdAdopts,
     checkFinishedIdAdopts,
   )
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (Timestamp, WorkflowId (..), WorkflowStatus (..), millisDuration, secondsDuration, timestampFromEpochMs)
+import DBOS.SystemDB (Duration, Timestamp, WorkflowId (..), WorkflowStatus (..), millisDuration, secondsDuration, timestampFromEpochMs)
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact.Serialization (decodeWorkflowValue, CodecError (..))
 import DBOS.Transact
@@ -64,7 +68,9 @@ data DeadlinesFixture m = DeadlinesFixture
     dfLaunch :: DBOS m -> m (Executor m),
     dfReadStatus :: WorkflowId -> m (Maybe WorkflowStatus),
     dfReadDeadline :: WorkflowId -> m (Maybe Timestamp),
-    dfPlantExpired :: WorkflowId -> m ()
+    dfPlantExpired :: WorkflowId -> m (),
+    dfPlantDelayed :: WorkflowId -> Duration -> m (),
+    dfSweepDelayed :: m ()
   }
 
 -- | The deadline stamped on a workflow row, waiting until the row carries
@@ -296,3 +302,49 @@ checkSkewHoldsBudget :: (Maybe WorkflowStatus, Integer) -> Either String ()
 checkSkewHoldsBudget (status, elapsedMs) = do
   unless (status == Just Cancelled) $ Left ("expected the row CANCELLED, got: " <> show status)
   unless (elapsedMs >= 250 && elapsedMs <= 10000) $ Left ("expected about a 500ms run, got: " <> show elapsedMs <> "ms")
+
+-- | A delayed release follows the database clock when it runs ahead: the
+-- row becomes runnable once the database's own reading passes its release.
+-- A sweep comparing on the process clock against the database-resolved
+-- release would leave the row delayed, so this twin fails with the sweep
+-- reverted to a bound process now under skew — the oracle's own
+-- regression case. Mirrors Rust
+-- @delays_hold_with_the_database_clock_ahead@.
+scenarioDelayedReleaseAhead :: MonadDelay m => DeadlinesFixture m -> m (Maybe WorkflowStatus, Maybe WorkflowStatus)
+scenarioDelayedReleaseAhead fx = do
+  (_, wid) <- fx.dfSetup
+  fx.dfPlantDelayed wid (secondsDuration 3)
+  before <- fx.dfReadStatus wid
+  threadDelay 5000000
+  fx.dfSweepDelayed
+  after <- fx.dfReadStatus wid
+  pure (before, after)
+
+-- | Delayed before the sweep, runnable after it.
+checkDelayedReleaseAhead :: (Maybe WorkflowStatus, Maybe WorkflowStatus) -> Either String ()
+checkDelayedReleaseAhead (before, after) = do
+  unless (before == Just Delayed) $ Left ("expected the row delayed before the sweep, got: " <> show before)
+  unless (after == Just Enqueued) $ Left ("expected the sweep to release the row, got: " <> show after)
+
+-- | A delayed release holds while the database clock has not reached it:
+-- a two-hour delay swept at once stays delayed. This pins the hold side
+-- of the contract — a sweep that released unconditionally, or a write
+-- that resolved to a past instant, would release it. (Unlike the ahead
+-- twin it does not discriminate clocks: with the skew behind, a
+-- process-clock sweep holds this row too. The oracle's behind-direction
+-- clock coverage rides the bounce and the moved delay, which land in
+-- S10.) Mirrors Rust @delays_hold_with_the_database_clock_behind@.
+scenarioDelayedHoldBehind :: Monad m => DeadlinesFixture m -> m (Maybe WorkflowStatus, Maybe WorkflowStatus)
+scenarioDelayedHoldBehind fx = do
+  (_, wid) <- fx.dfSetup
+  fx.dfPlantDelayed wid (secondsDuration 7200)
+  before <- fx.dfReadStatus wid
+  fx.dfSweepDelayed
+  after <- fx.dfReadStatus wid
+  pure (before, after)
+
+-- | Delayed before the sweep, delayed after it.
+checkDelayedHoldBehind :: (Maybe WorkflowStatus, Maybe WorkflowStatus) -> Either String ()
+checkDelayedHoldBehind (before, after) = do
+  unless (before == Just Delayed) $ Left ("expected the row delayed before the sweep, got: " <> show before)
+  unless (after == Just Delayed) $ Left ("expected the sweep to hold the row, got: " <> show after)

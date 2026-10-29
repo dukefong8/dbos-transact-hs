@@ -113,6 +113,8 @@ import DBOS.SystemDB
     nullTopicSentinel,
     recvStepName,
     rewindStepName,
+    durationToMs,
+    saturateTimeout,
     shouldRecord,
     secondsDuration,
     sendBulkStepName,
@@ -698,7 +700,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                 | otherwise -> Nothing
             row =
               (memFreshRow new caller creator)
-                { workflowRecordDelayUntil = new.newWorkflowDelay >>= addTimeout now,
+                { workflowRecordDelayUntil = saturateTimeout now <$> new.newWorkflowDelay,
                   workflowRecordDeadline = deadlineAt
                 }
         writeTVar db.memRows (Map.insert new.newWorkflowId row rows)
@@ -786,11 +788,17 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       Nothing -> retry
   setWorkflowDelay db (WorkflowId wid) delay _ = do
     now <- memDbNow db
-    let releaseAt = case delay of
-          DelayFor duration -> addTimeout now duration
-          DelayUntil instant -> Just instant
-    atomically (modifyTVar db.memRows (Map.adjust (\row -> row {workflowRecordDelayUntil = releaseAt}) wid))
-    pure (Right ())
+    case delay of
+      -- Mirrors the write: an unstorable relative delay is refused by
+      -- 'durationToMs', a fitting one saturates at the end of time.
+      DelayFor duration -> case durationToMs "delay" duration of
+        Left err -> pure (Left err)
+        Right _ -> do
+          atomically (modifyTVar db.memRows (Map.adjust (\row -> row {workflowRecordDelayUntil = Just (saturateTimeout now duration)}) wid))
+          pure (Right ())
+      DelayUntil instant -> do
+        atomically (modifyTVar db.memRows (Map.adjust (\row -> row {workflowRecordDelayUntil = Just instant}) wid))
+        pure (Right ())
   updateWorkflowAttributes db (WorkflowId wid) attributes _ =
     atomically (modifyTVar db.memRows (Map.adjust (\row -> row {workflowRecordAttributes = attributes}) wid))
       >> pure (Right ())

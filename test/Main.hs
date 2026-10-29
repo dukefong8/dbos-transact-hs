@@ -74,7 +74,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty SystemDBNotify.tests
 --- $> tasty SystemDBPostgres.tests
 --- $> tasty SystemDBRetry.tests
---- $> tasty SystemDBTypes.tests
+-- $> tasty SystemDBTypes.tests
 --- $> tasty Logger.tests
 --- $> tasty StreamTest.tests
 -- $> tasty StreamSim.tests

@@ -22,6 +22,8 @@ import DBOS.Transact.TimeoutSweep (TimeoutSweepEvent (..))
 import DBOS.Transact.DeadlinesCases
   ( DeadlinesFixture (..),
     checkBeatenDeadline,
+    checkDelayedHoldBehind,
+    checkDelayedReleaseAhead,
     checkKeptDeadline,
     checkPastDeadline,
     checkShutdownPending,
@@ -30,6 +32,8 @@ import DBOS.Transact.DeadlinesCases
     checkSweepCancelsAbandoned,
     checkWithinDeadline,
     scenarioBeatenDeadline,
+    scenarioDelayedHoldBehind,
+    scenarioDelayedReleaseAhead,
     scenarioKeptDeadline,
     scenarioPastDeadline,
     scenarioShutdownPending,
@@ -77,6 +81,18 @@ simDeadlinesFixtureSkewed skewMs = do
           planted <- SystemDB.initWorkflow mem expired Nothing
           case planted of
             Left err -> error (show err)
+            Right _ -> pure (),
+        dfPlantDelayed = \wid delay -> do
+          let WorkflowId widText = wid
+              delayed = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowQueueName = Just "sweep-test-q", SystemDB.newWorkflowDelay = Just delay}
+          planted <- SystemDB.initWorkflow mem delayed Nothing
+          case planted of
+            Left err -> error (show err)
+            Right _ -> pure (),
+        dfSweepDelayed = do
+          swept <- SystemDB.transitionDelayedWorkflows mem
+          case swept of
+            Left err -> error (show err)
             Right _ -> pure ()
       }
 
@@ -93,6 +109,10 @@ tests =
       simCase simDeadlinesFixture "restarting a finished id adopts without rerunning" scenarioFinishedIdAdopts checkFinishedIdAdopts traceFinishedIdAdopts,
       simCase (simDeadlinesFixtureSkewed 60000) "a budget holds with the database clock a minute ahead" scenarioSkewHoldsBudget checkSkewHoldsBudget noTrace,
       simCase (simDeadlinesFixtureSkewed (-60000)) "a budget holds with the database clock a minute behind" scenarioSkewHoldsBudget checkSkewHoldsBudget noTrace,
+      simCase simDeadlinesFixture "a delayed release follows the database clock in agreement" scenarioDelayedReleaseAhead checkDelayedReleaseAhead noTrace,
+      simCase (simDeadlinesFixtureSkewed 3600000) "a delayed release follows the database clock an hour ahead" scenarioDelayedReleaseAhead checkDelayedReleaseAhead noTrace,
+      simCase simDeadlinesFixture "a delayed hold follows the database clock in agreement" scenarioDelayedHoldBehind checkDelayedHoldBehind noTrace,
+      simCase (simDeadlinesFixtureSkewed (-3600000)) "a delayed hold follows the database clock an hour behind" scenarioDelayedHoldBehind checkDelayedHoldBehind noTrace,
       simCase simDeadlinesFixture "the sweep cancels an abandoned expired row" scenarioSweepCancelsAbandoned checkSweepCancelsAbandoned traceSweepCancels
     ]
   where

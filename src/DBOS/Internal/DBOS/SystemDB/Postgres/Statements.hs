@@ -576,7 +576,7 @@ data InitWorkflowParams = InitWorkflowParams
     initParamDeduplicationId    :: Maybe Text,
     initParamPriority           :: Int,
     initParamQueuePartitionKey  :: Maybe Text,
-    initParamDelayUntil         :: Maybe Int64,
+    initParamDelayMs            :: Maybe Int64,
     initParamAuthenticatedUser  :: Maybe Text,
     initParamAssumedRole        :: Maybe Text,
     initParamAuthenticatedRoles :: Maybe Text,
@@ -639,7 +639,7 @@ initWorkflowStatement params =
        debounce_deadline_epoch_ms, is_debounced, application_name, creator_xid)
     values
       (${initParamWorkflowId}, ${initParamStatus}, ${initParamName}, ${initParamClassName}, ${initParamConfigName},
-       ${initParamQueueName}, ${initParamDeduplicationId}, ${initParamPriority}, ${initParamQueuePartitionKey}, ${initParamDelayUntil},
+       ${initParamQueueName}, ${initParamDeduplicationId}, ${initParamPriority}, ${initParamQueuePartitionKey}, case when ${initParamDelayMs}::bigint is null then null when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end,
        ${initParamAuthenticatedUser}, ${initParamAssumedRole}, ${initParamAuthenticatedRoles},
        ${initParamExecutorId}, ${initParamApplicationVersion}, ${initParamApplicationId},
        ${initParamCreatedAt}, ${initParamUpdatedAt}, ${initParamInitialAttempts},
@@ -1671,14 +1671,14 @@ forkPointsStatement aggregate =
 -- released the workflow is committed to running, and a later debounce with
 -- the same key must start a fresh workflow. Mirrors
 -- @transition_delayed_workflows@.
-transitionDelayedSession :: Int64 -> Maybe Text -> Session.Session Int64
-transitionDelayedSession now applicationName =
+transitionDelayedSession :: Maybe Text -> Session.Session Int64
+transitionDelayedSession applicationName =
   sqlExecTypedSession [typedSql|
     update dbos.workflow_status
     set status = 'ENQUEUED',
-      updated_at = ${now},
+      updated_at = (extract(epoch from now()) * 1000)::bigint,
       deduplication_id = case when is_debounced then null else deduplication_id end
-    where status = 'DELAYED' and delay_until_epoch_ms <= ${now}
+    where status = 'DELAYED' and delay_until_epoch_ms <= (extract(epoch from now()) * 1000)::bigint
       and (${applicationName}::text is null
            or application_name = ${applicationName}
            or application_name is null)
@@ -2152,12 +2152,15 @@ getEventStepRecord params =
 
 -- | Moves a delayed workflow's release time. The @status = 'DELAYED'@ guard
 -- is the point: a released workflow is running or queued, and pushing its
--- delay out would not recall it. Mirrors @set_workflow_delay@.
-setWorkflowDelaySession :: Text -> Int64 -> Session.Session Int64
-setWorkflowDelaySession workflowId delayUntil =
+-- delay out would not recall it. A relative delay resolves in SQL against
+-- the database clock the release sweep compares it with, as on
+-- @init_workflow@; an absolute one is written as given. Exactly one of the
+-- two is bound. Mirrors @set_workflow_delay@.
+setWorkflowDelaySession :: Text -> Maybe Int64 -> Maybe Int64 -> Session.Session Int64
+setWorkflowDelaySession workflowId delayMs delayUntil =
   sqlExecTypedSession [typedSql|
     update dbos.workflow_status
-    set delay_until_epoch_ms = ${delayUntil},
+    set delay_until_epoch_ms = case when ${delayMs}::bigint is null then ${delayUntil} else case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${delayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${delayMs}::bigint) end end,
       updated_at = (extract(epoch from now()) * 1000)::bigint
     where workflow_uuid = ${workflowId} and status = 'DELAYED'
   |]

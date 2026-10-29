@@ -50,6 +50,7 @@ module DBOS.Transact.ManagementCases
     scenarioAttributesInWorkflow,
     scenarioDelayRelease,
     scenarioDelayReleaseInWorkflow,
+    scenarioSetDelayRefusal,
     scenarioRewindRunsAgain,
     scenarioRewindRefusals,
     scenarioRewindUndoCut,
@@ -90,6 +91,7 @@ module DBOS.Transact.ManagementCases
     checkAttributesInWorkflow,
     checkDelayRelease,
     checkDelayReleaseInWorkflow,
+    checkSetDelayRefusal,
     checkRewindRunsAgain,
     checkRewindRefusals,
     checkRewindUndoCut,
@@ -111,7 +113,7 @@ import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import GHC.Stack (HasCallStack)
-import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NotificationRecord (..), QueueName (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, internalQueueName, streamClosedSentinel, portableJsonSerialization)
+import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (..), QueueName (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, durationFromMs, durationFromSecs, forkNew, internalQueueName, newWorkflow, streamClosedSentinel, portableJsonSerialization)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
@@ -1732,6 +1734,55 @@ checkAttributesInWorkflow (stored, cleared, names) = do
 -- | The workflow waited as delayed, then ran its body on release.
 checkDelayRelease :: (Maybe WorkflowStatus, Int) -> Either String ()
 checkDelayRelease = checkEq (Just Delayed, 0)
+
+-- | A moved delay reports what the database's own check decides: a delay
+-- too long to be milliseconds at all is refused as an argument refusal to
+-- this operation, while one that fits is accepted — even the largest
+-- storable milliseconds, which saturate at the end of time instead of
+-- refusing, where the old code refused depending on the clock. A zero
+-- delay on the queued row is accepted and changes nothing. Mirrors Rust
+-- @a_client_lists_tags_and_delays_workflows@'s delay tail. Returns the
+-- zero move, the refusal, the saturating move, and the row status after
+-- all three.
+scenarioSetDelayRefusal :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m)
+                        => MgmtFixture m ->
+                           m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Either (Error EngineOnly) (), Maybe WorkflowStatus)
+scenarioSetDelayRefusal fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    _ <- fx.mfLaunch dbos
+    let wid = WorkflowId ("hs-l2-mgmt-set-delay-" <> suffix)
+        WorkflowId widText = wid
+        queued = (newWorkflow widText) {newWorkflowQueueName = Just "set-delay-q"}
+    planted <- runSystemDB fx.mfSystemDB (\db -> SystemDB.initWorkflow db queued Nothing)
+    case planted of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    zero <- setWorkflowDelay dbos wid (DelayFor (secondsDuration 0))
+    huge <- case durationFromSecs 1e16 of
+      Nothing -> throwIO (userError "durationFromSecs 1e16 did not construct")
+      Just duration -> pure duration
+    refused <- setWorkflowDelay dbos wid (DelayFor huge)
+    capped <- case durationFromMs maxBound of
+      Nothing -> throwIO (userError "durationFromMs maxBound did not construct")
+      Just duration -> pure duration
+    saturated <- setWorkflowDelay dbos wid (DelayFor capped)
+    row <- fx.mfReadRow wid
+    pure (zero, refused, saturated, Just row.workflowRecordStatus)
+
+-- | The zero move and the saturating move are accepted, the unstorable
+-- delay is refused as an argument to this operation naming @`delay`@, and
+-- the row is still queued.
+checkSetDelayRefusal :: (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Either (Error EngineOnly) (), Maybe WorkflowStatus) -> Either String ()
+checkSetDelayRefusal (zero, refused, saturated, status) = do
+  checkEq (Right ()) zero
+  case refused of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "delay a workflow" operation
+      unless ("`delay`" `Text.isInfixOf` detail) $ Left ("expected the detail to name `delay`, got: " <> show detail)
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  checkEq (Right ()) saturated
+  checkEq (Just Enqueued) status
 
 -- * Rewind
 

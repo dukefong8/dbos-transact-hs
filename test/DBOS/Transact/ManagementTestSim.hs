@@ -71,6 +71,7 @@ import DBOS.Transact.ManagementCases
     checkAttributesInWorkflow,
     checkDelayRelease,
     checkDelayReleaseInWorkflow,
+    checkSetDelayRefusal,
     checkRewindRunsAgain,
     checkRewindRefusals,
     checkRewindUndoCut,
@@ -112,6 +113,7 @@ import DBOS.Transact.ManagementCases
     scenarioAttributesInWorkflow,
     scenarioDelayRelease,
     scenarioDelayReleaseInWorkflow,
+    scenarioSetDelayRefusal,
     scenarioRewindRunsAgain,
     scenarioRewindRefusals,
     scenarioRewindUndoCut,
@@ -191,6 +193,7 @@ tests =
       simCase simMgmtFixture "attributes are replaced and can be searched" scenarioAttributes checkAttributes traceAttributes,
       simCase simMgmtFixture "a workflow replacing another attributes as its step stores the replacement" scenarioAttributesInWorkflow checkAttributesInWorkflow traceAttributesInWorkflow,
       simCase simMgmtFixture "a delayed workflow can be released sooner" scenarioDelayRelease checkDelayRelease traceDelayRelease,
+      simCase simMgmtFixture "an unstorable moved delay is refused and a saturating one accepted" scenarioSetDelayRefusal checkSetDelayRefusal traceSetDelayRefusal,
       simCase simMgmtFixture "a workflow moving another delay as its step releases the target" scenarioDelayReleaseInWorkflow checkDelayReleaseInWorkflow traceDelayReleaseInWorkflow,
       simCase simMgmtFixture "a finished workflow rewound to its second step runs again under the same id" scenarioRewindRunsAgain checkRewindRunsAgain traceRewindRunsAgain,
       simCase simMgmtFixture "rewind refusals name their cause and write nothing" scenarioRewindRefusals checkRewindRefusals traceRewindRefusals,
@@ -571,6 +574,13 @@ traceAttributes tr = do
 traceDelayRelease :: forall a. SimTrace a -> IO ()
 traceDelayRelease tr = do
   selectTraceEventsDynamic tr @?= [WorkflowEnqueued "hs-l2-mgmt-delayed-sim" "_dbos_internal_queue", WorkflowCompleted "hs-l2-mgmt-delayed-sim"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The two accepted moves announce the request; the refusal announces
+-- nothing. The row is judged by the shared check, not the trace.
+traceSetDelayRefusal :: forall a. SimTrace a -> IO ()
+traceSetDelayRefusal tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowDelayMoveAsked "hs-l2-mgmt-set-delay-sim", WorkflowDelayMoveAsked "hs-l2-mgmt-set-delay-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | The in-workflow move announces the request; the re-run's own steps are

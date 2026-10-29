@@ -17,6 +17,7 @@ module DBOS.Transact.Error
     renderTransactError,
     controlOf,
     fromSystemDB,
+    refusedArgument,
     fromRegistryError,
     fromSerializationError,
     Failure (..),
@@ -300,6 +301,19 @@ fromSystemDB :: SystemDBError.Error -> Error e
 fromSystemDB = \case
   SystemDBError.UnknownSerialization {name} -> UnknownSerialization {name}
   err -> SystemDatabase err
+
+-- | Lift a system-database refusal of a call's argument into the engine
+-- channel: an 'InvalidInput' names its field the way the surface spells it
+-- (@`delay` must fit in milliseconds as a 64-bit integer@), reported as
+-- 'InvalidArgument' to the operation. Any other failure is not a refusal
+-- and keeps its 'SystemDatabase' variant. Mirrors Rust
+-- @Error::refused_argument@ (@from_refusal@ plus @refusal_detail@ folded
+-- in): a surface refuses by asking the database's own check rather than
+-- restating it, so the two cannot disagree about what is storable.
+refusedArgument :: Text -> SystemDBError.Error -> Error e
+refusedArgument operation = \case
+  SystemDBError.InvalidInput {field, detail} -> InvalidArgument operation ("`" <> field <> "` " <> detail)
+  err -> fromSystemDB err
 
 -- | Lift a registry refusal into a caller's channel. The registry owns the
 -- refusal vocabulary; the envelope (tag, prose, wire) stays here so

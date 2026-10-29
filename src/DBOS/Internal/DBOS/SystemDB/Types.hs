@@ -40,6 +40,8 @@ module DBOS.SystemDB.Types
     durationFromMs,
     durationFromSecs,
     durationAsMillis,
+    durationToMs,
+    saturateTimeout,
     addTimeout,
     durationSince,
     timestampToIso8601,
@@ -101,7 +103,6 @@ module DBOS.SystemDB.Types
     defaultChange,
     changeSet,
     changeIsLeave,
-    resolveWorkflowDelay,
     isValidApplicationName,
     ApplicationName,
     parseApplicationName,
@@ -354,8 +355,8 @@ validateNewWorkflow new
   | Text.null new.newWorkflowId = Left (invalidInput "workflow_id" "must not be empty")
   | otherwise = case findEmpty optionalFields of
       Just field -> Left (invalidInput field "must be absent rather than empty")
-      Nothing -> case findZero [("delay", new.newWorkflowDelay), ("timeout", new.newWorkflowTimeout)] of
-        Just field -> Left (invalidInput field "must be a positive, non-zero duration")
+      Nothing -> case findBadDuration [("delay", new.newWorkflowDelay), ("timeout", new.newWorkflowTimeout)] of
+        Just err -> Left err
         Nothing    -> validateAttributes new.newWorkflowAttributes
   where
     optionalFields =
@@ -373,9 +374,18 @@ validateNewWorkflow new
     findEmpty fields = case find (maybe False Text.null . snd) fields of
       Just (field, _) -> Just field
       Nothing         -> Nothing
-    findZero durations = case find (maybe False durationIsZero . snd) durations of
-      Just (field, _) -> Just field
-      Nothing         -> Nothing
+    -- One field at a time, in oracle order: a zero duration is refused
+    -- before storability is asked, and delay reports before timeout,
+    -- exactly as @validate_positive_duration@ loops them. Mirrors Rust
+    -- @NewWorkflow::validate@.
+    findBadDuration [] = Nothing
+    findBadDuration ((field, duration) : rest) = case duration of
+      Nothing -> findBadDuration rest
+      Just value
+        | durationIsZero value -> Just (invalidInput field "must be a positive, non-zero duration")
+        | otherwise -> case durationToMs field value of
+            Left err -> Just err
+            Right _ -> findBadDuration rest
 
 -- | Rejects attributes that are not a JSON object. The contract is an
 -- object, not arbitrary JSON: the @attributes @>@ containment query only
@@ -512,14 +522,6 @@ data WorkflowDelay
   = DelayFor Duration
   | DelayUntil Timestamp
   deriving stock (Eq, Show)
-
--- | The instant this delay expires, resolved against @now@ if relative.
--- Mirrors @WorkflowDelay::resolve@.
-resolveWorkflowDelay :: WorkflowDelay -> Timestamp -> Maybe Timestamp
-resolveWorkflowDelay delay now =
-  case delay of
-    DelayFor duration -> addTimeout now duration
-    DelayUntil at     -> Just at
 
 -- | When a step ran, start and finish together. A pair because the database
 -- records completed steps; a start with no finish yields no duration.
@@ -1883,6 +1885,27 @@ durationFromMs :: Int64 -> Maybe Duration
 durationFromMs ms
   | ms < 0 = Nothing
   | otherwise = Just (Duration (fromIntegral ms / 1000))
+
+-- | A duration as the millisecond columns hold it. Refuses only what does
+-- not fit in a 64-bit integer, naming the field, so a write binds a
+-- storable value. Zero fits and is storable: whether zero is a refusal is
+-- the caller's own rule ('validateNewWorkflow' refuses it, 'setWorkflowDelay'
+-- accepts it). Mirrors Rust @duration_to_ms@.
+durationToMs :: Text -> Duration -> Either Error Int64
+durationToMs field duration
+  | ms > toInteger (maxBound :: Int64) = Left (invalidInput field "must fit in milliseconds as a 64-bit integer")
+  | otherwise = Right (fromInteger ms)
+  where
+    ms = durationAsMillis duration
+
+-- | The instant a delay of this length from now elapses, saturating at the
+-- largest storable instant instead of refusing: a saturated delay never
+-- elapses. Mirrors the @LEAST(GREATEST(...))@ in @now_ms_plus_sql@, which
+-- the writes use so one row never stops a batch.
+saturateTimeout :: Timestamp -> Duration -> Timestamp
+saturateTimeout (Timestamp start) duration = Timestamp (fromInteger clamped)
+  where
+    clamped = min (toInteger (maxBound :: Int64)) (max (toInteger (minBound :: Int64)) (toInteger start + durationAsMillis duration))
 
 -- | Reads a duration stored as fractional seconds. 'Nothing' for anything
 -- that is not one: negative, NaN, infinite, or larger than 'Duration' can

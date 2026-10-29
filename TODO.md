@@ -232,6 +232,18 @@ Ported in one slice (adopted an uncommitted #110 draft, then #109 on top):
     NULL-limits read (xmin-level check: overwrite vs delete+recreate);
     (3) decide on bounded retries + unclaim-on-unrunnable-dispatch (needs
     ADR — diverges from the oracle's known hole).
+  - Clean-slate repro (2026-10-28, no commit): dropped `dbos` (103k litter
+    rows) + `outbox_store`, re-migrated 0→125, fresh binary. Dual full
+    suites on the clean DB do NOT hang (both ~19 s, deadlocks=0, no
+    ungranted locks): the hang needs the litter state. First dual run
+    failed 2 outbox tests with 23505 on concurrent `create schema/table
+    if not exists` — a reset artifact (both binaries raced to recreate
+    the dropped schema; `IF NOT EXISTS` is check-then-create and not
+    concurrency-safe), not engine behavior. Second dual run: 1 known
+    flake each (versions-family + child-start race), outbox green.
+    `log_lock_waits` restored to off. Litter hypothesis still open:
+    synthesize PENDING-owned + NULL-app rows as a controlled experiment
+    instead of re-accumulating organically.
 
 ### Registry dual-stack (2026-10-27)
 

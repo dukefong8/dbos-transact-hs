@@ -105,7 +105,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resolveWorkflowDelay, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -1278,10 +1278,13 @@ escapeLike = (<> "%") . Text.concatMap escape
 -- list. The owner identity and the clock reading are parameters because the
 -- oracle generates both *outside* the retry: an owner that changed between
 -- attempts would fail to recognise its own write.
-initParams :: Maybe Text -> NewWorkflow -> WorkflowStatus -> Bool -> Text -> Timestamp -> Statements.InitWorkflowParams
-initParams applicationName new status queued creatorXid now =
-  Statements.InitWorkflowParams
-    { initParamWorkflowId = new.newWorkflowId,
+initParams :: Maybe Text -> NewWorkflow -> WorkflowStatus -> Bool -> Text -> Timestamp -> Either Error Statements.InitWorkflowParams
+initParams applicationName new status queued creatorXid now = do
+  delayMs <- traverse (durationToMs "delay") new.newWorkflowDelay
+  timeoutMs <- traverse (durationToMs "timeout") new.newWorkflowTimeout
+  pure
+    ( Statements.InitWorkflowParams
+        { initParamWorkflowId = new.newWorkflowId,
       initParamStatus = workflowStatusText status,
       initParamName = new.newWorkflowName,
       initParamClassName = new.newWorkflowClassName,
@@ -1290,7 +1293,7 @@ initParams applicationName new status queued creatorXid now =
       initParamDeduplicationId = new.newWorkflowDeduplicationId,
       initParamPriority = new.newWorkflowPriority,
       initParamQueuePartitionKey = new.newWorkflowQueuePartitionKey,
-      initParamDelayUntil = timestampToEpochMs <$> (new.newWorkflowDelay >>= addTimeout now),
+      initParamDelayMs = delayMs,
       initParamAuthenticatedUser = emptyToNone new.newWorkflowAuthenticatedUser,
       initParamAssumedRole = emptyToNone new.newWorkflowAssumedRole,
       initParamAuthenticatedRoles = encodeRoles new.newWorkflowAuthenticatedRoles,
@@ -1300,7 +1303,7 @@ initParams applicationName new status queued creatorXid now =
       initParamCreatedAt = timestampToEpochMs now,
       initParamUpdatedAt = timestampToEpochMs now,
       initParamInitialAttempts = if queued then 0 else 1,
-      initParamTimeoutMs = millisOf <$> new.newWorkflowTimeout,
+      initParamTimeoutMs = timeoutMs,
       initParamDeadline = timestampToEpochMs <$> new.newWorkflowDeadline,
       initParamParentWorkflowId = Nothing,
       initParamCreatorXid = creatorXid,
@@ -1310,9 +1313,7 @@ initParams applicationName new status queued creatorXid now =
       initParamDebounceDeadline = timestampToEpochMs <$> new.newWorkflowDebounceDeadline,
       initParamIsDebounced = new.newWorkflowIsDebounced,
       initParamApplicationName = new.newWorkflowApplicationName <|> applicationName
-    }
-  where
-    millisOf = fromInteger . durationAsMillis
+    })
 
 -- | Whether the failure is the deduplication index, which is only reported
 -- when the caller actually supplied a key on a queue — an unexpected
@@ -2333,19 +2334,21 @@ enqueueInTx :: NewWorkflow -> Maybe Text -> Text -> Timestamp -> Tx.Transaction 
 enqueueInTx new applicationName creatorXid now = do
   let status = initialStatus new
       queued = status == Enqueued || status == Delayed
-      params = initParams applicationName new status queued creatorXid now
-  row <- Tx.statement () (Statements.initWorkflowStatement params)
-  when (row.creator_xid == Just creatorXid) $
-    void $
-      Tx.statement
-        (new.newWorkflowId, new.newWorkflowInput)
-        Statements.initWorkflowInputStatement
-  case initConflict new row of
-    Just err -> Tx.condemn >> pure (Left err)
-    -- An identical row is a no-op join: the input stays as recorded and
-    -- the caller's writes commit, as Python's identical re-init raises
-    -- nothing and hands back the existing id.
-    Nothing -> pure (Right ())
+  case initParams applicationName new status queued creatorXid now of
+    Left err -> pure (Left err)
+    Right params -> do
+      row <- Tx.statement () (Statements.initWorkflowStatement params)
+      when (row.creator_xid == Just creatorXid) $
+        void $
+          Tx.statement
+            (new.newWorkflowId, new.newWorkflowInput)
+            Statements.initWorkflowInputStatement
+      case initConflict new row of
+        Just err -> Tx.condemn >> pure (Left err)
+        -- An identical row is a no-op join: the input stays as recorded and
+        -- the caller's writes commit, as Python's identical re-init raises
+        -- nothing and hands back the existing id.
+        Nothing -> pure (Right ())
 
 -- | The foreign key on the destination is what catches an address that does
 -- not exist, so a message can never be left pointing at nothing.
@@ -2482,70 +2485,73 @@ instance SystemDB PostgresSystemDB IO where
           let status = initialStatus new
               queued = status == Enqueued || status == Delayed
               parentText = unwrapWorkflowId caller.initCallerParentWorkflowId
-              params =
-                (initParams env.psdbApplicationName new status queued creatorXid now)
-                  { Statements.initParamParentWorkflowId = Just parentText
-                  }
-          result <- runTransaction env "init_workflow" $ do
-            -- A stale parent starts nothing: the ownership check opens the
-            -- transaction, so the child row and the parent record never
-            -- commit behind a hand-off.
-            owned <- Statements.checkOwnerTx parentText caller.initCallerToken
-            case owned of
-              Left conflict -> Tx.condemn >> pure (Left conflict)
-              Right () -> do
-                row <- Tx.statement () (Statements.initWorkflowStatement params)
-                stored <-
-                  Tx.statement
-                    ()
-                    ( Statements.recordChildWorkflowStatement
-                        Statements.RecordChildWorkflowParams
-                          { recordChildParentId = parentText,
-                            recordChildChildId = new.newWorkflowId,
-                            recordChildStepId = caller.initCallerStepId,
-                            recordChildStepName = caller.initCallerStepName,
-                            recordChildStartedAt = Just (timestampToEpochMs caller.initCallerStartedAt),
-                            recordChildCompletedAt = Just (timestampToEpochMs now),
-                            recordChildApplicationName = env.psdbApplicationName
-                          }
-                    )
-                -- The input lands where readers look, in the same commit, and
-                -- only when this attempt created the row: a start that found an
-                -- existing row must not touch the input the workflow was
-                -- recorded with.
-                when (row.creator_xid == Just creatorXid) $
-                  void $
-                    Tx.statement
-                      (new.newWorkflowId, new.newWorkflowInput)
-                      Statements.initWorkflowInputStatement
-                case (initConflict new row, stored) of
-                  (Just err, _) -> do
-                    -- The stored row is another workflow's: nothing this call
-                    -- wrote commits. Mirrors Rust's commit-time conflict check.
-                    Tx.condemn
-                    pure (Left err)
-                  (Nothing, Just childId)
-                    | childId == new.newWorkflowId -> pure (Right (row, stored))
-                  (Nothing, _) -> do
-                    -- A rival execution owns this parent step: roll the child row
-                    -- and the step back rather than leave them pointing at each
-                    -- other. Mirrors record_child_workflow_on's conflict.
-                    Tx.condemn
-                    pure (Left (StepNondeterminism {workflowId = parentText, stepId = caller.initCallerStepId}))
-          case result of
-            Left err
-              | queueDeduplicated new err ->
-                  pure
-                    ( Left
-                        QueueDeduplicated
-                          { workflowId = new.newWorkflowId,
-                            queueName = fromMaybe "" new.newWorkflowQueueName,
-                            deduplicationId = fromMaybe "" new.newWorkflowDeduplicationId
-                          }
-                    )
-              | otherwise -> pure (Left err)
-            Right (Left conflict) -> pure (Left conflict)
-            Right (Right (row, _stored)) -> finishInit env new creatorXid row
+          case initParams env.psdbApplicationName new status queued creatorXid now of
+            Left err -> pure (Left err)
+            Right base -> do
+              let params =
+                    base
+                      { Statements.initParamParentWorkflowId = Just parentText
+                      }
+              result <- runTransaction env "init_workflow" $ do
+                -- A stale parent starts nothing: the ownership check opens the
+                -- transaction, so the child row and the parent record never
+                -- commit behind a hand-off.
+                owned <- Statements.checkOwnerTx parentText caller.initCallerToken
+                case owned of
+                  Left conflict -> Tx.condemn >> pure (Left conflict)
+                  Right () -> do
+                    row <- Tx.statement () (Statements.initWorkflowStatement params)
+                    stored <-
+                      Tx.statement
+                        ()
+                        ( Statements.recordChildWorkflowStatement
+                            Statements.RecordChildWorkflowParams
+                              { recordChildParentId = parentText,
+                                recordChildChildId = new.newWorkflowId,
+                                recordChildStepId = caller.initCallerStepId,
+                                recordChildStepName = caller.initCallerStepName,
+                                recordChildStartedAt = Just (timestampToEpochMs caller.initCallerStartedAt),
+                                recordChildCompletedAt = Just (timestampToEpochMs now),
+                                recordChildApplicationName = env.psdbApplicationName
+                              }
+                        )
+                    -- The input lands where readers look, in the same commit, and
+                    -- only when this attempt created the row: a start that found an
+                    -- existing row must not touch the input the workflow was
+                    -- recorded with.
+                    when (row.creator_xid == Just creatorXid) $
+                      void $
+                        Tx.statement
+                          (new.newWorkflowId, new.newWorkflowInput)
+                          Statements.initWorkflowInputStatement
+                    case (initConflict new row, stored) of
+                      (Just err, _) -> do
+                        -- The stored row is another workflow's: nothing this call
+                        -- wrote commits. Mirrors Rust's commit-time conflict check.
+                        Tx.condemn
+                        pure (Left err)
+                      (Nothing, Just childId)
+                        | childId == new.newWorkflowId -> pure (Right (row, stored))
+                      (Nothing, _) -> do
+                        -- A rival execution owns this parent step: roll the child row
+                        -- and the step back rather than leave them pointing at each
+                        -- other. Mirrors record_child_workflow_on's conflict.
+                        Tx.condemn
+                        pure (Left (StepNondeterminism {workflowId = parentText, stepId = caller.initCallerStepId}))
+              case result of
+                Left err
+                  | queueDeduplicated new err ->
+                      pure
+                        ( Left
+                            QueueDeduplicated
+                              { workflowId = new.newWorkflowId,
+                                queueName = fromMaybe "" new.newWorkflowQueueName,
+                                deduplicationId = fromMaybe "" new.newWorkflowDeduplicationId
+                              }
+                        )
+                  | otherwise -> pure (Left err)
+                Right (Left conflict) -> pure (Left conflict)
+                Right (Right (row, _stored)) -> finishInit env new creatorXid row
       Nothing -> case validateNewWorkflow new of
         Left err -> pure (Left err)
         Right () -> do
@@ -2553,31 +2559,33 @@ instance SystemDB PostgresSystemDB IO where
           now <- timestampNow
           let status = initialStatus new
               queued = status == Enqueued || status == Delayed
-              params = initParams env.psdbApplicationName new status queued creatorXid now
-          -- The status row and the input commit together, so a crash can
-          -- never leave one without the other; the input lands only when
-          -- this attempt created the row.
-          result <- runTransaction env "init_workflow" $ do
-            row <- Tx.statement () (Statements.initWorkflowStatement params)
-            when (row.creator_xid == Just creatorXid) $
-              void $
-                Tx.statement
-                  (new.newWorkflowId, new.newWorkflowInput)
-                  Statements.initWorkflowInputStatement
-            pure row
-          case result of
-            Left err
-              | queueDeduplicated new err ->
-                  pure
-                    ( Left
-                        QueueDeduplicated
-                          { workflowId = new.newWorkflowId,
-                            queueName = fromMaybe "" new.newWorkflowQueueName,
-                            deduplicationId = fromMaybe "" new.newWorkflowDeduplicationId
-                          }
-                    )
-              | otherwise -> pure (Left err)
-            Right row -> finishInit env new creatorXid row
+          case initParams env.psdbApplicationName new status queued creatorXid now of
+            Left err -> pure (Left err)
+            Right params -> do
+              -- The status row and the input commit together, so a crash can
+              -- never leave one without the other; the input lands only when
+              -- this attempt created the row.
+              result <- runTransaction env "init_workflow" $ do
+                row <- Tx.statement () (Statements.initWorkflowStatement params)
+                when (row.creator_xid == Just creatorXid) $
+                  void $
+                    Tx.statement
+                      (new.newWorkflowId, new.newWorkflowInput)
+                      Statements.initWorkflowInputStatement
+                pure row
+              case result of
+                Left err
+                  | queueDeduplicated new err ->
+                      pure
+                        ( Left
+                            QueueDeduplicated
+                              { workflowId = new.newWorkflowId,
+                                queueName = fromMaybe "" new.newWorkflowQueueName,
+                                deduplicationId = fromMaybe "" new.newWorkflowDeduplicationId
+                              }
+                        )
+                  | otherwise -> pure (Left err)
+                Right row -> finishInit env new creatorXid row
   getWorkflow env wid = do
     result <- runSession env "get_workflow" (Statements.getWorkflowSession widText)
     pure (result >>= traverse workflowRecordFromRow)
@@ -2662,15 +2670,17 @@ instance SystemDB PostgresSystemDB IO where
                 threadDelay (durationMicros pollInterval)
                 loop env remaining
       unwrap (Types.WorkflowId widText) = widText
-  setWorkflowDelay env wid delay _caller = do
-    now <- timestampNow
-    case resolveWorkflowDelay delay now of
-      Nothing -> pure (Left (invalidInput "delay" "does not resolve to a representable instant"))
-      Just resolved -> do
-        result <- runSession env "set_workflow_delay" (Statements.setWorkflowDelaySession (unwrap wid) (timestampToEpochMs resolved))
-        pure (() <$ result)
+  setWorkflowDelay env wid delay _caller =
+    case delay of
+      DelayFor duration -> case durationToMs "delay" duration of
+        Left err -> pure (Left err)
+        Right ms -> runUpdate (Just ms) Nothing
+      DelayUntil instant -> runUpdate Nothing (Just (timestampToEpochMs instant))
     where
       unwrap (Types.WorkflowId widText) = widText
+      runUpdate relMs absMs = do
+        result <- runSession env "set_workflow_delay" (Statements.setWorkflowDelaySession (unwrap wid) relMs absMs)
+        pure (() <$ result)
   clearQueueAssignment env wid = do
     now <- timestampNow
     result <- runSession env "clear_queue_assignment" (Statements.clearQueueAssignmentSession (unwrap wid) (timestampToEpochMs now))
@@ -2695,8 +2705,7 @@ instance SystemDB PostgresSystemDB IO where
             (Statements.reenqueueForRecoverySession recoveryQueue executorIds applicationVersion env.psdbApplicationName)
         pure (map Types.WorkflowId <$> result)
   transitionDelayedWorkflows env = do
-    now <- timestampNow
-    result <- runSession env "transition_delayed_workflows" (Statements.transitionDelayedSession (timestampToEpochMs now) env.psdbApplicationName)
+    result <- runSession env "transition_delayed_workflows" (Statements.transitionDelayedSession env.psdbApplicationName)
     pure (fromIntegral <$> result)
   cancelIfTimedOut env (Types.WorkflowId workflowId) owner = do
     -- The ownership check locks the row first, so a hand-off cannot land

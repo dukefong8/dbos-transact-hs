@@ -54,7 +54,7 @@ import Data.Text.Encoding (encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types (Fork (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
-import DBOS.Transact.Connection (Connection (..), withConnection)
+import DBOS.Transact.Connection (Connection (..), runSystemDB, withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, workflowId, workflowOwner)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
@@ -366,17 +366,25 @@ forkFromInWorkflow wctx workflowIds point options =
 -- supervisor releases it on its next pass. Mirrors Rust
 -- @Connection::set_workflow_delay@: phrased as the request, not the
 -- effect — the row may already be released, so this announces
--- unconditionally.
+-- unconditionally. A refusal of the delay reports as an argument refusal
+-- to this operation, every other failure on the database channel — the
+-- @map_err(refused_argument)@, so the surface never restates what the
+-- database's own check decides.
 setWorkflowDelay :: Monad m
                  => Connection m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 setWorkflowDelay conn workflowId delay = do
-  result <- withConnection conn (\db -> SystemDB.setWorkflowDelay db workflowId delay Nothing)
+  result <- runSystemDB conn.connSysdb (\db -> SystemDB.setWorkflowDelay db workflowId delay Nothing)
   case result of
-    Left err -> pure (Left err)
+    Left sysErr -> pure (Left (TransactError.refusedArgument delayOperation sysErr))
     Right () -> do
       let WorkflowId workflowText = workflowId
       runTracer conn.connTracer (WorkflowDelayMoveAsked workflowText)
       pure (Right ())
+
+-- | The operation name a refused delay reports under. Mirrors Rust
+-- @DELAY_OPERATION@.
+delayOperation :: Text
+delayOperation = "delay a workflow"
 
 -- | Moves a delayed workflow's release as a step of the calling workflow.
 -- Same leaf rule as every in-workflow call.

@@ -134,6 +134,7 @@ import DBOS.Transact.ManagementCases
     checkAttributesInWorkflow,
     checkDelayRelease,
     checkDelayReleaseInWorkflow,
+    checkSetDelayRefusal,
     checkRewindRunsAgain,
     checkRewindRefusals,
     checkRewindUndoCut,
@@ -178,6 +179,7 @@ import DBOS.Transact.ManagementCases
     scenarioAttributesInWorkflow,
     scenarioDelayRelease,
     scenarioDelayReleaseInWorkflow,
+    scenarioSetDelayRefusal,
     scenarioRewindRunsAgain,
     scenarioRewindRefusals,
     scenarioRewindUndoCut,
@@ -286,6 +288,7 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "attributes are replaced and can be searched" scenarioAttributes checkAttributes,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow replacing another attributes as its step stores the replacement" scenarioAttributesInWorkflow checkAttributesInWorkflow,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a delayed workflow can be released sooner" scenarioDelayRelease checkDelayRelease,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an unstorable moved delay is refused and a saturating one accepted" scenarioSetDelayRefusal checkSetDelayRefusal,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow moving another delay as its step releases the target" scenarioDelayReleaseInWorkflow checkDelayReleaseInWorkflow,
       testCase "a workflow cannot delete itself" $
         withInstance "mgmt-self-delete" $ \dbos suffix -> do

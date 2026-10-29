@@ -32,6 +32,8 @@ import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.DeadlinesCases
   ( DeadlinesFixture (..),
     checkBeatenDeadline,
+    checkDelayedHoldBehind,
+    checkDelayedReleaseAhead,
     checkKeptDeadline,
     checkPastDeadline,
     checkShutdownPending,
@@ -40,6 +42,8 @@ import DBOS.Transact.DeadlinesCases
     checkSweepCancelsAbandoned,
     checkWithinDeadline,
     scenarioBeatenDeadline,
+    scenarioDelayedHoldBehind,
+    scenarioDelayedReleaseAhead,
     scenarioKeptDeadline,
     scenarioPastDeadline,
     scenarioShutdownPending,
@@ -114,6 +118,18 @@ mkDeadlinesFixture backend run = do
             planted <- SystemDB.initWorkflow backend expired Nothing
             case planted of
               Left err -> fail (show err)
+              Right _ -> pure (),
+          dfPlantDelayed = \wid delay -> do
+            let WorkflowId widText = wid
+                delayed = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowQueueName = Just "sweep-test-q", SystemDB.newWorkflowDelay = Just delay}
+            planted <- SystemDB.initWorkflow backend delayed Nothing
+            case planted of
+              Left err -> fail (show err)
+              Right _ -> pure (),
+          dfSweepDelayed = do
+            swept <- SystemDB.transitionDelayedWorkflows backend
+            case swept of
+              Left err -> fail (show err)
               Right _ -> pure ()
         }
 
@@ -131,5 +147,7 @@ tests =
             leaf "a deadline that loses to a recorded outcome reports that outcome" scenarioBeatenDeadline checkBeatenDeadline,
             leaf "the sweep cancels an abandoned expired row" scenarioSweepCancelsAbandoned checkSweepCancelsAbandoned,
             leaf "a budget holds with the database clock in agreement" scenarioSkewHoldsBudget checkSkewHoldsBudget,
+            leaf "a delayed release follows the database clock in agreement" scenarioDelayedReleaseAhead checkDelayedReleaseAhead,
+            leaf "a delayed hold follows the database clock in agreement" scenarioDelayedHoldBehind checkDelayedHoldBehind,
             leaf "restarting a finished id adopts without rerunning" scenarioFinishedIdAdopts checkFinishedIdAdopts
           ]
