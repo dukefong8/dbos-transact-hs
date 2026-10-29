@@ -2444,7 +2444,7 @@ forkTests getBackend =
             other -> fail ("expected InvalidInput, got: " <> show other)
           empty <- forkFrom env [WorkflowId ""] (ForkStep 0) defaultForkOptions Nothing
           case empty of
-            Left (InvalidInput {field, detail}) -> (field, detail) @?= ("source_id", "must not be empty")
+            Left (InvalidInput {field, detail}) -> (field, detail) @?= ("original_id", "must not be empty")
             other -> fail ("expected InvalidInput, got: " <> show other)
     ]
   where

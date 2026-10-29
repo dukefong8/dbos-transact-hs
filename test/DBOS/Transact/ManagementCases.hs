@@ -1593,18 +1593,18 @@ checkForkRefusals :: ( Either (Error EngineOnly) [WorkflowId],
 checkForkRefusals (emptySource, negativeStep, emptyQueue, emptyForks, emptyIds, written) = do
   case emptySource of
     Left (InvalidArgument operation detail) -> do
-      checkEq "fork workflows" operation
-      checkEq "source_id must not be empty" detail
+      checkEq "fork a workflow" operation
+      checkEq "Fork.original_id: must not be empty" detail
     other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
   case negativeStep of
     Left (InvalidArgument operation detail) -> do
       checkEq "fork from workflows" operation
-      checkEq "start_step must not be negative" detail
+      checkEq "Fork.start_step of `hs-l2-mgmt-fork-negative`: must not be negative, got -1" detail
     other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
   case emptyQueue of
     Left (InvalidArgument operation detail) -> do
-      checkEq "fork workflows" operation
-      checkEq "queue_name must be absent rather than empty" detail
+      checkEq "fork a workflow" operation
+      checkEq "ForkOptions.queue_name: must be absent rather than empty" detail
     other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
   checkEq (Right []) emptyForks
   checkEq (Right []) emptyIds
@@ -1654,20 +1654,20 @@ checkForkBatchRefusals :: ( Either (Error EngineOnly) [WorkflowId],
 checkForkBatchRefusals (duplicated, collided, huge, duped, first, written) = do
   case duplicated of
     Left (InvalidArgument operation detail) -> do
-      checkEq "fork workflows" operation
+      checkEq "fork a workflow" operation
       checkMentioned ("`" <> duped <> "`") detail
       checkMentioned "is the forked id of more than one fork" detail
     other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
   case collided of
     Left (InvalidArgument operation detail) -> do
-      checkEq "fork workflows" operation
+      checkEq "fork a workflow" operation
       checkMentioned ("`" <> first <> "`") detail
       checkMentioned "is both a forked id and an original id" detail
     other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
   case huge of
     Left (InvalidArgument operation detail) -> do
-      checkEq "fork workflows" operation
-      checkMentioned "timeout must fit in milliseconds as a 64-bit integer" detail
+      checkEq "fork a workflow" operation
+      checkMentioned "ForkOptions.timeout: must fit in milliseconds as a 64-bit integer" detail
     other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
   checkEq False written
   where

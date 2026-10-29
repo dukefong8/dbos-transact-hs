@@ -824,9 +824,9 @@ memTests =
           badSource <- forkFrom mem [WorkflowId ""] (ForkStep 0) defaultForkOptions Nothing
           pure (badOptions, badFork, badStep, badSource)
         badOptions @?= Left (InvalidInput "queue_name" "must be absent rather than empty")
-        badFork @?= Left (InvalidInput "source_id" "must not be empty")
+        badFork @?= Left (InvalidInput "original_id" "must not be empty")
         badStep @?= Left (InvalidInput "start_step" "must not be negative")
-        badSource @?= Left (InvalidInput "source_id" "must not be empty"),
+        badSource @?= Left (InvalidInput "original_id" "must not be empty"),
       testCase "an event published after a getEvent parks is delivered" $ do
         result <- runMem $ do
           mem <- newMemDB

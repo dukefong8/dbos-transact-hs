@@ -53,7 +53,7 @@ import Data.Int (Int64)
 import Data.Text.Encoding (encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Fork (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
+import DBOS.SystemDB.Types (Fork (..), ForkCallRefusal (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
 import DBOS.Transact.Connection (Connection (..), runSystemDB, withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, workflowId, workflowOwner)
 import DBOS.Transact.Error qualified as TransactError
@@ -235,9 +235,40 @@ forkWorkflows conn forks options = case checkForkArgs forks options of
 checkForkArgs :: [Fork] -> ForkOptions -> Either (TransactError.Error e) ()
 checkForkArgs [] _ = Right ()
 checkForkArgs forks options = case refuseInvalidForks forks options of
-  Just ("", detail) -> Left (TransactError.InvalidArgument "fork workflows" detail)
-  Just (field, detail) -> Left (TransactError.InvalidArgument "fork workflows" (field <> " " <> detail))
+  Just (ForkBatchRefusal detail) -> Left (TransactError.InvalidArgument forkOperation detail)
+  Just (ForkRefusal fork field detail) -> Left (TransactError.InvalidArgument forkOperation (refusedFork fork field detail))
+  Just (ForkOptionsRefusal field detail) -> Left (TransactError.InvalidArgument forkOperation (refusedForkOptions field detail))
   Nothing -> Right ()
+
+-- | What a fork call is refused as. Every fork surface refuses through
+-- @refuse_invalid_forks@ under this operation. Mirrors Rust
+-- @FORK_OPERATION@.
+forkOperation :: Text
+forkOperation = "fork a workflow"
+
+-- | A fork's refusal of one of its arguments, naming the sysdb field as
+-- the API spells it and the workflow it is about, when known. Mirrors
+-- Rust @refused_fork@, spelled with the Haskell module separator: the
+-- oracle writes @Fork::field@, the port writes @Fork.field@.
+refusedFork :: Fork -> Text -> Text -> Text
+refusedFork fork field detail = named <> ": " <> detail <> got
+  where
+    named
+      | fork.forkSourceId == "" = "Fork." <> field
+      | otherwise = "Fork." <> field <> " of `" <> fork.forkSourceId <> "`"
+    got
+      | field == "start_step" = ", got " <> showText fork.forkStartStep
+      | otherwise = ""
+
+-- | An option's refusal, with the one column the API spells differently.
+-- Mirrors Rust @refused_fork@ for the options, likewise module-spelled:
+-- @ForkOptions.app_version@ for the oracle's @ForkOptions::app_version@.
+refusedForkOptions :: Text -> Text -> Text
+refusedForkOptions field detail = "ForkOptions." <> api <> ": " <> detail
+  where
+    api = case field of
+      "application_version" -> "app_version"
+      other -> other
 
 -- | The engine-layer fork-from validation: options plus the per-source
 -- checks the oracle makes by validating a synthesized fork per id — three
@@ -247,15 +278,17 @@ checkForkArgs forks options = case refuseInvalidForks forks options of
 -- matching the oracle and the backends.
 checkForkFromArgs :: [WorkflowId] -> ForkPoint -> ForkOptions -> Either (TransactError.Error e) ()
 checkForkFromArgs [] _ _ = Right ()
-checkForkFromArgs workflowIds point options = case problems of
-  (field, detail) : _ -> Left (TransactError.InvalidArgument "fork from workflows" (field <> " " <> detail))
-  []                  -> Right ()
+checkForkFromArgs workflowIds point options = case perFork of
+  (fork, field, detail) : _ -> Left (TransactError.InvalidArgument "fork from workflows" (refusedFork fork field detail))
+  [] -> case forkOptionProblems options of
+    Just (field, detail) -> Left (TransactError.InvalidArgument "fork from workflows" (refusedForkOptions field detail))
+    Nothing -> Right ()
   where
     givenStep = case point of
       ForkStep step -> step
       _             -> 0
     synthesized (WorkflowId source) = Fork source Nothing givenStep
-    problems = [problem | Just problem <- forkOptionProblems options : map (forkProblems . synthesized) workflowIds]
+    perFork = [(fork, field, detail) | fork <- map synthesized workflowIds, Just (field, detail) <- [forkProblems fork]]
 
 -- | Forks workflows as a step of the calling workflow: a fork generates a
 -- new id, so a replay without this checkpoint would write a second fork

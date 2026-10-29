@@ -89,7 +89,20 @@ go. Section A (scheduler engine) and E (closed) are not tracked here.
   subtree, mem sleep success records the serialization and names ids on
   replay failure. Gates re-run: watcher green incl. new order unit twin,
   full 980/980, psql 568 rows, oracle management 41/41 plus queues 39/39,
-  cabal build all plus explicit test target linked.
+  cabal build all plus explicit test target linked. Vocabulary follow-up
+  2026-10-29: `refuseInvalidForks` carries a `ForkCallRefusal` (batch
+  detail, per-fork problem with its fork, option problem bare); engine
+  reports per-fork as `Fork.field [of `id`]: detail` (with the
+  `start_step` value, as `Fork::validate` adds it) and options as
+  `ForkOptions.field: detail` (with `application_version` → `app_version`),
+  all under `fork a workflow` (`FORK_OPERATION`); `forkProblems` reports
+  `original_id` as the sysdb spells it, and `forkFrom` keeps its own
+  `fork from workflows` operation (no oracle counterpart) with the same
+  rendering. DELIBERATE DIVERGENCE, operator-chosen: the port spells the
+  module separator `.` where the oracle spells `::` (`Fork.field` vs
+  `Fork::field`), so refusal details differ byte-for-byte. Gates re-run:
+  watcher green, full 980/980, psql 568 rows, oracle management 41/41
+  plus queues 39/39, cabal build all plus explicit test target linked.
 - [x] Re-channel enqueue and start refusals to InvalidArgument with the
   oracle operation strings; Config stays for setup failures. Done
   2026-10-29: `validateEnqueue` refuses as InvalidArgument "enqueue a

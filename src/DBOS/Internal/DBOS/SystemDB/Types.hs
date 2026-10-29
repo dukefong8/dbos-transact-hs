@@ -96,6 +96,7 @@ module DBOS.SystemDB.Types
     Debounce (..),
     DebounceHolder (..),
     Fork (..),
+    ForkCallRefusal (..),
     ForkPoint (..),
     ForkOptions (..),
     GetEventCaller (..),
@@ -183,7 +184,6 @@ module DBOS.SystemDB.Types
     forkNew,
     forkProblems,
     forkValidate,
-    forkBatchProblems,
     refuseInvalidForks,
     forkOptionProblems,
     forkOptionsValidate,
@@ -1599,53 +1599,43 @@ forkValidate fork = case forkProblems fork of
   Nothing -> Right ()
   Just (field, detail) -> Left (invalidInput field detail)
 
--- | What a batch alone can see: one forked id on two forks, or a forked
--- id that is an original, is certain to collide with that original's row
--- when written. Empty ids are left to 'forkProblems': the per-fork check
--- rejects them before any batch rule could name them twice. The detail is
--- a complete sentence naming the id, as the oracle's batch refusal does;
--- the engine reports it as-is rather than as a field problem. The batch
--- half of Rust @refuse_invalid_forks@; the engine refuses through here.
-forkBatchProblems :: [Fork] -> Maybe (Text, Text)
-forkBatchProblems forks
-  | Just dup <- findDup pinned = Just ("", "`" <> dup <> "` is the forked id of more than one fork")
-  | Just clash <- find (`elem` originals) pinned = Just ("", "`" <> clash <> "` is both a forked id and an original id")
-  | otherwise = Nothing
-  where
-    originals = [fork.forkSourceId | fork <- forks]
-    pinned = [pinnedId | Fork _ (Just pinnedId) _ <- forks, not (Text.null pinnedId)]
-    findDup = go Set.empty
-      where
-        go _ [] = Nothing
-        go seen (x : xs)
-          | Set.member x seen = Just x
-          | otherwise = go (Set.insert x seen) xs
+
+-- | Which refusal a fork call carries, with the pieces the engine needs
+-- to report it: a batch arm's complete detail, or a per-fork problem
+-- with its fork and an option problem bare. Mirrors the arms of Rust
+-- @refuse_invalid_forks@.
+data ForkCallRefusal
+  = ForkBatchRefusal Text
+  | ForkRefusal Fork Text Text
+  | ForkOptionsRefusal Text Text
+  deriving stock (Eq, Show)
 
 -- | The first problem a fork call carries, in the oracle's order: each
 -- fork in turn — its own check, then whether its pinned id is an
 -- original, then whether an earlier fork already pinned it — and the
--- options last. A batch arm reports @("", detail)@: the detail is
--- already a complete sentence naming the id, while per-fork and option
--- problems report @(field, detail)@ for the caller to join. Mirrors Rust
--- @refuse_invalid_forks@; the system database has no batch rules (its
--- @fork_workflows@ runs only the option and per-fork checks), so only
--- the engine refuses through here.
-refuseInvalidForks :: [Fork] -> ForkOptions -> Maybe (Text, Text)
+-- options last. The batch arms name the id in a complete detail, as the
+-- oracle's batch refusal does. Mirrors Rust @refuse_invalid_forks@; the
+-- system database has no batch rules (its @fork_workflows@ runs only
+-- the option and per-fork checks), so only the engine refuses through
+-- here.
+refuseInvalidForks :: [Fork] -> ForkOptions -> Maybe ForkCallRefusal
 refuseInvalidForks forks options = case go forks Set.empty of
-  Just problem -> Just problem
-  Nothing -> forkOptionProblems options
+  Just refusal -> Just refusal
+  Nothing -> case forkOptionProblems options of
+    Just (field, detail) -> Just (ForkOptionsRefusal field detail)
+    Nothing -> Nothing
   where
     originals = [fork.forkSourceId | fork <- forks]
     go [] _ = Nothing
     go (fork : rest) seen = case forkProblems fork of
-      Just problem -> Just problem
+      Just (field, detail) -> Just (ForkRefusal fork field detail)
       Nothing -> case fork.forkForkedId of
         -- No null guard: the per-fork check above already refuses
         -- @Just ""@, exactly as the oracle's @fork.validate()?@ runs
         -- before its batch checks.
         Just pinned
-          | pinned `elem` originals -> Just ("", "`" <> pinned <> "` is both a forked id and an original id")
-          | Set.member pinned seen -> Just ("", "`" <> pinned <> "` is the forked id of more than one fork")
+          | pinned `elem` originals -> Just (ForkBatchRefusal ("`" <> pinned <> "` is both a forked id and an original id"))
+          | Set.member pinned seen -> Just (ForkBatchRefusal ("`" <> pinned <> "` is the forked id of more than one fork"))
           | otherwise -> go rest (Set.insert pinned seen)
         _ -> go rest seen
 
@@ -1656,7 +1646,7 @@ refuseInvalidForks forks options = case go forks Set.empty of
 forkProblems :: Fork -> Maybe (Text, Text)
 forkProblems fork
   | Text.null fork.forkSourceId =
-      Just ("source_id", "must not be empty")
+      Just ("original_id", "must not be empty")
   | fork.forkForkedId == Just "" =
       Just ("forked_id", "must be absent rather than empty")
   | fork.forkStartStep < 0 =

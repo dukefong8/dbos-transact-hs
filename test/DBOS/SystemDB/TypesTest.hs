@@ -9,7 +9,7 @@ import DBOS.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
-import DBOS.SystemDB (ApplicationRowCounts (..), AppScope (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), IdleTransactionTimeout (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkBatchProblems, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, idleTimeoutDefault, idleTimeoutMax, idleTimeoutMillis, idleTimeoutOptionNames, idleTimeoutValidate, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodWorkflowKey, millisDuration, newQueue, newSchedule, newWorkflow, newWorkflowKey, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, portableJsonSerialization, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, refuseInvalidForks, renameFromApplication, renderApplicationName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
+import DBOS.SystemDB (ApplicationRowCounts (..), AppScope (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkCallRefusal (..), ForkOptions (..), IdleTransactionTimeout (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, idleTimeoutDefault, idleTimeoutMax, idleTimeoutMillis, idleTimeoutOptionNames, idleTimeoutValidate, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodWorkflowKey, millisDuration, newQueue, newSchedule, newWorkflow, newWorkflowKey, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, portableJsonSerialization, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, refuseInvalidForks, renameFromApplication, renderApplicationName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
 import DBOS.Transact
   (
   IdempotencyKey (..),
@@ -558,7 +558,7 @@ forkTests =
               @?= ("src", Nothing, 0),
       testCase "rejects fork ids the schema cannot key on" $ do
         forkValidate (Fork "" Nothing 0)
-          @?= Left (invalidInput "source_id" "must not be empty")
+          @?= Left (invalidInput "original_id" "must not be empty")
         forkValidate (Fork "s" (Just "") 0)
           @?= Left (invalidInput "forked_id" "must be absent rather than empty")
         forkValidate (Fork "s" Nothing (-1))
@@ -566,30 +566,30 @@ forkTests =
         forkValidate (Fork "s" (Just "f") 2)
           @?= Right (),
       testCase "a batch refuses one forked id on two forks" $ do
-        forkBatchProblems [Fork "a" (Just "twice") 0, Fork "b" (Just "twice") 0]
-          @?= Just ("", "`twice` is the forked id of more than one fork")
-        forkBatchProblems [Fork "a" (Just "once") 0, Fork "b" (Just "twice") 0]
+        refuseInvalidForks [Fork "a" (Just "twice") 0, Fork "b" (Just "twice") 0] defaultForkOptions
+          @?= Just (ForkBatchRefusal "`twice` is the forked id of more than one fork")
+        refuseInvalidForks [Fork "a" (Just "once") 0, Fork "b" (Just "twice") 0] defaultForkOptions
           @?= Nothing,
       testCase "a batch refuses a forked id that is an original" $ do
-        forkBatchProblems [Fork "a" (Just "a") 0]
-          @?= Just ("", "`a` is both a forked id and an original id")
-        forkBatchProblems [Fork "a" Nothing 0, Fork "b" (Just "a") 0]
-          @?= Just ("", "`a` is both a forked id and an original id")
-        forkBatchProblems [Fork "a" (Just "") 0, Fork "b" (Just "") 0]
-          @?= Nothing,
+        refuseInvalidForks [Fork "a" (Just "a") 0] defaultForkOptions
+          @?= Just (ForkBatchRefusal "`a` is both a forked id and an original id")
+        refuseInvalidForks [Fork "a" Nothing 0, Fork "b" (Just "a") 0] defaultForkOptions
+          @?= Just (ForkBatchRefusal "`a` is both a forked id and an original id")
+        refuseInvalidForks [Fork "a" (Just "") 0, Fork "b" (Just "") 0] defaultForkOptions
+          @?= Just (ForkRefusal (Fork "a" (Just "") 0) "forked_id" "must be absent rather than empty"),
       testCase "a whole call refuses in the oracle's order: fork, clash, dup, options" $ do
         -- An invalid fork refuses before a duplicate id later in the batch.
         refuseInvalidForks [Fork "" (Just "twice") 0, Fork "b" (Just "twice") 0] defaultForkOptions
-          @?= Just ("source_id", "must not be empty")
+          @?= Just (ForkRefusal (Fork "" (Just "twice") 0) "original_id" "must not be empty")
         -- A clash refuses before a duplicate id later in the batch.
         refuseInvalidForks [Fork "a" (Just "a") 0, Fork "b" (Just "a") 0] defaultForkOptions
-          @?= Just ("", "`a` is both a forked id and an original id")
+          @?= Just (ForkBatchRefusal "`a` is both a forked id and an original id")
         -- A duplicate refuses before bad options.
         refuseInvalidForks [Fork "a" (Just "twice") 0, Fork "b" (Just "twice") 0] (defaultForkOptions {forkOptionsAppVersion = Just ""})
-          @?= Just ("", "`twice` is the forked id of more than one fork")
+          @?= Just (ForkBatchRefusal "`twice` is the forked id of more than one fork")
         -- A bad fork refuses before bad options.
         refuseInvalidForks [Fork "" Nothing 0] (defaultForkOptions {forkOptionsAppVersion = Just ""})
-          @?= Just ("source_id", "must not be empty")
+          @?= Just (ForkRefusal (Fork "" Nothing 0) "original_id" "must not be empty")
         refuseInvalidForks [Fork "a" (Just "once") 0] defaultForkOptions
           @?= Nothing,
       testCase "rejects fork options that would stamp or duplicate" $ do
