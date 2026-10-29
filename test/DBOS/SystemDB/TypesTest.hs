@@ -9,7 +9,7 @@ import DBOS.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
-import DBOS.SystemDB (ApplicationRowCounts (..), AppScope (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), IdleTransactionTimeout (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, idleTimeoutDefault, idleTimeoutMax, idleTimeoutMillis, idleTimeoutOptionNames, idleTimeoutValidate, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodWorkflowKey, millisDuration, newQueue, newSchedule, newWorkflow, newWorkflowKey, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, portableJsonSerialization, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, renameFromApplication, renderApplicationName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
+import DBOS.SystemDB (ApplicationRowCounts (..), AppScope (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), IdleTransactionTimeout (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkBatchProblems, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, idleTimeoutDefault, idleTimeoutMax, idleTimeoutMillis, idleTimeoutOptionNames, idleTimeoutValidate, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodWorkflowKey, millisDuration, newQueue, newSchedule, newWorkflow, newWorkflowKey, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, portableJsonSerialization, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, refuseInvalidForks, renameFromApplication, renderApplicationName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
 import DBOS.Transact
   (
   IdempotencyKey (..),
@@ -565,6 +565,33 @@ forkTests =
           @?= Left (invalidInput "start_step" "must not be negative")
         forkValidate (Fork "s" (Just "f") 2)
           @?= Right (),
+      testCase "a batch refuses one forked id on two forks" $ do
+        forkBatchProblems [Fork "a" (Just "twice") 0, Fork "b" (Just "twice") 0]
+          @?= Just ("", "`twice` is the forked id of more than one fork")
+        forkBatchProblems [Fork "a" (Just "once") 0, Fork "b" (Just "twice") 0]
+          @?= Nothing,
+      testCase "a batch refuses a forked id that is an original" $ do
+        forkBatchProblems [Fork "a" (Just "a") 0]
+          @?= Just ("", "`a` is both a forked id and an original id")
+        forkBatchProblems [Fork "a" Nothing 0, Fork "b" (Just "a") 0]
+          @?= Just ("", "`a` is both a forked id and an original id")
+        forkBatchProblems [Fork "a" (Just "") 0, Fork "b" (Just "") 0]
+          @?= Nothing,
+      testCase "a whole call refuses in the oracle's order: fork, clash, dup, options" $ do
+        -- An invalid fork refuses before a duplicate id later in the batch.
+        refuseInvalidForks [Fork "" (Just "twice") 0, Fork "b" (Just "twice") 0] defaultForkOptions
+          @?= Just ("source_id", "must not be empty")
+        -- A clash refuses before a duplicate id later in the batch.
+        refuseInvalidForks [Fork "a" (Just "a") 0, Fork "b" (Just "a") 0] defaultForkOptions
+          @?= Just ("", "`a` is both a forked id and an original id")
+        -- A duplicate refuses before bad options.
+        refuseInvalidForks [Fork "a" (Just "twice") 0, Fork "b" (Just "twice") 0] (defaultForkOptions {forkOptionsAppVersion = Just ""})
+          @?= Just ("", "`twice` is the forked id of more than one fork")
+        -- A bad fork refuses before bad options.
+        refuseInvalidForks [Fork "" Nothing 0] (defaultForkOptions {forkOptionsAppVersion = Just ""})
+          @?= Just ("source_id", "must not be empty")
+        refuseInvalidForks [Fork "a" (Just "once") 0] defaultForkOptions
+          @?= Nothing,
       testCase "rejects fork options that would stamp or duplicate" $ do
         forkOptionsValidate (defaultForkOptions {forkOptionsAppVersion = Just ""})
           @?= Left (invalidInput "application_version" "must be absent rather than empty")
@@ -577,6 +604,11 @@ forkTests =
           @?= Left (invalidInput "replacement_children" "a replaced child id must not be empty")
         forkOptionsValidate (defaultForkOptions {forkOptionsReplacementChildren = [("a", "")]})
           @?= Left (invalidInput "replacement_children" "the replacement for a must not be empty")
+        case durationFromSecs 1e18 of
+          Nothing -> fail "expected a storable-busting duration"
+          Just huge ->
+            forkOptionsValidate (defaultForkOptions {forkOptionsTimeout = Just huge})
+              @?= Left (invalidInput "timeout" "must fit in milliseconds as a 64-bit integer")
         forkOptionsValidate defaultForkOptions
           @?= Right ()
     ]

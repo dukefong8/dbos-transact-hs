@@ -265,23 +265,26 @@ outOfOrderBody :: forall exec m. (MonadMVar m, MonadAsync m, MonadTime m, MonadD
                   WorkflowCtx exec m ->
                   m (Either (Error EngineOnly) ())
 outOfOrderBody dbos () wctx = do
-  a <- pendingSleep wctx (millisDuration 1)
-  b <- pendingSetEvent wctx "b" (1 :: Int)
-  c <- (pendingGetEvent dbos wctx (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: m (PendingStep exec m (Either (Error EngineOnly) (Maybe Int))))
-  d <- (pendingStep wctx "after" (\_ -> pure (Right (1 :: Int))) :: m (PendingStep exec m (Either (Error EngineOnly) Int)))
-  idsOk <- case (pendingStepId a, pendingStepId b, pendingStepId c, pendingStepId d) of
-    (Just 0, Just 1, Just 2, Just 4) -> pure True
-    _ -> pure False
-  if not idsOk
-    then pure (Left (StepFailed "joins" "ids were taken out of source order"))
-    else do
-      dResult <- d.pendingRun
-      cResult <- c.pendingRun
-      bResult <- b.pendingRun
-      aResult <- a.pendingRun
-      pure $ case (dResult, cResult, bResult, aResult) of
-        (Right _, Right Nothing, Right _, Right _) -> Right ()
-        _ -> Left (StepFailed "joins" "a branch answered wrong")
+  placed <- pendingSleep wctx (millisDuration 1)
+  case placed of
+    Left err -> pure (Left err)
+    Right a -> do
+      b <- pendingSetEvent wctx "b" (1 :: Int)
+      c <- (pendingGetEvent dbos wctx (WorkflowId "no-such-workflow") "nothing" (millisDuration 0) :: m (PendingStep exec m (Either (Error EngineOnly) (Maybe Int))))
+      d <- (pendingStep wctx "after" (\_ -> pure (Right (1 :: Int))) :: m (PendingStep exec m (Either (Error EngineOnly) Int)))
+      idsOk <- case (pendingStepId a, pendingStepId b, pendingStepId c, pendingStepId d) of
+        (Just 0, Just 1, Just 2, Just 4) -> pure True
+        _ -> pure False
+      if not idsOk
+        then pure (Left (StepFailed "joins" "ids were taken out of source order"))
+        else do
+          dResult <- d.pendingRun
+          cResult <- c.pendingRun
+          bResult <- b.pendingRun
+          aResult <- a.pendingRun
+          pure $ case (dResult, cResult, bResult, aResult) of
+            (Right _, Right Nothing, Right _, Right _) -> Right ()
+            _ -> Left (StepFailed "joins" "a branch answered wrong")
 
 -- | A workflow can publish and replay an event. Returns the first read
 -- and the replay's read.

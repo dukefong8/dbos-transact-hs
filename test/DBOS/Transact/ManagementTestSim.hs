@@ -65,6 +65,11 @@ import DBOS.Transact.ManagementCases
     checkBulkCancelResume,
     checkBulkFork,
     checkForkRefusals,
+    checkForkBatchRefusals,
+    checkStartRefusals,
+    checkSelfCancelResume,
+    checkSelfDelete,
+    checkAncestorDelete,
     checkForkPartitioned,
     checkForkInheritsOwner,
     checkAttributes,
@@ -107,6 +112,11 @@ import DBOS.Transact.ManagementCases
     scenarioBulkCancelResume,
     scenarioBulkFork,
     scenarioForkRefusals,
+    scenarioForkBatchRefusals,
+    scenarioStartRefusals,
+    scenarioSelfCancelResume,
+    scenarioSelfDelete,
+    scenarioAncestorDelete,
     scenarioForkPartitioned,
     scenarioForkInheritsOwner,
     scenarioAttributes,
@@ -189,6 +199,11 @@ tests =
       simCase simMgmtFixture "bulk cancel and resume hand back every id" scenarioBulkCancelResume checkBulkCancelResume traceBulkCancelResume,
       simCase simMgmtFixture "bulk forking hands back one new id per source, in order" scenarioBulkFork checkBulkFork traceBulkFork,
       simCase simMgmtFixture "invalid forks are refused on the engine channel" scenarioForkRefusals checkForkRefusals traceForkRefusals,
+      simCase simMgmtFixture "an invalid fork batch is refused up front with the fork named" scenarioForkBatchRefusals checkForkBatchRefusals traceForkBatchRefusals,
+      simCase simMgmtFixture "a start's durations are refused on the start's channel" scenarioStartRefusals checkStartRefusals traceMgmtShutdown,
+      simCase simMgmtFixture "a workflow cannot cancel or resume itself" scenarioSelfCancelResume checkSelfCancelResume traceSelfCancelResume,
+      simCase simMgmtFixture "a workflow cannot delete itself" scenarioSelfDelete checkSelfDelete traceSelfDelete,
+      simCase simMgmtFixture "a child cannot delete its ancestor tree" scenarioAncestorDelete checkAncestorDelete traceAncestorDelete,
       simCase simMgmtFixture "a fork onto a partitioned queue carries the key it is given" scenarioForkPartitioned checkForkPartitioned traceForkPartitioned,
       simCase simMgmtFixture "attributes are replaced and can be searched" scenarioAttributes checkAttributes traceAttributes,
       simCase simMgmtFixture "a workflow replacing another attributes as its step stores the replacement" scenarioAttributesInWorkflow checkAttributesInWorkflow traceAttributesInWorkflow,
@@ -546,6 +561,34 @@ traceBulkFork tr = do
 traceForkRefusals :: forall a. SimTrace a -> IO ()
 traceForkRefusals tr = do
   selectTraceEventsDynamic tr @?= [WorkflowsForked 0, WorkflowsForked 0]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | Both refusals are recorded as their steps' errors; the workflow
+-- still completes and the launch still shuts down.
+traceSelfCancelResume :: forall a. SimTrace a -> IO ()
+traceSelfCancelResume tr = do
+  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.cancel_workflow" 0, StepErrorRecorded "DBOS.resume_workflow" 1, WorkflowCompleted "hs-l2-mgmt-self-target-sim"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The refused delete is recorded as its step's error; the workflow
+-- still completes and the launch still shuts down.
+traceSelfDelete :: forall a. SimTrace a -> IO ()
+traceSelfDelete tr = do
+  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.delete_workflow" 0, WorkflowCompleted "hs-l2-mgmt-self-delete-sim"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The child's refused delete is recorded as its step's error; both
+-- workflows still complete and the launch still shuts down.
+traceAncestorDelete :: forall a. SimTrace a -> IO ()
+traceAncestorDelete tr = do
+  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.delete_workflow" 0, WorkflowCompleted "hs-l2-mgmt-ancestor-sim-0", WorkflowCompleted "hs-l2-mgmt-ancestor-sim"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | An invalid batch announces nothing at all: the refusal precedes any
+-- fork call reaching the backend. The launch still shuts down.
+traceForkBatchRefusals :: forall a. SimTrace a -> IO ()
+traceForkBatchRefusals tr = do
+  selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | The source runs, the single fork is announced, and the shutdown ends the

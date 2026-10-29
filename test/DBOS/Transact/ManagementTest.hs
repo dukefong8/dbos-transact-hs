@@ -128,6 +128,11 @@ import DBOS.Transact.ManagementCases
     checkBulkCancelResume,
     checkBulkFork,
     checkForkRefusals,
+    checkForkBatchRefusals,
+    checkStartRefusals,
+    checkSelfCancelResume,
+    checkSelfDelete,
+    checkAncestorDelete,
     checkForkPartitioned,
     checkForkInheritsOwner,
     checkAttributes,
@@ -173,6 +178,11 @@ import DBOS.Transact.ManagementCases
     scenarioBulkCancelResume,
     scenarioBulkFork,
     scenarioForkRefusals,
+    scenarioForkBatchRefusals,
+    scenarioStartRefusals,
+    scenarioSelfCancelResume,
+    scenarioSelfDelete,
+    scenarioAncestorDelete,
     scenarioForkPartitioned,
     scenarioForkInheritsOwner,
     scenarioAttributes,
@@ -258,6 +268,11 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an inline child clears its own datasource checkpoints on completion" scenarioChildClearsCheckpoints checkChildClearsCheckpoints,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "bulk forking hands back one new id per source, in order" scenarioBulkFork checkBulkFork,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "invalid forks are refused on the engine channel" scenarioForkRefusals checkForkRefusals,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an invalid fork batch is refused up front with the fork named" scenarioForkBatchRefusals checkForkBatchRefusals,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a start's durations are refused on the start's channel" scenarioStartRefusals checkStartRefusals,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow cannot cancel or resume itself" scenarioSelfCancelResume checkSelfCancelResume,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow cannot delete itself" scenarioSelfDelete checkSelfDelete,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a child cannot delete its ancestor tree" scenarioAncestorDelete checkAncestorDelete,
       testCase "resuming onto a named queue through a full launch puts the workflow there" $
         withInstance "mgmt-resume-queue" $ \dbos suffix -> do
           let key = newWorkflowKey "queued"
@@ -290,70 +305,6 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a delayed workflow can be released sooner" scenarioDelayRelease checkDelayRelease,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an unstorable moved delay is refused and a saturating one accepted" scenarioSetDelayRefusal checkSetDelayRefusal,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow moving another delay as its step releases the target" scenarioDelayReleaseInWorkflow checkDelayReleaseInWorkflow,
-      testCase "a workflow cannot delete itself" $
-        withInstance "mgmt-self-delete" $ \dbos suffix -> do
-          let key = newWorkflowKey "self-deleter"
-              wid = WorkflowId ("hs-l2-mgmt-self-" <> suffix)
-              body :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
-              body ownId wctx = do
-                deleted <- deleteWorkflowsInWorkflow wctx [WorkflowId ownId] False
-                pure (void deleted)
-          registered <- registerWorkflow dbos key body
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          ran <-
-            runWf
-              exec
-              key
-              wid
-              (Just (encodeWorkflowInput ("hs-l2-mgmt-self-" <> suffix :: Text)))
-          case ran of
-            Left err -> assertBool ("the refusal did not reach the caller: " <> show err) ("cannot delete itself" `Text.isInfixOf` Text.pack (show err))
-            Right _ -> fail "the workflow deleted itself"
-          -- The row went nowhere even though the delete was refused.
-          _ <- readRow getBackend wid
-          pure (),
-      testCase "a workflow cannot delete an ancestors tree" $
-        withInstance "mgmt-ancestor-delete" $ \dbos suffix -> do
-          -- The child reports through a rendezvous because a refused
-          -- delete records nothing: a polling handle would wait on a row
-          -- that stays pending forever, where the oracle awaits the
-          -- child's local task.
-          observed <- newEmptyMVar
-          let childKey = newWorkflowKey "deleting-child"
-              parentKey = newWorkflowKey "deleted-parent"
-              rootText = "hs-l2-mgmt-ancestor-" <> suffix
-              childBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
-              childBody root wctx = do
-                outcome <- deleteWorkflowsInWorkflow wctx [WorkflowId root] True
-                void (tryPutMVar observed outcome)
-                pure (void outcome)
-          childRef <- registerRefOrFail dbos childKey childBody
-          let parentBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
-              parentBody root wctx = do
-                started <- startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput root))
-                case started of
-                  Left err -> pure (Left err)
-                  Right _ -> void <$> takeMVar observed
-          registered <- registerWorkflow dbos parentKey parentBody
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchOrFail dbos
-          ran <-
-            runWf
-              exec
-              parentKey
-              (WorkflowId rootText)
-              (Just (encodeWorkflowInput (rootText :: Text)))
-          case ran of
-            Left err -> assertBool ("the refusal did not reach the caller: " <> show err) ("cannot delete itself" `Text.isInfixOf` Text.pack (show err))
-            Right _ -> fail "the child deleted the tree it was in"
-          -- Neither the ancestor nor the parent row went anywhere.
-          _ <- readRow getBackend (WorkflowId rootText)
-          pure (),
       testCase "management calls from inside a workflow are recorded as steps" $
         withInstance "mgmt-in-workflow" $ \dbos suffix -> do
           let targetKey = newWorkflowKey "target"

@@ -24,16 +24,20 @@ import DBOS.Transact
   sleepStep,
   )
 import DBOS.Transact.Sleep (SleepEvent (..))
-import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep, withWorkflow)
+import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, peekStepId, withStep, withWorkflow)
 import DBOS.Transact.SleepCases
   ( SleepFixture (..),
     checkSleepCheckpoint,
     checkSleepInStep,
     checkSleepPlain,
+    checkSleepRefused,
+    checkSleepRefusedRecorded,
     checkSleepReplay,
     scenarioSleepCheckpoint,
     scenarioSleepInStep,
     scenarioSleepPlain,
+    scenarioSleepRefused,
+    scenarioSleepRefusedRecorded,
     scenarioSleepReplay,
   )
 import Test.Tasty (TestTree, testGroup)
@@ -71,6 +75,13 @@ simSleepFixture = do
         sfCheckSleep = \wid ->
           SystemDB.checkStep mem wid 0 sleepStepName >>= either (error . show) pure,
         sfPlainSleep = sleepPlain,
+        sfRefusedSleep = \wid@(WorkflowId widText) duration -> do
+          conn <- memConnectionOn mem simTracer
+          owner <- ownerFor widText
+          withWorkflow conn simIdentity wid Nothing owner $ \wctx -> do
+            refused <- sleepStep wctx duration
+            next <- peekStepId wctx
+            pure (refused, next),
         sfRunInStep = \wid@(WorkflowId widText) duration -> do
           conn <- memConnectionOn mem simTracer
           owner <- ownerFor widText
@@ -90,7 +101,9 @@ tests =
     [ simCase simSleepFixture "a sleep waits and is checkpointed" scenarioSleepCheckpoint checkSleepCheckpoint traceSleepCheckpoint,
       simCase simSleepFixture "a replayed sleep does not start its clock again" scenarioSleepReplay checkSleepReplay traceSleepReplay,
       simCase simSleepFixture "a sleep outside a workflow waits plainly" scenarioSleepPlain checkSleepPlain traceSleepPlain,
-      simCase simSleepFixture "a sleep inside a step takes no id" scenarioSleepInStep checkSleepInStep traceSleepInStep
+      simCase simSleepFixture "a sleep inside a step takes no id" scenarioSleepInStep checkSleepInStep traceSleepInStep,
+      simCase simSleepFixture "a sleep that cannot be recorded is refused before it takes an id" scenarioSleepRefused checkSleepRefused traceSleepRefused,
+      simCase simSleepFixture "a refused sleep is recorded as the step error and replayed" scenarioSleepRefusedRecorded checkSleepRefusedRecorded traceSleepRefusedRecorded
     ]
 
 -- * Scheduler-event and typed-event assertions (sim-only)
@@ -131,3 +144,16 @@ traceSleepInStep tr = do
   where
     isUncheckpointed SleepUncheckpointed {} = True
     isUncheckpointed _ = False
+
+-- | A refused sleep waits on nothing and announces no wake.
+traceSleepRefused :: SimTrace a -> IO ()
+traceSleepRefused tr = do
+  assertBool "a refused sleep must wait on nothing" (null (filter isDelay (eventTypes tr)))
+  assertBool "a refused sleep announces no wake" (null (selectTraceEventsDynamic tr :: [SleepEvent]))
+
+-- | The recorded refusal waits on nothing after it: the primer waits,
+-- and neither run announces a wake.
+traceSleepRefusedRecorded :: SimTrace a -> IO ()
+traceSleepRefusedRecorded tr = do
+  assertBool "only the primer may wait on the sim clock" (length (filter isDelay (eventTypes tr)) == 1)
+  assertBool "neither run announces a wake" (null (selectTraceEventsDynamic tr :: [SleepEvent]))

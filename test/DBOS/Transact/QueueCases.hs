@@ -99,9 +99,12 @@ module DBOS.Transact.QueueCases
     checkPeerQueue,
     scenarioWorkerBudgetExhausted,
     checkWorkerBudgetExhausted,
+    scenarioDispatchPark,
+    checkDispatchPark,
   )
 where
 
+import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.Prelude
@@ -169,7 +172,8 @@ data QueueFixture m = QueueFixture
     qfShutdown :: m (),
     qfUpsertQueue :: NewQueue -> OnExistingQueue -> m (Either SysDB.Error Bool),
     qfReadQueueRow :: Text -> m (Maybe QueueRecord),
-    qfReadWorkflowRow :: WorkflowId -> m (Maybe WorkflowRecord)
+    qfReadWorkflowRow :: WorkflowId -> m (Maybe WorkflowRecord),
+    qfPlantAttempts :: WorkflowId -> Int64 -> m ()
   }
 
 -- | The legacy row the re-scope case resolves: the deprecated partition
@@ -869,8 +873,9 @@ scenarioBadEnqueue fx = do
 checkBadEnqueue :: (Either (Error EngineOnly) Text, [WorkflowRecord]) -> Either String ()
 checkBadEnqueue (started, listed) = do
   case started of
-    Left (ErrorConfig message) ->
-      unless ("`priority` must be at most 2147483647" `Text.isInfixOf` message) $ Left ("expected the priority refusal, got: " <> show message)
+    Left (InvalidArgument operation detail) -> do
+      unless (operation == "enqueue a workflow") $ Left ("expected the enqueue operation, got: " <> show operation)
+      unless ("`priority` must be at most 2147483647" `Text.isInfixOf` detail) $ Left ("expected the priority refusal, got: " <> show detail)
     Right workflowId -> Left ("expected a priority refusal, but the enqueue created: " <> show workflowId)
     other -> Left ("expected a priority refusal, got: " <> show other)
   case listed of
@@ -1641,3 +1646,40 @@ checkWorkerBudgetExhausted (high, waiting, statuses) = do
   unless (high == 1) $ Left ("expected at most one run in flight, got: " <> show high)
   unless (length waiting == 3 && length (filter (== Pending) waiting) == 1) $ Left ("expected one parked run behind two waiting rows, got: " <> show waiting)
   unless (statuses == [Just Success, Just Success, Just Success]) $ Left ("expected every row SUCCESS, got: " <> show statuses)
+
+-- | A dispatch past the recovery budget parks the row without running
+-- it: the attempts are spent behind the queue's back, so the claim that
+-- takes the row counts one more and the dispatch parks it. Promoted from
+-- the live-only twin; each stack plants the attempts its own way.
+scenarioDispatchPark :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+                     => QueueFixture m -> m (Int, Maybe WorkflowStatus, Int64)
+scenarioDispatchPark fx = do
+  runs <- newTVarIO (0 :: Int)
+  let key = newWorkflowKey "never-runs"
+      body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
+      body () _ = atomically (modifyTVar runs (+ 1)) >> pure (Right ())
+      queueName = "hs-l2-park-q-" <> Text.take 12 fx.qfSuffix
+      workflowText = "hs-l2-park-run-" <> fx.qfSuffix
+  _ <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
+  bracket fx.qfLaunch (\_ -> fx.qfShutdown) $ \_ -> do
+    _ <- enqueueWorkflow fx.qfDBOS key (WorkflowId workflowText) (Just (encodeWorkflowInput ())) queueName >>= either (error . show) pure
+    -- Spend the budget behind the queue's back: the claim counts one more,
+    -- so the dispatch reads 151 against a limit of 100.
+    fx.qfPlantAttempts (WorkflowId workflowText) 150
+    _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
+    parkedRow <- pollUntil (30 * 1000000) (fx.qfReadWorkflowRow (WorkflowId workflowText) >>= \row -> pure (maybe False ((== MaxRecoveryAttemptsExceeded) . (.workflowRecordStatus)) row))
+    unless parkedRow $ error "the row never parked"
+    parked <- waitForWorkflow fx.qfDBOS (WorkflowId workflowText) >>= either (error . show) pure
+    attempts <- case parked of
+      AwaitedParked count -> pure count
+      other -> error ("expected a parked outcome, got: " <> show other)
+    status <- fx.qfReadWorkflowRow (WorkflowId workflowText) >>= \row -> pure ((.workflowRecordStatus) <$> row)
+    ran <- readTVarIO runs
+    pure (ran, status, attempts)
+
+-- | The body never ran, the row parked, and the claim's count shows.
+checkDispatchPark :: (Int, Maybe WorkflowStatus, Int64) -> Either String ()
+checkDispatchPark (ran, status, attempts) = do
+  unless (ran == 0) $ Left ("expected the body never to run, got: " <> show ran)
+  unless (status == Just MaxRecoveryAttemptsExceeded) $ Left ("expected the row parked, got: " <> show status)
+  unless (attempts == 151) $ Left ("expected the claim to count one more, got: " <> show attempts)

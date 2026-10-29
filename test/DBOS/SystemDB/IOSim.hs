@@ -52,6 +52,7 @@ import DBOS.SystemDB
     DebounceRequest (..),
     Dequeued (..),
     DequeueStop (..),
+    Duration,
     EncodedValue (..),
     Error (..),
     EventRecord (..),
@@ -75,6 +76,7 @@ import DBOS.SystemDB
     ScheduleRecord (..),
     ScheduleUpdate (..),
     EncodedSendMessage (..),
+    Serialization (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
     StepTiming (..),
@@ -147,6 +149,7 @@ import DBOS.Transact
     newDBOS,
   )
 import DBOS.Transact.Logger (SomeTracer (..))
+import DBOS.Transact.Serialization (codecErrorText, decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Instance (launchExecutor, launchOn, launchOnWithQueues)
 import DBOS.Transact.Connection
@@ -967,32 +970,59 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                   | otherwise = (acc, row)
             writeTVar db.memRows rows'
             pure (Right moved)
-  deleteWorkflows db ids _ owner = atomically $ do
+  deleteWorkflows db ids deleteChildren owner = atomically $ do
     rows <- readTVar db.memRows
-    -- A step running the delete opens with its ownership check: a stale
-    -- execution removes nothing. Client and engine deletes skip it. The row
-    -- checked is named by the same value the fence reads its token from.
-    case owner of
-      Just o ->
-        case Map.lookup (widTextOf o.ownerWorkflowId) rows of
-          Just row | row.workflowRecordOwnerXid == Just o.ownerToken -> remove rows
-          _ -> pure (Left (WorkflowConflict {workflowId = widTextOf o.ownerWorkflowId}))
-      Nothing -> remove rows
+    -- A workflow cannot delete itself, and cannot delete an ancestor
+    -- whose tree it is inside: refused before anything runs, as the SQL
+    -- delete is, so the workflow never runs on with no row.
+    case owner >>= selfDelete (targets rows) of
+      Just err -> pure (Left err)
+      Nothing ->
+        -- A step running the delete opens with its ownership check: a stale
+        -- execution removes nothing. Client and engine deletes skip it. The row
+        -- checked is named by the same value the fence reads its token from.
+        case owner of
+          Just o ->
+            case Map.lookup (widTextOf o.ownerWorkflowId) rows of
+              Just row | row.workflowRecordOwnerXid == Just o.ownerToken -> remove rows
+              _ -> pure (Left (WorkflowConflict {workflowId = widTextOf o.ownerWorkflowId}))
+          Nothing -> remove rows
     where
-      remove rows = do
-        let gone = length (filter (`Map.member` rows) [wid | WorkflowId wid <- ids])
-        writeTVar db.memRows (foldr Map.delete rows [wid | WorkflowId wid <- ids])
-        modifyTVar db.memSteps (Map.filterWithKey (\(wid, _) _ -> wid `notElem` [w | WorkflowId w <- ids]))
+      targets rows =
+        let direct = [t | WorkflowId t <- ids]
+            extra = if deleteChildren then concatMap (descendants rows) direct else []
+         in nub (sort (direct <> extra))
+      descendants rows parent =
+        [t | WorkflowId t <- children] <> concatMap (descendants rows) [t | WorkflowId t <- children]
+        where children = [row.workflowRecordId | row <- Map.elems rows, row.workflowRecordParentWorkflowId == Just (WorkflowId parent)]
+      selfDelete keys o
+        | let WorkflowId callerId = o.ownerWorkflowId, callerId `elem` keys =
+            Just
+              ( invalidInput
+                  "workflow_ids"
+                  ( "workflow " <> callerId <> " cannot delete itself: the step checkpoint for the delete "
+                      <> "is written in the same transaction and would outlive the row it references"
+                  )
+              )
+        | otherwise = Nothing
+      remove current = do
+        let keys = targets current
+            gone = length (filter (`Map.member` current) keys)
+        writeTVar db.memRows (foldr Map.delete current keys)
+        modifyTVar db.memSteps (Map.filterWithKey (\(wid, _) _ -> wid `notElem` keys))
         -- Deleted rows take their holds with them, as deleting drops the
         -- SQL index entries.
-        modifyTVar db.memDedup (dropMemHolds rows [wid | WorkflowId wid <- ids])
+        modifyTVar db.memDedup (dropMemHolds current keys)
         pure (Right (fromIntegral gone))
   forkWorkflows db forks options _
     | null forks = pure (Right [])
-    | otherwise = case (forkOptionsValidate options, traverse forkValidate forks) of
-    (Left err, _) -> pure (Left err)
-    (_, Left err) -> pure (Left err)
-    (Right (), Right _) -> memFork db [(fork.forkSourceId, fork.forkForkedId, fork.forkStartStep) | fork <- forks] options
+    | otherwise =
+        -- No batch rules here either: the oracle's @fork_workflows@ runs
+        -- only the option and per-fork checks, as the live backend does.
+        case (forkOptionsValidate options, traverse forkValidate forks) of
+          (Left err, _) -> pure (Left err)
+          (_, Left err) -> pure (Left err)
+          (Right (), Right _) -> memFork db [(fork.forkSourceId, fork.forkForkedId, fork.forkStartStep) | fork <- forks] options
   forkFrom db ids point options _
     | null ids = pure (Right [])
     | otherwise = case (forkOptionsValidate options, traverse (forkValidate . synthesized) sources) of
@@ -1176,7 +1206,10 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     case replayed of
       Just record | record.stepRecordStepName == recvStepName -> pure (Right (memEncodedFromStep record))
       _ -> do
-        slept <- recordSleep db wid timeoutStepId duration token
+        -- The deadline step checkpoints through the deadline kind, so an
+        -- unrepresentable timeout saturates instead of refusing: a wait
+        -- that never elapses is what the caller asked for.
+        slept <- memCheckpointSleep MemDeadlineSleep db wid timeoutStepId duration token
         case slept of
           Left err -> pure (Left err)
           Right wakeAt -> do
@@ -1257,44 +1290,11 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   closeStream db wid stepId key writtenBy token =
     writeStream db wid stepId key streamClosedSentinel (Just portableJsonSerialization) writtenBy token
   close _ = close MockSystemDB
-  recordSleep db wid stepId duration token = do
-    now <- memDbNow db
-    case addTimeout now duration of
-      Nothing -> pure (Left (invalidInput "duration" "does not resolve to a representable wake time"))
-      Just wakeAt -> do
-        existing <- checkStep db wid stepId sleepStepName
-        case existing of
-          Left err -> pure (Left err)
-          Right (Just step) -> case step.stepRecordOutput >>= readMaybe . Text.unpack of
-            Just millis -> pure (Right (timestampFromEpochMs millis))
-            Nothing -> pure (Right wakeAt)
-          Right Nothing -> do
-            recorded <-
-              recordStep
-                db
-                wid
-                stepId
-                sleepStepName
-                (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
-                Nothing
-                (Just (StepTiming now wakeAt))
-                token
-            case recorded of
-              -- A rival recorded this sleep between the check and the write:
-              -- adopt its wake time, as the live checkpoint does, rather than
-              -- disagree with a record the workflow will replay.
-              Left (StepNondeterminism {}) -> do
-                adopted <- checkStep db wid stepId sleepStepName
-                case adopted of
-                  Right (Just step) -> case step.stepRecordOutput >>= readMaybe . Text.unpack of
-                    Just millis -> pure (Right (timestampFromEpochMs millis))
-                    Nothing -> pure (Left (Malformed "sleep reported as recorded but cannot be read back"))
-                  Left err -> pure (Left err)
-                  Right Nothing -> pure (Left (Malformed "sleep reported as recorded but cannot be read back"))
-              Left err -> pure (Left err)
-              Right () -> pure (Right wakeAt)
-              Left err -> pure (Left err)
-              Right () -> pure (Right wakeAt)
+  -- The class seam records durable sleeps; deadline waits checkpoint
+  -- through 'memCheckpointSleep' below so an unrepresentable timeout
+  -- saturates instead of refusing.
+  recordSleep db wid stepId duration token =
+    memCheckpointSleep MemDurableSleep db wid stepId duration token
   setEvent db wid stepId key value serialization token = do
     now <- memDbNow db
     -- The publish opens with the ownership check, before the replay adopt,
@@ -1920,6 +1920,80 @@ memCheckRecvOwner db wid@(WorkflowId widText) token = do
   pure $ case Map.lookup widText rows of
     Just row | row.workflowRecordOwnerXid == Just token -> Right wid
     _ -> Left (WorkflowConflict {workflowId = widText})
+
+-- | Which clock a checkpointed sleep keeps: a durable sleep is refused
+-- when its wake time cannot be stored, while a deadline too far out
+-- never elapses and saturates instead. Mirrors @SleepKind@.
+data MemSleepKind = MemDurableSleep | MemDeadlineSleep
+  deriving stock (Eq, Show)
+
+-- | The one checkpointed sleep, against whichever kind the caller needs.
+-- The record is looked for first, so a replay never decides again: a
+-- durable wake that cannot be stored is recorded as the refusal, and a
+-- deadline too far out saturates instead of refusing. Mirrors the
+-- oracle's checkpoint order.
+memCheckpointSleep :: MemSleepKind -> MemSystemDB s -> WorkflowId -> Int -> Duration -> Text -> IOSim s (Either Error Timestamp)
+memCheckpointSleep kind db wid stepId duration token = do
+  now <- memDbNow db
+  existing <- checkStep db wid stepId sleepStepName
+  case existing of
+    Left err -> pure (Left err)
+    Right (Just step) -> pure (memReplaySleep kind wid stepId step)
+    Right Nothing -> case decidedWake kind now duration of
+      Left refusal -> do
+        let encoded = encodeWorkflowValue refusal
+        memRecordSleepOutcome kind db wid stepId
+          (OutcomeError encoded.serializedText)
+          (Just portableJsonSerialization)
+          (StepTiming now now)
+          token
+          (Left refusal)
+      Right wakeAt -> do
+        let completedAt = case kind of
+              MemDurableSleep -> wakeAt
+              MemDeadlineSleep -> now
+        memRecordSleepOutcome kind db wid stepId
+          (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
+          (Just portableJsonSerialization)
+          (StepTiming now completedAt)
+          token
+          (Right wakeAt)
+  where
+    decidedWake MemDurableSleep started wait = case addTimeout started wait of
+      Nothing -> Left (invalidInput "duration" "must not end past the latest instant 64-bit epoch milliseconds can hold")
+      Just wakeAt -> Right wakeAt
+    decidedWake MemDeadlineSleep started wait = Right (saturateTimeout started wait)
+
+-- | Records a sleep outcome and answers it, adopting a rival's record on
+-- a write race rather than disagreeing with what the workflow replays.
+memRecordSleepOutcome :: MemSleepKind -> MemSystemDB s -> WorkflowId -> Int -> Outcome -> Maybe Text -> StepTiming -> Text -> Either Error Timestamp -> IOSim s (Either Error Timestamp)
+memRecordSleepOutcome kind db wid stepId outcome serialization timing token answer = do
+  recorded <- recordStep db wid stepId sleepStepName outcome serialization (Just timing) token
+  case recorded of
+    Left (StepNondeterminism {}) -> do
+      adopted <- checkStep db wid stepId sleepStepName
+      case adopted of
+        Right (Just step) -> pure (memReplaySleep kind wid stepId step)
+        Left err -> pure (Left err)
+        Right Nothing -> pure (Left (Malformed "sleep reported as recorded but cannot be read back"))
+    Left err -> pure (Left err)
+    Right () -> pure answer
+
+-- | Reads back a recorded sleep: a recorded refusal comes back as the
+-- refusal, a wake time as the instant. Only a durable sleep records
+-- refusals — a deadline never does — so any other combination reads the
+-- output. Mirrors @replayed_sleep@.
+memReplaySleep :: MemSleepKind -> WorkflowId -> Int -> StepRecord -> Either Error Timestamp
+memReplaySleep kind wid stepId record = case (kind, record.stepRecordError) of
+  (MemDurableSleep, Just encoded) ->
+    case decodeWorkflowValue "a sleep refusal" (Just (SerializedWorkflowValue encoded (Serialization <$> record.stepRecordSerialization))) of
+      Left codecErr -> Left (Malformed ("workflow " <> widText <> " step " <> Text.pack (show stepId) <> " sleep refusal cannot be read back: " <> codecErrorText codecErr))
+      Right err -> Left err
+  _ -> case record.stepRecordOutput >>= readMaybe . Text.unpack of
+    Just millis -> Right (timestampFromEpochMs millis)
+    Nothing -> Left (Malformed "sleep reported as recorded but has no wake time")
+  where
+    widText = case wid of WorkflowId text -> text
 
 -- | Marks one notification consumed, leaving the rest of the
 -- destination's rows alone.

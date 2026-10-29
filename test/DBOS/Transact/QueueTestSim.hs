@@ -23,6 +23,7 @@ module DBOS.Transact.QueueTestSim (tests) where
 
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimEventType (..), SimTrace, selectTraceEvents)
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
@@ -42,13 +43,14 @@ import DBOS.SystemDB
     startQueuedWorkflows,
     upsertQueue,
   )
-import DBOS.SystemDB.IOSim (MemSystemDB, memLaunchOnWith, memSetApplication, newMemDB, newMemDBWithApplication, simInstance)
+import DBOS.SystemDB.IOSim (MemSystemDB (memRows), memLaunchOnWith, memSetApplication, newMemDB, newMemDBWithApplication, simInstance)
 import DBOS.Transact (shutdown)
 import DBOS.Transact.QueueCases
   ( QueueFixture (..),
     checkBadEnqueue,
     checkCountedPartitioned,
     checkWorkerBudgetExhausted,
+    checkDispatchPark,
     checkDedup,
     checkDelayed,
     checkJoin,
@@ -89,6 +91,7 @@ import DBOS.Transact.QueueCases
     scenarioBadEnqueue,
     scenarioCountedPartitioned,
     scenarioWorkerBudgetExhausted,
+    scenarioDispatchPark,
     scenarioDedup,
     scenarioDelayed,
     scenarioJoin,
@@ -235,7 +238,11 @@ simQueueFixture listenOf = do
           found <- getWorkflow mem wid
           case found of
             Left err -> error (show err)
-            Right record -> pure record
+            Right record -> pure record,
+        -- Mem plants attempts directly on the row: no SQL needed, and
+        -- the claim counts one more from there, exactly as live.
+        qfPlantAttempts = \(WorkflowId widText) count ->
+          atomically $ modifyTVar mem.memRows (\rows -> Map.adjust (\row -> row {workflowRecordRecoveryAttempts = count}) widText rows)
       }
 
 -- | One framed leaf over the per-leaf fixture. Validation cases emit no
@@ -317,6 +324,7 @@ tests =
           simLeaf (const (Just [])) "a full partition does not end the walk" scenarioWalkFullPartition checkWalkFullPartition,
           simLeaf (const (Just [])) "a walk stops once the queue-wide room is claimed" scenarioWalkSpentRoom checkWalkSpentRoom,
           simLeaf (const Nothing) "a saturated worker budget runs one at a time" scenarioWorkerBudgetExhausted checkWorkerBudgetExhausted,
+          simLeaf (const Nothing) "a dispatch past the recovery budget parks the row without running it" scenarioDispatchPark checkDispatchPark,
           simLeaf (const Nothing) "another application's queue is not dequeued from" scenarioPeerQueue checkPeerQueue,
           -- IO only: the fixture rewrites the row through raw SQL into the
           -- pre-109 shape (input moved into the status column, payload-table

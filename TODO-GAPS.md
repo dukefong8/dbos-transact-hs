@@ -68,21 +68,69 @@ go. Section A (scheduler engine) and E (closed) are not tracked here.
   both backends call it from Types. Residual: the sim still imports
   `CallerStep (..)` from the Postgres session module for its caller
   verification mirror. Moving that codec machinery is separate scope.
-- [ ] Fork batch refusals in the shared helpers: duplicate pinned ids
-  and oversized timeouts refuse up front naming the fork. Gate: unit
-  twins plus Management fork group, oracle fork tests.
-- [ ] Re-channel enqueue and start refusals to InvalidArgument with the
-  oracle operation strings; Config stays for setup failures. Gate:
-  twins asserting the channel in Client and Management groups, oracle
-  validation tests.
-- [ ] Sleep surface: record the refusal as the step error, look up the
-  recorded step before refusing, pre-check before the step id. Gate:
-  sim twins for all three plus Sleep group live, oracle sleep tests.
-- [ ] Shared self cancel and self resume scenarios; promote the
-  live-only delete cases to shared twins. Gate: Management groups both
-  stacks.
-- [ ] Dispatch-park sim twin plus the ADR list entry, or a recorded
-  reason. Gate: Queue groups both stacks.
+- [x] Fork batch refusals in the shared helpers: duplicate pinned ids
+  and oversized timeouts refuse up front naming the fork. Done
+  2026-10-29: `forkBatchProblems` in Types (dup forked ids, forked/id
+  collision with the id named, empty ids left to per-fork rules),
+  refused through engine `checkForkArgs` (detail verbatim, as the
+  oracle's `refuse()` vs `refused_fork()` split) and both sysdb backends
+  (as `InvalidInput`), plus the oversized timeout bound in
+  `forkOptionProblems` via `durationToMs`; `runFork` unified on
+  `durationToMs`. Per-fork/options message formats unchanged, so no
+  existing twin churn. Gates: watcher green, Management 58/58 live,
+  shared batch scenario both stacks (red-proven by stub), TypesTest unit
+  twins, full 973/973, psql 565 rows, oracle management 41/41,
+  cabal build all plus explicit test target linked. Review follow-up
+  2026-10-29: engine now walks the oracle's order via `refuseInvalidForks`
+  (per-fork, clash, dup per fork in turn, options last; batch details
+  backticked as the oracle spells them), sysdb batch checks removed (the
+  oracle's `fork_workflows` runs only option plus per-fork checks),
+  `forkOptionProblems` total on timeout failure, mem delete drops the
+  subtree, mem sleep success records the serialization and names ids on
+  replay failure. Gates re-run: watcher green incl. new order unit twin,
+  full 980/980, psql 568 rows, oracle management 41/41 plus queues 39/39,
+  cabal build all plus explicit test target linked.
+- [x] Re-channel enqueue and start refusals to InvalidArgument with the
+  oracle operation strings; Config stays for setup failures. Done
+  2026-10-29: `validateEnqueue` refuses as InvalidArgument "enqueue a
+  workflow" naming the queue (plus the missing delay checks), new
+  `validateStart` covers the timeout on both operations, and
+  `refusedStart` maps sysdb InvalidInput with the `api_field` spellings
+  at every init path (engine starts, child starts, both client
+  enqueues); `runFork`'s duplicate bound check unified on
+  `durationToMs`. Per-fork/queue-registration formats unchanged. Live
+  caught a twin bug: sub-ms reads as zero on both layers (millis
+  granularity, matching sysdb), so the accept-case pins 1ms. Gates:
+  watcher green, Client/Management/Queue groups live, full 976/976,
+  psql 565 rows, oracle lib-workflow 22/22 plus client 33/33, cabal
+  build all plus explicit test target linked.
+- [x] Sleep surface: record the refusal as the step error, look up the
+  recorded step before refusing, pre-check before the step id. Done
+  2026-10-29: `durationToMs` pre-check before `placeCall` in `sleepStep`
+  and `pendingSleep` (signature widens to Either), `sleepPlain` refuses
+  likewise; checkpoint looks up first, durable past-max wake records the
+  refusal as the step error (JSON codec round-trip) and replays it,
+  deadlines saturate; `recordSleep` mapping moves from `fromSystemDB` to
+  `refusedArgument "sleep"`. Both record paths red-proven in isolation.
+  Gates: watcher green, Sleep 6/6 live, full 978/978, psql 567 rows,
+  oracle sleep 4/4, cabal build all plus explicit test target linked.
+- [x] Shared self cancel and self resume scenarios; promote the
+  live-only delete cases to shared twins. Done 2026-10-29: new shared
+  cancel/resume scenario (refusal texts reach the caller, row succeeds),
+  promoted self-delete and ancestor-delete scenarios (rendezvous
+  replaced by child-handle wait), plus the missing mem self-delete
+  refusal with descendant walk that the promotion exposed (sim
+  deadlocked deleting its own row). Gates: watcher green, Management
+  groups both stacks, full 979/979, psql 568 rows, oracle management
+  41/41, cabal build all plus explicit test target linked.
+- [x] Dispatch-park sim twin plus the ADR list entry, or a recorded
+  reason. Done 2026-10-29: promoted the live-only case to a shared
+  `scenarioDispatchPark` (runs 0, parked status, claim counts one more
+  to 151) with a `qfPlantAttempts` fixture op — SQL update live, direct
+  mem row write on sim. No ADR entry needed: the case runs on sim, so
+  the IO-only marker is gone with it. Gates: watcher green, Queue
+  groups both stacks, full 979/979, psql 681 rows, oracle queues 39/39,
+  cabal build all plus explicit test target linked.
 
 ## D. Debouncer twins
 

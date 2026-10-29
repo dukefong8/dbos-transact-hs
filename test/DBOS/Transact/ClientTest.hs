@@ -17,7 +17,7 @@ import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Hasql.Transaction qualified as Tx
-import DBOS.SystemDB (AppScope (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
+import DBOS.SystemDB (AppScope (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, durationFromSecs, forkNew, getWorkflow, millisDuration, secondsDuration)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres qualified as Postgres
@@ -124,7 +124,7 @@ import DBOS.Transact.Datasource qualified as DSTx (Tx (Tx))
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Instance (dequeueWorkflows)
 import DBOS.Transact.Client (clientGetEventSerialized)
-import DBOS.Transact.Workflow (storedPriority, validateEnqueue)
+import DBOS.Transact.Workflow (storedPriority, validateEnqueue, validateStart)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
@@ -320,20 +320,78 @@ tests =
               other -> fail ("expected a stored-id refusal, got: " <> show other),
       testCase "an enqueue no queue could honour is refused before any write" $ do
         let both = (enqueueNew "q") {deduplicationId = Just "key", partitionKey = Just "part"}
-        case validateEnqueue both of
-          Left err ->
-            assertBool "names the queue" ("enqueue onto `q`" `Text.isInfixOf` Text.pack (show err))
-          Right () -> fail "expected dedup plus partition to be refused"
+        case (validateEnqueue both :: Either (Error EngineOnly) ()) of
+          Left (InvalidArgument operation detail) -> do
+            operation @?= "enqueue a workflow"
+            assertBool "names the queue" ("queue `q`" `Text.isInfixOf` detail)
+          other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
         let noKey = (enqueueNew "q") {duplicationPolicy = ReturnExisting}
-        case validateEnqueue noKey of
-          Left _ -> pure ()
-          Right () -> fail "expected return-existing without a key to be refused"
+        case (validateEnqueue noKey :: Either (Error EngineOnly) ()) of
+          Left (InvalidArgument _ _) -> pure ()
+          other -> fail ("expected return-existing without a key to be refused, got: " <> show other)
         let zero = (enqueueNew "q") {priority = Just 0}
-        case validateEnqueue zero of
-          Left _ -> pure ()
-          Right () -> fail "expected priority zero to be refused"
+        case (validateEnqueue zero :: Either (Error EngineOnly) ()) of
+          Left (InvalidArgument _ _) -> pure ()
+          other -> fail ("expected priority zero to be refused, got: " <> show other)
         storedPriority (enqueueNew "q") @?= 0
         storedPriority ((enqueueNew "q") {priority = Just 3}) @?= 3,
+      testCase "a start's durations are refused on the start's channel" $ do
+        let huge = case durationFromSecs 1e18 of
+              Nothing -> error "a storable-busting duration must build"
+              Just duration -> duration
+        -- Zero reads as zero at millisecond granularity on both layers,
+        -- as the system database's own check does; one millisecond is
+        -- the smallest valid duration.
+        case (validateEnqueue ((enqueueNew "q") {delay = Just (millisDuration 0)}) :: Either (Error EngineOnly) ()) of
+          Left (InvalidArgument operation detail) -> do
+            operation @?= "enqueue a workflow"
+            detail @?= "queue `q`: `delay` must be a positive, non-zero duration"
+          other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+        case (validateEnqueue ((enqueueNew "q") {delay = Just huge}) :: Either (Error EngineOnly) ()) of
+          Left (InvalidArgument operation detail) -> do
+            operation @?= "enqueue a workflow"
+            detail @?= "queue `q`: `delay` must fit in milliseconds as a 64-bit integer"
+          other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+        case (validateStart (Just (enqueueNew "q")) (Just huge) :: Either (Error EngineOnly) ()) of
+          Left (InvalidArgument operation detail) -> do
+            operation @?= "enqueue a workflow"
+            detail @?= "queue `q`: `timeout` must fit in milliseconds as a 64-bit integer"
+          other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+        case (validateStart Nothing (Just huge) :: Either (Error EngineOnly) ()) of
+          Left (InvalidArgument operation detail) -> do
+            operation @?= "start a workflow"
+            detail @?= "`timeout` must fit in milliseconds as a 64-bit integer"
+          other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+        validateStart (Just (enqueueNew "q")) (Just (millisDuration 1)) @?= (Right () :: Either (Error EngineOnly) ())
+        validateStart Nothing Nothing @?= (Right () :: Either (Error EngineOnly) ()),
+      testCase "a start the database refuses reports as the start's own" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-refused-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-refused-q-" <> Text.take 12 suffix
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          let enqueued shape = clientEnqueueWorkflowWith client (newWorkflowKey "refused") shape Nothing
+              check shape expected = do
+                refused <- enqueued shape
+                case refused of
+                  Left (InvalidArgument operation detail) -> do
+                    operation @?= "enqueue a workflow"
+                    detail @?= expected
+                  other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+          check
+            (((enqueueOptionsNew queueName) {workflowId = Just ""}) :: EnqueueOptions)
+            ("queue `" <> queueName <> "`: `workflow_id` must not be empty")
+          check
+            ((enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {deduplicationId = Just ""}})
+            ("queue `" <> queueName <> "`: `deduplication_id` must be absent rather than empty")
+          check
+            (((enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {partitionKey = Just ""}}) :: EnqueueOptions)
+            ("queue `" <> queueName <> "`: `partition_key` must be absent rather than empty")
+          check
+            (((enqueueOptionsNew queueName) {appVersion = Just ""}) :: EnqueueOptions)
+            ("queue `" <> queueName <> "`: `app_version` must be absent rather than empty"),
       testCase "a second enqueue under a held key joins the holder" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)

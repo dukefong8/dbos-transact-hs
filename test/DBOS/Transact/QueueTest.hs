@@ -45,6 +45,7 @@ import DBOS.Transact.QueueCases
     checkUpdateHonoured,
     checkWorkerConcurrency,
     checkWorkerBudgetExhausted,
+    checkDispatchPark,
     checkCrud,
     checkDeadlineStamped,
     checkConcurrencySpellings,
@@ -86,6 +87,7 @@ import DBOS.Transact.QueueCases
     scenarioUpdateHonoured,
     scenarioWorkerConcurrency,
     scenarioWorkerBudgetExhausted,
+    scenarioDispatchPark,
     scenarioCrud,
     scenarioDeadlineStamped,
     scenarioConcurrencySpellings,
@@ -161,7 +163,20 @@ mkQueueFixture backend listenOf run = do
             found <- getWorkflow backend wid
             case found of
               Left err -> fail (show err)
-              Right record -> pure record
+              Right record -> pure record,
+          qfPlantAttempts = \(WorkflowId widText) count -> do
+            planted <-
+              Postgres.runSession backend "fixture" $
+                Session.statement (widText, count) $
+                  Statement.preparable
+                    "update dbos.workflow_status set recovery_attempts = $2 where workflow_uuid = $1"
+                    (contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
+                      <> contramap snd (Encoders.param (Encoders.nonNullable Encoders.int8)))
+                    Decoders.rowsAffected
+            case planted of
+              Left err -> fail (show err)
+              Right 1 -> pure ()
+              Right n -> fail ("expected one planted row, got: " <> show n)
         }
 
 -- | One framed leaf over the per-leaf fixture. Most cases drain every
@@ -250,61 +265,6 @@ tests =
         admission Pending 1 @?= Run
         admission Pending limit @?= Run
         admission Pending (limit + 1) @?= Park,
-      -- IO only: the attempt count is planted through raw SQL, which the
-      -- sim has no equivalent of.
-      testCase "a dispatch past the recovery budget parks the row without running it" $ do
-        fresh <- UUID.V4.nextRandom
-        backend <- getBackend
-        let suffix = Text.pack (UUID.toString fresh)
-            appName = "hs-l2-queue-park-" <> Text.take 12 suffix
-            queueName = "hs-l2-park-" <> Text.take 12 suffix
-            version = "hs-l2-version-" <> suffix
-            workflowText = "hs-l2-park-run-" <> suffix
-            workflowId = WorkflowId workflowText
-        base <- configFromEnv appName
-        let config = base {configAppVersion = Just version}
-        ran <- newIORef (0 :: Int)
-        bracket (newDBOS config) shutdown $ \dbos -> do
-          let key = newWorkflowKey "never-runs"
-              body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
-              body () _ = modifyIORef' ran (+ 1) >> pure (Right ())
-          registered <- registerWorkflow dbos key body
-          case registered of
-            Left err -> fail (show err)
-            Right () -> pure ()
-          exec <- launchQueueExec dbos isolatedEnvironment
-          enqueued <- enqueueWorkflow dbos key workflowId (Just (encodeWorkflowInput ())) queueName
-          case enqueued of
-            Left err -> fail (show err)
-            Right result -> result.initResultStatus @?= Enqueued
-          -- Spend the budget behind the queue's back: the claim counts one
-          -- more, so the dispatch reads 151 against a limit of 100.
-          bumped <-
-            Postgres.runSession backend "fixture" $
-              Session.statement workflowText $
-                Statement.preparable
-                  "update dbos.workflow_status set recovery_attempts = 150 where workflow_uuid = $1"
-                  (Encoders.param (Encoders.nonNullable Encoders.text))
-                  Decoders.rowsAffected
-          case bumped of
-            Left err -> fail (show err)
-            Right 1 -> pure ()
-            Right n -> fail ("expected one bumped row, got: " <> show n)
-          queueRegistered <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate
-          case queueRegistered of
-            Left err -> fail (show err)
-            Right _ -> pure ()
-          waited <- waitForWorkflow dbos workflowId
-          case waited of
-            Left err -> fail (show err)
-            Right (AwaitedParked attempts) -> attempts @?= 151
-            Right other -> fail ("expected a parked outcome, got: " <> show other)
-          found <- getWorkflow backend workflowId
-          case found of
-            Right (Just record) -> record.workflowRecordStatus @?= MaxRecoveryAttemptsExceeded
-            other -> fail ("expected record, got: " <> show other)
-          runs <- readIORef ran
-          runs @?= 0,
       leaf getBackend (const Nothing) "a queue's worker concurrency runs that many at once in one process" scenarioWorkerConcurrency checkWorkerConcurrency,
       leaf getBackend ((\s -> Just ["hs-l2-listen-fast-" <> Text.take 12 s])) "listen queues narrow what this process dequeues" scenarioListenNarrow checkListenNarrow,
       leaf getBackend ((const (Just []))) "an empty listen set dequeues from no registered queue" scenarioListenNone checkListenNone,
@@ -342,7 +302,8 @@ tests =
       leaf getBackend (const Nothing) "a queue carries a rate limit, always prioritised" scenarioRateLimit checkRateLimit,
       leaf getBackend (const Nothing) "per-partition limits partition a queue" scenarioPartitionLimits checkPartitionLimits,
       leaf getBackend (const Nothing) "re-registering updates the stored limits" scenarioReregister checkReregister,
-      leaf getBackend (const Nothing) "a saturated worker budget runs one at a time" scenarioWorkerBudgetExhausted checkWorkerBudgetExhausted
+      leaf getBackend (const Nothing) "a saturated worker budget runs one at a time" scenarioWorkerBudgetExhausted checkWorkerBudgetExhausted,
+      leaf getBackend (const Nothing) "a dispatch past the recovery budget parks the row without running it" scenarioDispatchPark checkDispatchPark
     ]
 
 -- * Engine-only driver aliases

@@ -93,7 +93,7 @@ import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkR
 import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
 import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
 import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Submitted (..), enqueueNew, initOrJoin, storedPriority, validateEnqueue)
+import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Submitted (..), enqueueNew, initOrJoin, storedPriority, validateStart)
 import Hasql.Transaction qualified as Tx
 import System.Environment (lookupEnv)
 
@@ -331,7 +331,7 @@ clientEnqueueWorkflow client workflow queueName input =
 clientEnqueueWorkflowWith :: MonadSTM m
                           => Client m -> WorkflowKey -> EnqueueOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 clientEnqueueWorkflowWith client workflow options input = do
-  case validateEnqueue options.queue of
+  case validateStart (Just options.queue) options.timeout of
     Left err -> pure (Left err)
     Right () -> do
       generated <- generatedWorkflowId client.conn
@@ -368,7 +368,7 @@ clientEnqueueWorkflowWith client workflow options input = do
       pure $ case started of
         Right (SubmittedCreated _)     -> Right (handle True workflowText)
         Right (SubmittedJoined holder) -> Right holder
-        Left err                       -> Left (TransactError.fromSystemDB err)
+        Left err                       -> Left (TransactError.refusedStart (Just shape.name) err)
   where
     rawInput = unWorkflowInput <$> input
     handle failMissing workflowText =
@@ -385,7 +385,7 @@ clientEnqueueWorkflowWith client workflow options input = do
 -- commits.
 clientEnqueueWorkflowInTx :: Client IO -> WorkflowKey -> Text -> Tx.Transaction () -> EnqueueOptions -> Maybe WorkflowInput -> IO (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle IO e))
 clientEnqueueWorkflowInTx client workflow operation callerWrites options input =
-  case validateEnqueue options.queue of
+  case validateStart (Just options.queue) options.timeout of
     Left err -> pure (Left err)
     Right () -> case options.queue.duplicationPolicy of
       ReturnExisting ->
@@ -421,14 +421,14 @@ clientEnqueueWorkflowInTx client workflow operation callerWrites options input =
                   newWorkflowAppVersion = options.appVersion
                 }
         case validateNewWorkflow new of
-          Left err -> pure (Left (TransactError.fromSystemDB err))
+          Left err -> pure (Left (TransactError.refusedStart (Just shape.name) err))
           Right () -> do
             creatorXid <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
             now <- timestampNow
             composed <- withClientTransaction client operation (callerWrites >> Postgres.enqueueInTx new applicationName creatorXid now)
             pure $ case composed of
               Left err -> Left err
-              Right (Left sysErr) -> Left (TransactError.fromSystemDB sysErr)
+              Right (Left sysErr) -> Left (TransactError.refusedStart (Just shape.name) sysErr)
               Right (Right ()) -> Right (pollingHandle client.conn workflowText True)
 
 -- | A handle to a workflow that already exists, by id. Always polling, and

@@ -25,6 +25,7 @@ module DBOS.Transact.Workflow
     DuplicationPolicy (..),
     enqueueNew,
     validateEnqueue,
+    validateStart,
     storedPriority,
     Timeout (..),
     timeoutBudget,
@@ -79,7 +80,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowStatus (..), databaseTimeRead, databaseTimeReaches, isTerminal, newWorkflow, renderWorkflowKey, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowStatus (..), databaseTimeRead, databaseTimeReaches, durationIsZero, durationToMs, isTerminal, newWorkflow, renderWorkflowKey, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry, clearDatasourceCheckpoints)
@@ -465,8 +466,10 @@ enqueueNew queueName =
 -- | Rejects an enqueue no queue could honour. Only what the shape could not
 -- rule out: nesting under the queue already makes a delay with no queue
 -- unbuildable, so what is left is the deduplication/partition pair, the
--- policy without a key, and the priority range.
-validateEnqueue :: Enqueue -> Either (TransactError.Error TransactError.EngineOnly) ()
+-- policy without a key, the priority range, and the delay. Each is an
+-- 'InvalidArgument' naming the queue, through 'startRefusal'. Mirrors
+-- Rust @Enqueue::validate@.
+validateEnqueue :: Enqueue -> Either (TransactError.Error e) ()
 validateEnqueue queue
   | Just _ <- queue.deduplicationId,
     Just _ <- queue.partitionKey =
@@ -481,12 +484,38 @@ validateEnqueue queue
   | Just limit <- queue.priority,
     limit > maxPriority =
       refuse ("`priority` must be at most " <> pack (show maxPriority) <> ", got " <> pack (show limit))
+  | Just delay <- queue.delay = checkStartDuration (Just queue.name) "delay" delay
   | otherwise = Right ()
   where
-    refuse detail = Left (TransactError.ErrorConfig ("enqueue onto `" <> queue.name <> "`: " <> detail))
+    refuse detail = Left (TransactError.startRefusal (Just queue.name) detail)
     -- The column is a signed 32-bit integer; 'Nothing' is the only way to
     -- say unprioritised, because 0 is the stored sentinel for it.
     maxPriority = 2147483647 :: Word32
+
+-- | Refuses a start duration on the start's channel, asking the
+-- database's own check: a zero duration is refused before storability
+-- is asked, and the queue rides along so the refusal names the enqueue.
+-- Mirrors the duration half of Rust @validate_start@.
+checkStartDuration :: Maybe Text -> Text -> Duration -> Either (TransactError.Error e) ()
+checkStartDuration queueName field duration
+  | durationIsZero duration =
+      Left (TransactError.startRefusal queueName ("`" <> field <> "` must be a positive, non-zero duration"))
+  | otherwise = case durationToMs field duration of
+      Left (SystemDBError.InvalidInput _ detail) ->
+        Left (TransactError.startRefusal queueName ("`" <> field <> "` " <> detail))
+      Left err -> Left (TransactError.fromSystemDB err)
+      Right _ -> Right ()
+
+-- | The enqueue's own checks plus the timeout, refused as the start's
+-- own: to 'enqueue a workflow' naming the queue when one is named, and
+-- to 'start a workflow' otherwise. The checks run before the start takes
+-- a step id. Mirrors Rust @validate_start@.
+validateStart :: Maybe Enqueue -> Maybe Duration -> Either (TransactError.Error e) ()
+validateStart queue budget = do
+  traverse_ validateEnqueue queue
+  case budget of
+    Nothing -> Right ()
+    Just duration -> checkStartDuration ((.name) <$> queue) "timeout" duration
 
 -- | The stored priority: the sentinel @0@ when unprioritised. Infallible
 -- because 'validateEnqueue' has already ruled out what would not fit.
@@ -779,8 +808,8 @@ debounceCreation queue = case queue of
 startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
               => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflow tasks conn identity snapshot ref options input datasources =
-  case traverse validateEnqueue options.startQueue of
-    Left err -> pure (Left (TransactError.liftEngine err))
+  case validateStart options.startQueue (timeoutBudget options.startTimeout) of
+    Left err -> pure (Left err)
     Right _ -> do
       now <- timestampNow
       generated <- generatedWorkflowId conn
@@ -810,7 +839,7 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
               }
       started <- initOrJoin conn new options.startQueue Nothing
       case started of
-        Left err -> pure (Left (TransactError.fromSystemDB err))
+        Left err -> pure (Left (TransactError.refusedStart ((.name) <$> options.startQueue) err))
         -- A held deduplication key: the handle belongs to its holder.
         Right (SubmittedJoined holder) -> pure (Right holder)
         Right (SubmittedCreated result)
@@ -986,8 +1015,8 @@ startChildWorkflow wctx ref options input = do
         Just instanceId
           | instanceId /= conn.connInstanceId ->
               pure (Left (TransactError.WrongInstance {operation = "start a workflow"}))
-          | otherwise -> case traverse validateEnqueue options.startQueue of
-              Left err -> pure (Left (TransactError.liftEngine err))
+          | otherwise -> case validateStart options.startQueue (timeoutBudget options.startTimeout) of
+              Left err -> pure (Left err)
               Right _ -> do
                 parentStepId <- nextStepId wctx
                 startChild parentStepId
@@ -1008,7 +1037,7 @@ startChildWorkflow wctx ref options input = do
           recordRefusal refusal
             | shouldRecordStartError refusal =
                 recordStartError conn parentText parentStepId name now (ownerToken wctx) refusal
-            | otherwise = pure (TransactError.fromSystemDB refusal)
+            | otherwise = pure (TransactError.refusedStart ((.name) <$> options.startQueue) refusal)
       recorded <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db (WorkflowId parentText) parentStepId name)
       case recorded of
         Left err -> pure (Left (TransactError.fromSystemDB err))

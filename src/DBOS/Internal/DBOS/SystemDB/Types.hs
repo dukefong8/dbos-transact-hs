@@ -183,6 +183,8 @@ module DBOS.SystemDB.Types
     forkNew,
     forkProblems,
     forkValidate,
+    forkBatchProblems,
+    refuseInvalidForks,
     forkOptionProblems,
     forkOptionsValidate,
     defaultForkOptions,
@@ -204,7 +206,7 @@ import Data.Text qualified as Text
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, withObject, withScientific, withText, (.:), (.:?), (.!=), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Set qualified as Set
-import DBOS.SystemDB.Error (Error, invalidInput)
+import DBOS.SystemDB.Error (Error (InvalidInput), invalidInput)
 import Data.Time.Clock (nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import Data.Time.Clock.System (SystemTime (..))
@@ -1597,6 +1599,56 @@ forkValidate fork = case forkProblems fork of
   Nothing -> Right ()
   Just (field, detail) -> Left (invalidInput field detail)
 
+-- | What a batch alone can see: one forked id on two forks, or a forked
+-- id that is an original, is certain to collide with that original's row
+-- when written. Empty ids are left to 'forkProblems': the per-fork check
+-- rejects them before any batch rule could name them twice. The detail is
+-- a complete sentence naming the id, as the oracle's batch refusal does;
+-- the engine reports it as-is rather than as a field problem. The batch
+-- half of Rust @refuse_invalid_forks@; the engine refuses through here.
+forkBatchProblems :: [Fork] -> Maybe (Text, Text)
+forkBatchProblems forks
+  | Just dup <- findDup pinned = Just ("", "`" <> dup <> "` is the forked id of more than one fork")
+  | Just clash <- find (`elem` originals) pinned = Just ("", "`" <> clash <> "` is both a forked id and an original id")
+  | otherwise = Nothing
+  where
+    originals = [fork.forkSourceId | fork <- forks]
+    pinned = [pinnedId | Fork _ (Just pinnedId) _ <- forks, not (Text.null pinnedId)]
+    findDup = go Set.empty
+      where
+        go _ [] = Nothing
+        go seen (x : xs)
+          | Set.member x seen = Just x
+          | otherwise = go (Set.insert x seen) xs
+
+-- | The first problem a fork call carries, in the oracle's order: each
+-- fork in turn — its own check, then whether its pinned id is an
+-- original, then whether an earlier fork already pinned it — and the
+-- options last. A batch arm reports @("", detail)@: the detail is
+-- already a complete sentence naming the id, while per-fork and option
+-- problems report @(field, detail)@ for the caller to join. Mirrors Rust
+-- @refuse_invalid_forks@; the system database has no batch rules (its
+-- @fork_workflows@ runs only the option and per-fork checks), so only
+-- the engine refuses through here.
+refuseInvalidForks :: [Fork] -> ForkOptions -> Maybe (Text, Text)
+refuseInvalidForks forks options = case go forks Set.empty of
+  Just problem -> Just problem
+  Nothing -> forkOptionProblems options
+  where
+    originals = [fork.forkSourceId | fork <- forks]
+    go [] _ = Nothing
+    go (fork : rest) seen = case forkProblems fork of
+      Just problem -> Just problem
+      Nothing -> case fork.forkForkedId of
+        -- No null guard: the per-fork check above already refuses
+        -- @Just ""@, exactly as the oracle's @fork.validate()?@ runs
+        -- before its batch checks.
+        Just pinned
+          | pinned `elem` originals -> Just ("", "`" <> pinned <> "` is both a forked id and an original id")
+          | Set.member pinned seen -> Just ("", "`" <> pinned <> "` is the forked id of more than one fork")
+          | otherwise -> go rest (Set.insert pinned seen)
+        _ -> go rest seen
+
 -- | The first problem a fork carries, if any: the rules shared by the
 -- engine refusal (the management layer's @InvalidArgument@) and the
 -- system-database refusal below — so the two cannot disagree on what is
@@ -1666,7 +1718,17 @@ forkOptionProblems options =
     Just field -> Just (field, "must be absent rather than empty")
     Nothing -> case options.forkOptionsTimeout of
       Just timeout | durationIsZero timeout -> Just ("timeout", "must be absent rather than zero")
-      _ -> validateChildren options.forkOptionsReplacementChildren
+      -- As on a workflow: an oversized timeout is refused up front
+      -- rather than truncated on write. 'durationToMs' fails only as
+      -- 'InvalidInput', so the pair carries straight across.
+      Just limit -> case durationToMs "timeout" limit of
+        Left (InvalidInput problemField detail) -> Just (problemField, detail)
+        -- Total by construction: 'durationToMs' fails only as
+        -- 'InvalidInput' today, but any future failure is still a
+        -- timeout problem, never a pass.
+        Left _ -> Just ("timeout", "must fit in milliseconds as a 64-bit integer")
+        Right _ -> validateChildren options.forkOptionsReplacementChildren
+      Nothing -> validateChildren options.forkOptionsReplacementChildren
   where
     optionals =
       [ ("application_version", options.forkOptionsAppVersion),

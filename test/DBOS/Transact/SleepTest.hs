@@ -13,10 +13,14 @@ import DBOS.Transact.SleepCases
     checkSleepCheckpoint,
     checkSleepInStep,
     checkSleepPlain,
+    checkSleepRefused,
+    checkSleepRefusedRecorded,
     checkSleepReplay,
     scenarioSleepCheckpoint,
     scenarioSleepInStep,
     scenarioSleepPlain,
+    scenarioSleepRefused,
+    scenarioSleepRefusedRecorded,
     scenarioSleepReplay,
   )
 import Data.Text qualified as Text
@@ -32,7 +36,7 @@ import DBOS.Transact
   )
 import DBOS.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep, withWorkflow)
+import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, peekStepId, withStep, withWorkflow)
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 
@@ -55,7 +59,9 @@ tests =
           [ leaf "a sleep waits and is checkpointed" scenarioSleepCheckpoint checkSleepCheckpoint,
             leaf "a replayed sleep does not start its clock again" scenarioSleepReplay checkSleepReplay,
             leaf "a sleep outside a workflow waits plainly" scenarioSleepPlain checkSleepPlain,
-            leaf "a sleep inside a step takes no id" scenarioSleepInStep checkSleepInStep
+            leaf "a sleep inside a step takes no id" scenarioSleepInStep checkSleepInStep,
+            leaf "a sleep that cannot be recorded is refused before it takes an id" scenarioSleepRefused checkSleepRefused,
+            leaf "a refused sleep is recorded as the step error and replayed" scenarioSleepRefusedRecorded checkSleepRefusedRecorded
           ]
 
 -- | One fixture per leaf over the suite backend: a fresh workflow id per
@@ -89,6 +95,13 @@ mkSleepFixture backend run = do
             sfCheckSleep = \wid ->
               SystemDB.checkStep backend wid 0 sleepStepName >>= either (fail . show) pure,
             sfPlainSleep = sleepPlain,
+            sfRefusedSleep = \wid@(WorkflowId widText) duration -> do
+              conn <- connOver backend (ioTracer logger)
+              owner <- ownerFor widText
+              withWorkflow conn sleepTestIdentity wid Nothing owner $ \wctx -> do
+                refused <- sleepStep wctx duration
+                next <- peekStepId wctx
+                pure (refused, next),
             sfRunInStep = \wid@(WorkflowId widText) duration -> do
               conn <- connOver backend (ioTracer logger)
               owner <- ownerFor widText

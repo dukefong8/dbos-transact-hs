@@ -10,30 +10,39 @@ module DBOS.Transact.SleepCases
   ( SleepFixture (..),
     SleepCheckpointObservation (..),
     SleepReplayObservation (..),
+    SleepRefusedObservation (..),
+    SleepRefusedRecordObservation (..),
     scenarioSleepCheckpoint,
     scenarioSleepReplay,
     scenarioSleepPlain,
     scenarioSleepInStep,
+    scenarioSleepRefused,
+    scenarioSleepRefusedRecorded,
     checkSleepCheckpoint,
     checkSleepReplay,
     checkSleepPlain,
     checkSleepInStep,
+    checkSleepRefused,
+    checkSleepRefusedRecorded,
   )
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (Duration, StepRecord (..), WorkflowId, millisDuration, sleepStepName)
-import DBOS.Transact (EngineOnly, Error)
+import Data.Text qualified as Text
+import DBOS.SystemDB (Duration, StepRecord (..), WorkflowId, durationFromMs, millisDuration, sleepStepName)
+import DBOS.Transact (EngineOnly, Error (..))
 
 -- | What a stack must provide to run the shared sleep scenarios: fresh
 -- workflow ids, one sleep run, the sleep's checkpoint row, the free sleep,
--- and the sleep-inside-a-step variant (which takes no id).
+-- the sleep-inside-a-step variant (which takes no id), and a refused sleep
+-- with the id the next call would take (which must still be fresh).
 data SleepFixture m = SleepFixture
   { sfFreshWorkflowId :: m WorkflowId,
     sfRunSleep :: WorkflowId -> Duration -> m (Either (Error EngineOnly) ()),
     sfCheckSleep :: WorkflowId -> m (Maybe StepRecord),
-    sfPlainSleep :: Duration -> m (),
-    sfRunInStep :: WorkflowId -> Duration -> m (Either (Error EngineOnly) (), Int, Int)
+    sfPlainSleep :: Duration -> m (Either (Error EngineOnly) ()),
+    sfRunInStep :: WorkflowId -> Duration -> m (Either (Error EngineOnly) (), Int, Int),
+    sfRefusedSleep :: WorkflowId -> Duration -> m (Either (Error EngineOnly) (), Int)
   }
 
 -- | The outcome of one sleep plus the checkpoint row it left behind.
@@ -72,7 +81,7 @@ scenarioSleepReplay wf = do
   pure (SleepReplayObservation first second before after)
 
 -- | The free sleep outside a workflow waits plainly: no checkpoint, no id.
-scenarioSleepPlain :: SleepFixture m -> m ()
+scenarioSleepPlain :: SleepFixture m -> m (Either (Error EngineOnly) ())
 scenarioSleepPlain wf = wf.sfPlainSleep (millisDuration 1)
 
 -- | A sleep inside a step waits without consuming a step id.
@@ -112,8 +121,9 @@ checkSleepReplay obs = do
     _ -> Left "expected the recorded sleep before and after the replay"
 
 -- | The free sleep returns.
-checkSleepPlain :: () -> Either String ()
-checkSleepPlain () = Right ()
+checkSleepPlain :: Either (Error EngineOnly) () -> Either String ()
+checkSleepPlain (Right ()) = Right ()
+checkSleepPlain (Left err) = Left ("the plain sleep must succeed, got: " <> show err)
 
 -- | The in-step sleep succeeds and the step counter does not move.
 checkSleepInStep :: (Either (Error EngineOnly) (), Int, Int) -> Either String ()
@@ -123,3 +133,87 @@ checkSleepInStep (slept, before, after) = do
     Right () -> pure ()
   unless (after == before + 1) $
     Left "the in-step sleep must take no id"
+
+-- | A refused sleep and the id the next call would still take, plus the
+-- checkpoint row, which must be absent: the pre-check runs before the
+-- step id is taken.
+data SleepRefusedObservation = SleepRefusedObservation
+  { sroRefusedOutcome :: Either (Error EngineOnly) (),
+    sroRefusedNextId :: Int,
+    sroRefusedCheckpoint :: Maybe StepRecord
+  }
+
+-- | A sleep that cannot be recorded is refused at the call, before it
+-- takes a step id: the next id is still fresh and nothing is recorded.
+scenarioSleepRefused :: Monad m => SleepFixture m -> m SleepRefusedObservation
+scenarioSleepRefused wf = do
+  wid <- wf.sfFreshWorkflowId
+  -- One millisecond past what the column holds: too long to record, so
+  -- the pre-check refuses it.
+  (refused, next) <- wf.sfRefusedSleep wid (millisDuration 9223372036854775808)
+  checkpoint <- wf.sfCheckSleep wid
+  pure (SleepRefusedObservation refused next checkpoint)
+
+-- | The refusal arrives on the sleep channel, the next id is untouched,
+-- and no step was recorded for the sleep.
+checkSleepRefused :: SleepRefusedObservation -> Either String ()
+checkSleepRefused obs = do
+  case obs.sroRefusedOutcome of
+    Left (InvalidArgument operation detail) -> do
+      unless (operation == Text.pack "sleep") $ Left ("expected the sleep operation, got: " <> show operation)
+      unless (detail == Text.pack "`duration` must fit in milliseconds as a 64-bit integer") $
+        Left ("expected the duration refusal, got: " <> show detail)
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  unless (obs.sroRefusedNextId == 0) $
+    Left ("a refused sleep must spend no step id, got: " <> show obs.sroRefusedNextId)
+  case obs.sroRefusedCheckpoint of
+    Nothing -> Right ()
+    Just record -> Left ("a refused sleep must record nothing, got: " <> show record)
+
+-- | A refused sleep's record and the replay that must adopt it: the first
+-- run records the refusal as the step error, and a second run with a
+-- short duration gets the same refusal back instead of deciding again.
+data SleepRefusedRecordObservation = SleepRefusedRecordObservation
+  { srroFirst :: Either (Error EngineOnly) (),
+    srroBefore :: Maybe StepRecord,
+    srroSecond :: Either (Error EngineOnly) (),
+    srroAfter :: Maybe StepRecord
+  }
+
+-- | A sleep whose wake time fits in milliseconds but carries the clock
+-- past the largest storable instant: recorded as the step's error, and
+-- replayed as the same refusal.
+scenarioSleepRefusedRecorded :: Monad m => SleepFixture m -> m SleepRefusedRecordObservation
+scenarioSleepRefusedRecorded wf = do
+  wid <- wf.sfFreshWorkflowId
+  -- The plain sleep moves the clock past zero, so the maximum
+  -- millisecond count overflows the sum on every clock.
+  _ <- wf.sfPlainSleep (millisDuration 25) >>= either (error . show) pure
+  pastMax <- case durationFromMs 9223372036854775807 of
+    Nothing -> error "the maximum millisecond count must build"
+    Just duration -> pure duration
+  first <- wf.sfRunSleep wid pastMax
+  before <- wf.sfCheckSleep wid
+  second <- wf.sfRunSleep wid (millisDuration 25)
+  after <- wf.sfCheckSleep wid
+  pure (SleepRefusedRecordObservation first before second after)
+
+-- | Both runs refuse identically, the record carries the refusal as its
+-- error, and the replay leaves the row alone.
+checkSleepRefusedRecorded :: SleepRefusedRecordObservation -> Either String ()
+checkSleepRefusedRecorded obs = do
+  let refused = \run -> case run of
+        Left (InvalidArgument operation detail) -> do
+          unless (operation == Text.pack "sleep") $ Left ("expected the sleep operation, got: " <> show operation)
+          unless (Text.pack "must not end past" `Text.isInfixOf` detail) $
+            Left ("expected the wake-time refusal, got: " <> show detail)
+        other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  refused obs.srroFirst
+  refused obs.srroSecond
+  case obs.srroBefore of
+    Just record -> case record.stepRecordError of
+      Just _ -> pure ()
+      Nothing -> Left "the refusal must be recorded as the step error"
+    Nothing -> Left "expected the refusal recorded"
+  unless (obs.srroAfter == obs.srroBefore) $
+    Left "the replay must leave the recorded refusal alone"

@@ -44,6 +44,11 @@ module DBOS.Transact.ManagementCases
     scenarioBulkCancelResume,
     scenarioBulkFork,
     scenarioForkRefusals,
+    scenarioForkBatchRefusals,
+    scenarioStartRefusals,
+    scenarioSelfCancelResume,
+    scenarioSelfDelete,
+    scenarioAncestorDelete,
     scenarioForkPartitioned,
     scenarioForkInheritsOwner,
     scenarioAttributes,
@@ -85,6 +90,11 @@ module DBOS.Transact.ManagementCases
     checkBulkCancelResume,
     checkBulkFork,
     checkForkRefusals,
+    checkForkBatchRefusals,
+    checkStartRefusals,
+    checkSelfCancelResume,
+    checkSelfDelete,
+    checkAncestorDelete,
     checkForkPartitioned,
     checkForkInheritsOwner,
     checkAttributes,
@@ -127,6 +137,7 @@ import DBOS.Transact
     Serializer (..),
     StartOptions (..),
     StepInfo (..),
+    Timeout (..),
     StepOutcome (..),
     StepOutput (..),
     StepFailure (..),
@@ -137,10 +148,12 @@ import DBOS.Transact
     WorkflowRef,
     cancelWorkflow,
     cancelWorkflows,
+    cancelWorkflowsInWorkflow,
     closeStream,
     defaultRewindOptions,
     deleteWorkflow,
     deleteWorkflows,
+    deleteWorkflowsInWorkflow,
     enqueueWorkflow,
     enqueueNew,
     forkWorkflow,
@@ -158,6 +171,7 @@ import DBOS.Transact
     registerWorkflowRef,
     resumeWorkflow,
     resumeWorkflows,
+    resumeWorkflowsInWorkflow,
     retrieveWorkflow,
     rewindWorkflow,
     rewindWorkflows,
@@ -1596,6 +1610,242 @@ checkForkRefusals (emptySource, negativeStep, emptyQueue, emptyForks, emptyIds, 
   checkEq (Right []) emptyIds
   checkEq False written
 
+-- | An invalid batch is refused up front with the fork named, and no
+-- fork is written: one forked id on two forks, a forked id that is an
+-- original, and a timeout too long to store. The refusal precedes any
+-- read, so the sources need not exist; the pinned id's absence
+-- afterwards proves nothing was written. Mirrors the oracle's bulk
+-- refusal twin.
+scenarioForkBatchRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                          => MgmtFixture m -> m ( Either (Error EngineOnly) [WorkflowId],
+                                                 Either (Error EngineOnly) [WorkflowId],
+                                                 Either (Error EngineOnly) [WorkflowId],
+                                                 Text,
+                                                 Text,
+                                                 Bool
+                                               )
+scenarioForkBatchRefusals fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let first = "hs-l2-mgmt-fork-batch-a-" <> suffix
+        second = "hs-l2-mgmt-fork-batch-b-" <> suffix
+        duped = "hs-l2-mgmt-fork-dup-" <> suffix
+    _ <- fx.mfLaunch dbos
+    duplicated <- forkWorkflows dbos [Fork first (Just duped) 0, Fork second (Just duped) 0] defaultForkOptions
+    collided <- forkWorkflows dbos [Fork first Nothing 0, Fork second (Just first) 0] defaultForkOptions
+    huge <- case durationFromSecs 1e18 of
+      Nothing -> error "a storable-busting duration must build"
+      Just duration -> forkWorkflows dbos [Fork first Nothing 0] (defaultForkOptions {forkOptionsTimeout = Just duration})
+    found <- runSystemDB fx.mfSystemDB (\db -> SystemDB.getWorkflow db (WorkflowId duped))
+    let written = case found of
+          Right (Just _) -> True
+          _ -> False
+    pure (duplicated, collided, huge, duped, first, written)
+
+-- | Each refusal arrives on the engine channel naming the fork, and the
+-- pinned fork was never written.
+checkForkBatchRefusals :: ( Either (Error EngineOnly) [WorkflowId],
+                            Either (Error EngineOnly) [WorkflowId],
+                            Either (Error EngineOnly) [WorkflowId],
+                            Text,
+                            Text,
+                            Bool
+                          ) -> Either String ()
+checkForkBatchRefusals (duplicated, collided, huge, duped, first, written) = do
+  case duplicated of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "fork workflows" operation
+      checkMentioned ("`" <> duped <> "`") detail
+      checkMentioned "is the forked id of more than one fork" detail
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case collided of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "fork workflows" operation
+      checkMentioned ("`" <> first <> "`") detail
+      checkMentioned "is both a forked id and an original id" detail
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case huge of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "fork workflows" operation
+      checkMentioned "timeout must fit in milliseconds as a 64-bit integer" detail
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  checkEq False written
+  where
+    checkMentioned needle detail =
+      unless (needle `Text.isInfixOf` detail) $ Left ("expected " <> show needle <> " in " <> show detail)
+
+-- | A start's durations are refused on the start's channel: a plain
+-- start's timeout to "start a workflow", and a queued start's delay and
+-- timeout to "enqueue a workflow" naming the queue. Nothing runs, so the
+-- bodies never need registering.
+scenarioStartRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                      => MgmtFixture m -> m ( Either (Error EngineOnly) (),
+                                             Either (Error EngineOnly) (),
+                                             Either (Error EngineOnly) ()
+                                           )
+scenarioStartRefusals fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey ("refused-start-" <> Text.take 12 suffix)
+        body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
+        body () _ = pure (Right ())
+        queueName = "hs-l2-mgmt-start-refused-q-" <> Text.take 12 suffix
+    ref <- registerWorkflowRef dbos key body >>= either (error . show) pure
+    executor <- fx.mfLaunch dbos
+    huge <- case durationFromSecs 1e18 of
+      Nothing -> error "a storable-busting duration must build"
+      Just duration -> pure duration
+    plain <- startWfRef executor ref (startOptionsDefault {startTimeout = Explicit huge}) Nothing
+    queued <- startWfRef executor ref (startOptionsDefault {startTimeout = Explicit huge, startQueue = Just (enqueueNew queueName)}) Nothing
+    delayed <- startWfRef executor ref (startOptionsDefault {startQueue = Just ((enqueueNew queueName) {delay = Just huge})}) Nothing
+    pure (void plain, void queued, void delayed)
+
+-- | Each refusal arrives as InvalidArgument on the start's own operation,
+-- naming the queue for queued starts.
+checkStartRefusals :: ( Either (Error EngineOnly) (),
+                        Either (Error EngineOnly) (),
+                        Either (Error EngineOnly) ()
+                      ) -> Either String ()
+checkStartRefusals (plain, queued, delayed) = do
+  case plain of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "start a workflow" operation
+      checkMentioned "`timeout` must fit in milliseconds as a 64-bit integer" detail
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case queued of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "enqueue a workflow" operation
+      checkMentioned "`timeout` must fit in milliseconds as a 64-bit integer" detail
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case delayed of
+    Left (InvalidArgument operation detail) -> do
+      checkEq "enqueue a workflow" operation
+      checkMentioned "`delay` must fit in milliseconds as a 64-bit integer" detail
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  where
+    checkMentioned needle detail =
+      unless (needle `Text.isInfixOf` detail) $ Left ("expected " <> show needle <> " in " <> show detail)
+
+-- | A workflow that cancels and resumes itself is refused both, and
+-- its row still succeeds: the refusals name the calling workflow.
+scenarioSelfCancelResume :: forall m. (MonadFork m, MonadAsync m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                         => MgmtFixture m -> m ((Text, Text), WorkflowStatus)
+scenarioSelfCancelResume fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "self-targeting"
+        wid = WorkflowId ("hs-l2-mgmt-self-target-" <> suffix)
+        body :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) (Text, Text))
+        body ownId wctx = do
+          cancelled <- cancelWorkflowsInWorkflow wctx [WorkflowId ownId] False
+          let cancelledText = case cancelled of
+                Left err -> Text.pack (show err)
+                Right _ -> "cancelled"
+          resumed <- resumeWorkflowsInWorkflow wctx [WorkflowId ownId] Nothing
+          let resumedText = case resumed of
+                Left err -> Text.pack (show err)
+                Right _ -> "resumed"
+          pure (Right (cancelledText, resumedText))
+    ref <- registerWorkflowRef dbos key body >>= either (error . show) pure
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowInput ("hs-l2-mgmt-self-target-" <> suffix :: Text)))
+    pair <- case ran of
+      Left err -> error (show err)
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError (Text, Text) of
+        Left err -> error (show err)
+        Right texts -> pure texts
+      Right Nothing -> error "the self-targeting workflow returned no result"
+    row <- fx.mfReadRow wid
+    pure (pair, row.workflowRecordStatus)
+
+-- | Both refusals name the calling workflow, and its row succeeds.
+checkSelfCancelResume :: ((Text, Text), WorkflowStatus) -> Either String ()
+checkSelfCancelResume ((cancelled, resumed), status) = do
+  unless ("cannot cancel itself" `Text.isInfixOf` cancelled) $
+    Left ("expected the cancel refusal, got: " <> show cancelled)
+  unless ("cannot resume itself" `Text.isInfixOf` resumed) $
+    Left ("expected the resume refusal, got: " <> show resumed)
+  checkEq Success status
+
+-- | A workflow cannot delete itself: the refusal reaches the caller and
+-- the row goes nowhere. Promoted from the live-only twin.
+scenarioSelfDelete :: forall m. (MonadFork m, MonadAsync m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                   => MgmtFixture m -> m (Text, WorkflowStatus)
+scenarioSelfDelete fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let key = newWorkflowKey "self-deleter"
+        wid = WorkflowId ("hs-l2-mgmt-self-delete-" <> suffix)
+        body :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        body ownId wctx = do
+          deleted <- deleteWorkflowsInWorkflow wctx [WorkflowId ownId] False
+          pure (Right (Text.pack (show deleted)))
+    ref <- registerWorkflowRef dbos key body >>= either (error . show) pure
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec key wid (Just (encodeWorkflowInput ("hs-l2-mgmt-self-delete-" <> suffix :: Text)))
+    outcome <- case ran of
+      Left err -> error (show err)
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+        Left err -> error (show err)
+        Right text -> pure text
+      Right Nothing -> error "the self-deleting workflow returned no result"
+    row <- fx.mfReadRow wid
+    pure (outcome, row.workflowRecordStatus)
+
+-- | The refusal reaches the caller and the row goes nowhere.
+checkSelfDelete :: (Text, WorkflowStatus) -> Either String ()
+checkSelfDelete (outcome, status) = do
+  unless ("cannot delete itself" `Text.isInfixOf` outcome) $
+    Left ("expected the delete refusal, got: " <> show outcome)
+  checkEq Success status
+
+-- | A child cannot delete the ancestor tree it runs inside: the refusal
+-- reaches the parent through the child's handle, and the ancestor row
+-- goes nowhere. Promoted from the live-only twin.
+scenarioAncestorDelete :: forall m. (MonadFork m, MonadAsync m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                       => MgmtFixture m -> m (Text, WorkflowStatus)
+scenarioAncestorDelete fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let childKey = newWorkflowKey "deleting-child"
+        parentKey = newWorkflowKey "deleted-parent"
+        rootText = "hs-l2-mgmt-ancestor-" <> suffix
+        childBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        childBody root wctx = do
+          outcome <- deleteWorkflowsInWorkflow wctx [WorkflowId root] True
+          pure (Right (Text.pack (show outcome)))
+    childRef <- registerWorkflowRef dbos childKey childBody >>= either (error . show) pure
+    let parentBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        parentBody root wctx = do
+          started <- startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput root))
+          case started of
+            Left err -> pure (Left err)
+            Right child -> do
+              awaited <- resultWf child
+              case awaited of
+                Left err -> pure (Left err)
+                Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+                  Left err -> error (show err)
+                  Right text -> pure (Right text)
+                Right Nothing -> error "the child returned no result"
+    _ <- registerWorkflow dbos parentKey parentBody >>= either (error . show) pure
+    exec <- fx.mfLaunch dbos
+    ran <- runWf exec parentKey (WorkflowId rootText) (Just (encodeWorkflowInput (rootText :: Text)))
+    outcome <- case ran of
+      Left err -> error (show err)
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+        Left err -> error (show err)
+        Right text -> pure text
+      Right Nothing -> error "the parent returned no result"
+    root <- fx.mfReadRow (WorkflowId rootText)
+    pure (outcome, root.workflowRecordStatus)
+
+-- | The refusal reaches the parent and the ancestor row goes nowhere.
+checkAncestorDelete :: (Text, WorkflowStatus) -> Either String ()
+checkAncestorDelete (outcome, status) = do
+  unless ("cannot delete itself" `Text.isInfixOf` outcome) $
+    Left ("expected the delete refusal, got: " <> show outcome)
+  checkEq Success status
 -- | The fork's row carries the partition key it was given.
 checkForkPartitioned :: Maybe Text -> Either String ()
 checkForkPartitioned = checkEq (Just "pk-7")

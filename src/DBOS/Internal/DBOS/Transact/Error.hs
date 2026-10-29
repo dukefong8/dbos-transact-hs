@@ -18,6 +18,8 @@ module DBOS.Transact.Error
     controlOf,
     fromSystemDB,
     refusedArgument,
+    startRefusal,
+    refusedStart,
     fromRegistryError,
     fromSerializationError,
     Failure (..),
@@ -314,6 +316,52 @@ refusedArgument :: Text -> SystemDBError.Error -> Error e
 refusedArgument operation = \case
   SystemDBError.InvalidInput {field, detail} -> InvalidArgument operation ("`" <> field <> "` " <> detail)
   err -> fromSystemDB err
+
+-- | What a start that runs at once is refused as. A start onto a queue,
+-- and with it every client enqueue, is refused as 'enqueueOperation'.
+-- Mirrors Rust @START_OPERATION@.
+startOperation :: Text
+startOperation = "start a workflow"
+
+-- | What a start onto a queue is refused as; see 'startOperation'.
+-- Mirrors Rust @ENQUEUE_OPERATION@.
+enqueueOperation :: Text
+enqueueOperation = "enqueue a workflow"
+
+-- | A start's refusal of one of its arguments: to 'enqueueOperation' when
+-- it names a queue, with the queue in the detail because nothing else in
+-- the refusal says which enqueue it was, and to 'startOperation' when it
+-- does not. Mirrors Rust @start_refusal@.
+startRefusal :: Maybe Text -> Text -> Error e
+startRefusal queue detail = case queue of
+  Just name -> InvalidArgument enqueueOperation ("queue `" <> name <> "`: " <> detail)
+  Nothing -> InvalidArgument startOperation detail
+
+-- | A start's error, with the system database's refusal of its arguments
+-- reported as the start's own, through 'startRefusal'. Chiefly the
+-- refusal only the insert can make: a delay that fits in milliseconds
+-- but carries the release time past the largest instant, which depends
+-- on the clock. A child start records that refusal at its parent's step
+-- as the system database's error, so a replay reads it back in the same
+-- form and this maps it the same way. Also every other value of the row
+-- the caller supplied and the insert refuses, named as the start's API
+-- spells it. Mirrors Rust @refused_start@.
+refusedStart :: Maybe Text -> SystemDBError.Error -> Error e
+refusedStart queue = \case
+  SystemDBError.InvalidInput {field, detail} -> startRefusal queue (refusalDetail (apiField field) detail)
+  err -> fromSystemDB err
+  where
+    -- A system-database refusal's field and detail as one phrase, for a
+    -- message that names the call separately. Mirrors @refusal_detail@.
+    refusalDetail field detail = "`" <> field <> "` " <> detail
+    -- The name a start's API gives a column the system database refuses
+    -- by name. Mirrors Rust @api_field@.
+    apiField field = case field of
+      "queue_name" -> "name"
+      "queue_partition_key" -> "partition_key"
+      "name" -> "workflow"
+      "application_version" -> "app_version"
+      other -> other
 
 -- | Lift a registry refusal into a caller's channel. The registry owns the
 -- refusal vocabulary; the envelope (tag, prose, wire) stays here so

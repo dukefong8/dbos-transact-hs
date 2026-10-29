@@ -10,7 +10,7 @@ module DBOS.Transact.Sleep (sleepStep, pendingSleep, sleepPlain, SleepEvent (..)
 import Data.Int (Int64)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, sleepStepName, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, durationToMs, sleepStepName, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Context (WorkflowCtx (wctxTracer), ownerToken, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
@@ -40,16 +40,26 @@ instance ToLogStr SleepEvent where
 
 sleepStep :: (MonadSTM m, MonadTime m, MonadDelay m)
           => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-sleepStep wctx duration = placeCall wctx >>= driveSleep wctx duration
+sleepStep wctx duration =
+  -- The duration is checked first, so a refusal claims no id — and only
+  -- against a rule that reads no clock, so the first run and a replay
+  -- decide it the same way. Mirrors Rust @sleep@'s pre-check.
+  case durationToMs "duration" duration of
+    Left sysErr -> pure (Left (TransactError.refusedArgument "sleep" sysErr))
+    Right _ -> placeCall wctx >>= driveSleep wctx duration
 
 -- | A sleep built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the wait runs when the
--- pending value is awaited or raced.
+-- pending value is awaited or raced. The pre-check runs first for the
+-- same reason as 'sleepStep': a refused sleep moves no counter.
 pendingSleep :: (MonadSTM m, MonadTime m, MonadDelay m)
-             => WorkflowCtx exec m -> Duration -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
-pendingSleep wctx duration = do
-  placement <- placeCall wctx
-  pure (PendingStep sleepStepName (Just placement) (driveSleep wctx duration placement))
+             => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ())))
+pendingSleep wctx duration =
+  case durationToMs "duration" duration of
+    Left sysErr -> pure (Left (TransactError.refusedArgument "sleep" sysErr))
+    Right _ -> do
+      placement <- placeCall wctx
+      pure (Right (PendingStep sleepStepName (Just placement) (driveSleep wctx duration placement)))
 
 -- | Drives a placed sleep: a plain wait inside a step or outside a
 -- workflow, otherwise the recorded wake-time wait under the claimed id.
@@ -63,12 +73,15 @@ driveSleep wctx duration placement =
       -- stands for everything its body did, and taking an id here would shift
       -- every step after it on replay. Mirrors Rust's @InsideStep@ placement.
       runTracer wctx.wctxTracer (SleepUncheckpointed (durationAsMillis duration))
-      sleepPlain duration >> pure (Right ())
+      sleepPlain duration
     Right (DurabilityRecorded wctx' stepId') -> do
       let workflowId' = WorkflowId (workflowId wctx')
       recordedWake <- withSystemDB wctx' (\db -> SystemDB.recordSleep db workflowId' stepId' duration (ownerToken wctx'))
       case recordedWake of
-        Left err -> pure (Left (TransactError.fromSystemDB err))
+        -- A recorded refusal surfaces on the same channel as a fresh
+        -- one: 'recordSleep' hands back the stored refusal, whatever
+        -- run recorded it.
+        Left err -> pure (Left (TransactError.refusedArgument "sleep" err))
         Right wakeAt -> do
           now <- timestampNow
           let remainingMillis = max 0 (timestampToEpochMs wakeAt - timestampToEpochMs now)
@@ -77,9 +90,13 @@ driveSleep wctx duration placement =
           pure (Right ())
 
 -- | A plain wait, mirroring the free @sleep@ outside a workflow or inside
--- a step: no checkpoint, no id, just the delay.
-sleepPlain :: MonadDelay m => Duration -> m ()
-sleepPlain duration = threadDelay (fromInteger (durationAsMillis duration) * 1000)
+-- a step: no checkpoint, no id, just the delay. Refused like every other
+-- sleep when the duration cannot be recorded, so the same call does not
+-- succeed in one place and fail in another.
+sleepPlain :: MonadDelay m => Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+sleepPlain duration = case durationToMs "duration" duration of
+  Left sysErr -> pure (Left (TransactError.refusedArgument "sleep" sysErr))
+  Right _ -> threadDelay (fromInteger (durationAsMillis duration) * 1000) >> pure (Right ())
 
 millisToMicros :: Int64 -> Int
 millisToMicros milliseconds = fromIntegral (milliseconds * 1000)

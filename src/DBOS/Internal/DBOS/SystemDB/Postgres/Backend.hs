@@ -106,9 +106,10 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), AppScope (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Dequeued (..), DequeueStop (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdleTransactionTimeout (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, idleTimeoutMillis, idleTimeoutParameter, idleTimeoutValidate, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateAttributes, validateNewWorkflow, refuseSelfTarget, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), AppScope (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Dequeued (..), DequeueStop (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdleTransactionTimeout (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, idleTimeoutMillis, idleTimeoutParameter, idleTimeoutValidate, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateAttributes, validateNewWorkflow, refuseSelfTarget, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead, saturateTimeout)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
+import DBOS.Transact.Serialization (codecErrorText, decodeWorkflowValue, encodeWorkflowValue)
 import Hasql.Connection.Settings qualified as Connection
 import Hasql.Decoders qualified as Decoders
 import Hasql.Errors qualified as Errors
@@ -1544,36 +1545,64 @@ data SleepKind = DurableSleep | DeadlineSleep
 checkpointSleep :: PostgresSystemDB -> SleepKind -> WorkflowId -> Int -> Duration -> Text -> IO (Either Error Timestamp)
 checkpointSleep env kind wid stepId duration token = do
   startedAt <- timestampNow
-  case addTimeout startedAt duration of
-    Nothing -> pure (Left (invalidInput "duration" "does not resolve to a representable wake time"))
-    Just wakeAt -> do
-      existing <- checkStep env wid stepId sleepStepName
-      case existing of
+  existing <- checkStep env wid stepId sleepStepName
+  case existing of
+    Left err -> pure (Left err)
+    -- A replay wakes at the original instant — or is refused as it was.
+    -- The refusal is held until the record has been looked for: whether
+    -- the sum fits depends on the clock, so a replay must not decide it
+    -- again. Mirrors the oracle's lookup-first order.
+    Right (Just step) -> pure (replaySleep wid stepId kind step)
+    Right Nothing -> case decidedWake kind startedAt duration of
+      Left refusal -> recordRefusal refusal startedAt
+      Right wakeAt -> do
+        let completedAt = case kind of
+              DurableSleep  -> wakeAt
+              DeadlineSleep -> startedAt
+        recordWake startedAt wakeAt completedAt
+  where
+    -- A durable sleep whose wake time cannot be stored is refused; a
+    -- deadline too far out never elapses, so it saturates at the largest
+    -- instant there is. Mirrors the oracle's wake computation.
+    decidedWake DurableSleep started wait = case addTimeout started wait of
+      Nothing -> Left (invalidInput "duration" "must not end past the latest instant 64-bit epoch milliseconds can hold")
+      Just wakeAt -> Right wakeAt
+    decidedWake DeadlineSleep started wait = Right (saturateTimeout started wait)
+    -- Only a first run reaches here, so only a first run decides the
+    -- refusal. It is recorded in the sleep's place, so a replay reads it
+    -- back rather than deciding again against a later clock.
+    recordRefusal refusal started = do
+      let encoded = encodeWorkflowValue refusal
+      recordOutcome
+        (OutcomeError encoded.serializedText)
+        (Just portableJsonSerialization)
+        (StepTiming started started)
+        (Left refusal)
+    recordWake started wakeAt completedAt =
+      recordOutcome
+        (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
+        (Just portableJsonSerialization)
+        (StepTiming started completedAt)
+        (Right wakeAt)
+    recordOutcome outcome serialization timing answer = do
+      recorded <-
+        recordStep env
+              wid
+              stepId
+              sleepStepName
+              outcome
+              serialization
+              (Just timing)
+              token
+      case recorded of
+        Right () -> pure answer
+        Left (StepNondeterminism {}) -> do
+          adopted <- checkStep env wid stepId sleepStepName
+          pure $ case adopted of
+            Left err          -> Left err
+            Right (Just step) -> replaySleep wid stepId kind step
+            Right Nothing     -> Left (Malformed "sleep reported as recorded but cannot be read back")
         Left err -> pure (Left err)
-        Right (Just step) -> pure (decodeWakeTime wid stepId step.stepRecordOutput)
-        Right Nothing -> do
-          let completedAt = case kind of
-                DurableSleep  -> wakeAt
-                DeadlineSleep -> startedAt
-          recorded <-
-            recordStep env
-                  wid
-                  stepId
-                  sleepStepName
-                  (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
-                  (Just portableJsonSerialization)
-                  (Just (StepTiming startedAt completedAt))
-                  token
-
-          case recorded of
-            Right () -> pure (Right wakeAt)
-            Left (StepNondeterminism {}) -> do
-              adopted <- checkStep env wid stepId sleepStepName
-              pure $ case adopted of
-                Left err          -> Left err
-                Right (Just step) -> decodeWakeTime wid stepId step.stepRecordOutput
-                Right Nothing     -> Left (Malformed "sleep reported as recorded but cannot be read back")
-            Left err -> pure (Left err)
 
 -- | The wait's re-read cadence with nothing pushing: one second, the short
 -- interval every implementation uses without a listener (ADR-0010).
@@ -2234,11 +2263,7 @@ runFork env sources forkedIds steps options =
   where
     unwrapQueueName (QueueName name) = name
     forkTimeoutMs Nothing = Right Nothing
-    forkTimeoutMs (Just duration) =
-      let millis = durationAsMillis duration
-       in if millis > toInteger (maxBound :: Int64)
-            then Left (invalidInput "timeout" "must fit in milliseconds as a 64-bit integer")
-            else Right (Just (fromInteger millis))
+    forkTimeoutMs (Just duration) = Just <$> durationToMs "timeout" duration
 
 -- | Sends one message or a batch: the oracle's @deliver@, whose only
 -- difference between the two is the step name. Fork fan-out is refused
@@ -2500,6 +2525,20 @@ decodeWakeTime wid stepId output = case output of
     Nothing ->
       Left (Malformed ("workflow " <> widText <> " step " <> Text.pack (show stepId) <> " wake time " <> Text.pack (show recorded) <> " is not epoch milliseconds"))
     Just epochMs -> Right (timestampFromEpochMs epochMs)
+  where
+    widText = case wid of Types.WorkflowId text -> text
+
+-- | Reads back a recorded sleep: a recorded refusal comes back as the
+-- refusal, a wake time as the instant. Only a durable sleep records
+-- refusals — a deadline never does — so any other combination reads the
+-- output. Mirrors @replayed_sleep@.
+replaySleep :: WorkflowId -> Int -> SleepKind -> StepRecord -> Either Error Timestamp
+replaySleep wid stepId kind step = case (kind, step.stepRecordError) of
+  (DurableSleep, Just encoded) ->
+    case decodeWorkflowValue "a sleep refusal" (Just (SerializedWorkflowValue encoded (Serialization <$> step.stepRecordSerialization))) of
+      Left codecErr -> Left (Malformed ("workflow " <> widText <> " step " <> Text.pack (show stepId) <> " sleep refusal cannot be read back: " <> codecErrorText codecErr))
+      Right err -> Left err
+  _ -> decodeWakeTime wid stepId step.stepRecordOutput
   where
     widText = case wid of Types.WorkflowId text -> text
 
@@ -2940,6 +2979,9 @@ instance SystemDB PostgresSystemDB IO where
   forkWorkflows env forks options _caller
     | null forks = pure (Right [])
     | otherwise =
+        -- No batch rules here: the oracle's @fork_workflows@ runs only
+        -- the option and per-fork checks, leaving whole-batch collisions
+        -- to the engine above and to the write itself.
         case (forkOptionsValidate options, traverse forkValidate forks) of
           (Left err, _) -> pure (Left err)
           (_, Left err) -> pure (Left err)

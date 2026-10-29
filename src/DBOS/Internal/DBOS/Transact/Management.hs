@@ -53,7 +53,7 @@ import Data.Int (Int64)
 import Data.Text.Encoding (encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Fork (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
+import DBOS.SystemDB.Types (Fork (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
 import DBOS.Transact.Connection (Connection (..), runSystemDB, withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, workflowId, workflowOwner)
 import DBOS.Transact.Error qualified as TransactError
@@ -221,22 +221,23 @@ forkWorkflows conn forks options = case checkForkArgs forks options of
         announceFork conn forked
         pure (Right forked)
 
--- | The engine-layer fork validation: the same rules as the system
--- database, reported as an engine refusal (Rust @InvalidArgument@) rather
--- than a database one. Runs before anything runs on the launched-instance
--- entries, plain and in-workflow; the client calls the backends directly
--- and reports their sysdb refusal. The backends keep their own refusal as
--- defense in depth.
--- An empty fork list is an immediate success with no validation, as the
--- oracle returns @Ok@ before validating options and the backends return
--- an empty fork list the same way.
+-- | The engine-layer fork validation: the oracle's whole-call check, which
+-- walks each fork in turn — its own rules, then whether its pinned id is
+-- an original, then whether an earlier fork already pinned it — and the
+-- options last, reported as an engine refusal (Rust @InvalidArgument@)
+-- rather than a database one. A batch arm's detail is already a complete
+-- sentence naming the id; per-fork and option problems report as field
+-- problems. Runs before anything runs on the launched-instance entries,
+-- plain and in-workflow; the client calls the backends directly and
+-- reports their sysdb refusal. An empty fork list is an immediate
+-- success with no validation, as the oracle returns @Ok@ before
+-- validating options.
 checkForkArgs :: [Fork] -> ForkOptions -> Either (TransactError.Error e) ()
 checkForkArgs [] _ = Right ()
-checkForkArgs forks options = case problems of
-  (field, detail) : _ -> Left (TransactError.InvalidArgument "fork workflows" (field <> " " <> detail))
-  []                  -> Right ()
-  where
-    problems = [problem | Just problem <- forkOptionProblems options : map forkProblems forks]
+checkForkArgs forks options = case refuseInvalidForks forks options of
+  Just ("", detail) -> Left (TransactError.InvalidArgument "fork workflows" detail)
+  Just (field, detail) -> Left (TransactError.InvalidArgument "fork workflows" (field <> " " <> detail))
+  Nothing -> Right ()
 
 -- | The engine-layer fork-from validation: options plus the per-source
 -- checks the oracle makes by validating a synthesized fork per id — three
