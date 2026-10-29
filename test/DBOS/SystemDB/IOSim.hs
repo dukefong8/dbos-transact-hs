@@ -43,13 +43,15 @@ import Data.Set qualified as Set
 import Data.Text qualified as Text
 import DBOS.SystemDB.Error (Error (..), decodePortableError, encodePortableError)
 import DBOS.SystemDB
-  ( Applications (..),
+  ( AppScope (..),
     AwaitedOutcome (..),
     DatabaseTime (..),
     databaseTimeRead,
     Debounce (..),
     DebounceHolder (..),
     DebounceRequest (..),
+    Dequeued (..),
+    DequeueStop (..),
     EncodedValue (..),
     Error (..),
     EventRecord (..),
@@ -72,7 +74,7 @@ import DBOS.SystemDB
     ScheduleFilter (..),
     ScheduleRecord (..),
     ScheduleUpdate (..),
-    SendMessage (..),
+    EncodedSendMessage (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
     StepTiming (..),
@@ -113,6 +115,7 @@ import DBOS.SystemDB
     newWorkflow,
     nullTopicSentinel,
     recvStepName,
+    refuseSelfTarget,
     rewindStepName,
     durationToMs,
     saturateTimeout,
@@ -135,7 +138,7 @@ import DBOS.SystemDB
     timestampNow,
     timestampToEpochMs,
     zeroRowCounts)
-import DBOS.SystemDB.Postgres.Statements (CallerStep (..), refuseSelfTarget)
+import DBOS.SystemDB.Postgres.Statements (CallerStep (..))
 import DBOS.Transact
   ( DBOS,
     Executor,
@@ -247,7 +250,8 @@ instance SystemDB MockSystemDB (IOSim s) where
   getLatestApplicationVersion = \cases _ _ -> pure (Right (Just mockVersion))
   updateApplicationVersionTimestamp = \cases _ _ _ _ -> pure (Right ())
   upsertQueue = \cases _ _ _ -> pure (Right True)
-  startQueuedWorkflows = \cases _ _ _ _ _ _ _ _ -> pure (Right [mockQueuedId])
+  startQueuedWorkflows = \cases _ _ _ _ _ _ _ _ -> pure (Right (Dequeued [mockQueuedId] Nothing))
+  countPendingQueueWorkflows = \cases _ _ -> pure (Right 0)
   getQueuePartitions = \cases _ _ -> pure (Right [mockPartition])
   startQueuedPartitionedWorkflows = \cases _ _ _ _ _ _ -> pure (Right [mockPartitionedId])
   getQueue = \cases _ name -> pure (Right (Just (mockQueue name)))
@@ -408,11 +412,11 @@ data MemSystemDB s = MemSystemDB
     -- cross-instance refusal reads.
     memInstanceCounter :: StrictTVar (IOSim s) Int,
     -- | The application this listener claims queues for. Mirrors the
-    -- Postgres backend's @psdbApplicationName@: a claim sees the
+    -- Postgres backend's @psdbAppName@: a claim sees the
     -- listener's own application's rows and unclaimed rows; 'Nothing'
     -- sees everything. Settable so one database can model several
     -- applications' executors.
-    memApplicationName :: StrictTVar (IOSim s) (Maybe Text),
+    memAppName :: StrictTVar (IOSim s) (Maybe Text),
     -- | How far the database's clock runs ahead of this process's monotonic
     -- clock, in milliseconds (behind, when negative): the skew knob the
     -- deadline tests turn. The clock reading 'initWorkflow' returns carries
@@ -466,7 +470,7 @@ newMemDBWithApplication application =
 -- | Re-points the listener's application between sweeps, so one database
 -- can model several applications' executors.
 memSetApplication :: Maybe Text -> MemSystemDB s -> IOSim s ()
-memSetApplication application db = atomically (writeTVar db.memApplicationName application)
+memSetApplication application db = atomically (writeTVar db.memAppName application)
 
 -- | The Postgres application filter: the listener sees its own
 -- application's rows and unclaimed rows; a listener with no application
@@ -474,7 +478,7 @@ memSetApplication application db = atomically (writeTVar db.memApplicationName a
 visibleToApplication :: Maybe Text -> WorkflowRecord -> Bool
 visibleToApplication application row = case application of
   Nothing -> True
-  Just name -> row.workflowRecordApplicationName == Just name || isNothing row.workflowRecordApplicationName
+  Just name -> row.workflowRecordAppName == Just name || isNothing row.workflowRecordAppName
 
 -- | A connection over simulated data carrying the given tracer.
 memConnectionOn :: MemSystemDB s -> SomeTracer (IOSim s) -> IOSim s (Connection (IOSim s))
@@ -537,7 +541,7 @@ memFreshRow new caller creator =
       workflowRecordError = Nothing,
       workflowRecordSerialization = new.newWorkflowSerialization,
       workflowRecordExecutorId = new.newWorkflowExecutorId,
-      workflowRecordApplicationVersion = new.newWorkflowApplicationVersion,
+      workflowRecordAppVersion = new.newWorkflowAppVersion,
       workflowRecordRecoveryAttempts = 0,
       workflowRecordQueueName = new.newWorkflowQueueName,
       workflowRecordCreatedAt = mockTimestamp,
@@ -549,12 +553,12 @@ memFreshRow new caller creator =
       workflowRecordWasForkedFrom = False,
       workflowRecordOwnerXid = if initialStatus new == Pending then Just creator else Nothing,
       workflowRecordCreatorXid = Just creator,
-      workflowRecordApplicationId = new.newWorkflowApplicationId,
+      workflowRecordAppId = new.newWorkflowAppId,
       workflowRecordAuthenticatedUser = new.newWorkflowAuthenticatedUser,
       workflowRecordAuthenticatedRoles = new.newWorkflowAuthenticatedRoles,
       workflowRecordAssumedRole = new.newWorkflowAssumedRole,
       workflowRecordRequest = Nothing,
-      workflowRecordApplicationName = new.newWorkflowApplicationName,
+      workflowRecordAppName = new.newWorkflowAppName,
       workflowRecordDeduplicationId = new.newWorkflowDeduplicationId,
       workflowRecordPriority = new.newWorkflowPriority,
       workflowRecordQueuePartitionKey = new.newWorkflowQueuePartitionKey,
@@ -859,10 +863,10 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     now <- memDbNow db
     atomically $ do
       rows <- readTVar db.memRows
-      application <- readTVar db.memApplicationName
+      application <- readTVar db.memAppName
       let inScope row = case application of
             Nothing   -> True
-            Just name -> row.workflowRecordApplicationName == Just name || row.workflowRecordApplicationName == Nothing
+            Just name -> row.workflowRecordAppName == Just name || row.workflowRecordAppName == Nothing
           due = [wid | (wid, row) <- sortOn (\entry -> (snd entry).workflowRecordDeadline) (Map.toList rows), memTimedOut now row, inScope row]
           targets = take (fromIntegral limit) due
           rows' = foldl' (\acc wid -> Map.adjust (memTimedOutRow now) wid acc) rows targets
@@ -1116,7 +1120,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
             | (widText, row) <- Map.toList rows,
               row.workflowRecordStatus == Pending,
               maybe False (`elem` executorIds) row.workflowRecordExecutorId,
-              row.workflowRecordApplicationVersion == Just applicationVersion
+              row.workflowRecordAppVersion == Just applicationVersion
           ]
         requeue row =
           row
@@ -1168,30 +1172,42 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
   -- recv step with no output records the absence a timeout produced, so a
   -- replay adopts it.
   recv db wid stepId timeoutStepId topic duration token = do
-    let WorkflowId widText = wid
-        storedTopic = fromMaybe nullTopicSentinel topic
-    replayed <- atomically (Map.lookup (widText, stepId) <$> readTVar db.memSteps)
+    replayed <- atomically (Map.lookup (widTextOf wid, stepId) <$> readTVar db.memSteps)
     case replayed of
-      Just record -> pure (Right (memEncodedFromStep record))
-      Nothing -> do
+      Just record | record.stepRecordStepName == recvStepName -> pure (Right (memEncodedFromStep record))
+      _ -> do
         slept <- recordSleep db wid timeoutStepId duration token
         case slept of
           Left err -> pure (Left err)
-          Right _ -> do
-            -- The take opens with the ownership check, as the SQL take-tx
-            -- does: a stale execution's consume is refused before anything
-            -- is taken, so the message stays parked for the owner.
-            rights <- atomically $ do
-              rows <- readTVar db.memRows
-              pure $ case Map.lookup widText rows of
-                Just row | row.workflowRecordOwnerXid == Just token -> Right ()
-                _ -> Left (WorkflowConflict {workflowId = widText})
-            case rights of
-              Left conflict -> pure (Left conflict)
-              Right () -> do
-                waited <- memTimeout (fromInteger (durationAsMillis duration * 1000)) (atomically (memTakeMessage db widText storedTopic))
+          Right wakeAt -> do
+            now <- memDbNow db
+            -- Past the deadline already (an adopted sleep step's old wake
+            -- time, or a zero duration): record the absence at once, as a
+            -- pass at the deadline would.
+            case durationSince wakeAt now of
+              Nothing -> do
+                owned <- atomically (memCheckRecvOwner db wid token)
+                case owned of
+                  Left conflict -> pure (Left conflict)
+                  Right _ -> do
+                    memRecordRecvStep db wid stepId recvStepName Nothing
+                    pure (Right Nothing)
+              Just remaining -> do
+                waited <- memTimeout (fromInteger (durationAsMillis remaining * 1000)) (atomically (memTake db wid stepId storedTopic token))
                 case waited of
-                  Just (uuid, value) -> do
+                  -- The wait itself timed out: the deadline passed while
+                  -- blocked, so the absence is recorded — for the owner
+                  -- still holding the row, as the take requires.
+                  Nothing -> do
+                    owned <- atomically (memCheckRecvOwner db wid token)
+                    case owned of
+                      Left conflict -> pure (Left conflict)
+                      Right _ -> do
+                        memRecordRecvStep db wid stepId recvStepName Nothing
+                        pure (Right Nothing)
+                  Just (Left conflict) -> pure (Left conflict)
+                  Just (Right (MemAdopted value)) -> pure (Right value)
+                  Just (Right (MemTook uuid value)) -> do
                     memRecordRecvStep db wid stepId recvStepName (Just value)
                     atomically $ do
                       notifications <- readTVar db.memNotifications
@@ -1199,9 +1215,16 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                       consumed <- readTVar db.memConsumedBy
                       writeTVar db.memConsumedBy (Map.insert (widText, uuid) stepId consumed)
                     pure (Right (Just value))
-                  Nothing -> do
-                    memRecordRecvStep db wid stepId recvStepName Nothing
-                    pure (Right Nothing)
+    where
+      -- One wait and one take: the take opens with the ownership check,
+      -- adopts a recorded step, else pops the oldest waiting message —
+      -- atomically, so a rival's take can neither slip between the check
+      -- and the consume nor double-take. The wait blocks till a message
+      -- lands or the deadline passes, so an empty take with time left
+      -- cannot occur; only the deadline records the absence. Mirrors the
+      -- oracle's take.
+      storedTopic = fromMaybe nullTopicSentinel topic
+      WorkflowId widText = wid
   writeStream db wid@(WorkflowId widText) stepId key value serialization writtenBy token = do
     let stepName = if isStreamClosed value serialization then closeStreamStepName else writeStreamStepName
     now <- memDbNow db
@@ -1431,40 +1454,42 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     now <- memDbNow db
     atomically $ do
       versions <- readTVar db.memVersions
-      let existing = [v | v <- versions, v.versionInfoName == versionName, v.versionInfoApplicationName == applicationName]
+      let existing = [v | v <- versions, v.versionInfoName == versionName, v.versionInfoAppName == applicationName]
       if null existing
         then do
-          writeTVar db.memVersions (versions <> [VersionInfo {versionInfoApplicationName = applicationName, versionInfoId = versionName, versionInfoName = versionName, versionInfoTimestamp = now, versionInfoCreatedAt = now}])
+          writeTVar db.memVersions (versions <> [VersionInfo {versionInfoAppName = applicationName, versionInfoId = versionName, versionInfoName = versionName, versionInfoTimestamp = now, versionInfoCreatedAt = now}])
           pure (Right ())
         else pure (Right ())
   listApplicationVersions db = Right <$> readTVarIO db.memVersions
   getLatestApplicationVersion db applicationName = do
     versions <- readTVarIO db.memVersions
-    let scoped = [v | v <- versions, v.versionInfoApplicationName == applicationName || v.versionInfoApplicationName == Nothing]
+    let scoped = [v | v <- versions, v.versionInfoAppName == applicationName || v.versionInfoAppName == Nothing]
     pure (Right (case sortOn (.versionInfoTimestamp) scoped of [] -> Nothing; vs -> Just (last vs)))
   updateApplicationVersionTimestamp db versionName timestamp applicationName =
-    atomically (modifyTVar db.memVersions (map (\v -> if v.versionInfoName == versionName && v.versionInfoApplicationName == applicationName then v {versionInfoTimestamp = timestamp} else v)))
+    atomically (modifyTVar db.memVersions (map (\v -> if v.versionInfoName == versionName && v.versionInfoAppName == applicationName then v {versionInfoTimestamp = timestamp} else v)))
       >> pure (Right ())
   upsertQueue db queue onExisting = atomically $ do
     queues <- readTVar db.memQueues
-    application <- readTVar db.memApplicationName
+    application <- readTVar db.memAppName
     let existing = Map.lookup queue.newQueueName queues
     case existing of
       Just _ | onExisting == LeaveExisting -> pure (Right False)
       _ -> do
         -- The SQL upsert falls back to the backend's application when the
         -- request names none, so a registered queue is never unclaimed.
-        writeTVar db.memQueues (Map.insert queue.newQueueName (memQueueRecord queue {newQueueApplicationName = queue.newQueueApplicationName <|> application}) queues)
+        writeTVar db.memQueues (Map.insert queue.newQueueName (memQueueRecord queue {newQueueAppName = queue.newQueueAppName <|> application}) queues)
         pure (Right (isNothing existing))
   -- The claim: worker/concurrency budgets from the queue's limits (rate
-  -- limits are not modelled — Mem keeps no dequeue history), candidates
-  -- in priority/created order, flipped to PENDING with the executor and
-  -- version stamped, exactly the SQL claim's columns.
+  -- limits are not modelled — Mem keeps no dequeue history, so a rate
+  -- stop never fires here), candidates in priority/created order,
+  -- flipped to PENDING with the executor and version stamped, exactly
+  -- the SQL claim's columns. Each spent limit is named as the SQL claim
+  -- names it, first spent first.
   startQueuedWorkflows db queue executorId applicationVersion partitionKey localRunning partitionLocalRunning ownerToken = do
     now <- memDbNow db
     atomically $ do
       rows <- readTVar db.memRows
-      application <- readTVar db.memApplicationName
+      application <- readTVar db.memAppName
       let queueName = queue.queueRecordName
           workerBudget = case queue.queueRecordWorkerConcurrency of
             Just cap -> Just (max 0 (fromIntegral cap - localRunning))
@@ -1473,7 +1498,6 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
             (Just cap, Just _) -> Just (max 0 (fromIntegral cap - partitionLocalRunning))
             _ -> Nothing
           narrow current available = Just (maybe available (min available) current)
-          budget = foldr (\available current -> narrow current available) Nothing [b | Just b <- [workerBudget, partitionWorkerBudget]]
           running = length [() | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordStatus == Pending, row.workflowRecordQueueName == Just queueName]
           concurrencyBudget = case queue.queueRecordConcurrency of
             Just cap -> Just (max 0 (fromIntegral cap - fromIntegral running))
@@ -1482,30 +1506,48 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
             (Just cap, Just key) ->
               Just (max 0 (fromIntegral cap - fromIntegral (length [() | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordStatus == Pending, row.workflowRecordQueueName == Just queueName, row.workflowRecordQueuePartitionKey == Just key])))
             _ -> Nothing
-          budget' = foldr (\available current -> narrow current available) budget [b | Just b <- [concurrencyBudget, partitionConcurrencyBudget]]
-      case budget' of
-        Just n | n == 0 -> pure (Right [])
+          stopped stop = pure (Right (Dequeued [] (Just stop)))
+      case workerBudget of
+        Just n | n == 0 -> stopped DequeueStopWorkerConcurrency
         _ -> do
-          versions <- readTVar db.memVersions
-          let latest = case sortOn (.versionInfoTimestamp) versions of [] -> Nothing; vs -> Just (last vs).versionInfoName
-              isLatest = maybe True (== applicationVersion) latest
-              candidates =
-                [ widText
-                  | (widText, row) <- sortOn (\(_, row) -> (row.workflowRecordPriority, row.workflowRecordCreatedAt)) (Map.toList rows),
-                    row.workflowRecordQueueName == Just queueName,
-                    visibleToApplication application row,
-                    row.workflowRecordStatus == Enqueued,
-                    row.workflowRecordApplicationVersion == Just applicationVersion || (isLatest && isNothing row.workflowRecordApplicationVersion),
-                    case partitionKey of
-                      Nothing -> True
-                      Just key -> row.workflowRecordQueuePartitionKey == Just key
-                ]
-              claimed = maybe candidates (\n -> take (fromIntegral n) candidates) budget'
-          writeTVar db.memRows (foldr (memClaimRow executorId applicationVersion now ownerToken) rows claimed)
-          pure (Right (map WorkflowId claimed))
+          let budget = foldr (\available current -> narrow current available) workerBudget [b | Just b <- [partitionWorkerBudget]]
+          case budget of
+            Just n | n == 0 -> stopped DequeueStopPartitionWorkerConcurrency
+            _ -> do
+              let budget' = foldr (\available current -> narrow current available) budget [b | Just b <- [concurrencyBudget]]
+              case budget' of
+                Just n | n == 0 -> stopped DequeueStopConcurrency
+                _ -> do
+                  let budget'' = foldr (\available current -> narrow current available) budget' [b | Just b <- [partitionConcurrencyBudget]]
+                  case budget'' of
+                    Just n | n == 0 -> stopped DequeueStopPartitionConcurrency
+                    _ -> do
+                      versions <- readTVar db.memVersions
+                      let latest = case sortOn (.versionInfoTimestamp) versions of [] -> Nothing; vs -> Just (last vs).versionInfoName
+                          isLatest = maybe True (== applicationVersion) latest
+                          candidates =
+                            [ widText
+                              | (widText, row) <- sortOn (\(_, row) -> (row.workflowRecordPriority, row.workflowRecordCreatedAt)) (Map.toList rows),
+                                row.workflowRecordQueueName == Just queueName,
+                                visibleToApplication application row,
+                                row.workflowRecordStatus == Enqueued,
+                                row.workflowRecordAppVersion == Just applicationVersion || (isLatest && isNothing row.workflowRecordAppVersion),
+                                case partitionKey of
+                                  Nothing -> True
+                                  Just key -> row.workflowRecordQueuePartitionKey == Just key
+                            ]
+                          claimed = maybe candidates (\n -> take (fromIntegral n) candidates) budget''
+                      writeTVar db.memRows (foldr (memClaimRow executorId applicationVersion now ownerToken) rows claimed)
+                      pure (Right (Dequeued (map WorkflowId claimed) Nothing))
+  -- The same PENDING population the claim counts against: this
+  -- application's rows and unclaimed ones, queue-wide.
+  countPendingQueueWorkflows db queueName = do
+    rows <- readTVarIO db.memRows
+    application <- readTVarIO db.memAppName
+    pure (Right (fromIntegral (length [() | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordStatus == Pending, row.workflowRecordQueueName == Just queueName])))
   getQueuePartitions db queueName = do
     rows <- readTVarIO db.memRows
-    application <- readTVarIO db.memApplicationName
+    application <- readTVarIO db.memAppName
     pure
       ( Right (sort (Set.toList (Set.fromList [key | row <- Map.elems rows, visibleToApplication application row, row.workflowRecordQueueName == Just queueName, row.workflowRecordStatus == Enqueued, Just key <- [row.workflowRecordQueuePartitionKey]])))
       )
@@ -1514,7 +1556,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     now <- memDbNow db
     atomically $ do
       rows <- readTVar db.memRows
-      application <- readTVar db.memApplicationName
+      application <- readTVar db.memAppName
       versions0 <- readTVar db.memVersions
       let queueName = queue.queueRecordName
           cap = fromIntegral dequeueSweepCap
@@ -1538,7 +1580,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                             row.workflowRecordQueueName == Just queueName,
                             visibleToApplication application row,
                             row.workflowRecordStatus == Enqueued,
-                            row.workflowRecordApplicationVersion == Just applicationVersion || (isLatest && isNothing row.workflowRecordApplicationVersion),
+                            row.workflowRecordAppVersion == Just applicationVersion || (isLatest && isNothing row.workflowRecordAppVersion),
                             row.workflowRecordQueuePartitionKey == Just key
                         ]
                     ]
@@ -1550,16 +1592,16 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     pure (Right (Map.lookup name queues))
   listQueues db applications = do
     queues <- readTVarIO db.memQueues
-    application <- readTVarIO db.memApplicationName
+    application <- readTVarIO db.memAppName
     let visible row = case applications of
           -- The listener's own application plus the unclaimed rows, as the
           -- SQL claim's @$1 is null or application_name = $1@ guard does: a
           -- listener with no application sees everything.
           Unset -> case application of
             Nothing -> True
-            Just name -> row.queueRecordApplicationName == Nothing || row.queueRecordApplicationName == Just name
+            Just name -> row.queueRecordAppName == Nothing || row.queueRecordAppName == Just name
           Named [] -> True
-          Named names -> maybe True (`elem` names) row.queueRecordApplicationName
+          Named names -> maybe True (`elem` names) row.queueRecordAppName
           AnyApplication -> True
     pure (Right [row | row <- Map.elems queues, visible row])
   updateQueue db name update validate = do
@@ -1836,17 +1878,48 @@ memRecordRecvStep db wid stepId name value = do
   now <- memDbNow db
   atomically (memInsertStep db wid stepId name ((.encodedValue) <$> value) (value >>= (.encodedSerialization)) now)
 
--- | Take the first parked message for a destination on a topic, blocking
--- until one lands. Hands back the stored id with the value, so the taker
--- can record which step consumed it.
-memTakeMessage :: MemSystemDB s -> Text -> Text -> STM (IOSim s) (Text, EncodedValue)
-memTakeMessage db wid topic = do
-  stored <- readTVar db.memMessages
-  case Map.lookup (wid, topic) stored of
-    Just ((uuid, value) : _) -> do
-      writeTVar db.memMessages (Map.adjust (drop 1) (wid, topic) stored)
-      pure (uuid, value)
-    _ -> retry
+-- | What one take came back with: the step's answer (a recorded step
+-- | What one take came back with: the step's answer (a recorded step
+-- adopted, or the message this take popped). Empty takes cannot occur:
+-- the wait blocks till a message lands or the deadline passes. Mirrors the
+-- oracle's take.
+data MemTake
+  = MemAdopted (Maybe EncodedValue)
+  | MemTook Text EncodedValue
+  deriving stock (Eq, Show)
+
+-- | One take: the ownership check, a recorded step adopted, else the
+-- oldest waiting message popped — atomically, so a rival's take can
+-- neither slip between the check and the consume nor double-take. A
+-- stale execution is refused before anything is taken, so the message
+-- stays parked for the owner. Mirrors the take transaction.
+memTake :: MemSystemDB s -> WorkflowId -> Int -> Text -> Text -> STM (IOSim s) (Either Error MemTake)
+memTake db wid stepId topic token = do
+  owned <- memCheckRecvOwner db wid token
+  case owned of
+    Left conflict -> pure (Left conflict)
+    Right (WorkflowId widText) -> do
+      steps <- readTVar db.memSteps
+      case Map.lookup (widText, stepId) steps of
+        Just record | record.stepRecordStepName == recvStepName -> pure (Right (MemAdopted (memEncodedFromStep record)))
+        _ -> do
+          stored <- readTVar db.memMessages
+          case Map.lookup (widText, topic) stored of
+            Just ((uuid, value) : _) -> do
+              writeTVar db.memMessages (Map.adjust (drop 1) (widText, topic) stored)
+              pure (Right (MemTook uuid value))
+            _ -> retry
+
+-- | The ownership check the take and the absence record share: a stale
+-- execution is refused rather than handed the step or allowed to record
+-- one. Hands back the row id a check passing unwraps, so both paths read
+-- the rows once.
+memCheckRecvOwner :: MemSystemDB s -> WorkflowId -> Text -> STM (IOSim s) (Either Error WorkflowId)
+memCheckRecvOwner db wid@(WorkflowId widText) token = do
+  rows <- readTVar db.memRows
+  pure $ case Map.lookup widText rows of
+    Just row | row.workflowRecordOwnerXid == Just token -> Right wid
+    _ -> Left (WorkflowConflict {workflowId = widText})
 
 -- | Marks one notification consumed, leaving the rest of the
 -- destination's rows alone.
@@ -1879,8 +1952,8 @@ memDebounce db request caller = case debounceValidate request of
   Left err -> pure (Left err)
   Right () -> do
     now <- memDbNow db
-    application <- readTVarIO db.memApplicationName
-    let scope = request.debounceRequestApplicationName <|> application
+    application <- readTVarIO db.memAppName
+    let scope = request.debounceRequestAppName <|> application
     atomically $ do
       rows <- readTVar db.memRows
       steps <- readTVar db.memSteps
@@ -1914,7 +1987,7 @@ memBounce scope request now rows = case Map.lookupMin (Map.filter isBouncable ro
           row
             { workflowRecordDelayUntil = Just capped,
               workflowRecordSerialization = request.debounceRequestSerialization,
-              workflowRecordApplicationName = row.workflowRecordApplicationName <|> scope,
+              workflowRecordAppName = row.workflowRecordAppName <|> scope,
               workflowRecordInput = request.debounceRequestInputs
             }
      in (Debounced wid, Map.insert wid row' rows)
@@ -1934,7 +2007,7 @@ memBounce scope request now rows = case Map.lookupMin (Map.filter isBouncable ro
         && holderKey row == Just request.debounceRequestWorkflow
         && row.workflowRecordStatus == Delayed
         && row.workflowRecordIsDebounced
-        && (scope == Nothing || row.workflowRecordApplicationName == scope || row.workflowRecordApplicationName == Nothing)
+        && (scope == Nothing || row.workflowRecordAppName == scope || row.workflowRecordAppName == Nothing)
     holderKey row = case row.workflowRecordName of
       Nothing -> Nothing
       Just name -> Just (workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName)
@@ -1951,7 +2024,7 @@ memDebounceHolder row =
           debounceHolderWorkflowName = row.workflowRecordName,
           debounceHolderClassName = row.workflowRecordClassName,
           debounceHolderConfigName = row.workflowRecordConfigName,
-          debounceHolderApplicationName = row.workflowRecordApplicationName
+          debounceHolderAppName = row.workflowRecordAppName
         }
 
 -- | The caller step a bounce records: the JSON outcome under the debounce
@@ -2050,7 +2123,7 @@ simCallerEncoding (Just name) = Left (UnknownSerialization {name})
 -- notification per delivery so 'getAllNotifications' sees them, and record
 -- the caller's step. A send writes the messages TVar, which is what wakes
 -- a parked 'recv'.
-memSend :: MemSystemDB s -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> IOSim s (Either Error ())
+memSend :: MemSystemDB s -> Text -> [EncodedSendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> IOSim s (Either Error ())
 memSend db stepName messages serialization caller owner sendToForks = do
   now <- memDbNow db
   -- The duplicate-key refusal applies to the caller's list, before fan-out,
@@ -2214,7 +2287,7 @@ memRewind db wid cut sysOpts caller = do
                     { workflowRecordStatus = Enqueued,
                       workflowRecordQueueName = Just (fromMaybe internal sysOpts.sysRewindQueueName),
                       workflowRecordQueuePartitionKey = sysOpts.sysRewindQueuePartitionKey,
-                      workflowRecordApplicationVersion = sysOpts.sysRewindApplicationVersion <|> row.workflowRecordApplicationVersion,
+                      workflowRecordAppVersion = sysOpts.sysRewindAppVersion <|> row.workflowRecordAppVersion,
                       workflowRecordRecoveryAttempts = 0,
                       workflowRecordOwnerXid = Nothing,
                       workflowRecordDeadline = Nothing,
@@ -2278,7 +2351,7 @@ memQueueRecord queue =
       queueRecordPartitionWorkerConcurrency = queue.newQueuePartitionWorkerConcurrency,
       queueRecordPartitionRateLimit = queue.newQueuePartitionRateLimit,
       queueRecordPollingInterval = queue.newQueuePollingInterval,
-      queueRecordApplicationName = queue.newQueueApplicationName
+      queueRecordAppName = queue.newQueueAppName
     }
 
 memApplyQueueUpdate :: QueueUpdate -> QueueRecord -> QueueRecord
@@ -2309,7 +2382,7 @@ memScheduleRecord new _now =
       scheduleRecordAutomaticBackfill = new.newScheduleAutomaticBackfill,
       scheduleRecordCronTimezone = new.newScheduleCronTimezone,
       scheduleRecordQueueName = new.newScheduleQueueName,
-      scheduleRecordApplicationName = new.newScheduleApplicationName
+      scheduleRecordAppName = new.newScheduleAppName
     }
 
 memApplyScheduleUpdate :: ScheduleUpdate -> ScheduleRecord -> ScheduleRecord
@@ -2332,7 +2405,7 @@ memClaimRow executorId applicationVersion now ownerToken widText = Map.adjust cl
       row
         { workflowRecordStatus = Pending,
           workflowRecordExecutorId = Just executorId,
-          workflowRecordApplicationVersion = Just applicationVersion,
+          workflowRecordAppVersion = Just applicationVersion,
           workflowRecordOwnerXid = Just ownerToken,
           workflowRecordStartedAt = Just now,
           workflowRecordUpdatedAt = now,

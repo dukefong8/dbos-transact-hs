@@ -57,7 +57,7 @@ import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Timeout (..
 data Debouncer = Debouncer
   { debouncerQueueName :: Maybe Text,
     debouncerTimeout :: Maybe Duration,
-    debouncerApplicationName :: Maybe Text
+    debouncerAppName :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -69,7 +69,7 @@ debouncerNew =
   Debouncer
     { debouncerQueueName = Nothing,
       debouncerTimeout = Nothing,
-      debouncerApplicationName = Nothing
+      debouncerAppName = Nothing
     }
 
 -- | Per-call debounce options: only the id a fresh row may take. A call
@@ -169,13 +169,13 @@ debounceWith dbos userRef def key period input options = do
           debounceRequestPeriod = bouncePeriod,
           debounceRequestInputs = (.serializedText) <$> rawInput,
           debounceRequestSerialization = Just (inputSerialization exec.conn rawInput),
-          debounceRequestApplicationName = targetApp exec
+          debounceRequestAppName = targetApp exec
         }
     queueName = case def.debouncerQueueName of
       Just name -> name
       Nothing -> case internalQueueName of QueueName name -> name
     dedupKey = debounceDedupKey userRef.refKey key
-    targetApp exec = def.debouncerApplicationName <|> exec.conn.connAppName
+    targetApp exec = def.debouncerAppName <|> exec.conn.connAppName
 
 -- | Debounce from inside a running workflow: the bounce commits atomically
 -- with its step checkpoint, as the oracle's @call_txn_as_step@ does, so a
@@ -245,13 +245,13 @@ debounceInWorkflow wctx userRef def key period input = do
           debounceRequestPeriod = bouncePeriod,
           debounceRequestInputs = (.serializedText) <$> rawInput,
           debounceRequestSerialization = Just (inputSerialization conn rawInput),
-          debounceRequestApplicationName = targetApp conn
+          debounceRequestAppName = targetApp conn
         }
     queueName = case def.debouncerQueueName of
       Just name -> name
       Nothing -> case internalQueueName of QueueName name -> name
     dedupKey = debounceDedupKey userRef.refKey key
-    targetApp conn = def.debouncerApplicationName <|> conn.connAppName
+    targetApp conn = def.debouncerAppName <|> conn.connAppName
 
 -- * Helpers
 
@@ -332,7 +332,7 @@ debounceClientWith dc key period input call = do
                 debounceRequestPeriod = period,
                 debounceRequestInputs = (.serializedText) <$> rawInput,
                 debounceRequestSerialization = Just (inputSerialization conn rawInput),
-                debounceRequestApplicationName = targetApp
+                debounceRequestAppName = targetApp
               }
       bounced <- withConnection conn (\db -> SystemDB.debounceDelayedWorkflow db request Nothing)
       case bounced of
@@ -414,7 +414,7 @@ classifyBounce holder workflow targetApp
       Nothing -> False
       Just name ->
         workflowKeyFromRow name holder.debounceHolderClassName holder.debounceHolderConfigName == workflow
-    anotherApp holder target = case (target, holder.debounceHolderApplicationName) of
+    anotherApp holder target = case (target, holder.debounceHolderAppName) of
       (Just waiting, Just owner) -> waiting /= owner
       _ -> False
 
@@ -436,7 +436,7 @@ debouncedStartOptions def queueName dedupKey period offered =
                 delay = Just period,
                 isDebounced = True,
                 debounceTimeout = def.debouncerTimeout,
-                applicationName = def.debouncerApplicationName
+                applicationName = def.debouncerAppName
               }
           )
     }

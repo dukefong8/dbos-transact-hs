@@ -3,6 +3,7 @@ module DBOS.Transact
   -- lifecycle-config
     ApplicationVersion (..),
     Config (..),
+    IdleTransactionTimeout (..),
     PollingConcurrency (PollingDefault, PollingUnlimited),
     pollingAtMost,
     configNew,
@@ -48,7 +49,7 @@ module DBOS.Transact
     WorkflowRecord (..),
     WorkflowFilter (..),
     defaultWorkflowFilter,
-    Applications (..),
+    AppScope (..),
     Timestamp,
     timestampFromEpochMs,
     timestampToEpochMs,
@@ -197,13 +198,11 @@ module DBOS.Transact
   -- comm-messages
     Topic (..),
     IdempotencyKey (..),
-    Message (..),
+    SendMessage (..),
     Forks (..),
     SendOptions (..),
     sendOptionsDefault,
-    SendBulkOptions (..),
-    sendBulkOptionsDefault,
-    SendMessage (..),
+    EncodedSendMessage (..),
     send,
     sendWith,
     sendBulk,
@@ -293,8 +292,8 @@ module DBOS.Transact
     clientListWorkflows,
     clientListWorkflowSteps,
     clientListWorkflowStepsWith,
-    clientListApplicationVersions,
-    clientLatestApplicationVersion,
+    clientListAppVersions,
+    clientLatestAppVersion,
     clientPromoteVersion,
 
   -- client-enqueue
@@ -328,7 +327,7 @@ module DBOS.Transact
 where
 
 import DBOS.Transact.Checkpoint (PendingStep)
-import DBOS.Transact.Client (Client (..), ClientConfig (..), EnqueueOptions (..), clientCancelWorkflows, clientConfigFromEnv, clientConfigNew, clientDeleteQueue, clientDeleteWorkflows, clientForkWorkflows, clientGetEvent, clientLatestApplicationVersion, clientListApplicationVersions, clientListQueues, clientListQueuedWorkflows, clientListWorkflowSteps, clientListWorkflowStepsWith, clientListWorkflows, clientOutcomePollInterval, clientPromoteVersion, clientReadStream, clientReadStreamFrom, clientRegisterQueue, clientRetrieveQueue, clientResumeWorkflows, clientRewindWorkflows, clientSetWorkflowDelay, clientSendMessage, clientSendMessageInTx, clientSendMessages, clientSendMessagesInTx, clientUpdateQueue, clientUpdateWorkflowAttributes, closeClient, connectClient, clientEnqueueWorkflow, clientEnqueueWorkflowInTx, clientEnqueueWorkflowWith, enqueueOptionsNew, enqueueOptionsOn, clientRetrieveWorkflow, validateClientConfig, withClientTransaction, clientWorkflowStatus, clientWorkflowRecord, clientWaitFirst)
+import DBOS.Transact.Client (Client (..), ClientConfig (..), EnqueueOptions (..), clientCancelWorkflows, clientConfigFromEnv, clientConfigNew, clientDeleteQueue, clientDeleteWorkflows, clientForkWorkflows, clientGetEvent, clientLatestAppVersion, clientListAppVersions, clientListQueues, clientListQueuedWorkflows, clientListWorkflowSteps, clientListWorkflowStepsWith, clientListWorkflows, clientOutcomePollInterval, clientPromoteVersion, clientReadStream, clientReadStreamFrom, clientRegisterQueue, clientRetrieveQueue, clientResumeWorkflows, clientRewindWorkflows, clientSetWorkflowDelay, clientSendMessage, clientSendMessageInTx, clientSendMessages, clientSendMessagesInTx, clientUpdateQueue, clientUpdateWorkflowAttributes, closeClient, connectClient, clientEnqueueWorkflow, clientEnqueueWorkflowInTx, clientEnqueueWorkflowWith, enqueueOptionsNew, enqueueOptionsOn, clientRetrieveWorkflow, validateClientConfig, withClientTransaction, clientWorkflowStatus, clientWorkflowRecord, clientWaitFirst)
 import DBOS.Transact.Config (Config (..), Serializer (..), configFromEnv, configNew, serializerName, validateConfig)
 import DBOS.Transact.Connection ()
 import DBOS.Transact.Context (StepCtx, WorkflowCtx, stepCtxCancellationToken, workflowId)
@@ -342,7 +341,7 @@ import DBOS.Transact.Identity (Environment (..))
 import DBOS.Transact.Instance (DBOS, Executor, cancelWorkflow, cancelWorkflows, deleteWorkflow, deleteWorkflows, enqueueWorkflow, fetchWorkflowStatuses, forkFrom, forkWorkflow, forkWorkflows, getAllEvents, getWorkflowEvent, getWorkflowRecord, getWorkflowStatus, isLaunched, launch, launchWithEnvironment, listWorkflowIdsByName, listWorkflowSteps, listWorkflowStepsWith, listQueuedWorkflows, listWorkflows, newDBOS, registerDataSource, registerWorkflow, registerWorkflowRef, resumeWorkflow, resumeWorkflows, retrieveWorkflow, rewindWorkflow, rewindWorkflows, runWorkflow, runWorkflowRef, sendWorkflowMessage, sendWorkflowMessages, setWorkflowDelay, shutdown, startWorkflow, updateWorkflowAttributes)
 import DBOS.Transact.Logger (logDebug, logError, logInfo, logWarn)
 import DBOS.Transact.Management (ListWorkflowStepsOptions (..), PortableWorkflowError (..), StepFailure (..), StepInfo (..), StepOutcome (..), StepOutput (..), cancelWorkflowsInWorkflow, defaultListWorkflowStepsOptions, deleteWorkflowsInWorkflow, forkFromInWorkflow, forkWorkflowsInWorkflow, listWorkflowStepsInWorkflow, listWorkflowStepsWithInWorkflow, listWorkflowsInWorkflow, resumeWorkflowsInWorkflow, rewindWorkflowsInWorkflow, setWorkflowDelayInWorkflow, updateWorkflowAttributesInWorkflow)
-import DBOS.Transact.Message (Forks (..), Message (..), SendBulkOptions (..), SendOptions (..), recv, send, sendBulk, sendBulkOptionsDefault, sendBulkWith, sendOptionsDefault, sendWith)
+import DBOS.Transact.Message (Forks (..), SendMessage (..), SendOptions (..), recv, send, sendBulk, sendBulkWith, sendOptionsDefault, sendWith)
 import DBOS.Transact.Patch (deprecatePatchStep, patchStep, pendingDeprecatePatch, pendingPatch)
 import DBOS.Transact.Queue (Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), defaultQueueChange, defaultQueueOptions, deleteQueue, listQueues, queue, registerQueue, updateQueue)
 import DBOS.Transact.Registry (RegistryError, renderRegistryError)
@@ -354,4 +353,4 @@ import DBOS.Transact.Stream (ReadStreamOptions (..), StreamReader, closeStream, 
 import DBOS.Transact.Wait (joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
 import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), RunOptions (..), StartOptions (..), Timeout (..), WorkflowRef, enqueueNew, runOptionsDefault, startChildWorkflow, startOptionsDefault)
 
-import DBOS.SystemDB.Types (Applications (..), ApplicationVersion (..), Change (..), Duration, ForkOptions (..), ForkPoint (..), IdempotencyKey (..), PollingConcurrency (PollingDefault, PollingUnlimited), RateLimit (..), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), Timestamp, Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowKey (..), WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultRewindOptions, defaultWorkflowFilter, isTerminal, methodWorkflowKey, millisDuration, newWorkflowKey, pollingAtMost, secondsDuration, timestampFromEpochMs, timestampToEpochMs, workflowStatusText)
+import DBOS.SystemDB.Types (AppScope (..), ApplicationVersion (..), Change (..), Duration, ForkOptions (..), ForkPoint (..), IdempotencyKey (..), IdleTransactionTimeout (..), PollingConcurrency (PollingDefault, PollingUnlimited), RateLimit (..), RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), Timestamp, Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowKey (..), WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultRewindOptions, defaultWorkflowFilter, isTerminal, methodWorkflowKey, millisDuration, newWorkflowKey, pollingAtMost, secondsDuration, timestampFromEpochMs, timestampToEpochMs, workflowStatusText)

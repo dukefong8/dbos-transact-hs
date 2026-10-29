@@ -33,7 +33,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Types
   ( Change (..),
-    Applications (..),
+    AppScope (..),
     NewQueue (..),
     OnExistingQueue (..),
     QueueName (..),
@@ -301,7 +301,7 @@ registerQueue dbos queueName options conflict
         case onExisting of
           Left err -> pure (Left err)
           Right policy -> do
-            let new = (queueOptionsToNewQueue queueName options) {newQueueApplicationName = Just executor.identity.identityAppName}
+            let new = (queueOptionsToNewQueue queueName options) {newQueueAppName = Just executor.identity.identityAppName}
             inserted <- withConnection executor.conn (\db -> SystemDB.upsertQueue db new policy)
             case inserted of
               Left err -> pure (Left err)

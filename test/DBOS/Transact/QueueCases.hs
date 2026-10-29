@@ -87,6 +87,14 @@ module DBOS.Transact.QueueCases
     checkPartitioned,
     scenarioCountedPartitioned,
     checkCountedPartitioned,
+    scenarioWalkSpentConcurrency,
+    checkWalkSpentConcurrency,
+    scenarioWalkSpentRateLimit,
+    checkWalkSpentRateLimit,
+    scenarioWalkFullPartition,
+    checkWalkFullPartition,
+    scenarioWalkSpentRoom,
+    checkWalkSpentRoom,
     scenarioPeerQueue,
     checkPeerQueue,
     scenarioWorkerBudgetExhausted,
@@ -97,8 +105,12 @@ where
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.Prelude
-import DBOS.SystemDB (AwaitedOutcome (..), Change (..), Duration, NewQueue (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), RateLimit (..), Timestamp, WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter, internalQueueName, newQueue, secondsDuration)
+import DBOS.SystemDB (AwaitedOutcome (..), Change (..), Dequeued (..), Duration, NewQueue (..), NewWorkflow (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), RateLimit (..), Timestamp, WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter, internalQueueName, newQueue, newWorkflow, secondsDuration)
 import DBOS.SystemDB qualified as SysDB
+import DBOS.Transact.Connection (Connection (connSysdb), runSystemDB)
+import DBOS.Transact.Dequeue (Polled (..), newRunning, pollOnce)
+import DBOS.Transact.Identity (Identity (identityAppVersion))
+import DBOS.Transact.Instance (Executor (conn, datasources, identity, tasks, workflows))
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
@@ -175,7 +187,7 @@ legacyPartitionedRecord =
       queueRecordPartitionWorkerConcurrency = Nothing,
       queueRecordPartitionRateLimit = Nothing,
       queueRecordPollingInterval = secondsDuration 1,
-      queueRecordApplicationName = Just "app"
+      queueRecordAppName = Just "app"
     }
 
 -- | Fresh defaults admit everything and poll once a second.
@@ -585,7 +597,7 @@ scenarioLegacyUpdateRefused :: forall m. (MonadSTM m, MonadMVar m)
                             => QueueFixture m -> m (Either SysDB.Error Bool, Maybe Queue, Either (Error EngineOnly) Queue)
 scenarioLegacyUpdateRefused fx = do
   let queueName = "hs-l2-legacy-q-" <> Text.take 12 fx.qfSuffix
-  written <- fx.qfUpsertQueue ((newQueue queueName) {newQueueConcurrency = Just 1, newQueueWorkerConcurrency = Just 1, newQueuePartitionQueue = True, newQueueApplicationName = Just fx.qfAppName}) UpdateExisting
+  written <- fx.qfUpsertQueue ((newQueue queueName) {newQueueConcurrency = Just 1, newQueueWorkerConcurrency = Just 1, newQueuePartitionQueue = True, newQueueAppName = Just fx.qfAppName}) UpdateExisting
   _ <- fx.qfLaunch
   stored <- queue fx.qfDBOS queueName >>= either (error . show) pure
   refused <- updateQueue fx.qfDBOS queueName (defaultQueueChange {partitionConcurrency = Set (Just 4)})
@@ -879,7 +891,7 @@ scenarioInternalRow fx = do
   -- single run can own it; leaving the owner null keeps the upsert
   -- repeatable while the stored 300s interval still proves the engine
   -- ignores it.
-  _ <- fx.qfUpsertQueue ((newQueue internalName) {newQueuePollingInterval = secondsDuration 300, newQueueWorkerConcurrency = Just 1, newQueueApplicationName = Nothing}) UpdateExisting >>= either (error . show) pure
+  _ <- fx.qfUpsertQueue ((newQueue internalName) {newQueuePollingInterval = secondsDuration 300, newQueueWorkerConcurrency = Just 1, newQueueAppName = Nothing}) UpdateExisting >>= either (error . show) pure
   exec <- fx.qfLaunch
   let workflowText = "on-the-internal-queue-" <> fx.qfSuffix
   started <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew internalName)}) Nothing >>= orCrash
@@ -923,7 +935,7 @@ scenarioGhostQueue fx = do
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   -- The row is written straight to the database: no register_queue
   -- anywhere on this process.
-  _ <- fx.qfUpsertQueue ((newQueue ("hs-l2-ghost-q-" <> Text.take 12 fx.qfSuffix)) {newQueueApplicationName = Just fx.qfAppName}) UpdateExisting >>= either (error . show) pure
+  _ <- fx.qfUpsertQueue ((newQueue ("hs-l2-ghost-q-" <> Text.take 12 fx.qfSuffix)) {newQueueAppName = Just fx.qfAppName}) UpdateExisting >>= either (error . show) pure
   exec <- fx.qfLaunch
   let queueName = "hs-l2-ghost-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "ghost-run-" <> fx.qfSuffix
@@ -1416,6 +1428,136 @@ scenarioCountedPartitioned fx = do
 checkCountedPartitioned :: Int -> Either String ()
 checkCountedPartitioned keyPeak = unless (keyPeak == 2) $ Left ("expected two per key, got: " <> show keyPeak)
 
+-- | The backlog one partition walk reads: a queue with one waiting row on
+-- each of @count@ partitions, staged straight through the launched
+-- executor's own connection — no workflow is registered, so whatever a
+-- claim takes is skipped at dispatch and the walk's counts stand alone.
+-- Staging runs through the executor (after its launch registers the
+-- version) so the claims below read as the latest version.
+stageWalkBacklog :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                 => Connection m -> Text -> NewQueue -> Int -> m QueueRecord
+stageWalkBacklog conn suffix new count = do
+  _ <- runSystemDB conn.connSysdb (\db -> SysDB.upsertQueue db new UpdateExisting) >>= either (error . show) pure
+  let name = new.newQueueName
+  mapM_
+    ( \n -> do
+        let wid = "walk-" <> Text.pack (show n) <> "-" <> suffix
+            key = "p-" <> Text.pack (show n)
+        runSystemDB conn.connSysdb (\db -> SysDB.initWorkflow db ((newWorkflow wid) {newWorkflowQueueName = Just name, newWorkflowQueuePartitionKey = Just key}) Nothing) >>= either (error . show) pure
+    )
+    [0 .. count - 1]
+  found <- runSystemDB conn.connSysdb (\db -> SysDB.getQueue db name) >>= either (error . show) pure
+  maybe (error "walk queue missing after staging") pure found
+
+-- | One row on @key@, claimed at once: a start from elsewhere that the
+-- walk must reckon with. The claim presents the launched version, which
+-- the launch registered as latest.
+claimWalkRow :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+             => Connection m -> Identity -> Text -> Text -> Text -> m Dequeued
+claimWalkRow conn identity queueName key suffix = do
+  let wid = "walk-started-" <> key <> "-" <> suffix
+  runSystemDB conn.connSysdb (\db -> SysDB.initWorkflow db ((newWorkflow wid) {newWorkflowQueueName = Just queueName, newWorkflowQueuePartitionKey = Just key}) Nothing) >>= either (error . show) pure
+  found <- runSystemDB conn.connSysdb (\db -> SysDB.getQueue db queueName) >>= either (error . show) pure
+  record <- maybe (error "walk queue missing for the elsewhere start") pure found
+  dequeued <- runSystemDB conn.connSysdb (\db -> SysDB.startQueuedWorkflows db record "exec" identity.identityAppVersion (Just key) 0 0 ("tok-" <> key)) >>= either (error . show) pure
+  -- The elsewhere start takes exactly its row: anything else means the
+  -- staging, not the walk, is broken, and the counts below would blame
+  -- the wrong layer.
+  case dequeued.dequeuedWorkflowIds of
+    [_] -> pure dequeued
+    ids -> error ("walk staging claimed " <> show (length ids) <> " rows, expected one")
+
+-- | One poll of the named queue through the engine's own walk, with no
+-- supervisor polling behind it (the leaf listens to nothing), so the
+-- only claims are the walk's own.
+pollWalk :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+         => QueueFixture m -> Executor m -> QueueRecord -> m Polled
+pollWalk fx executor record = do
+  running <- newRunning
+  polled <- pollOnce executor.conn executor.identity executor.workflows executor.tasks running record executor.datasources
+  fx.qfShutdown
+  pure polled
+
+-- | A walk with the queue-wide concurrency spent visits no partition: the
+-- room is read once up front, and none means the partitions are never
+-- even listed.
+scenarioWalkSpentConcurrency :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                             => QueueFixture m -> m Polled
+scenarioWalkSpentConcurrency fx = do
+  executor <- fx.qfLaunch
+  let conn = executor.conn
+      identity = executor.identity
+      queueName = "hs-l2-walk-spent-q-" <> Text.take 12 fx.qfSuffix
+  record <- stageWalkBacklog conn fx.qfSuffix ((newQueue queueName) {newQueueConcurrency = Just 1, newQueuePartitionConcurrency = Just 1}) 50
+  -- A start from elsewhere spends the queue-wide room before the walk.
+  _ <- claimWalkRow conn identity queueName "elsewhere" fx.qfSuffix
+  pollWalk fx executor record
+
+checkWalkSpentConcurrency :: Polled -> Either String ()
+checkWalkSpentConcurrency polled = do
+  unless (polled.polledClaims == 0) $ Left ("expected no partition visited, got: " <> show polled.polledClaims)
+  unless (polled.polledContention == False) $ Left "expected no contention"
+  unless (null polled.polledClaimed) $ Left ("expected nothing claimed, got: " <> show polled.polledClaimed)
+
+-- | A spent queue-wide rate limit ends the walk on its first claim: the
+-- pending count cannot see a rate limit, so one claim is paid to learn
+-- it, and since it spans every partition the rest are not visited.
+scenarioWalkSpentRateLimit :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                           => QueueFixture m -> m Polled
+scenarioWalkSpentRateLimit fx = do
+  executor <- fx.qfLaunch
+  let conn = executor.conn
+      identity = executor.identity
+      queueName = "hs-l2-walk-rate-q-" <> Text.take 12 fx.qfSuffix
+  record <- stageWalkBacklog conn fx.qfSuffix ((newQueue queueName) {newQueueRateLimit = Just (RateLimit {rateLimitLimit = 1, rateLimitPeriod = secondsDuration 3600}), newQueuePartitionConcurrency = Just 1}) 5
+  -- The first claim fills the window; the walk's first claim finds it
+  -- full and stops there.
+  _ <- claimWalkRow conn identity queueName "p-0" fx.qfSuffix
+  pollWalk fx executor record
+
+checkWalkSpentRateLimit :: Polled -> Either String ()
+checkWalkSpentRateLimit polled = do
+  unless (polled.polledClaims == 1) $ Left ("expected one claim to learn the limit, got: " <> show polled.polledClaims)
+  unless (null polled.polledClaimed) $ Left ("expected nothing claimed, got: " <> show polled.polledClaimed)
+
+-- | A full partition does not end the walk: its own limit says nothing
+-- about the next key, so the walk visits it and still claims every other
+-- partition.
+scenarioWalkFullPartition :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                          => QueueFixture m -> m Polled
+scenarioWalkFullPartition fx = do
+  executor <- fx.qfLaunch
+  let conn = executor.conn
+      identity = executor.identity
+      queueName = "hs-l2-walk-full-q-" <> Text.take 12 fx.qfSuffix
+  record <- stageWalkBacklog conn fx.qfSuffix ((newQueue queueName) {newQueueConcurrency = Just 10, newQueuePartitionConcurrency = Just 1}) 3
+  -- One partition's concurrency is spent; the queue has room to spare.
+  -- The elsewhere start fills p-0 either way: whichever of its two rows
+  -- the claim takes, one runs and one stays waiting, so the full
+  -- partition stays listed.
+  _ <- claimWalkRow conn identity queueName "p-0" fx.qfSuffix
+  pollWalk fx executor record
+
+checkWalkFullPartition :: Polled -> Either String ()
+checkWalkFullPartition polled = do
+  unless (polled.polledClaims == 3) $ Left ("expected every partition visited, got: " <> show polled.polledClaims)
+  unless (length polled.polledClaimed == 2) $ Left ("expected the two open partitions claimed, got: " <> show polled.polledClaimed)
+
+-- | The walk stops once the queue-wide room it read up front is claimed.
+scenarioWalkSpentRoom :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                      => QueueFixture m -> m Polled
+scenarioWalkSpentRoom fx = do
+  executor <- fx.qfLaunch
+  let conn = executor.conn
+      queueName = "hs-l2-walk-room-q-" <> Text.take 12 fx.qfSuffix
+  record <- stageWalkBacklog conn fx.qfSuffix ((newQueue queueName) {newQueueConcurrency = Just 2, newQueuePartitionConcurrency = Just 1}) 3
+  pollWalk fx executor record
+
+checkWalkSpentRoom :: Polled -> Either String ()
+checkWalkSpentRoom polled = do
+  unless (polled.polledClaims == 2) $ Left ("expected the walk to stop after two claims, got: " <> show polled.polledClaims)
+  unless (length polled.polledClaimed == 2) $ Left ("expected two rows claimed, got: " <> show polled.polledClaimed)
+
 -- | Another application's queue is not dequeued from: several reconciles'
 -- worth of waiting, the body never runs and the row stays ENQUEUED.
 scenarioPeerQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
@@ -1431,7 +1573,7 @@ scenarioPeerQueue fx = do
       peerName = "some-other-application-" <> Text.take 12 fx.qfSuffix
       workflowText = "enqueued-onto-a-peers-queue-" <> fx.qfSuffix
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
-  _ <- fx.qfUpsertQueue ((newQueue queueName) {newQueueApplicationName = Just peerName}) UpdateExisting >>= either (error . show) pure
+  _ <- fx.qfUpsertQueue ((newQueue queueName) {newQueueAppName = Just peerName}) UpdateExisting >>= either (error . show) pure
   exec <- fx.qfLaunch
   _ <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
   -- Several reconciles' worth: if this queue were going to enter the set,

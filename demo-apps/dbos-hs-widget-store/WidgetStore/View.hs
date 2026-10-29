@@ -207,7 +207,7 @@ pageView page =
 
         <div class="mt-12 text-center">
           <div class="bg-gradient-to-r from-primary-500 to-primary-600 rounded-2xl p-8 text-white">
-            <h3 class="text-2xl font-bold mb-4">Build Your Own Crash-Proof Applications</h3>
+            <h3 class="text-2xl font-bold mb-4">Build Your Own Crash-Proof AppScope</h3>
             <p class="text-primary-100 mb-6">
               Learn how to create resilient applications that can survive any failure with DBOS
             </p>

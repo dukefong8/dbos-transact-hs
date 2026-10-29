@@ -27,7 +27,8 @@ where
 
 import DBOS.Prelude
 import Data.Text qualified as Text
-import DBOS.SystemDB.Types (Duration, PollingConcurrency (PollingDefault), durationIsZero, portableJsonSerialization, secondsDuration)
+import DBOS.SystemDB.Error (renderError)
+import DBOS.SystemDB.Types (Duration, IdleTransactionTimeout (..), PollingConcurrency (PollingDefault), durationIsZero, idleTimeoutValidate, portableJsonSerialization, secondsDuration)
 import DBOS.Transact.Error (EngineOnly, Error (..))
 import System.Environment (lookupEnv)
 
@@ -81,7 +82,8 @@ data Config = Config
     configPollingConcurrency :: PollingConcurrency,
     configOutcomePollInterval :: Maybe Duration,
     configListenQueues :: Maybe [Text],
-    configNotificationCoalesce :: Maybe Duration
+    configNotificationCoalesce :: Maybe Duration,
+    configIdleTransactionTimeout :: IdleTransactionTimeout
   }
   deriving stock (Eq, Show)
 
@@ -102,7 +104,8 @@ configNew appName databaseUrl =
       configPollingConcurrency = PollingDefault,
       configOutcomePollInterval = Nothing,
       configListenQueues = Nothing,
-      configNotificationCoalesce = Nothing
+      configNotificationCoalesce = Nothing,
+      configIdleTransactionTimeout = Default
     }
 
 -- | @configNew@, taking the database URL from @DBOS_DATABASE_URL@. A
@@ -133,6 +136,8 @@ validateConfig config
       -- a setting, a zero poll interval is a busy loop against the database
       -- rather than a faster answer.
       Left (ErrorConfig "`outcome_poll_interval` cannot be zero")
+  | Left err <- idleTimeoutValidate config.configIdleTransactionTimeout =
+      Left (ErrorConfig (renderError err))
   | otherwise = Right ()
 
 -- | The interval to poll for workflow outcomes at. Mirrors

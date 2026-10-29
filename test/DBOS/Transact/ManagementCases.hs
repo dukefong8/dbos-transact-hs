@@ -1269,8 +1269,8 @@ scenarioForkInheritsOwner fx = do
       other -> throwIO (userError ("expected the chosen fork id, got: " <> show other))
     forkRow <- fx.mfReadRow (WorkflowId forkedText)
     pure
-      ( parentRow.workflowRecordApplicationName,
-        forkRow.workflowRecordApplicationName,
+      ( parentRow.workflowRecordAppName,
+        forkRow.workflowRecordAppName,
         fx.mfIdentity.identityAppName
       )
 
@@ -2386,7 +2386,7 @@ scenarioRewindQueueVersion fx = do
     case ran of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
-    rewound <- rewindWorkflow dbos wid (defaultRewindOptions {rewindStartStep = 0, rewindQueueName = Just "custom-q", rewindQueuePartitionKey = Just "pk-1", rewindApplicationVersion = Just "v9"})
+    rewound <- rewindWorkflow dbos wid (defaultRewindOptions {rewindStartStep = 0, rewindQueueName = Just "custom-q", rewindQueuePartitionKey = Just "pk-1", rewindAppVersion = Just "v9"})
     case rewound of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -2399,7 +2399,7 @@ scenarioRewindQueueVersion fx = do
       ( row.workflowRecordStatus,
         row.workflowRecordQueueName,
         row.workflowRecordQueuePartitionKey,
-        row.workflowRecordApplicationVersion,
+        row.workflowRecordAppVersion,
         row.workflowRecordRecoveryAttempts,
         stepIds
       )

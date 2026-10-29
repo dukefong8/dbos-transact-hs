@@ -37,7 +37,7 @@ import DBOS.Transact
     Error,
     Queue (..),
     QueueChange (..),
-    SendMessage (..),
+    EncodedSendMessage (..),
     StartOptions (..),
     WorkflowId (..),
     WorkflowRef,
@@ -228,7 +228,7 @@ respondAllApprovals app decision = do
     liftIO
       ( sendWorkflowMessages
           app.staDbos
-          [ SendMessage
+          [ EncodedSendMessage
               { sendDestinationId = WorkflowId row.arWorkflowId,
                 sendMessageBody = encodeWorkflowValue decision,
                 sendTopic = Just approvalTopic,

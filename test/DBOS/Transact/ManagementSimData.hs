@@ -58,7 +58,7 @@ mockQueue name =
       queueRecordPartitionWorkerConcurrency = Nothing,
       queueRecordPartitionRateLimit = Nothing,
       queueRecordPollingInterval = secondsDuration 1,
-      queueRecordApplicationName = Just "mock-app"
+      queueRecordAppName = Just "mock-app"
     }
 
 -- | The queue the stateless backend answers with.
@@ -95,7 +95,7 @@ mockSchedule name =
       scheduleRecordAutomaticBackfill = False,
       scheduleRecordCronTimezone = Nothing,
       scheduleRecordQueueName = Nothing,
-      scheduleRecordApplicationName = Just "mock-app"
+      scheduleRecordAppName = Just "mock-app"
     }
 
 -- | The schedule the stateless backend answers with.
@@ -105,7 +105,7 @@ mockScheduleName = "mock-schedule"
 mockVersion :: VersionInfo
 mockVersion =
   VersionInfo
-    { versionInfoApplicationName = Just "mock-app",
+    { versionInfoAppName = Just "mock-app",
       versionInfoId = "mock-version-id",
       versionInfoName = "0.0.0",
       versionInfoCreatedAt = mockTimestamp,

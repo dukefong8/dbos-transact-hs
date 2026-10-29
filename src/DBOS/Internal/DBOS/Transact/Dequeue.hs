@@ -6,7 +6,7 @@
 -- backs off under contention and scales back when clean, local running
 -- tallies that bound worker concurrency without asking the database, and
 -- concurrent dispatch of every claimed row.
-module DBOS.Transact.Dequeue (Admission (..), QueueEvent (..), admission, dequeuePass, superviseForever) where
+module DBOS.Transact.Dequeue (Admission (..), Polled (..), QueueEvent (..), Running, admission, dequeuePass, newRunning, pollOnce, superviseForever) where
 
 import DBOS.Prelude
 import Data.Int (Int64)
@@ -17,7 +17,8 @@ import System.Log.FastLogger (ToLogStr (..))
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError (..), Error (..), renderError)
 import DBOS.SystemDB.Types
-  ( Applications (..),
+  ( AppScope (..),
+    Dequeued (..),
     Duration (..),
     QueueName (..),
     QueueRecord (..),
@@ -34,6 +35,7 @@ import DBOS.SystemDB.Types
     queueResolvedLimits,
     resolvedIsPartitioned,
     secondsDuration,
+    spansPartitions,
     timestampNow,
     timestampToEpochMs,
     databaseTimeRead,
@@ -207,11 +209,23 @@ workerBudget limits running
   | maybe False (<= 0) limits.resolvedPartitionWorkerConcurrency = Just 0
   | otherwise = (\cap -> max 0 (cap - running)) <$> limits.resolvedWorkerConcurrency
 
+-- | What one poll of a queue met: the contention that ended it, if
+-- any, how many claim transactions it ran — one per partition visited,
+-- when it walked them — and the ids those claims took. Mirrors Rust
+-- @Polled@.
+data Polled = Polled
+  { polledContention :: Bool,
+    polledClaims     :: Int,
+    polledClaimed    :: [WorkflowId]
+  }
+  deriving stock (Eq, Show)
+
 -- | One dequeue and the dispatch of whatever it claimed, reporting the
--- contended flag the caller backs off on. Announcements go through the
--- connection's tracer.
+-- contention it met, if any, and how many claims it took to get there.
+-- Announcements go through the connection's tracer. Mirrors Rust
+-- @poll_once@.
 pollOnce :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-         => Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Tasks m -> Running m -> QueueRecord -> DataSourceRegistry m -> m (Bool, [WorkflowId])
+         => Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Tasks m -> Running m -> QueueRecord -> DataSourceRegistry m -> m Polled
 pollOnce conn identity workflows tasks running queue datasources = do
   if not (resolvedIsPartitioned limits)
     then do
@@ -222,14 +236,14 @@ pollOnce conn identity workflows tasks running queue datasources = do
       case claimed of
         Left err -> do
           contended <- reportDequeueError conn.connTracer err
-          pure (contended, [])
-        Right ids -> do
-          dispatchClaimed conn identity workflows tasks running queue Nothing ids ownerToken datasources
-          pure (False, ids)
+          pure (Polled contended 1 [])
+        Right dequeued -> do
+          dispatchClaimed conn identity workflows tasks running queue Nothing dequeued.dequeuedWorkflowIds ownerToken datasources
+          pure (Polled False 1 dequeued.dequeuedWorkflowIds)
     else do
       alreadyRunning <- runningCount running queueName
       case workerBudget limits alreadyRunning of
-        Just 0 -> pure (False, [])
+        Just 0 -> pure (Polled False 0 [])
         _ | limits.resolvedPartitionConcurrency == Just 1
               && limits.resolvedConcurrency == Nothing
               && limits.resolvedRateLimit == Nothing
@@ -250,23 +264,44 @@ pollOnce conn identity workflows tasks running queue datasources = do
               case swept of
                 Left err -> do
                   contended <- reportDequeueError conn.connTracer err
-                  pure (contended, [])
+                  pure (Polled contended 1 [])
                 Right ids -> do
                   -- The sweep returns one head per partition and does not
                   -- say which; each claimed row carries its own key, so the
                   -- tally is credited from the rows themselves.
                   dispatchClaimed conn identity workflows tasks running queue Nothing ids ownerToken datasources
-                  pure (False, ids)
+                  pure (Polled False 1 ids)
         _ -> do
-          partitions <- runSystemDB conn.connSysdb (\db -> SystemDB.getQueuePartitions db queueName)
-          case partitions of
+          -- The room left under the queue's global concurrency, across
+          -- every executor: 'Nothing' when it carries none. One count
+          -- rather than one per partition, and a snapshot rather than a
+          -- promise — each claim below counts again in its own
+          -- transaction, so a peer that spends the room in the meantime
+          -- costs this walk a claim, not an overrun.
+          room <- case limits.resolvedConcurrency of
+            Nothing -> pure (Right Nothing)
+            Just cap -> do
+              pending <- runSystemDB conn.connSysdb (\db -> SystemDB.countPendingQueueWorkflows db queueName)
+              pure (fmap (\count -> Just (max 0 (cap - fromIntegral count))) pending)
+          case room of
             Left err -> do
               contended <- reportDequeueError conn.connTracer err
-              pure (contended, [])
-            Right keys -> do
-              seed <- conn.connEntropy
-              walk (shuffled (fromIntegral seed) keys) alreadyRunning 0
-              pure (False, [])
+              pure (Polled contended 0 [])
+            Right globalRoom ->
+              -- Not even listed: with the queue full, every partition
+              -- would claim nothing.
+              if globalRoom == Just 0
+                then pure (Polled False 0 [])
+                else do
+                  partitions <- runSystemDB conn.connSysdb (\db -> SystemDB.getQueuePartitions db queueName)
+                  case partitions of
+                    Left err -> do
+                      contended <- reportDequeueError conn.connTracer err
+                      pure (Polled contended 0 [])
+                    Right keys -> do
+                      seed <- conn.connEntropy
+                      (claims, ids) <- walk (shuffled (fromIntegral seed) keys) alreadyRunning 0 globalRoom 0 []
+                      pure (Polled False claims ids)
   where
     limits = queueResolvedLimits queue
     queueName = queue.queueRecordName
@@ -284,13 +319,14 @@ pollOnce conn identity workflows tasks running queue datasources = do
               (fromIntegral partitionLocalRunning)
               ownerToken
         )
-    walk [] _ _ = pure ()
-    walk (partition : rest) alreadyRunning claimedHere =
-      case workerBudget limits (alreadyRunning + claimedHere) of
-        Just 0 -> pure ()
-        _ -> do
+    walk [] _ _ _ claims ids = pure (claims, ids)
+    walk (partition : rest) alreadyRunning claimedHere globalRoom claims ids
+      | workerBudget limits (alreadyRunning + claimedHere) == Just 0 = pure (claims, ids)
+      | roomSpent = pure (claims, ids)
+      | otherwise = do
           local <- runningPartitionCount running queueName partition
           ownerToken <- generatedWorkflowId conn
+          let claims' = claims + 1
           claimed <-
             runSystemDB
               conn.connSysdb
@@ -309,13 +345,24 @@ pollOnce conn identity workflows tasks running queue datasources = do
             Left err
               -- A peer holds this partition's rows. Skipping just this key
               -- is the point of walking them separately.
-              | isContention err -> walk rest alreadyRunning claimedHere
+              | isContention err -> walk rest alreadyRunning claimedHere globalRoom claims' ids
               | otherwise -> do
                   _ <- reportDequeueError conn.connTracer err
-                  walk rest alreadyRunning claimedHere
-            Right ids -> do
-              dispatchClaimed conn identity workflows tasks running queue (Just partition) ids ownerToken datasources
-              walk rest alreadyRunning (claimedHere + length ids)
+                  walk rest alreadyRunning claimedHere globalRoom claims' ids
+            Right dequeued -> do
+              dispatchClaimed conn identity workflows tasks running queue (Just partition) dequeued.dequeuedWorkflowIds ownerToken datasources
+              let claimedHere' = claimedHere + length dequeued.dequeuedWorkflowIds
+                  ids' = ids <> dequeued.dequeuedWorkflowIds
+              -- A queue-wide limit leaves every other partition just as
+              -- full, so the walk ends on it; a per-partition limit says
+              -- nothing about the next key.
+              case dequeued.dequeuedStoppedBy of
+                Just stop | spansPartitions stop -> pure (claims', ids')
+                _ -> walk rest alreadyRunning claimedHere' globalRoom claims' ids'
+      where
+        roomSpent = case globalRoom of
+          Just room -> claimedHere >= room
+          Nothing -> False
 
 -- | Turns a failed dequeue into the "was it contention" answer the caller
 -- backs off on. A peer mid-dequeue is the system working, not a failure.
@@ -532,7 +579,7 @@ internalQueueRecord =
       queueRecordPartitionWorkerConcurrency = Nothing,
       queueRecordPartitionRateLimit = Nothing,
       queueRecordPollingInterval = secondsDuration 1,
-      queueRecordApplicationName = Nothing
+      queueRecordAppName = Nothing
     }
 
 -- | Polls one queue until its row leaves the published set, or shutdown
@@ -554,8 +601,9 @@ pollQueue tasks conn identity workflows queues running name datasources = go (se
           let floorInterval = queue.queueRecordPollingInterval
               ceiling = max floorInterval maxPollingInterval
               clamped = max floorInterval (min ceiling interval)
-          (contended, _) <- pollOnce conn identity workflows tasks running queue datasources
-          let next =
+          polled <- pollOnce conn identity workflows tasks running queue datasources
+          let contended = polled.polledContention
+              next =
                 if contended
                   then min (scaleDuration backoffFactor clamped) ceiling
                   else max (scaleDuration scalebackFactor clamped) floorInterval
@@ -628,7 +676,7 @@ dequeuePass tasks conn identity workflows listenQueues datasources = do
           when (any (\record -> record.queueRecordName == internalName) records) $
             runTracer conn.connTracer InternalQueueLimitsIgnored
           claimedByQueue <- traverse (\queue -> pollOnce conn identity workflows tasks running queue datasources) queues
-          let claimed = concatMap snd claimedByQueue
+          let claimed = concatMap (.polledClaimed) claimedByQueue
           reportSlowPass conn passStart (length queues) (length claimed)
           pure (Right claimed)
 

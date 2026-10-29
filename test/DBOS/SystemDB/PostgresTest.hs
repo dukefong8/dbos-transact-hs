@@ -5,7 +5,7 @@ module DBOS.SystemDB.PostgresTest (tests, streamTests) where
 import DBOS.Prelude
 import DBOS.SystemDB.Error (decodePortableError)
 import DBOS.SystemDB
-  ( Applications (..),
+  ( AppScope (..),
     AwaitedOutcome (..),
     BackendError (..),
     BackendErrorKind (..),
@@ -33,6 +33,9 @@ import DBOS.SystemDB
     getQueue,
     getQueuePartitions,
     GetEventCaller (..),
+    Dequeued (..),
+    DequeueStop (..),
+    countPendingQueueWorkflows,
     listQueues,
     newQueue,
     recordChildResult,
@@ -43,8 +46,9 @@ import DBOS.SystemDB
     upsertQueue,
     deleteQueue,
     IdempotencyKey (..),
+    IdleTransactionTimeout (..),
     InitWorkflowCaller (..),
-    SendMessage (..),
+    EncodedSendMessage (..),
     SerializedWorkflowValue (..),
     Serialization (..),
     portableJsonSerialization,
@@ -71,6 +75,7 @@ import DBOS.SystemDB
     ApplicationName,
     QueueRecord (..),
     QueueUpdate (..),
+    RateLimit (..),
     RenameBatching (..),
     ScheduleFilter (..),
     ScheduleRecord (..),
@@ -79,6 +84,7 @@ import DBOS.SystemDB
     defaultQueueUpdate,
     defaultScheduleFilter,
     defaultScheduleUpdate,
+    durationFromSecs,
     RenameFrom (..),
     defaultForkOptions,
     defaultRetryPolicy,
@@ -91,6 +97,7 @@ import DBOS.SystemDB
     newWorkflow,
     parseApplicationName,
     secondsDuration,
+    spansPartitions,
     sleepStepName,
     streamClosedSentinel,
     timestampFromEpochMs,
@@ -128,12 +135,17 @@ import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import DBOS.Transact.Logger (nullTracer)
 import Data.UUID.V4 qualified as UUID.V4
+import Hasql.Connection qualified as Connection
+import Hasql.Connection.Settings qualified as ConnectionSettings
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Errors qualified as Errors
 import Hasql.Pool qualified as Pool
+import Hasql.Pool.Config qualified as PoolConfig
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
+import Hasql.Transaction qualified as Tx
+import Pqi.Ffi qualified as Pqi
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -161,6 +173,7 @@ tests =
         assertBool "the listing pages in step order" ("order by function_id" `Text.isInfixOf` offSql)
         assertBool "limit and offset are bound" ("limit $2 offset $3" `Text.isInfixOf` offSql),
       lifecycleTests getBackend,
+      idleTimeoutTests getBackend,
       schemaTests getBackend,
       workflowTests getBackend,
       childrenTests getBackend,
@@ -193,7 +206,7 @@ acquireSuiteBackend = do
 
 -- | A handle acting for a named application, over the suite pool.
 withBackendAs :: IO PostgresSystemDB -> Maybe Text -> (PostgresSystemDB -> IO a) -> IO a
-withBackendAs getBackend appName = withBackendSettings getBackend (defaultSettings {settingsApplicationName = appName})
+withBackendAs getBackend appName = withBackendSettings getBackend (defaultSettings {settingsAppName = appName})
 
 -- | A handle with the given settings, over the suite pool: 'fromPool'
 -- wraps the shared pool, so no case opens connections of its own.
@@ -546,6 +559,8 @@ classifyTests =
         kindOf (serverUsage "08000" "connection exception") @?= Connection
         kindOf (serverUsage "53300" "too many connections") @?= Connection
         kindOf (serverUsage "57000" "cannot connect now") @?= Connection,
+      testCase "an idle session the server ended is a lost connection" $
+        kindOf (serverUsage "25P03" "terminating connection due to idle-in-transaction timeout") @?= Connection,
       testCase "XXUUU with a transport message is a connection failure" $
         kindOf (serverUsage "XXUUU" "read tcp 10.0.0.1:26257->10.0.0.2:5432: i/o timeout") @?= Connection,
       testCase "XXUUU with an internal message is permanent" $
@@ -601,6 +616,7 @@ configTests =
         let config = configNew "postgresql://u:p@host:5432/db"
         config.configUrl @?= "postgresql://u:p@host:5432/db"
         config.configMaxConnections @?= 10
+        config.configIdleTransactionTimeout @?= Default
         config.configSettings @?= defaultSettings
     ]
 
@@ -674,6 +690,156 @@ lifecycleTests getBackend =
         _ <- close env
         pure ()
     ]
+
+-- | The idle-transaction timeout connect sets: each variant read back
+-- from the server it was set on, so backend formatting differences
+-- cannot hide a missed @SET@. Owns no rows and opens its own pools, so
+-- these run safely alongside anything else.
+idleTimeoutTests :: IO PostgresSystemDB -> TestTree
+idleTimeoutTests getBackend =
+  testGroup
+    "Idle transaction timeout"
+    [ testCase "connect sets sixty seconds by default" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        shown <- connected base Default
+        reference <- connected (withOptions base "options=-c%20idle_in_transaction_session_timeout%3D60000") ServerSetting
+        shown @?= reference,
+      testCase "connect sets an explicit timeout" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        shown <- connected base (After (millisDuration 300))
+        reference <- connected (withOptions base "options=-c%20idle_in_transaction_session_timeout%3D300") ServerSetting
+        shown @?= reference,
+      testCase "a positive timeout under a millisecond is a millisecond" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        subMs <- case durationFromSecs 0.0005 of
+          Nothing -> fail "expected a sub-millisecond duration"
+          Just duration -> pure duration
+        shown <- connected base (After subMs)
+        reference <- connected (withOptions base "options=-c%20idle_in_transaction_session_timeout%3D1") ServerSetting
+        shown @?= reference,
+      testCase "ServerSetting leaves the server's setting" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        shown <- connected base ServerSetting
+        -- The server's own value, read over a raw connection that sets
+        -- nothing: the suite pool carries the default sixty seconds.
+        server <- rawShow base
+        shown @?= server,
+      testCase "the URL's own options keep theirs, however spelled" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        owned <- connected (withOptions base "options=-c%20idle_in_transaction_session_timeout%3D1234") ServerSetting
+        forM_
+          [ "options=-c%20idle_in_transaction_session_timeout%3D1234",
+            "options=-c%20IDLE%5FIN%5FTRANSACTION%5FSESSION%5FTIMEOUT%3D1234",
+            "options=--idle-in-transaction-session-timeout%3D1234"
+          ]
+          ( \query -> do
+              kept <- connected (withOptions base query) Default
+              kept @?= owned
+          ),
+      testCase "a bare parameter the URL cannot carry is refused at once" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        -- libpq rejects a bare server parameter the URL cannot carry, so
+        -- there is nothing to connect with: without connection retries
+        -- the refusal surfaces at once as a connection failure rather
+        -- than blocking on a database that will never answer. The
+        -- detection itself (the parameter sets nothing) is unit-proven;
+        -- sqlx accepts this URL where libpq does not, so the oracle's
+        -- twin connects here and ours cannot.
+        outcome <-
+          try
+            ( acquirePostgresSystemDB
+                ((configNew (withOptions base "idle_in_transaction_session_timeout=1234")) {configIdleTransactionTimeout = Default, configSettings = defaultSettings {settingsRetry = defaultRetryPolicy {retryPolicyRetryConnectionErrors = False}}})
+                nullTracer
+            )
+        case outcome of
+          Left (Backend backend) -> backend.backendKind @?= Connection
+          _ -> fail "expected a refused connection",
+      testCase "a value that merely names the parameter sets nothing" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        sixty <- connected base Default
+        set <- connected (withOptions base "options=-c%20application_name%3Didle_in_transaction_session_timeout") Default
+        set @?= sixty,
+      testCase "a pool the caller built is left alone" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        server <- rawShow base
+        -- A pool `connect` never saw, wrapped by `fromPool`: no SET runs
+        -- on its connections, so it reads the server's own value rather
+        -- than the sixty seconds a connected pool carries.
+        bracket
+          (Pool.acquire Pqi.adapter (PoolConfig.settings [PoolConfig.size 1, PoolConfig.staticConnectionSettings (ConnectionSettings.connectionString base)]))
+          Pool.release
+          $ \pool -> do
+            env <- fromPool pool 1 defaultSettings nullTracer
+            shown <- showIdleTimeout env
+            shown @?= server,
+      testCase "a bad timeout is refused before anything connects" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        outcome <- try (acquirePostgresSystemDB ((configNew base) {configIdleTransactionTimeout = After (millisDuration 0)}) nullTracer)
+        case outcome of
+          Left (InvalidInput {}) -> pure ()
+          _ -> fail "expected InvalidInput",
+      testCase "the server ends a transaction left idle" $ do
+        baseConfig <- configFromEnv
+        let base = baseConfig.configUrl
+        -- A session-level advisory lock stands in for a row lock: the
+        -- server releases it with the session, and a second session can
+        -- take it at once only if the first is gone. The dead session
+        -- itself reports whatever the driver saw on next use (usually a
+        -- closed connection, with no SQLSTATE to classify), so the twin
+        -- asserts the failure plus the lock's release — the 25P03 code
+        -- itself is pinned by the classifier unit twin. The key folds in
+        -- a fresh id, so two suites sharing one server never share a
+        -- lock.
+        lockId <- freshWorkflowId
+        let lockKey = Text.foldl' (\key char -> key * 31 + fromIntegral (fromEnum char)) 0 lockId
+            lockSql = Text.pack (show lockKey)
+        outcome <-
+          bracket
+            (Connection.acquire Pqi.adapter (ConnectionSettings.connectionString base) >>= either (fail . show) pure)
+            Connection.release
+            $ \idle -> do
+              _ <- Connection.use idle (Session.script "set idle_in_transaction_session_timeout = 300") >>= either (fail . show) pure
+              _ <- Connection.use idle (Session.script "begin") >>= either (fail . show) pure
+              _ <- Connection.use idle (Session.script ("select pg_advisory_lock(" <> lockSql <> ")")) >>= either (fail . show) pure
+              threadDelay 1000000
+              Connection.use idle (Session.statement () Statements.showIdleTimeoutStatement)
+        case outcome of
+          Left _ -> pure ()
+          Right _ -> fail "expected the idle session to be ended"
+        bracket
+          (Connection.acquire Pqi.adapter (ConnectionSettings.connectionString base) >>= either (fail . show) pure)
+          Connection.release
+          $ \fresh -> do
+            taken <- Connection.use fresh (Session.statement lockKey Statements.tryAdvisoryLockStatement) >>= either (fail . show) pure
+            taken @?= True
+    ]
+  where
+    connected url timeout =
+      bracket
+        (acquirePostgresSystemDB ((configNew url) {configIdleTransactionTimeout = timeout}) nullTracer)
+        releasePostgresSystemDB
+        showIdleTimeout
+    showIdleTimeout env = do
+      result <- runSession env "fixture-show-idle-timeout" (Session.statement () Statements.showIdleTimeoutStatement)
+      case result of
+        Left err -> fail (show err)
+        Right value -> pure value
+    -- The server's own reading over a raw connection that sets nothing.
+    rawShow url =
+      bracket
+        (Connection.acquire Pqi.adapter (ConnectionSettings.connectionString url) >>= either (fail . show) pure)
+        Connection.release
+        $ \raw -> Connection.use raw (Session.statement () Statements.showIdleTimeoutStatement) >>= either (fail . show) pure
+    withOptions url query = url <> (if "?" `Text.isInfixOf` url then "&" else "?") <> query
 
 -- | Live schema contract, folded in from the parked @DBOS.SchemaTest@
 -- (2026-09-29): the Python DBOS table set and the columns Haskell's pinned
@@ -1145,7 +1311,7 @@ listTests getBackend =
         withBackendAs getBackend Nothing $ \bare -> do
           _ <- runSession bare "fixture" (insertFixture (defaultFixture claimed) {fixtureApplication = mine})
           _ <- runSession bare "fixture" (insertFixture (defaultFixture unclaimed))
-          named <- fromPool bare.psdbPool 8 (defaultSettings {settingsApplicationName = mine}) nullTracer
+          named <- fromPool bare.psdbPool 8 (defaultSettings {settingsAppName = mine}) nullTracer
           let scoped env workflowFilter = idsOf env workflowFilter {workflowFilterWorkflowIds = [claimed, unclaimed]}
           -- A handle with no application of its own sees every application's
           -- rows rather than only the unclaimed ones.
@@ -1154,9 +1320,9 @@ listTests getBackend =
           -- A named handle scopes to its name plus the unclaimed rows.
           own <- sort <$> scoped named defaultWorkflowFilter
           own @?= sort [claimed, unclaimed]
-          other <- scoped named defaultWorkflowFilter {workflowFilterApplications = Named [unique <> "-elsewhere"]}
+          other <- scoped named defaultWorkflowFilter {workflowFilterAppScope = Named [unique <> "-elsewhere"]}
           other @?= [unclaimed]
-          anyRows <- sort <$> scoped named defaultWorkflowFilter {workflowFilterApplications = AnyApplication}
+          anyRows <- sort <$> scoped named defaultWorkflowFilter {workflowFilterAppScope = AnyApplication}
           anyRows @?= sort [claimed, unclaimed],
       testCase "an id is an address while a prefix stays a search" $ do
         unique <- freshWorkflowId
@@ -1170,7 +1336,7 @@ listTests getBackend =
           _ <- runSession bare "fixture" (insertFixture (defaultFixture owned) {fixtureApplication = mine})
           _ <- runSession bare "fixture" (insertFixture (defaultFixture peer) {fixtureApplication = Just theirsName})
           _ <- runSession bare "fixture" (insertFixture (defaultFixture nobody))
-          named <- fromPool bare.psdbPool 8 (defaultSettings {settingsApplicationName = mine}) nullTracer
+          named <- fromPool bare.psdbPool 8 (defaultSettings {settingsAppName = mine}) nullTracer
           -- A prefix is a search, not an address, so it stays scoped to the
           -- caller's own rows plus the unclaimed ones.
           let stem = defaultWorkflowFilter {workflowFilterWorkflowIdPrefixes = [unique]}
@@ -1181,7 +1347,7 @@ listTests getBackend =
           byId <- idsOf named defaultWorkflowFilter {workflowFilterWorkflowIds = [peer]}
           byId @?= [peer]
           -- Naming an application still narrows an id-keyed read.
-          narrowed <- idsOf named defaultWorkflowFilter {workflowFilterWorkflowIds = [peer], workflowFilterApplications = Named [mineName]}
+          narrowed <- idsOf named defaultWorkflowFilter {workflowFilterWorkflowIds = [peer], workflowFilterAppScope = Named [mineName]}
           narrowed @?= [],
       testCase "queues-only and parented flags narrow" $ do
         unique <- freshWorkflowId
@@ -1626,9 +1792,9 @@ queueTests getBackend =
           record <- registeredQueue env name
           version <- latestVersion env
           claimed <- startQueuedWorkflows env record "exec" version Nothing 0 0 "tok-c"
-          fmap length claimed @?= Right 1
+          fmap (length . (.dequeuedWorkflowIds)) claimed @?= Right 1
           blocked <- startQueuedWorkflows env record "exec" version Nothing 1 0 "tok-c"
-          blocked @?= Right [],
+          fmap (.dequeuedWorkflowIds) blocked @?= Right [],
       testCase "an empty partition key is refused" $ do
         unique <- freshWorkflowId
         let name = "q-" <> Text.take 8 unique
@@ -1648,7 +1814,7 @@ queueTests getBackend =
           record <- registeredQueue env name
           version <- latestVersion env
           claimed <- startQueuedWorkflows env record "exec" version Nothing 0 0 "tok-claim-0"
-          claimed @?= Right [WorkflowId unique]
+          fmap (.dequeuedWorkflowIds) claimed @?= Right [WorkflowId unique]
           readBack <- getWorkflow env (WorkflowId unique)
           case readBack of
             Right (Just row) -> row.workflowRecordStatus @?= Pending
@@ -1663,7 +1829,7 @@ queueTests getBackend =
           version <- latestVersion env
           -- One token per claim: the caller mints it, the claim writes it.
           claimed <- startQueuedWorkflows env record "exec" version Nothing 0 0 "tok-claim-1"
-          claimed @?= Right [WorkflowId unique]
+          fmap (.dequeuedWorkflowIds) claimed @?= Right [WorkflowId unique]
           readBack <- getWorkflow env (WorkflowId unique)
           case readBack of
             Right (Just row) -> row.workflowRecordOwnerXid @?= Just "tok-claim-1"
@@ -1679,15 +1845,83 @@ queueTests getBackend =
           -- A listener of another application skips the scoped row: the
           -- claim's filter admits its own application's rows and
           -- unclaimed ones only.
-          withBackendSettings getBackend (defaultSettings {settingsApplicationName = Just foreignApp}) $ \foreignEnv -> do
+          withBackendSettings getBackend (defaultSettings {settingsAppName = Just foreignApp}) $ \foreignEnv -> do
             foreignRecord <- registeredQueue foreignEnv name
             foreignClaim <- startQueuedWorkflows foreignEnv foreignRecord "foreign-exec" version Nothing 0 0 "tok-c"
-            foreignClaim @?= Right []
+            fmap (.dequeuedWorkflowIds) foreignClaim @?= Right []
           -- The application the row names claims it.
-          withBackendSettings getBackend (defaultSettings {settingsApplicationName = Just ("fixture-" <> unique)}) $ \ownerEnv -> do
+          withBackendSettings getBackend (defaultSettings {settingsAppName = Just ("fixture-" <> unique)}) $ \ownerEnv -> do
             ownerRecord <- registeredQueue ownerEnv name
             ownerClaim <- startQueuedWorkflows ownerEnv ownerRecord "owner-exec" version Nothing 0 0 "tok-c"
-            ownerClaim @?= Right [WorkflowId unique],
+            fmap (.dequeuedWorkflowIds) ownerClaim @?= Right [WorkflowId unique],
+      testCase "the pending count sees only the queue's running rows" $ do
+        unique <- freshWorkflowId
+        let orders = "q-orders-" <> Text.take 8 unique
+            invoices = "q-invoices-" <> Text.take 8 unique
+        withBackend getBackend $ \env -> do
+          _ <- upsertQueue env (newQueue orders) UpdateExisting
+          _ <- upsertQueue env (newQueue invoices) UpdateExisting
+          empty <- countPendingQueueWorkflows env orders
+          empty @?= Right 0
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-a")) {fixtureQueue = Just orders, fixtureStatus = "PENDING", fixturePartitionKey = Just "alpha"}
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-b")) {fixtureQueue = Just orders, fixtureStatus = "PENDING", fixturePartitionKey = Just "beta"}
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-c")) {fixtureQueue = Just invoices, fixtureStatus = "PENDING"}
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-w")) {fixtureQueue = Just orders, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "alpha"}
+          counted <- countPendingQueueWorkflows env orders
+          counted @?= Right 2,
+      testCase "a partition claim names a spent queue-wide concurrency limit" $ do
+        unique <- freshWorkflowId
+        let name = "q-" <> Text.take 8 unique
+        withBackend getBackend $ \env -> do
+          _ <- upsertQueue env (newQueue name) {newQueueConcurrency = Just 1, newQueuePartitionConcurrency = Just 1} UpdateExisting
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureQueue = Just name, fixtureStatus = "PENDING", fixturePartitionKey = Just "alpha"}
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-w")) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "beta"}
+          record <- registeredQueue env name
+          version <- latestVersion env
+          claimed <- startQueuedWorkflows env record "exec" version (Just "beta") 0 0 "tok-c"
+          fmap (.dequeuedWorkflowIds) claimed @?= Right []
+          fmap (.dequeuedStoppedBy) claimed @?= Right (Just DequeueStopConcurrency)
+          spansPartitions DequeueStopConcurrency @?= True,
+      testCase "a partition claim names a spent queue-wide rate limit" $ do
+        unique <- freshWorkflowId
+        let name = "q-" <> Text.take 8 unique
+        withBackend getBackend $ \env -> do
+          _ <- upsertQueue env (newQueue name) {newQueueRateLimit = Just (RateLimit {rateLimitLimit = 1, rateLimitPeriod = secondsDuration 3600}), newQueuePartitionConcurrency = Just 1} UpdateExisting
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "beta"}
+          record <- registeredQueue env name
+          version <- latestVersion env
+          -- The first claim fills the window and marks the row it took;
+          -- the second finds no room left.
+          _ <- startQueuedWorkflows env record "exec" version (Just "beta") 0 0 "tok-first"
+          claimed <- startQueuedWorkflows env record "exec" version (Just "beta") 0 0 "tok-second"
+          fmap (.dequeuedWorkflowIds) claimed @?= Right []
+          fmap (.dequeuedStoppedBy) claimed @?= Right (Just DequeueStopRateLimit)
+          spansPartitions DequeueStopRateLimit @?= True,
+      testCase "a full partition is named as that partition's limit alone" $ do
+        unique <- freshWorkflowId
+        let name = "q-" <> Text.take 8 unique
+        withBackend getBackend $ \env -> do
+          _ <- upsertQueue env (newQueue name) {newQueueConcurrency = Just 10, newQueuePartitionConcurrency = Just 1} UpdateExisting
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureQueue = Just name, fixtureStatus = "PENDING", fixturePartitionKey = Just "alpha"}
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-w")) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "alpha"}
+          record <- registeredQueue env name
+          version <- latestVersion env
+          claimed <- startQueuedWorkflows env record "exec" version (Just "alpha") 0 0 "tok-c"
+          fmap (.dequeuedWorkflowIds) claimed @?= Right []
+          fmap (.dequeuedStoppedBy) claimed @?= Right (Just DequeueStopPartitionConcurrency)
+          spansPartitions DequeueStopPartitionConcurrency @?= False,
+      testCase "a full worker is named as the stop" $ do
+        unique <- freshWorkflowId
+        let name = "q-" <> Text.take 8 unique
+        withBackend getBackend $ \env -> do
+          _ <- upsertQueue env (newQueue name) {newQueueWorkerConcurrency = Just 1, newQueuePartitionConcurrency = Just 1} UpdateExisting
+          _ <- insertFixtureChecked env (ownedFixture (unique <> "-w")) {fixtureQueue = Just name, fixtureStatus = "ENQUEUED", fixturePartitionKey = Just "alpha"}
+          record <- registeredQueue env name
+          version <- latestVersion env
+          claimed <- startQueuedWorkflows env record "exec" version (Just "alpha") 1 0 "tok-c"
+          fmap (.dequeuedWorkflowIds) claimed @?= Right []
+          fmap (.dequeuedStoppedBy) claimed @?= Right (Just DequeueStopWorkerConcurrency)
+          spansPartitions DequeueStopWorkerConcurrency @?= True,
       testCase "a partition sweep takes one head per partition" $ do
         unique <- freshWorkflowId
         let name = "q-" <> Text.take 8 unique
@@ -1755,7 +1989,7 @@ queueTests getBackend =
                   debounceRequestPeriod = secondsDuration 1,
                   debounceRequestInputs = Just "{\"n\":2}",
                   debounceRequestSerialization = Nothing,
-                  debounceRequestApplicationName = Nothing
+                  debounceRequestAppName = Nothing
                 }
         withBackend getBackend $ \env -> do
           now <- timestampNow
@@ -1905,7 +2139,7 @@ bounceRequest queueName key =
       debounceRequestPeriod = millisDuration 2000,
       debounceRequestInputs = Just "{\"n\":2}",
       debounceRequestSerialization = Nothing,
-      debounceRequestApplicationName = Nothing
+      debounceRequestAppName = Nothing
     }
 
 -- | Application versions: registering one claims a nameless row or inserts
@@ -1954,7 +2188,7 @@ versionTests getBackend =
         let versionName = "v-" <> Text.take 8 unique
             otherApp = "other-" <> Text.take 8 unique
             mine = "mine-" <> Text.take 8 unique
-        withBackendSettings getBackend (defaultSettings {settingsApplicationName = Just mine}) $ \env -> do
+        withBackendSettings getBackend (defaultSettings {settingsAppName = Just mine}) $ \env -> do
           _ <- createApplicationVersion env versionName (Just otherApp)
           refused <- createApplicationVersion env versionName Nothing
           case refused of
@@ -1993,7 +2227,7 @@ versionTests getBackend =
                   ("explain " <> query)
                   Encoders.noParams
                   (Decoders.rowList (Decoders.column (Decoders.nonNullable Decoders.text)))
-            appOf info = info.versionInfoApplicationName
+            appOf info = info.versionInfoAppName
         withBackend getBackend $ \env -> do
           planted <- runSession env "plant versions" plant
           planted @?= Right (fromIntegral (3 * perOwner))
@@ -2057,11 +2291,11 @@ renameTests getBackend =
           counts @?= Right (ApplicationRowCounts 0 0 0 2 0)
           live <- getWorkflow env (WorkflowId inFlight)
           case live of
-            Right (Just record) -> record.workflowRecordApplicationName @?= Just newName
+            Right (Just record) -> record.workflowRecordAppName @?= Just newName
             other -> fail ("expected record, got: " <> show other)
           done <- getWorkflow env (WorkflowId settled)
           case done of
-            Right (Just record) -> record.workflowRecordApplicationName @?= Just newName
+            Right (Just record) -> record.workflowRecordAppName @?= Just newName
             other -> fail ("expected record, got: " <> show other),
       testCase "renaming the unclaimed leaves other applications alone" $ do
         unique <- freshWorkflowId
@@ -2078,7 +2312,7 @@ renameTests getBackend =
             other -> fail ("expected counts, got: " <> show other)
           kept <- getWorkflow env (WorkflowId owned)
           case kept of
-            Right (Just record) -> record.workflowRecordApplicationName @?= Just "other-app"
+            Right (Just record) -> record.workflowRecordAppName @?= Just "other-app"
             other -> fail ("expected record, got: " <> show other),
       testCase "a batched rename moves the same rows" $ do
         unique <- freshWorkflowId
@@ -2256,7 +2490,7 @@ lifecycleWriteTests getBackend =
                   env
                   ( (newWorkflow wid)
                       { newWorkflowDeadline = Just deadline,
-                        newWorkflowApplicationName = Just sweepApp
+                        newWorkflowAppName = Just sweepApp
                       }
                   )
                   Nothing
@@ -2288,7 +2522,7 @@ lifecycleWriteTests getBackend =
           -- never see this row (nor sweep it first). The single-row cancel
           -- takes no application filter, so the scope changes nothing it
           -- asserts.
-          let scoped = (newWorkflow owned) {newWorkflowDeadline = Just (timestampFromEpochMs 1000), newWorkflowApplicationName = Just ("guard-app-" <> owned)}
+          let scoped = (newWorkflow owned) {newWorkflowDeadline = Just (timestampFromEpochMs 1000), newWorkflowAppName = Just ("guard-app-" <> owned)}
           _ <- initWorkflow env scoped Nothing
           refused <- cancelIfTimedOut env (WorkflowId owned) "someone-else"
           refused @?= Right False
@@ -2546,6 +2780,51 @@ messageTests getBackend =
           case reported of
             Right records -> length (filter (.notificationRecordConsumed) records) @?= 1
             other -> fail ("expected the consumed message, got: " <> show other),
+      testCase "a recv whose message a rival took waits for the next" $ do
+        destination <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture destination)
+          tookOne <- async (recv env (WorkflowId destination) 1 2 (Just "approval") (secondsDuration 5) (fixtureOwner destination))
+          tookTwo <- async (recv env (WorkflowId destination) 3 4 (Just "approval") (secondsDuration 5) (fixtureOwner destination))
+          threadDelay 100000
+          _ <- sendMessage env (messageTo (WorkflowId destination) (Topic "approval") (SerializedWorkflowValue "one" Nothing)) Nothing Nothing Nothing False
+          threadDelay 100000
+          _ <- sendMessage env (messageTo (WorkflowId destination) (Topic "approval") (SerializedWorkflowValue "two" Nothing)) Nothing Nothing Nothing False
+          answers <- traverse wait [tookOne, tookTwo]
+          let bodies = [body | Right (Just value) <- answers, let EncodedValue body _ = value]
+          assertBool ("expected one take of each message, got: " <> show answers) (length bodies == 2 && "one" `elem` bodies && "two" `elem` bodies)
+          reported <- getAllNotifications env (WorkflowId destination)
+          case reported of
+            Right records -> length (filter (.notificationRecordConsumed) records) @?= 2
+            other -> fail ("expected both messages consumed, got: " <> show other),
+      testCase "an empty take records nothing" $ do
+        -- The load-bearing semantic of the take-inside-the-wait-loop: a
+        -- take that finds nothing writes no step, so a later take for
+        -- the same step still waits rather than adopting an absence.
+        -- Deterministic where the threaded twin cannot be: one take
+        -- consumes, the next misses, and only the miss must leave no
+        -- record.
+        destination <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture destination)
+          _ <- sendMessage env (messageTo (WorkflowId destination) (Topic "approval") (SerializedWorkflowValue "one" Nothing)) Nothing Nothing Nothing False
+          let runTake step = Backend.runTransaction env "fixture-take" $ do
+                owned <- Statements.checkOwnerTx destination (fixtureOwner destination)
+                case owned of
+                  Left conflict -> Tx.condemn >> pure (Left conflict)
+                  Right () ->
+                    Right
+                      <$> Statements.recvTx (Statements.RecvParams destination step "approval" 0 0)
+          tookFirst <- runTake 1
+          case tookFirst of
+            Right (Right (Statements.RecvTook message)) -> message @?= Statements.EncodedValueRaw "one" Nothing
+            other -> fail ("expected the first take to consume, got: " <> show other)
+          missed <- runTake 2
+          case missed of
+            Right (Right Statements.RecvMissed) -> pure ()
+            other -> fail ("expected the empty take to miss unrecorded, got: " <> show other)
+          step <- checkStep env (WorkflowId destination) 2 "DBOS.recv"
+          step @?= Right Nothing,
       testCase "a stale token's recv take is refused and the message stays parked" $ do
         destination <- freshWorkflowId
         withBackend getBackend $ \env -> do
@@ -2558,6 +2837,17 @@ messageTests getBackend =
           -- The refused take rolled back: the owner's take still finds it.
           taken <- recv env (WorkflowId destination) 1 2 (Just "approval") (millisDuration 0) (fixtureOwner destination)
           taken @?= Right (Just (EncodedValue "held" Nothing)),
+      testCase "a stale token's recv absence is refused and records nothing" $ do
+        destination <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture destination)
+          refused <- recv env (WorkflowId destination) 1 2 (Just "approval") (millisDuration 0) "someone-else"
+          case refused of
+            Left (WorkflowConflict {}) -> pure ()
+            other -> fail ("expected WorkflowConflict, got: " <> show other)
+          -- Nothing was recorded: no step answers a later read.
+          step <- checkStep env (WorkflowId destination) 1 "DBOS.recv"
+          step @?= Right Nothing,
       testCase "a send to forks reaches the fork tree" $ do
         source <- freshWorkflowId
         withBackend getBackend $ \env -> do
@@ -3072,7 +3362,7 @@ recoveryTests getBackend =
           case leftAlone of
             Right (Just record) -> do
               record.workflowRecordStatus @?= Pending
-              record.workflowRecordApplicationName @?= Just theirs
+              record.workflowRecordAppName @?= Just theirs
             other -> fail ("expected record, got: " <> show other)
           none <- reenqueueForRecovery env [] "v1" "_dbos_internal_queue"
           none @?= Right []
@@ -3328,7 +3618,7 @@ scheduleTests getBackend =
               record.scheduleRecordAutomaticBackfill @?= True
               record.scheduleRecordCronTimezone @?= Just "Europe/London"
               record.scheduleRecordQueueName @?= Just "reports"
-              record.scheduleRecordApplicationName @?= Nothing
+              record.scheduleRecordAppName @?= Nothing
             other -> fail ("expected the schedule, got: " <> show other)
           missing <- getSchedule env (name <> "-absent") Nothing
           missing @?= Right Nothing
@@ -3411,7 +3701,7 @@ scheduleTests getBackend =
             Left (AlreadyRegistered {kind = kind}) -> kind @?= "Schedule id"
             other -> fail ("expected an id collision, got: " <> show other)
           _ <- upsertSchedule env schedule Nothing
-          names <- scheduleNames env (defaultScheduleFilter {scheduleFilterNamePrefixes = [name], scheduleFilterApplications = AnyApplication})
+          names <- scheduleNames env (defaultScheduleFilter {scheduleFilterNamePrefixes = [name], scheduleFilterAppScope = AnyApplication})
           names @?= [name]
           _ <- deleteSchedule env name Nothing
           pure (),
@@ -3438,7 +3728,7 @@ scheduleTests getBackend =
         withBackendAs getBackend (Just beta) $ \env -> do
           _ <- upsertSchedule env (newSchedule unclaimed "sweep" "0 * * * *") Nothing
           claimed <- readSchedule env unclaimed
-          claimed.scheduleRecordApplicationName @?= Just beta
+          claimed.scheduleRecordAppName @?= Just beta
         withBackend getBackend $ \env -> do
           _ <- deleteSchedule env name Nothing
           _ <- deleteSchedule env unclaimed Nothing
@@ -3507,7 +3797,7 @@ scheduleTests getBackend =
             reportWeekly = base <> "report-weekly"
             sweepHourly = base <> "sweep-hourly"
             wildcardOdd = base <> "100%-odd"
-            scoped = defaultScheduleFilter {scheduleFilterNamePrefixes = [base], scheduleFilterApplications = AnyApplication}
+            scoped = defaultScheduleFilter {scheduleFilterNamePrefixes = [base], scheduleFilterAppScope = AnyApplication}
         withBackend getBackend $ \env -> do
           forM_
             [ (reportNightly, "generate_report"),
@@ -3555,19 +3845,19 @@ scheduleTests getBackend =
           created <- createSchedule env (newSchedule nobodyJob "run" "0 0 * * *") Nothing
           created @?= Right ()
         withBackendAs getBackend (Just alpha) $ \env -> do
-          own <- scheduleNames env scoped {scheduleFilterApplications = Unset}
+          own <- scheduleNames env scoped {scheduleFilterAppScope = Unset}
           own @?= [alphaJob, nobodyJob]
-          anyApp <- scheduleNames env scoped {scheduleFilterApplications = AnyApplication}
+          anyApp <- scheduleNames env scoped {scheduleFilterAppScope = AnyApplication}
           anyApp @?= [alphaJob, betaJob, nobodyJob]
-          named <- scheduleNames env scoped {scheduleFilterApplications = Named [beta]}
+          named <- scheduleNames env scoped {scheduleFilterAppScope = Named [beta]}
           named @?= [betaJob, nobodyJob]
           -- A schedule is addressed by name, so a read crosses applications.
           crossed <- getSchedule env betaJob Nothing
           case crossed of
-            Right (Just record) -> record.scheduleRecordApplicationName @?= Just beta
+            Right (Just record) -> record.scheduleRecordAppName @?= Just beta
             other -> fail ("expected beta's schedule, got: " <> show other)
         withBackend getBackend $ \env -> do
-          unnamedOwn <- scheduleNames env scoped {scheduleFilterApplications = Unset}
+          unnamedOwn <- scheduleNames env scoped {scheduleFilterAppScope = Unset}
           unnamedOwn @?= [alphaJob, betaJob, nobodyJob]
           traverse_ (\scheduleName -> deleteSchedule env scheduleName Nothing) [alphaJob, betaJob, nobodyJob]
           pure (),

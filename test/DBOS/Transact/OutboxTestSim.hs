@@ -168,8 +168,8 @@ simOutboxFixture = do
                   newWorkflowSerialization = Just portableJsonSerialization,
                   newWorkflowQueueName = Just "ob-notify-q",
                   newWorkflowExecutorId = Nothing,
-                  newWorkflowApplicationName = Just "sim-app",
-                  newWorkflowApplicationVersion = Just "0.0.0"
+                  newWorkflowAppName = Just "sim-app",
+                  newWorkflowAppVersion = Just "0.0.0"
                 }
         created <- runSystemDB (SomeSystemDB mem) (\db -> SystemDB.initWorkflow db row Nothing)
         case created of

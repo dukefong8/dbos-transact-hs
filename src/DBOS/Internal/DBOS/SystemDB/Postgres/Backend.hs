@@ -106,7 +106,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), Applications (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, validateAttributes, validateNewWorkflow, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), AppScope (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Dequeued (..), DequeueStop (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdleTransactionTimeout (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, idleTimeoutMillis, idleTimeoutParameter, idleTimeoutValidate, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateAttributes, validateNewWorkflow, refuseSelfTarget, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import Hasql.Connection.Settings qualified as Connection
@@ -371,7 +371,7 @@ getEventSession (WorkflowId workflowId) key =
 -- recipient. The batch is one statement, so it is all-or-nothing.
 sendMessagesSession ::
   [MessageUUID] ->
-  [SendMessage] ->
+  [EncodedSendMessage] ->
   Session ()
 sendMessagesSession fallbackIds messages =
   void $ sqlExecTypedSession [typedSql|
@@ -873,8 +873,13 @@ sessionKind sessionError = case sessionError of
   _ -> Permanent
 
 -- | The retry verdict for one server-reported error, by SQLSTATE class.
+-- @25P03@ is a lost connection by code, not by class: the server ended a
+-- session left idle inside a transaction, so asking again on a new
+-- connection is what a lost connection asks for.
 serverKind :: Errors.ServerError -> BackendErrorKind
-serverKind (Errors.ServerError code message _ _ _) = case Text.take 2 code of
+serverKind (Errors.ServerError code message _ _ _)
+  | code == "25P03" = Connection
+  | otherwise = case Text.take 2 code of
   "40"                              -> Transient
   "08"                              -> Connection
   "53"                              -> Connection
@@ -911,7 +916,7 @@ data Settings = Settings
   { settingsSchema               :: Text,
     settingsRetry                :: RetryPolicy,
     settingsExecutorId           :: Maybe Text,
-    settingsApplicationName      :: Maybe Text,
+    settingsAppName              :: Maybe Text,
     settingsPollingConcurrency   :: PollingConcurrency,
     settingsNotificationCoalesce :: Maybe Duration
   }
@@ -925,7 +930,7 @@ defaultSettings =
     { settingsSchema = "dbos",
       settingsRetry = defaultRetryPolicy,
       settingsExecutorId = Nothing,
-      settingsApplicationName = Nothing,
+      settingsAppName = Nothing,
       settingsPollingConcurrency = PollingDefault,
       settingsNotificationCoalesce = Nothing
     }
@@ -934,11 +939,15 @@ defaultSettings =
 -- fields Haskell never uses: @use_listen_notify@ (a migration input, and
 -- Haskell does not migrate) and @migrate@ (ADR-0004: the Rust runner owns
 -- migrations; 'acquirePostgresSystemDB' verifies instead). @maxConnections@
--- defaults to 10, as in @Config::new@.
+-- defaults to 10, as in @Config::new@. @configIdleTransactionTimeout@ is
+-- set on every connection 'acquirePostgresSystemDB' opens, unless the
+-- URL's own options already set it; 'fromPool' leaves a handed pool
+-- alone. Mirrors Rust @Config::idle_transaction_timeout@.
 data Config = Config
-  { configUrl            :: Text,
-    configMaxConnections :: Word32,
-    configSettings       :: Settings
+  { configUrl                      :: Text,
+    configMaxConnections           :: Word32,
+    configIdleTransactionTimeout   :: IdleTransactionTimeout,
+    configSettings                 :: Settings
   }
   deriving stock (Eq, Show)
 
@@ -949,6 +958,7 @@ configNew url =
   Config
     { configUrl = url,
       configMaxConnections = 10,
+      configIdleTransactionTimeout = Default,
       configSettings = defaultSettings
     }
 
@@ -996,7 +1006,7 @@ data PostgresSystemDB = PostgresSystemDB
   { psdbPool            :: Pool.Pool,
     psdbRetry           :: RetryPolicy,
     psdbExecutorId      :: Maybe Text,
-    psdbApplicationName :: Maybe Text,
+    psdbAppName         :: Maybe Text,
     psdbPollingPermits  :: StrictTVar IO Int,
     psdbNotify          :: Registry,
     psdbNotifier        :: Notifier,
@@ -1023,7 +1033,7 @@ fromPool pool poolSize settings tracer = do
       { psdbPool = pool,
         psdbRetry = settings.settingsRetry,
         psdbExecutorId = settings.settingsExecutorId,
-        psdbApplicationName = settings.settingsApplicationName,
+        psdbAppName = settings.settingsAppName,
         psdbPollingPermits = permits,
         psdbNotify = registry,
         psdbNotifier = notifier,
@@ -1037,21 +1047,44 @@ fromPool pool poolSize settings tracer = do
 -- not a build step.
 acquirePostgresSystemDB :: Config -> SomeTracer IO -> IO PostgresSystemDB
 acquirePostgresSystemDB config tracer = do
-  pool <-
-    Pool.acquire
-      Pqi.adapter
-      ( PoolConfig.settings
-          [ PoolConfig.size (fromIntegral config.configMaxConnections),
-            PoolConfig.acquisitionTimeout 10,
-            PoolConfig.agingTimeout 1800,
-            PoolConfig.idlenessTimeout 1800,
-            PoolConfig.staticConnectionSettings (Connection.connectionString config.configUrl)
-          ]
-      )
-  env <- fromPool pool config.configMaxConnections config.configSettings tracer
-  verifySystemDatabase env >>= \case
-    Left err -> Pool.release pool >> throwIO err
-    Right () -> pure env
+  -- Before anything touches the server, so a bad setting creates no
+  -- database. Mirrors Rust @connect@'s validation.
+  case idleTimeoutValidate config.configIdleTransactionTimeout of
+    Left err -> throwIO err
+    Right () -> do
+      initTimeout <- case idleTimeoutMillis config.configIdleTransactionTimeout of
+        Nothing -> pure Nothing
+        Just millis -> do
+          alreadySet <- optionsSetIdleTimeout config.configUrl
+          pure (if alreadySet then Nothing else Just millis)
+      pool <-
+        Pool.acquire
+          Pqi.adapter
+          ( PoolConfig.settings
+              ( [ PoolConfig.size (fromIntegral config.configMaxConnections),
+                  PoolConfig.acquisitionTimeout 10,
+                  PoolConfig.agingTimeout 1800,
+                  PoolConfig.idlenessTimeout 1800,
+                  PoolConfig.staticConnectionSettings (Connection.connectionString config.configUrl)
+                ]
+                  <> case initTimeout of
+                    Nothing -> []
+                    Just millis -> [PoolConfig.initSession (Session.script ("SET " <> idleTimeoutParameter <> " = " <> Text.pack (show millis)))]
+              )
+          )
+      env <- fromPool pool config.configMaxConnections config.configSettings tracer
+      verifySystemDatabase env >>= \case
+        Left err -> Pool.release pool >> throwIO err
+        Right () -> pure env
+
+-- | Whether the URL's own options or @PGOPTIONS@ already set the
+-- idle-transaction parameter, in which case a pool 'acquirePostgresSystemDB'
+-- opens leaves them alone. Mirrors Rust
+-- @options_set_idle_transaction_timeout@.
+optionsSetIdleTimeout :: Text -> IO Bool
+optionsSetIdleTimeout url = do
+  pgOptions <- lookupEnv "PGOPTIONS"
+  pure (urlSetsIdleTimeout url (Text.pack <$> pgOptions))
 
 -- | Bracketed handle: acquires, runs, and releases the pool. Mirrors Rust
 -- @close@ being what a shutdown waits on — here there are no tasks, so
@@ -1163,7 +1196,7 @@ workflowRecordFromRow row = do
         workflowRecordError = row.error,
         workflowRecordSerialization = row.serialization,
         workflowRecordExecutorId = row.executor_id,
-        workflowRecordApplicationVersion = row.application_version,
+        workflowRecordAppVersion = row.application_version,
         workflowRecordRecoveryAttempts = fromMaybe 0 row.recovery_attempts,
         workflowRecordQueueName = row.queue_name,
         workflowRecordCreatedAt = timestampFromEpochMs row.created_at,
@@ -1175,12 +1208,12 @@ workflowRecordFromRow row = do
         workflowRecordWasForkedFrom = fromMaybe False row.was_forked_from,
         workflowRecordOwnerXid = row.owner_xid,
         workflowRecordCreatorXid = row.creator_xid,
-        workflowRecordApplicationId = row.application_id,
+        workflowRecordAppId = row.application_id,
         workflowRecordAuthenticatedUser = row.authenticated_user,
         workflowRecordAuthenticatedRoles = roles,
         workflowRecordAssumedRole = row.assumed_role,
         workflowRecordRequest = row.request,
-        workflowRecordApplicationName = row.application_name,
+        workflowRecordAppName = row.application_name,
         workflowRecordDeduplicationId = row.deduplication_id,
         workflowRecordPriority = fromMaybe 0 row.priority,
         workflowRecordQueuePartitionKey = row.queue_partition_key,
@@ -1219,13 +1252,13 @@ listParams env workflowFilter =
       listLoadOutput = workflowFilter.workflowFilterLoadOutput,
       listWorkflowIds = workflowFilter.workflowFilterWorkflowIds,
       listWorkflowIdPrefixes = escapeLike <$> workflowFilter.workflowFilterWorkflowIdPrefixes,
-      listNamedApplications = namedApplications,
+      listNamedAppScope = namedAppScope,
       listUnsetApplication = unsetApplication,
       listNames = workflowFilter.workflowFilterNames,
       listClassNames = workflowFilter.workflowFilterClassNames,
       listConfigNames = workflowFilter.workflowFilterConfigNames,
       listStatuses = workflowStatusText <$> workflowFilter.workflowFilterStatus,
-      listApplicationVersions = workflowFilter.workflowFilterApplicationVersions,
+      listApplicationVersions = workflowFilter.workflowFilterAppVersions,
       listExecutorIds = workflowFilter.workflowFilterExecutorIds,
       listAuthenticatedUsers = workflowFilter.workflowFilterAuthenticatedUsers,
       listQueueNames = workflowFilter.workflowFilterQueueNames,
@@ -1253,15 +1286,15 @@ listParams env workflowFilter =
     -- A workflow id is a global address, so asking for one by id is an
     -- identity read and must not be scoped to the handle's application.
     idKeyed = not (null workflowFilter.workflowFilterWorkflowIds)
-    (namedApplications, unsetApplication) =
-      case workflowFilter.workflowFilterApplications of
+    (namedAppScope, unsetApplication) =
+      case workflowFilter.workflowFilterAppScope of
         AnyApplication -> (Nothing, Nothing)
         Named names
           | null names -> (Nothing, Nothing)
           | otherwise -> (Just names, Nothing)
         Unset
           | idKeyed -> (Nothing, Nothing)
-          | otherwise -> (Nothing, env.psdbApplicationName)
+          | otherwise -> (Nothing, env.psdbAppName)
 
 -- | Appends @%@ and escapes the caller's wildcards, so a prefix is matched
 -- literally. Mirrors the oracle's escaping: backslash first, then @%@ and
@@ -1300,8 +1333,8 @@ initParams applicationName new status queued creatorXid now = do
       initParamAssumedRole = emptyToNone new.newWorkflowAssumedRole,
       initParamAuthenticatedRoles = encodeRoles new.newWorkflowAuthenticatedRoles,
       initParamExecutorId = new.newWorkflowExecutorId,
-      initParamApplicationVersion = new.newWorkflowApplicationVersion,
-      initParamApplicationId = new.newWorkflowApplicationId,
+      initParamAppVersion = new.newWorkflowAppVersion,
+      initParamAppId = new.newWorkflowAppId,
       initParamUpdatedAt = timestampToEpochMs now,
       initParamInitialAttempts = if queued then 0 else 1,
       initParamTimeoutMs = timeoutMs,
@@ -1313,7 +1346,7 @@ initParams applicationName new status queued creatorXid now = do
       initParamScheduleName = new.newWorkflowScheduleName,
       initParamDebounceTimeoutMs = debounceTimeoutMs,
       initParamIsDebounced = new.newWorkflowIsDebounced,
-      initParamApplicationName = new.newWorkflowApplicationName <|> applicationName
+      initParamAppName = new.newWorkflowAppName <|> applicationName
     })
 
 -- | Whether the failure is the deduplication index, which is only reported
@@ -1424,7 +1457,7 @@ initWorkflowAs env new creatorXid now = case validateNewWorkflow new of
   Right () -> do
     let status = initialStatus new
         queued = status == Enqueued || status == Delayed
-    case initParams env.psdbApplicationName new status queued creatorXid now of
+    case initParams env.psdbAppName new status queued creatorXid now of
       Left err -> pure (Left err)
       Right params -> do
         -- The status row and the input commit together, so a crash can
@@ -1614,7 +1647,7 @@ queueInsertParams queue updatedAt owner =
       queueInsertPartitionRateLimitPeriodSec = (durationSeconds . (.rateLimitPeriod)) <$> queue.newQueuePartitionRateLimit,
       queueInsertPollingIntervalSec = durationSeconds queue.newQueuePollingInterval,
       queueInsertUpdatedAt = updatedAt,
-      queueInsertApplicationName = owner
+      queueInsertAppName = owner
     }
 
 -- | A sweep needs partition concurrency 1 and nothing else; the partition
@@ -1643,7 +1676,7 @@ debounceBounceParams request app = do
         debounceBounceDeduplicationId = request.debounceRequestDeduplicationId,
         debounceBouncePeriodMs = periodMs,
         debounceBounceSerialization = request.debounceRequestSerialization,
-        debounceBounceApplicationName = app,
+        debounceBounceAppName = app,
         debounceBounceClassName = className,
         debounceBounceConfigName = configName
       }
@@ -1658,7 +1691,7 @@ debounceHeld raw =
         debounceHolderWorkflowName = raw.debounceHolderWorkflowName,
         debounceHolderClassName = raw.debounceHolderClassName,
         debounceHolderConfigName = raw.debounceHolderConfigName,
-        debounceHolderApplicationName = raw.debounceHolderApplicationName
+        debounceHolderAppName = raw.debounceHolderAppName
       }
 
 -- | The stored output of a debounce step as the value it records. A missing
@@ -1760,7 +1793,7 @@ queueRecordFromRow row = do
         queueRecordPartitionWorkerConcurrency = row.queueRowPartitionWorkerConcurrency,
         queueRecordPartitionRateLimit = partitionRateLimit,
         queueRecordPollingInterval = pollingInterval,
-        queueRecordApplicationName = row.queueRowApplicationName
+        queueRecordAppName = row.queueRowAppName
       }
 
 -- | A rate limit read from its two columns: a pair is a limit only when both
@@ -1820,7 +1853,7 @@ debounceCallerTx app callerWid callerText callerStep startedAt completedAt reque
                         recordStepSerialization = Just portableJsonSerialization,
                         recordStepStartedAt = Just (timestampToEpochMs startedAt),
                         recordStepCompletedAt = Just completedAt,
-                        recordStepApplicationName = app,
+                        recordStepAppName = app,
                         recordStepChildWorkflowId = Nothing
                       }
                   )
@@ -1862,7 +1895,7 @@ instance Aeson.ToJSON ScheduleRecord where
         "automatic_backfill" Aeson..= record.scheduleRecordAutomaticBackfill,
         "cron_timezone" Aeson..= record.scheduleRecordCronTimezone,
         "queue_name" Aeson..= record.scheduleRecordQueueName,
-        "application_name" Aeson..= record.scheduleRecordApplicationName
+        "application_name" Aeson..= record.scheduleRecordAppName
       ]
 
 instance Aeson.FromJSON ScheduleRecord where
@@ -1946,7 +1979,7 @@ runCallerStep env stepName callerWid callerStep startedAt work = do
                         recordStepSerialization = Just portableJsonSerialization,
                         recordStepStartedAt = Just (timestampToEpochMs startedAt),
                         recordStepCompletedAt = Just completedAt,
-                        recordStepApplicationName = env.psdbApplicationName,
+                        recordStepAppName = env.psdbAppName,
                         recordStepChildWorkflowId = Nothing
                       }
                 )
@@ -2004,7 +2037,7 @@ scheduleRecordFromRow row = do
         scheduleRecordAutomaticBackfill = row.scheduleRowAutomaticBackfill,
         scheduleRecordCronTimezone = row.scheduleRowCronTimezone,
         scheduleRecordQueueName = row.scheduleRowQueueName,
-        scheduleRecordApplicationName = row.scheduleRowApplicationName
+        scheduleRecordAppName = row.scheduleRowAppName
       }
   where
     parseFiredAt stored = case timestampFromIso8601 stored of
@@ -2032,7 +2065,7 @@ scheduleInsertParams new scheduleId owner =
       scheduleInsertAutomaticBackfill = new.newScheduleAutomaticBackfill,
       scheduleInsertCronTimezone = new.newScheduleCronTimezone,
       scheduleInsertQueueName = new.newScheduleQueueName,
-      scheduleInsertApplicationName = owner
+      scheduleInsertAppName = owner
     }
 
 -- | The values a partial update writes: each column with whether the update
@@ -2067,11 +2100,11 @@ scheduleListParams env scheduleFilter =
     { listScheduleStatuses = scheduleStatusText <$> scheduleFilter.scheduleFilterStatuses,
       listScheduleWorkflowNames = scheduleFilter.scheduleFilterWorkflowNames,
       listScheduleNamePrefixes = escapeLike <$> scheduleFilter.scheduleFilterNamePrefixes,
-      listScheduleApplications = case scheduleFilter.scheduleFilterApplications of
+      listScheduleAppScope = case scheduleFilter.scheduleFilterAppScope of
         AnyApplication -> Nothing
         Named []       -> Nothing
         Named names    -> Just names
-        Unset          -> (: []) <$> env.psdbApplicationName
+        Unset          -> (: []) <$> env.psdbAppName
     }
 
 -- | Whether a create's failure is a unique-index collision, and which index
@@ -2097,7 +2130,7 @@ missingSchedule name = Left (NotRegistered {kind = "Schedule", name = name})
 -- commit. Mirrors @upsert_schedule_on@.
 upsertScheduleOn :: PostgresSystemDB -> NewSchedule -> Text -> Tx.Transaction (Either Error ())
 upsertScheduleOn env new scheduleId = do
-  let claimant = new.newScheduleApplicationName <|> env.psdbApplicationName
+  let claimant = new.newScheduleAppName <|> env.psdbAppName
   holder <- Tx.statement new.newScheduleName Statements.scheduleOwnerStatement
   case resolveOwner "Schedule" new.newScheduleName claimant holder of
     Left err -> pure (Left err)
@@ -2125,7 +2158,7 @@ applySchedulesTx env = go
 versionInfoFromRow :: Statements.VersionRowRaw -> VersionInfo
 versionInfoFromRow row =
   VersionInfo
-    { versionInfoApplicationName = row.versionRowApplicationName,
+    { versionInfoAppName = row.versionRowAppName,
       versionInfoId = row.versionRowId,
       versionInfoName = row.versionRowName,
       versionInfoTimestamp = timestampFromEpochMs row.versionRowTimestamp,
@@ -2184,11 +2217,11 @@ runFork env sources forkedIds steps options =
               { forkSources = sources,
                 forkIds = forkedIds,
                 forkSteps = steps,
-                forkApplicationVersion = options.forkOptionsApplicationVersion,
+                forkAppVersion = options.forkOptionsAppVersion,
                 forkQueue = queue,
                 forkPartitionKey = options.forkOptionsQueuePartitionKey,
                 forkTimeoutMs = timeoutMs,
-                forkApplicationName = env.psdbApplicationName,
+                forkAppName = env.psdbAppName,
                 forkReplaceFrom = map fst options.forkOptionsReplacementChildren,
                 forkReplaceTo = map snd options.forkOptionsReplacementChildren,
                 forkCopiesAnything = any (> 0) steps
@@ -2212,7 +2245,7 @@ runFork env sources forkedIds steps options =
 -- until @descendant_forks@ lands; an empty batch still records its step,
 -- because a step id that nothing occupies is a hole a replay has to guess
 -- about.
-sendInternal :: PostgresSystemDB -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> IO (Either Error ())
+sendInternal :: PostgresSystemDB -> Text -> [EncodedSendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> IO (Either Error ())
 sendInternal _ _ messages _ Nothing _ _ | null messages = pure (Right ())
 sendInternal env stepName messages serialization caller owner sendToForks = do
   -- The duplicate-key refusal applies to the caller's list, before fan-out:
@@ -2229,7 +2262,7 @@ sendInternal env stepName messages serialization caller owner sendToForks = do
 -- every workflow forked from it, transitively. One send fans out to a whole
 -- fork tree, and each recipient gets its own scoped message id. Mirrors the
 -- oracle's fork fan-out.
-expandForks :: PostgresSystemDB -> [SendMessage] -> IO (Either Error [SendMessage])
+expandForks :: PostgresSystemDB -> [EncodedSendMessage] -> IO (Either Error [EncodedSendMessage])
 expandForks env messages = do
   let roots = [destination | message <- messages, let Types.WorkflowId destination = message.sendDestinationId]
   forks <- descendantForks env roots
@@ -2262,7 +2295,7 @@ descendantForks env roots = go Map.empty Set.empty roots
             else go children' seen' fresh
 
 -- | Delivers a batch once the recipient set is settled.
-deliverTo :: PostgresSystemDB -> Text -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> IO (Either Error ())
+deliverTo :: PostgresSystemDB -> Text -> [EncodedSendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> IO (Either Error ())
 deliverTo env stepName messages serialization caller owner = do
   fallbacks <- traverse (const (MessageUUID . UUID.toText <$> UUID.V4.nextRandom)) messages
   timing <- StepTiming <$> timestampNow <*> timestampNow
@@ -2331,7 +2364,7 @@ descendantForksTx roots = go Map.empty Set.empty roots
 -- like every client send. A validation refusal rolls the caller's
 -- transaction back (as Python raises before touching the connection); a
 -- foreign-key failure aborts the caller's transaction through the statement.
-sendMessageInTx :: SendMessage -> Maybe Text -> Text -> Bool -> Tx.Transaction (Either Error ())
+sendMessageInTx :: EncodedSendMessage -> Maybe Text -> Text -> Bool -> Tx.Transaction (Either Error ())
 sendMessageInTx message serialization fallback sendToForks =
   sendBatchInTx [message] serialization [fallback] sendToForks
 
@@ -2345,7 +2378,7 @@ sendMessageInTx message serialization fallback sendToForks =
 -- abort the same way. Backend-internal: applications compose through
 -- 'withClientTransaction' and the 'clientSendMessagesInTx' wrappers, which
 -- pre-validate so nothing runs on a refusal.
-sendBatchInTx :: [SendMessage] -> Maybe Text -> [Text] -> Bool -> Tx.Transaction (Either Error ())
+sendBatchInTx :: [EncodedSendMessage] -> Maybe Text -> [Text] -> Bool -> Tx.Transaction (Either Error ())
 sendBatchInTx messages serialization fallbacks sendToForks = do
   outcome <- runExceptT $ do
     paired <- ExceptT (pure (pairMessages messages fallbacks))
@@ -2358,7 +2391,7 @@ sendBatchInTx messages serialization fallbacks sendToForks = do
     -- | The checked scope, pure: duplicate keys are refused on the caller's
     -- list before fan-out (one key fanning out is legal), and fallbacks
     -- stay one per message.
-    pairMessages :: [SendMessage] -> [Text] -> Either Error [(SendMessage, Text)]
+    pairMessages :: [EncodedSendMessage] -> [Text] -> Either Error [(EncodedSendMessage, Text)]
     pairMessages pairedMessages pairedFallbacks = do
       validateSendKeys pairedMessages
       if length pairedFallbacks /= length pairedMessages
@@ -2366,7 +2399,7 @@ sendBatchInTx messages serialization fallbacks sendToForks = do
         else Right (zip pairedMessages pairedFallbacks)
     -- | The recipient set, settled inside the transaction so it cannot go
     -- stale before the insert. Statement failures propagate unchecked.
-    expandPaired :: [(SendMessage, Text)] -> Tx.Transaction [(SendMessage, Text)]
+    expandPaired :: [(EncodedSendMessage, Text)] -> Tx.Transaction [(EncodedSendMessage, Text)]
     expandPaired paired
       | not sendToForks = pure paired
       | otherwise = do
@@ -2379,7 +2412,7 @@ sendBatchInTx messages serialization fallbacks sendToForks = do
             ]
     -- | The batched insert, recording no step like every client send.
     -- A foreign-key failure aborts the caller's transaction here.
-    insertExpanded :: [(SendMessage, Text)] -> Tx.Transaction ()
+    insertExpanded :: [(EncodedSendMessage, Text)] -> Tx.Transaction ()
     insertExpanded expanded =
       void
         ( Statements.sendMessagesTx
@@ -2566,7 +2599,7 @@ instance SystemDB PostgresSystemDB IO where
           let status = initialStatus new
               queued = status == Enqueued || status == Delayed
               parentText = unwrapWorkflowId caller.initCallerParentWorkflowId
-          case initParams env.psdbApplicationName new status queued creatorXid now of
+          case initParams env.psdbAppName new status queued creatorXid now of
             Left err -> pure (Left err)
             Right base -> do
               let params =
@@ -2593,7 +2626,7 @@ instance SystemDB PostgresSystemDB IO where
                                 recordChildStepName = caller.initCallerStepName,
                                 recordChildStartedAt = Just (timestampToEpochMs caller.initCallerStartedAt),
                                 recordChildCompletedAt = Just (timestampToEpochMs now),
-                                recordChildApplicationName = env.psdbApplicationName
+                                recordChildAppName = env.psdbAppName
                               }
                         )
                     -- The input lands where readers look, in the same commit, and
@@ -2755,10 +2788,10 @@ instance SystemDB PostgresSystemDB IO where
           runSession
             env
             "reenqueue_for_recovery"
-            (Statements.reenqueueForRecoverySession recoveryQueue executorIds applicationVersion env.psdbApplicationName)
+            (Statements.reenqueueForRecoverySession recoveryQueue executorIds applicationVersion env.psdbAppName)
         pure (map Types.WorkflowId <$> result)
   transitionDelayedWorkflows env = do
-    result <- runSession env "transition_delayed_workflows" (Statements.transitionDelayedSession env.psdbApplicationName)
+    result <- runSession env "transition_delayed_workflows" (Statements.transitionDelayedSession env.psdbAppName)
     pure (fromIntegral <$> result)
   cancelIfTimedOut env (Types.WorkflowId workflowId) owner = do
     -- The ownership check locks the row first, so a hand-off cannot land
@@ -2773,14 +2806,14 @@ instance SystemDB PostgresSystemDB IO where
     pure ((> 0) <$> outcome)
   cancelTimedOutWorkflows env limit =
     fmap (map Types.WorkflowId)
-      <$> runSession env "cancel_timed_out_workflows" (Statements.cancelTimedOutWorkflowsSession env.psdbApplicationName limit)
+      <$> runSession env "cancel_timed_out_workflows" (Statements.cancelTimedOutWorkflowsSession env.psdbAppName limit)
   deadLetterWorkflows env workflowIds minRecoveryAttempts =
     fmap (map Types.WorkflowId)
       <$> runSession env "dead_letter_workflows" (Statements.deadLetterWorkflowsSession (map (\(Types.WorkflowId widText) -> widText) workflowIds) minRecoveryAttempts)
   cancelWorkflows env workflowIds cancelChildren _caller fromWorkflow
     | null workflowIds = pure (Right [])
     | otherwise =
-        case fromWorkflow >>= (\callerId -> Statements.refuseSelfTarget callerId (map unwrap workflowIds) "cancel") of
+        case fromWorkflow >>= (\callerId -> refuseSelfTarget callerId (map unwrap workflowIds) "cancel") of
           -- A workflow cannot cancel itself: refused before anything runs.
           Just err -> pure (Left err)
           Nothing -> do
@@ -2830,7 +2863,7 @@ instance SystemDB PostgresSystemDB IO where
     | null workflowIds = pure (Right [])
     | otherwise =
         -- A workflow cannot resume itself: refused before anything runs.
-        case fromWorkflow >>= (\callerId -> Statements.refuseSelfTarget callerId ids "resume") of
+        case fromWorkflow >>= (\callerId -> refuseSelfTarget callerId ids "resume") of
           Just err -> pure (Left err)
           Nothing -> do
             existing <- runSession env "resume_workflows" (Statements.existingWorkflowsSession ids)
@@ -2964,7 +2997,7 @@ instance SystemDB PostgresSystemDB IO where
                   rewindStartStep = cut,
                   rewindQueueName = queue,
                   rewindPartitionKey = sysOpts.sysRewindQueuePartitionKey,
-                  rewindAppVersion = sysOpts.sysRewindApplicationVersion,
+                  rewindAppVersion = sysOpts.sysRewindAppVersion,
                   rewindCaller = (\(Types.WorkflowId callerWid, step) -> (callerWid, step)) <$> caller,
                   rewindStartedAt = timestampToEpochMs timing.stepTimingStartedAt,
                   rewindCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt
@@ -2993,16 +3026,13 @@ instance SystemDB PostgresSystemDB IO where
                           recordStepSerialization = Just portableJsonSerialization,
                           recordStepStartedAt = Just (timestampToEpochMs timing.stepTimingStartedAt),
                           recordStepCompletedAt = Just (timestampToEpochMs completedAt),
-                          recordStepApplicationName = Nothing,
+                          recordStepAppName = Nothing,
                           recordStepChildWorkflowId = Nothing
                         }
                 pure (Left err)
               _ -> pure (Left err)
             other -> pure other
   recv env wid stepId timeoutStepId topic timeout token = do
-    let storedTopic = fromMaybe nullTopicSentinel topic
-        widText = unwrap wid
-    startedAt <- timestampNow
     replay <- checkStep env wid stepId recvStepName
     case replay of
       Left err -> pure (Left err)
@@ -3010,49 +3040,81 @@ instance SystemDB PostgresSystemDB IO where
       -- another, including the absence a timeout produced.
       Right (Just step) -> pure (Right (stepEncodedValue step))
       Right Nothing -> do
+        let storedTopic = fromMaybe nullTopicSentinel topic
+            Types.WorkflowId widText = wid
         subscription <- subscribe env.psdbNotify (messageKey widText (Just storedTopic))
+        startedAt <- timestampNow
         ( do
             deadline <- checkpointSleep env DeadlineSleep wid timeoutStepId timeout token
             case deadline of
               Left err -> pure (Left err)
-              Right wakeAt -> do
-                waited <- pollForMessage env subscription widText storedTopic wakeAt
-                case waited of
-                  Left err -> pure (Left err)
-                  Right () -> do
-                    completedAt <- timestampNow
-                    taken <-
-                      runTransaction
-                        env
-                        "recv"
-                        ( do
-                            -- The take opens with the ownership check: the row
-                            -- lock serializes takes, and a stale execution's
-                            -- consume is refused with its record rolled back.
-                            owned <- Statements.checkOwnerTx widText token
-                            case owned of
-                              Left conflict -> Tx.condemn >> pure (Left conflict)
-                              Right () ->
-                                Right
-                                  <$> Statements.recvTx
-                                    Statements.RecvParams
-                                      { recvWorkflowId = widText,
-                                        recvStepId = stepId,
-                                        recvTopic = storedTopic,
-                                        recvStartedAt = timestampToEpochMs startedAt,
-                                        recvCompletedAt = timestampToEpochMs completedAt
-                                      }
-                        )
-                    pure $ case join taken of
-                      Left err -> Left err
-                      Right (Statements.RecvAdopted row) ->
-                        fmap (>>= stepEncodedValue) (stepCheckToRecord wid stepId recvStepName row)
-                      Right (Statements.RecvTook message) ->
-                        Right ((\raw -> EncodedValue raw.encodedRawValue raw.encodedRawSerialization) <$> message)
+              Right wakeAt -> loop subscription startedAt wakeAt
           )
             `finally` unsubscribe subscription
     where
-      unwrap (Types.WorkflowId widText) = widText
+      -- One poll and one take per pass: an empty take with time left
+      -- records nothing and waits on, so a message taken by a rival
+      -- receive never becomes a recorded absence; only a take at or past
+      -- the deadline records the empty step. Mirrors the oracle's
+      -- take-inside-the-wait-loop.
+      loop subscription startedAt wakeAt = do
+        let storedTopic = fromMaybe nullTopicSentinel topic
+            Types.WorkflowId widText = wid
+        waited <- pollForMessage env subscription widText storedTopic wakeAt
+        case waited of
+          Left err -> pure (Left err)
+          Right () -> do
+            completedAt <- timestampNow
+            taken <-
+              runTransaction
+                env
+                "recv"
+                ( do
+                    -- The take opens with the ownership check: the row
+                    -- lock serializes takes, and a stale execution's
+                    -- consume is refused with its record rolled back.
+                    owned <- Statements.checkOwnerTx widText token
+                    case owned of
+                      Left conflict -> Tx.condemn >> pure (Left conflict)
+                      Right () ->
+                        Right
+                          <$> Statements.recvTx
+                            Statements.RecvParams
+                              { recvWorkflowId = widText,
+                                recvStepId = stepId,
+                                recvTopic = storedTopic,
+                                recvStartedAt = timestampToEpochMs startedAt,
+                                recvCompletedAt = timestampToEpochMs completedAt
+                              }
+                )
+            case join taken of
+              Left err -> pure (Left err)
+              Right (Statements.RecvAdopted row) ->
+                pure (fmap (>>= stepEncodedValue) (stepCheckToRecord wid stepId recvStepName row))
+              Right (Statements.RecvTook message) ->
+                pure (Right (Just ((\raw -> EncodedValue raw.encodedRawValue raw.encodedRawSerialization) message)))
+              Right Statements.RecvMissed -> do
+                now <- timestampNow
+                let remaining = fromMaybe (Duration 0) (durationSince wakeAt now)
+                if remaining <= Duration 0
+                  then do
+                    recorded <-
+                      runTransaction env "recv" $ do
+                        -- The record opens with the ownership check, as the
+                        -- take does: a stale execution's absence is refused
+                        -- rather than recorded, and a failure to record is
+                        -- reported rather than returned as an unrecorded
+                        -- absence a replay would take again.
+                        owned <- Statements.checkOwnerTx widText token
+                        case owned of
+                          Left conflict -> Tx.condemn >> pure (Left conflict)
+                          Right () -> do
+                            Tx.statement () (Statements.recordStepStatement (Statements.recvStepRecord (Statements.RecvParams widText stepId storedTopic (timestampToEpochMs startedAt) (timestampToEpochMs now)) Nothing))
+                            pure (Right ())
+                    case join recorded of
+                      Left err -> pure (Left err)
+                      Right () -> pure (Right Nothing)
+                  else loop subscription startedAt wakeAt
   writeStream env wid stepId key value serialization writtenBy token = do
     startedAt <- timestampNow
     completedAt <- timestampNow
@@ -3071,7 +3133,7 @@ instance SystemDB PostgresSystemDB IO where
               recordStepSerialization = Nothing,
               recordStepStartedAt = Just (timestampToEpochMs startedAt),
               recordStepCompletedAt = Just (timestampToEpochMs completedAt),
-              recordStepApplicationName = env.psdbApplicationName,
+              recordStepAppName = env.psdbAppName,
               recordStepChildWorkflowId = Nothing
             }
         writeOnce = do
@@ -3152,7 +3214,7 @@ instance SystemDB PostgresSystemDB IO where
                   recordStepSerialization = serialization,
                   recordStepStartedAt = timestampToEpochMs . (.stepTimingStartedAt) <$> timing,
                   recordStepCompletedAt = timestampToEpochMs . (.stepTimingCompletedAt) <$> timing,
-                  recordStepApplicationName = env.psdbApplicationName,
+                  recordStepAppName = env.psdbAppName,
                   recordStepChildWorkflowId = Nothing
                 }
         -- The ownership check opens the transaction and locks the row, so a
@@ -3367,7 +3429,7 @@ instance SystemDB PostgresSystemDB IO where
             streamStepId = row.streamEntryRawStepId
           }
   createApplicationVersion env versionName applicationName = do
-    let claimant = applicationName <|> env.psdbApplicationName
+    let claimant = applicationName <|> env.psdbAppName
     holder <- runSession env "create_application_version" (Statements.versionHolderSession versionName)
     case holder of
       Left err -> pure (Left err)
@@ -3384,13 +3446,13 @@ instance SystemDB PostgresSystemDB IO where
                 pure ()
               pure (Right ())
   listApplicationVersions env = do
-    result <- runSession env "list_application_versions" (Statements.listApplicationVersionsSession env.psdbApplicationName)
+    result <- runSession env "list_application_versions" (Statements.listApplicationVersionsSession env.psdbAppName)
     pure (map versionInfoFromRow <$> result)
   getLatestApplicationVersion env applicationName = do
-    result <- runSession env "get_latest_application_version" (Statements.latestApplicationVersionSession (applicationName <|> env.psdbApplicationName))
+    result <- runSession env "get_latest_application_version" (Statements.latestApplicationVersionSession (applicationName <|> env.psdbAppName))
     pure (fmap versionInfoFromRow <$> result)
   updateApplicationVersionTimestamp env versionName timestamp applicationName = do
-    let claimant = applicationName <|> env.psdbApplicationName
+    let claimant = applicationName <|> env.psdbAppName
     holder <- runSession env "update_application_version_timestamp" (Statements.versionHolderSession versionName)
     case holder of
       Left err -> pure (Left err)
@@ -3405,7 +3467,7 @@ instance SystemDB PostgresSystemDB IO where
           pure (() <$ result)
   upsertQueue env queue onExisting = do
     let name = queue.newQueueName
-        owner = queue.newQueueApplicationName <|> env.psdbApplicationName
+        owner = queue.newQueueAppName <|> env.psdbAppName
     before <- runSession env "upsert_queue" (Session.statement name Statements.queueOwnerStatement)
     case before of
       Left err -> pure (Left err)
@@ -3434,7 +3496,7 @@ instance SystemDB PostgresSystemDB IO where
       _ -> do
         let limits = queueResolvedLimits queue
             queueName = queue.queueRecordName
-            app = env.psdbApplicationName
+            app = env.psdbAppName
             hasSharedBudget =
               isJust limits.resolvedConcurrency
                 || isJust limits.resolvedPartitionConcurrency
@@ -3447,65 +3509,93 @@ instance SystemDB PostgresSystemDB IO where
               | hasWriteSkew = TxSessions.Serializable
               | otherwise = TxSessions.RepeatableRead
             narrow current available = Just (maybe available (min available) current)
-            budget =
-              foldr
-                (\available current -> narrow current available)
-                Nothing
-                ( [max 0 (fromIntegral cap - localRunning) | Just cap <- [limits.resolvedWorkerConcurrency]]
-                    <> [max 0 (fromIntegral cap - partitionLocalRunning) | Just cap <- [limits.resolvedPartitionWorkerConcurrency], isJust partitionKey]
-                )
+            -- Worker concurrency first, because it costs no query. Each
+            -- limit below is checked against zero as soon as it narrows
+            -- the budget, so the claim names the first limit in this
+            -- order that closed it: worker, partition worker, rate,
+            -- partition rate, concurrency, partition concurrency.
+            stopped stop = pure (Dequeued [] (Just stop))
+            workerBudgetNow = case limits.resolvedWorkerConcurrency of
+              Nothing  -> Nothing
+              Just cap -> Just (max 0 (fromIntegral cap - localRunning))
         result <- runTransactionAt env isolation "start_queued_workflows" $ do
-          case budget of
-            Just 0 -> pure []
+          case workerBudgetNow of
+            Just 0 -> stopped DequeueStopWorkerConcurrency
             _ -> do
-              afterRate <- case limits.resolvedRateLimit of
-                Nothing -> pure budget
-                Just rateLimit -> do
-                  recent <- Tx.statement (app, queueName, periodMillis rateLimit.rateLimitPeriod) Statements.dequeueRateLimitCountStatement
-                  pure (narrow budget (max 0 (fromIntegral rateLimit.rateLimitLimit - recent)))
-              afterPartitionRate <- case (limits.resolvedPartitionRateLimit, partitionKey) of
-                (Just rateLimit, Just key) -> do
-                  recent <- Tx.statement (app, key, queueName, periodMillis rateLimit.rateLimitPeriod) Statements.dequeuePartitionRateLimitCountStatement
-                  pure (narrow afterRate (max 0 (fromIntegral rateLimit.rateLimitLimit - recent)))
-                _ -> pure afterRate
-              afterConcurrency <- case limits.resolvedConcurrency of
-                Nothing -> pure afterPartitionRate
-                Just cap -> do
-                  running <- Tx.statement (app, queueName) Statements.dequeueConcurrencyCountStatement
-                  pure (narrow afterPartitionRate (max 0 (fromIntegral cap - running)))
-              afterPartitionConcurrency <- case (limits.resolvedPartitionConcurrency, partitionKey) of
-                (Just cap, Just key) -> do
-                  running <- Tx.statement (app, key, queueName) Statements.dequeuePartitionConcurrencyCountStatement
-                  pure (narrow afterConcurrency (max 0 (fromIntegral cap - running)))
-                _ -> pure afterConcurrency
-              case afterPartitionConcurrency of
-                Just 0 -> pure []
+              let partitionWorkerBudgetNow =
+                    foldr
+                      (\available current -> narrow current available)
+                      workerBudgetNow
+                      [max 0 (fromIntegral cap - partitionLocalRunning) | Just cap <- [limits.resolvedPartitionWorkerConcurrency], isJust partitionKey]
+              case partitionWorkerBudgetNow of
+                Just 0 -> stopped DequeueStopPartitionWorkerConcurrency
                 _ -> do
-                  latest <- Statements.latestVersionNameTx app
-                  let isLatest = maybe True (== applicationVersion) latest
-                      candidatesStatement =
-                        if hasSharedBudget
-                          then Statements.dequeueCandidatesNowaitStatement
-                          else Statements.dequeueCandidatesSkipLockedStatement
-                  candidates <-
-                    Tx.statement
-                      (app, partitionKey, applicationVersion, queueName, isLatest, afterPartitionConcurrency)
-                      candidatesStatement
-                  if null candidates
-                    then pure []
-                    else do
-                      flipped <- Tx.statement (app, executorId, applicationVersion, rateLimited, candidates, ownerToken) Statements.dequeueClaimStatement
-                      pure (filter (`elem` flipped) candidates)
-        pure (fmap (map WorkflowId) result)
+                  afterRate <- case limits.resolvedRateLimit of
+                    Nothing -> pure partitionWorkerBudgetNow
+                    Just rateLimit -> do
+                      recent <- Tx.statement (app, queueName, periodMillis rateLimit.rateLimitPeriod) Statements.dequeueRateLimitCountStatement
+                      pure (narrow partitionWorkerBudgetNow (max 0 (fromIntegral rateLimit.rateLimitLimit - recent)))
+                  case afterRate of
+                    Just 0 -> stopped DequeueStopRateLimit
+                    _ -> do
+                      afterPartitionRate <- case (limits.resolvedPartitionRateLimit, partitionKey) of
+                        (Just rateLimit, Just key) -> do
+                          recent <- Tx.statement (app, key, queueName, periodMillis rateLimit.rateLimitPeriod) Statements.dequeuePartitionRateLimitCountStatement
+                          pure (narrow afterRate (max 0 (fromIntegral rateLimit.rateLimitLimit - recent)))
+                        _ -> pure afterRate
+                      case afterPartitionRate of
+                        Just 0 -> stopped DequeueStopPartitionRateLimit
+                        _ -> do
+                          afterConcurrency <- case limits.resolvedConcurrency of
+                            Nothing -> pure afterPartitionRate
+                            Just cap -> do
+                              running <- Tx.statement (app, queueName) Statements.dequeueConcurrencyCountStatement
+                              pure (narrow afterPartitionRate (max 0 (fromIntegral cap - running)))
+                          case afterConcurrency of
+                            Just 0 -> stopped DequeueStopConcurrency
+                            _ -> do
+                              afterPartitionConcurrency <- case (limits.resolvedPartitionConcurrency, partitionKey) of
+                                (Just cap, Just key) -> do
+                                  running <- Tx.statement (app, key, queueName) Statements.dequeuePartitionConcurrencyCountStatement
+                                  pure (narrow afterConcurrency (max 0 (fromIntegral cap - running)))
+                                _ -> pure afterConcurrency
+                              case afterPartitionConcurrency of
+                                Just 0 -> stopped DequeueStopPartitionConcurrency
+                                _ -> do
+                                  latest <- Statements.latestVersionNameTx app
+                                  let isLatest = maybe True (== applicationVersion) latest
+                                      candidatesStatement =
+                                        if hasSharedBudget
+                                          then Statements.dequeueCandidatesNowaitStatement
+                                          else Statements.dequeueCandidatesSkipLockedStatement
+                                  candidates <-
+                                    Tx.statement
+                                      (app, partitionKey, applicationVersion, queueName, isLatest, afterPartitionConcurrency)
+                                      candidatesStatement
+                                  if null candidates
+                                    then pure (Dequeued [] Nothing)
+                                    else do
+                                      flipped <- Tx.statement (app, executorId, applicationVersion, rateLimited, candidates, ownerToken) Statements.dequeueClaimStatement
+                                      pure (Dequeued (map WorkflowId (filter (`elem` flipped) candidates)) Nothing)
+        pure result
+  -- | The queue's room under its global concurrency is the same count
+  -- each claim runs: its PENDING rows this application could dequeue, or
+  -- unclaimed ones. One statement serves both, so the room a partition
+  -- walk budgets for is the room each claim will find.
+  countPendingQueueWorkflows env queueName =
+    runSession
+      env
+      "count_pending_queue_workflows"
+      (Session.statement (env.psdbAppName, queueName) Statements.dequeueConcurrencyCountStatement)
   getQueuePartitions env queueName =
     runSession
       env
       "get_queue_partitions"
-      (Session.statement (queueName, env.psdbApplicationName) Statements.queuePartitionsStatement)
+      (Session.statement (queueName, env.psdbAppName) Statements.queuePartitionsStatement)
   startQueuedPartitionedWorkflows env queue executorId applicationVersion maxTasks ownerToken = do
     let limits = queueResolvedLimits queue
         queueName = queue.queueRecordName
-        app = env.psdbApplicationName
+        app = env.psdbAppName
     case validateSweepLimits limits of
       Left err -> pure (Left err)
       Right () -> case maxTasks of
@@ -3546,7 +3636,7 @@ instance SystemDB PostgresSystemDB IO where
           AnyApplication -> Nothing
           Named []       -> Nothing
           Named names    -> Just names
-          Unset          -> (: []) <$> env.psdbApplicationName
+          Unset          -> (: []) <$> env.psdbAppName
     result <- runSession env "list_queues" (Session.statement scope Statements.queueListStatement)
     pure (result >>= traverse queueRecordFromRow)
   updateQueue env name update validate = do
@@ -3577,14 +3667,14 @@ instance SystemDB PostgresSystemDB IO where
         Right () -> do
           startedAt <- timestampNow
           completedAt <- timestampToEpochMs <$> timestampNow
-          let app = request.debounceRequestApplicationName <|> env.psdbApplicationName
+          let app = request.debounceRequestAppName <|> env.psdbAppName
           Types.WorkflowId callerText <- pure callerWid
           outcome <- runTransaction env "debounce_delayed_workflow" (debounceCallerTx app callerWid callerText callerStep startedAt completedAt request)
           pure (join outcome)
       Nothing -> case debounceValidate request of
         Left err -> pure (Left err)
         Right () -> do
-          let app = request.debounceRequestApplicationName <|> env.psdbApplicationName
+          let app = request.debounceRequestAppName <|> env.psdbAppName
           case debounceBounceParams request app of
             Left err -> pure (Left err)
             Right params -> do
@@ -3619,7 +3709,7 @@ instance SystemDB PostgresSystemDB IO where
     -- acknowledgement must find its own row rather than insert a second
     -- one under a fresh id.
     scheduleId <- maybe (UUID.toText <$> UUID.V4.nextRandom) pure new.newScheduleId
-    let owner = new.newScheduleApplicationName <|> env.psdbApplicationName
+    let owner = new.newScheduleAppName <|> env.psdbAppName
         work = do
           holder <- Tx.statement new.newScheduleName Statements.scheduleOwnerStatement
           case resolveOwner "Schedule" new.newScheduleName owner holder of
@@ -3787,7 +3877,7 @@ instance SystemDB PostgresSystemDB IO where
                   recordChildStepName = stepName,
                   recordChildStartedAt = timestampToEpochMs <$> startedAt,
                   recordChildCompletedAt = now <$ startedAt,
-                  recordChildApplicationName = env.psdbApplicationName
+                  recordChildAppName = env.psdbAppName
                 }
         -- The ownership check opens the transaction, as for a step write: a
         -- refused parent records nothing and reports the conflict.
@@ -3824,7 +3914,7 @@ instance SystemDB PostgresSystemDB IO where
                   recordStepSerialization = serialization,
                   recordStepStartedAt = timestampToEpochMs . (.stepTimingStartedAt) <$> timing,
                   recordStepCompletedAt = timestampToEpochMs . (.stepTimingCompletedAt) <$> timing,
-                  recordStepApplicationName = env.psdbApplicationName,
+                  recordStepAppName = env.psdbAppName,
                   recordStepChildWorkflowId = Just childText
                 }
         -- The ownership check opens the transaction, as for a step write.
@@ -3962,7 +4052,7 @@ blockingPollIntervalMicros = 50000
 -- | Deliver one message. A resend under the same idempotency key is a no-op.
 legacySendMessage ::
   Pool.Pool ->
-  SendMessage ->
+  EncodedSendMessage ->
   IO ()
 legacySendMessage pool message =
   legacySendMessages pool [message]
@@ -3972,7 +4062,7 @@ legacySendMessage pool message =
 -- deliver everything a second time.
 legacySendMessages ::
   Pool.Pool ->
-  [SendMessage] ->
+  [EncodedSendMessage] ->
   IO ()
 legacySendMessages pool messages = do
   fallbacks <- traverse (const (fmap (MessageUUID . UUID.toText) UUID.V4.nextRandom)) messages

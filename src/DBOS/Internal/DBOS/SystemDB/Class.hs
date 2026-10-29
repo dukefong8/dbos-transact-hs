@@ -91,8 +91,8 @@ class Monad m => SystemDB db m where
   -- send presents it and is fenced on the sending execution; a client or
   -- engine send passes 'Nothing' and skips the fence. Mirrors Rust
   -- @send_message@'s @Option<WorkflowOwner>@.
-  sendMessage :: db -> SendMessage -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> m (Either Error ())
-  sendMessages :: db -> [SendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> m (Either Error ())
+  sendMessage :: db -> EncodedSendMessage -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> m (Either Error ())
+  sendMessages :: db -> [EncodedSendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> m (Either Error ())
   recv :: (MonadDelay m, MonadTime m)
        => db -> WorkflowId -> Int -> Int -> Maybe Text -> Duration -> Text -> m (Either Error (Maybe EncodedValue))
   writeStream :: db -> WorkflowId -> Int -> Text -> Text -> Maybe Text -> WrittenBy -> Text -> m (Either Error ())
@@ -117,11 +117,12 @@ class Monad m => SystemDB db m where
   getLatestApplicationVersion :: db -> Maybe Text -> m (Either Error (Maybe VersionInfo))
   updateApplicationVersionTimestamp :: db -> Text -> Timestamp -> Maybe Text -> m (Either Error ())
   upsertQueue :: db -> NewQueue -> OnExistingQueue -> m (Either Error Bool)
-  startQueuedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Text -> Int64 -> Int64 -> Text -> m (Either Error [WorkflowId])
+  startQueuedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Text -> Int64 -> Int64 -> Text -> m (Either Error Dequeued)
+  countPendingQueueWorkflows :: db -> Text -> m (Either Error Int64)
   getQueuePartitions :: db -> Text -> m (Either Error [Text])
   startQueuedPartitionedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Int64 -> Text -> m (Either Error [WorkflowId])
   getQueue :: db -> Text -> m (Either Error (Maybe QueueRecord))
-  listQueues :: db -> Applications -> m (Either Error [QueueRecord])
+  listQueues :: db -> AppScope -> m (Either Error [QueueRecord])
   updateQueue :: db -> Text -> QueueUpdate -> (QueueRecord -> QueueRecord -> Either Error ()) -> m (Either Error QueueRecord)
   debounceDelayedWorkflow :: db -> DebounceRequest -> Maybe (WorkflowId, Int) -> m (Either Error Debounce)
   getDeduplicationKeyHolder :: db -> Text -> Text -> m (Either Error (Maybe WorkflowId))

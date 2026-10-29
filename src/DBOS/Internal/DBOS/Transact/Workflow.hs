@@ -412,9 +412,9 @@ workflowNewWorkflow conn identity key (WorkflowId workflowText) input queueName 
           newWorkflowSerialization = Just serialization,
           newWorkflowQueueName = queueName,
           newWorkflowExecutorId = Just identity.identityExecutorId,
-          newWorkflowApplicationName = Just identity.identityAppName,
-          newWorkflowApplicationVersion = Just identity.identityAppVersion,
-          newWorkflowApplicationId = if Text.null identity.identityAppId then Nothing else Just identity.identityAppId
+          newWorkflowAppName = Just identity.identityAppName,
+          newWorkflowAppVersion = Just identity.identityAppVersion,
+          newWorkflowAppId = if Text.null identity.identityAppId then Nothing else Just identity.identityAppId
         }
 
 -- | What an enqueue asks of its queue: deduplication, priority, partition,
@@ -797,11 +797,11 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
                 newWorkflowDelay = debouncedDelay,
                 newWorkflowIsDebounced = debounced,
                 newWorkflowDebounceTimeout = debouncedTimeout,
-                newWorkflowApplicationName = debounceApp <|> Just identity.identityAppName,
+                newWorkflowAppName = debounceApp <|> Just identity.identityAppName,
                 -- A row written for another application carries no version: the
                 -- runner resolves the target's latest, as the oracle's
                 -- @for_another_app@ writes @application_version = None@.
-                newWorkflowApplicationVersion = case debounceApp of
+                newWorkflowAppVersion = case debounceApp of
                   Just app | app /= identity.identityAppName -> Nothing
                   _ -> Just identity.identityAppVersion,
                 newWorkflowTimeout = timeoutBudget options.startTimeout,
@@ -1027,11 +1027,11 @@ startChildWorkflow wctx ref options input = do
                     newWorkflowDelay = debouncedDelay,
                     newWorkflowIsDebounced = debounced,
                     newWorkflowDebounceTimeout = debouncedTimeout,
-                    newWorkflowApplicationName = debounceApp <|> Just identity.identityAppName,
+                    newWorkflowAppName = debounceApp <|> Just identity.identityAppName,
                     -- A row written for another application carries no version: the
                     -- runner resolves the target's latest, as the oracle's
                     -- @for_another_app@ writes @application_version = None@.
-                    newWorkflowApplicationVersion = case debounceApp of
+                    newWorkflowAppVersion = case debounceApp of
                       Just app | app /= identity.identityAppName -> Nothing
                       _ -> Just identity.identityAppVersion,
                     newWorkflowTimeout = timeoutBudget options.startTimeout,

@@ -13,11 +13,13 @@ import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, runSimOrThrow)
 import Data.Map.Strict qualified as Map
 import DBOS.SystemDB
-  ( Applications (..),
+  ( AppScope (..),
     AwaitedOutcome (..),
     Change (..),
     Debounce (..),
     DebounceRequest (..),
+    Dequeued (..),
+    DequeueStop (..),
     EncodedValue (..),
     Error (..),
     EventRecord (..),
@@ -38,7 +40,7 @@ import DBOS.SystemDB
     ScheduleRecord (..),
     ScheduleStatus (..),
     ScheduleUpdate (..),
-    SendMessage (..),
+    EncodedSendMessage (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
     SysRewindOptions (..),
@@ -69,6 +71,7 @@ import DBOS.SystemDB
     newWorkflowKey,
     parseApplicationName,
     secondsDuration,
+    spansPartitions,
     timestampFromEpochMs,
     zeroRowCounts)
 import DBOS.SystemDB.IOSim (MemSystemDB (memRows), MockSystemDB (..), newMemDB)
@@ -260,7 +263,7 @@ queueTests =
     [ testCase "upsertQueue reports a write" $ do
         run (upsertQueue backend (newQueue "q") UpdateExisting) @?= Right True,
       testCase "startQueuedWorkflows answers a claimed id" $ do
-        run (startQueuedWorkflows backend mockQueueRecord "exec" "0.0.0" Nothing 0 0 "tok-mock") @?= Right [WorkflowId "mock-queued"],
+        fmap (.dequeuedWorkflowIds) (run (startQueuedWorkflows backend mockQueueRecord "exec" "0.0.0" Nothing 0 0 "tok-mock")) @?= Right [WorkflowId "mock-queued"],
       testCase "getQueuePartitions answers a partition" $ do
         run (getQueuePartitions backend "q") @?= Right ["mock-partition"],
       testCase "startQueuedPartitionedWorkflows answers a claimed id" $ do
@@ -300,7 +303,7 @@ queueTests =
           queueRecordPartitionWorkerConcurrency = Nothing,
           queueRecordPartitionRateLimit = Nothing,
           queueRecordPollingInterval = secondsDuration 1,
-          queueRecordApplicationName = Just "app"
+          queueRecordAppName = Just "app"
         }
     debounceRequest =
       DebounceRequest
@@ -310,7 +313,7 @@ queueTests =
           debounceRequestPeriod = secondsDuration 1,
           debounceRequestInputs = Nothing,
           debounceRequestSerialization = Nothing,
-          debounceRequestApplicationName = Nothing
+          debounceRequestAppName = Nothing
         }
 
 -- * Schedules
@@ -414,7 +417,7 @@ memTests =
                     debounceRequestPeriod = secondsDuration 1,
                     debounceRequestInputs = Just "{\"n\":2}",
                     debounceRequestSerialization = Nothing,
-                    debounceRequestApplicationName = Nothing
+                    debounceRequestAppName = Nothing
                   }
           _ <- orFailSim =<< initWorkflow mem base Nothing
           lost <- initWorkflow mem base Nothing
@@ -470,11 +473,61 @@ memTests =
           first <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-first"
           second <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-second"
           row <- orJustSim "the claimed row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-q")
-          pure (first, second, row)
+          pure (first.dequeuedWorkflowIds, second.dequeuedWorkflowIds, row)
         first @?= [WorkflowId "wf-q"]
         second @?= []
         row.workflowRecordStatus @?= Pending
         row.workflowRecordOwnerXid @?= Just "tok-first",
+      testCase "the pending count sees only the queue's running rows" $ do
+        counted <- runMem $ do
+          mem <- newMemDB
+          _ <- upsertQueue mem (newQueue "orders") UpdateExisting
+          _ <- upsertQueue mem (newQueue "invoices") UpdateExisting
+          empty <- orFailSim =<< countPendingQueueWorkflows mem "orders"
+          _ <- initWorkflow mem ((newWorkflow "wf-a") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-b") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "beta"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-c") {newWorkflowQueueName = Just "invoices"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-w") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "gamma"}) Nothing
+          orders <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "orders"
+          _ <- orFailSim =<< startQueuedWorkflows mem orders "exec" "v1" (Just "alpha") 0 0 "tok-a"
+          _ <- orFailSim =<< startQueuedWorkflows mem orders "exec" "v1" (Just "beta") 0 0 "tok-b"
+          full <- orFailSim =<< countPendingQueueWorkflows mem "orders"
+          pure (empty, full)
+        counted @?= (0, 2),
+      testCase "a partition claim names a spent queue-wide concurrency limit" $ do
+        stopped <- runMem $ do
+          mem <- newMemDB
+          _ <- upsertQueue mem ((newQueue "orders") {newQueueConcurrency = Just 1, newQueuePartitionConcurrency = Just 1}) UpdateExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-running") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-waiting") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "beta"}) Nothing
+          queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "orders"
+          _ <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-run"
+          orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" (Just "beta") 0 0 "tok-c"
+        stopped @?= Dequeued [] (Just DequeueStopConcurrency)
+        spansPartitions DequeueStopConcurrency @?= True,
+      -- IO only: a spent queue-wide rate limit names RateLimit. Mem keeps
+      -- no dequeue history, so the rate stop never fires here; the live
+      -- tree carries that twin.
+      testCase "a full partition is named as that partition's limit alone" $ do
+        stopped <- runMem $ do
+          mem <- newMemDB
+          _ <- upsertQueue mem ((newQueue "orders") {newQueueConcurrency = Just 10, newQueuePartitionConcurrency = Just 1}) UpdateExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-running") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-waiting") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
+          queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "orders"
+          _ <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-run"
+          orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" (Just "alpha") 0 0 "tok-c"
+        stopped @?= Dequeued [] (Just DequeueStopPartitionConcurrency)
+        spansPartitions DequeueStopPartitionConcurrency @?= False,
+      testCase "a full worker is named as the stop" $ do
+        stopped <- runMem $ do
+          mem <- newMemDB
+          _ <- upsertQueue mem ((newQueue "orders") {newQueueWorkerConcurrency = Just 1, newQueuePartitionConcurrency = Just 1}) UpdateExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-waiting") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
+          queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "orders"
+          orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" (Just "alpha") 1 0 "tok-c"
+        stopped @?= Dequeued [] (Just DequeueStopWorkerConcurrency)
+        spansPartitions DequeueStopWorkerConcurrency @?= True,
       testCase "a delayed row whose instant passed transitions to enqueued" $ do
         (before, moved, after) <- runMem $ do
           mem <- newMemDB
@@ -638,7 +691,7 @@ memTests =
       testCase "recovery re-enqueues the named executor's pending rows" $ do
         (recovered, row) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-r") {newWorkflowExecutorId = Just "exec-1", newWorkflowApplicationVersion = Just "v1"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-r") {newWorkflowExecutorId = Just "exec-1", newWorkflowAppVersion = Just "v1"}) Nothing
           recovered <- orFailSim =<< reenqueueForRecovery mem ["exec-1"] "v1" "recovery-q"
           row <- orJustSim "the recovered row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-r")
           pure (recovered, row)
@@ -655,6 +708,38 @@ memTests =
           _ <- sendMessage mem (message (WorkflowId "wf-m") (SerializedWorkflowValue "\"v\"" Nothing)) {sendTopic = Just (Topic "topic")} (Just "portable_json") Nothing Nothing False
           takeMVar received
         result @?= Right (Just (EncodedValue "\"v\"" (Just "portable_json"))),
+      -- Twin of the rival-take case: the loser of the first message waits
+      -- for the next instead of recording an empty take, so both receives
+      -- take distinct messages and neither step records an absence.
+      testCase "a recv whose message a rival took waits for the next" $ do
+        (first, second) <- runMem $ do
+          mem <- newMemDB
+          firstTaken <- newEmptyMVar
+          secondTaken <- newEmptyMVar
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-m") Nothing
+          let token = created.initResultCreatorXid
+              receive step box =
+                recv mem (WorkflowId "wf-m") step step (Just "topic") (secondsDuration 10) token >>= putMVar box
+              post body =
+                orFailSim
+                  =<< sendMessage
+                    mem
+                    (message (WorkflowId "wf-m") (SerializedWorkflowValue body Nothing)) {sendTopic = Just (Topic "topic")}
+                    (Just "portable_json")
+                    Nothing
+                    Nothing
+                    False
+          _ <- forkIO (receive 0 firstTaken)
+          _ <- forkIO (receive 1 secondTaken)
+          threadDelay 1000
+          _ <- post "\"one\""
+          threadDelay 1000
+          _ <- post "\"two\""
+          (,) <$> takeMVar firstTaken <*> takeMVar secondTaken
+        let bodies = [body | Right (Just value) <- [first, second], let EncodedValue body _ = value]
+        assertBool
+          ("expected one take of each message, got: " <> show bodies)
+          (length bodies == 2 && "\"one\"" `elem` bodies && "\"two\"" `elem` bodies),
       -- Twin of the live stale-send case: the refused delivery rolls back,
       -- so the owner's send still delivers.
       testCase "a stale token's send is refused and delivers nothing" $ do
@@ -695,6 +780,23 @@ memTests =
           Left (WorkflowConflict {}) -> pure ()
           other -> fail ("expected WorkflowConflict, got: " <> show other)
         taken @?= Right (Just (EncodedValue "\"held\"" (Just "portable_json"))),
+      testCase "a stale token's recv absence is refused and records nothing" $ do
+        -- Twin of the live stale-absence case: a stale execution is
+        -- refused with nothing recorded, so the owner's later take still
+        -- finds the message. Pins the end-to-end invariant; the refusal
+        -- below fires at the sleep checkpoint, while the record path's
+        -- own check closes the narrower take-to-record hand-off window.
+        (refused, taken) <- runMem $ do
+          mem <- newMemDB
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-s") Nothing
+          refused <- recv mem (WorkflowId "wf-s") 0 0 (Just "topic") (millisDuration 0) "someone-else"
+          _ <- sendMessage mem (message (WorkflowId "wf-s") (SerializedWorkflowValue "\"late\"" Nothing)) {sendTopic = Just (Topic "topic")} (Just "portable_json") Nothing Nothing False
+          taken <- recv mem (WorkflowId "wf-s") 0 0 (Just "topic") (secondsDuration 10) created.initResultCreatorXid
+          pure (refused, taken)
+        case refused of
+          Left (WorkflowConflict {}) -> pure ()
+          other -> fail ("expected WorkflowConflict, got: " <> show other)
+        taken @?= Right (Just (EncodedValue "\"late\"" (Just "portable_json"))),
       testCase "a rewind clears the finished row's outcome with its steps" $ do
         (before, rewound, row, steps) <- runMem $ do
           mem <- newMemDB

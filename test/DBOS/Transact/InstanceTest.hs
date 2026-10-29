@@ -23,6 +23,7 @@ import DBOS.Transact
     Executor,
     Environment (..),
     Error (..),
+    IdleTransactionTimeout (..),
     PollingConcurrency (PollingDefault),
     Serializer (..),
     SerializedWorkflowValue (..),
@@ -121,7 +122,8 @@ tests =
                   configPollingConcurrency = PollingDefault,
                   configOutcomePollInterval = Nothing,
                   configListenQueues = Nothing,
-                  configNotificationCoalesce = Nothing
+                  configNotificationCoalesce = Nothing,
+                  configIdleTransactionTimeout = Default
                 }
         dbos <- newDBOS invalid
         started <- launchWithEnvironment dbos isolatedEnvironment
@@ -333,7 +335,7 @@ tests =
                   loserBase
                     { configAppVersion = Just contested,
                       configExecutorId = Just ("hs-l2-executor-" <> suffix),
-                      configDatabaseUrl = withApplicationName loserBase.configDatabaseUrl tag
+                      configDatabaseUrl = withAppName loserBase.configDatabaseUrl tag
                     }
             bracket (newDBOS loserConfig) shutdown $ \loser -> do
               loserStarted <- launchWithEnvironment loser isolatedEnvironment
@@ -388,8 +390,8 @@ acquireSuiteBackend = do
 
 -- | Tags a connection string so its backends can be told from every other
 -- test's on the shared server.
-withApplicationName :: Text -> Text -> Text
-withApplicationName url tag
+withAppName :: Text -> Text -> Text
+withAppName url tag
   | "?" `Text.isInfixOf` url = url <> "&application_name=" <> tag
   | otherwise = url <> "?application_name=" <> tag
 
@@ -439,7 +441,7 @@ readAppVersions getBackend appName appVersion = do
       pure
         [ version.versionInfoName
           | version <- versions,
-            version.versionInfoApplicationName == Just appName,
+            version.versionInfoAppName == Just appName,
             version.versionInfoName == appVersion
         ]
 

@@ -9,11 +9,11 @@ import DBOS.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
-import DBOS.SystemDB (ApplicationRowCounts (..), Applications (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodWorkflowKey, newQueue, newSchedule, newWorkflow, newWorkflowKey, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, portableJsonSerialization, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, renameFromApplication, renderApplicationName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
+import DBOS.SystemDB (ApplicationRowCounts (..), AppScope (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkOptions (..), IdleTransactionTimeout (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, idleTimeoutDefault, idleTimeoutMax, idleTimeoutMillis, idleTimeoutOptionNames, idleTimeoutValidate, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodWorkflowKey, millisDuration, newQueue, newSchedule, newWorkflow, newWorkflowKey, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, portableJsonSerialization, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, renameFromApplication, renderApplicationName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
 import DBOS.Transact
   (
   IdempotencyKey (..),
-  SendMessage (..),
+  EncodedSendMessage (..),
   Serialization (..),
   SerializedWorkflowValue (..),
   Topic (..),
@@ -41,7 +41,8 @@ tests =
       debounceTests,
       outcomeTests,
       notificationTests,
-      ownerTests
+      ownerTests,
+      idleTimeoutTests
     ]
 
 ownerTests :: TestTree
@@ -51,6 +52,44 @@ ownerTests =
     [ testCase "an owner carries its row and token" $
         let owner = WorkflowOwner {ownerWorkflowId = WorkflowId "wf", ownerToken = "tok"}
          in (owner.ownerWorkflowId, owner.ownerToken) @?= (WorkflowId "wf", "tok")
+    ]
+
+idleTimeoutTests :: TestTree
+idleTimeoutTests =
+  testGroup
+    "Idle transaction timeout"
+    [ testCase "the default is sixty seconds and the max is i32 milliseconds" $ do
+        durationAsMillis idleTimeoutDefault @?= 60000
+        durationAsMillis idleTimeoutMax @?= 2147483647,
+      testCase "millis resolves each variant" $ do
+        idleTimeoutMillis Default @?= Just 60000
+        idleTimeoutMillis (After (millisDuration 300)) @?= Just 300
+        idleTimeoutMillis ServerSetting @?= Nothing
+        case durationFromSecs 0.0005 of
+          Nothing -> fail "expected a sub-millisecond duration"
+          Just subMs -> idleTimeoutMillis (After subMs) @?= Just 1,
+      testCase "validation refuses only what the server cannot take" $ do
+        idleTimeoutValidate Default @?= Right ()
+        idleTimeoutValidate ServerSetting @?= Right ()
+        idleTimeoutValidate (After (millisDuration 300)) @?= Right ()
+        case idleTimeoutValidate (After (millisDuration 0)) of
+          Left (InvalidInput {}) -> pure ()
+          other -> fail ("expected a zero After to be refused, got: " <> show other)
+        case idleTimeoutValidate (After (secondsDuration 3000000)) of
+          Left (InvalidInput {}) -> pure ()
+          other -> fail ("expected an over-max After to be refused, got: " <> show other),
+      testCase "option names read as the server reads them" $ do
+        idleTimeoutOptionNames "-c a=1 -cB=2 --c-d=3 -c e\\ f=4" @?= ["a", "b", "c_d", "e f"]
+        idleTimeoutOptionNames "-c application_name=idle_in_transaction_session_timeout" @?= ["application_name"]
+        idleTimeoutOptionNames "-B 100 stray -c" @?= [],
+      testCase "a URL sets the timeout only through its options" $ do
+        urlSetsIdleTimeout "postgresql://h/db?options=-c%20idle_in_transaction_session_timeout%3D1234" Nothing @?= True
+        urlSetsIdleTimeout "postgresql://h/db?options=-c%20IDLE%5FIN%5FTRANSACTION%5FSESSION%5FTIMEOUT%3D1234" Nothing @?= True
+        urlSetsIdleTimeout "postgresql://h/db?options=--idle-in-transaction-session-timeout%3D1234" Nothing @?= True
+        urlSetsIdleTimeout "postgresql://h/db?idle_in_transaction_session_timeout=1234" Nothing @?= False
+        urlSetsIdleTimeout "postgresql://h/db?options=-c%20application_name%3Didle_in_transaction_session_timeout" Nothing @?= False
+        urlSetsIdleTimeout "postgresql://h/db" Nothing @?= False
+        urlSetsIdleTimeout "postgresql://h/db" (Just "-c idle_in_transaction_session_timeout=5") @?= True
     ]
 
 timestampTests :: TestTree
@@ -221,7 +260,7 @@ workflowRecordTests =
                   workflowRecordError = Nothing,
                   workflowRecordSerialization = Just "json",
                   workflowRecordExecutorId = Nothing,
-                  workflowRecordApplicationVersion = Just "v1",
+                  workflowRecordAppVersion = Just "v1",
                   workflowRecordRecoveryAttempts = 0,
                   workflowRecordQueueName = Just "demo-queue",
                   workflowRecordCreatedAt = timestampFromEpochMs 1700000000000,
@@ -232,12 +271,12 @@ workflowRecordTests =
                   workflowRecordParentWorkflowId = Nothing,
                   workflowRecordWasForkedFrom = False,
                   workflowRecordOwnerXid = Nothing,
-                  workflowRecordApplicationId = Nothing,
+                  workflowRecordAppId = Nothing,
                   workflowRecordAuthenticatedUser = Nothing,
                   workflowRecordAuthenticatedRoles = [],
                   workflowRecordAssumedRole = Nothing,
                   workflowRecordRequest = Nothing,
-                  workflowRecordApplicationName = Nothing,
+                  workflowRecordAppName = Nothing,
                   workflowRecordDeduplicationId = Nothing,
                   workflowRecordPriority = 0,
                   workflowRecordQueuePartitionKey = Nothing,
@@ -387,7 +426,7 @@ queueTests =
                   queueRecordPartitionWorkerConcurrency = Nothing,
                   queueRecordPartitionRateLimit = Nothing,
                   queueRecordPollingInterval = secondsDuration 1,
-                  queueRecordApplicationName = Nothing
+                  queueRecordAppName = Nothing
                 }
          in do
               queueHasPartitionLimits legacy @?= False
@@ -415,7 +454,7 @@ queueTests =
                   queueRecordPartitionWorkerConcurrency = Nothing,
                   queueRecordPartitionRateLimit = Nothing,
                   queueRecordPollingInterval = secondsDuration 1,
-                  queueRecordApplicationName = Nothing
+                  queueRecordAppName = Nothing
                 }
          in do
               queueHasPartitionLimits modern @?= True
@@ -437,7 +476,7 @@ queueTests =
                   queueRecordPartitionWorkerConcurrency = Nothing,
                   queueRecordPartitionRateLimit = Nothing,
                   queueRecordPollingInterval = secondsDuration 1,
-                  queueRecordApplicationName = Nothing
+                  queueRecordAppName = Nothing
                 }
             merged = applyQueueUpdate (defaultQueueUpdate {queueUpdateConcurrency = Set (Just 5)}) stored
          in (merged.queueRecordConcurrency, merged.queueRecordName)
@@ -455,7 +494,7 @@ queueTests =
                   queueRecordPartitionWorkerConcurrency = Nothing,
                   queueRecordPartitionRateLimit = Nothing,
                   queueRecordPollingInterval = secondsDuration 1,
-                  queueRecordApplicationName = Nothing
+                  queueRecordAppName = Nothing
                 }
             moved = applyQueueUpdate (defaultQueueUpdate {queueUpdatePartitionConcurrency = Set (Just 1)}) stored
             pinned = applyQueueUpdate (defaultQueueUpdate {queueUpdatePartitionQueue = Set False, queueUpdatePartitionConcurrency = Set (Just 1)}) stored
@@ -499,7 +538,7 @@ filterTests =
     [ testCase "an empty workflow filter narrows nothing but loads everything" $
         let narrowed = defaultWorkflowFilter
          in ( narrowed.workflowFilterWorkflowIds,
-              narrowed.workflowFilterApplications,
+              narrowed.workflowFilterAppScope,
               narrowed.workflowFilterLoadInput,
               narrowed.workflowFilterLoadOutput
             )
@@ -527,7 +566,7 @@ forkTests =
         forkValidate (Fork "s" (Just "f") 2)
           @?= Right (),
       testCase "rejects fork options that would stamp or duplicate" $ do
-        forkOptionsValidate (defaultForkOptions {forkOptionsApplicationVersion = Just ""})
+        forkOptionsValidate (defaultForkOptions {forkOptionsAppVersion = Just ""})
           @?= Left (invalidInput "application_version" "must be absent rather than empty")
         noWait <- expectJust "durationFromMs 0" (durationFromMs 0)
         forkOptionsValidate (defaultForkOptions {forkOptionsTimeout = Just noWait})
@@ -556,7 +595,7 @@ debounceTests =
                   debounceRequestPeriod = wait,
                   debounceRequestInputs = Nothing,
                   debounceRequestSerialization = Nothing,
-                  debounceRequestApplicationName = Nothing
+                  debounceRequestAppName = Nothing
                 }
         debounceValidate request
           @?= Right ()
@@ -578,7 +617,7 @@ debounceTests =
                   debounceRequestPeriod = wait,
                   debounceRequestInputs = Nothing,
                   debounceRequestSerialization = Nothing,
-                  debounceRequestApplicationName = Nothing
+                  debounceRequestAppName = Nothing
                 }
         debounceValidate (base {debounceRequestPeriod = noWait})
           @?= Left (invalidInput "period" "must be a positive, non-zero duration")
@@ -606,7 +645,7 @@ notificationTests =
     [ testCase "maps Python SendMessage without topic to notifications sentinel topic" $
         notificationRowForMessage
           (MessageUUID "generated-message-id")
-          (SendMessage (WorkflowId "dest-wf") messageBody Nothing Nothing)
+          (EncodedSendMessage (WorkflowId "dest-wf") messageBody Nothing Nothing)
           @?= NotificationRow
             { notificationDestinationId = WorkflowId "dest-wf",
               notificationTopic = nullTopicSentinel,
@@ -617,7 +656,7 @@ notificationTests =
       testCase "maps Python SendMessage topic into a notifications row" $
         notificationRowForMessage
           (MessageUUID "generated-message-id")
-          (SendMessage (WorkflowId "dest-wf") messageBody (Just (Topic "testtopic")) Nothing)
+          (EncodedSendMessage (WorkflowId "dest-wf") messageBody (Just (Topic "testtopic")) Nothing)
           @?= NotificationRow
             { notificationDestinationId = WorkflowId "dest-wf",
               notificationTopic = "testtopic",
@@ -628,7 +667,7 @@ notificationTests =
       testCase "scopes Python send idempotency keys by destination workflow" $
         ( notificationRowForMessage
             (MessageUUID "ignored-generated-id")
-            ( SendMessage
+            ( EncodedSendMessage
                 (WorkflowId "dest-wf")
                 messageBody
                 Nothing
@@ -639,7 +678,7 @@ notificationTests =
       testCase "scopes generated fallback ids by destination workflow" $
         ( notificationRowForMessage
             (MessageUUID "generated-message-id")
-            (SendMessage (WorkflowId "dest-wf") messageBody Nothing Nothing)
+            (EncodedSendMessage (WorkflowId "dest-wf") messageBody Nothing Nothing)
           ).notificationMessageUUID
           @?= MessageUUID "generated-message-id::dest-wf"
     ]

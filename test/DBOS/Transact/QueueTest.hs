@@ -15,7 +15,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import DBOS.DualStack (liveCaseWith)
 import DBOS.Prelude
-import DBOS.SystemDB (Applications (..), AwaitedOutcome (..), QueueRecord (..), SystemDB (getQueue, upsertQueue), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), getWorkflow)
+import DBOS.SystemDB (AppScope (..), AwaitedOutcome (..), QueueRecord (..), SystemDB (getQueue, upsertQueue), WorkflowRecord (..), WorkflowStatus (..), getWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Dequeue (Admission (..), admission)
@@ -68,6 +68,10 @@ import DBOS.Transact.QueueCases
     checkUnhonourable,
     checkUnlaunched,
     checkUpdateCoherent,
+    checkWalkFullPartition,
+    checkWalkSpentConcurrency,
+    checkWalkSpentRateLimit,
+    checkWalkSpentRoom,
     scenarioBadEnqueue,
     scenarioCountedPartitioned,
     scenarioDedup,
@@ -105,6 +109,10 @@ import DBOS.Transact.QueueCases
     scenarioUnhonourable,
     scenarioUnlaunched,
     scenarioUpdateCoherent,
+    scenarioWalkFullPartition,
+    scenarioWalkSpentConcurrency,
+    scenarioWalkSpentRateLimit,
+    scenarioWalkSpentRoom,
   )
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertEqual, testCase, (@?=))
@@ -317,6 +325,10 @@ tests =
       leaf getBackend (const Nothing) "updating a queue changes what a running worker honours" scenarioUpdateHonoured checkUpdateHonoured,
       leaf getBackend (const Nothing) "a partitioned queue runs one workflow per key at a time" scenarioPartitioned checkPartitioned,
       leaf getBackend (const Nothing) "a counted partitioned queue runs its limit per key" scenarioCountedPartitioned checkCountedPartitioned,
+      leaf getBackend (const (Just [])) "a walk with the queue-wide concurrency spent visits no partition" scenarioWalkSpentConcurrency checkWalkSpentConcurrency,
+      leaf getBackend (const (Just [])) "a walk with the queue-wide rate limit spent stops after one claim" scenarioWalkSpentRateLimit checkWalkSpentRateLimit,
+      leaf getBackend (const (Just [])) "a full partition does not end the walk" scenarioWalkFullPartition checkWalkFullPartition,
+      leaf getBackend (const (Just [])) "a walk stops once the queue-wide room is claimed" scenarioWalkSpentRoom checkWalkSpentRoom,
       leaf getBackend (const Nothing) "a stored row cannot redefine the internal queue" scenarioInternalRow checkInternalRow,
       leaf getBackend (const Nothing) "another application's queue is not dequeued from" scenarioPeerQueue checkPeerQueue,
       leaf getBackend (const Nothing) "an unhonourable queue configuration is refused" scenarioUnhonourable checkUnhonourable,

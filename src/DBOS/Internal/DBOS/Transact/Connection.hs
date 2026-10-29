@@ -200,11 +200,12 @@ backendConfig config identity =
   Postgres.Config
     { Postgres.configUrl = config.configDatabaseUrl,
       Postgres.configMaxConnections = fromIntegral config.configMaxConnections,
+      Postgres.configIdleTransactionTimeout = config.configIdleTransactionTimeout,
       Postgres.configSettings =
         (Postgres.defaultSettings :: Settings)
           { settingsSchema = config.configSchema,
             settingsExecutorId = Just identity.identityExecutorId,
-            settingsApplicationName = Just identity.identityAppName,
+            settingsAppName = Just identity.identityAppName,
             settingsPollingConcurrency = config.configPollingConcurrency,
             settingsNotificationCoalesce = config.configNotificationCoalesce
           }

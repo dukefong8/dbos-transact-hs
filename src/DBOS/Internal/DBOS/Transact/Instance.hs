@@ -72,7 +72,7 @@ import Data.Map.Strict qualified as Map
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Applications, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult, WorkflowKey, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter, renderWorkflowKey)
+import DBOS.SystemDB.Types (AppScope, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult, WorkflowKey, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter, renderWorkflowKey)
 import DBOS.Transact.Serialization (CodecError (..), SerializationError, WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, unWorkflowInput)
 import DBOS.Transact.Serialization qualified as Serialization
 import DBOS.Transact.Config (Config (..))
@@ -526,7 +526,7 @@ sendWorkflowMessage :: (MonadMVar m)
 sendWorkflowMessage dbos destination topic idempotencyKey value = do
   withExecutor dbos "send a message" $ \executor -> do
     let message =
-          SendMessage
+          EncodedSendMessage
             { sendDestinationId = destination,
               sendMessageBody = value,
               sendTopic = topic,
@@ -537,7 +537,7 @@ sendWorkflowMessage dbos destination topic idempotencyKey value = do
 
 -- | Send a batch from outside in one transaction: all or none.
 sendWorkflowMessages :: (MonadMVar m)
-                     => DBOS m -> [SendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+                     => DBOS m -> [EncodedSendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWorkflowMessages dbos messages = do
   withExecutor dbos "send messages" $ \executor -> do
     written <- withConnection executor.conn (\db -> SystemDB.sendMessages db messages Nothing Nothing Nothing False)

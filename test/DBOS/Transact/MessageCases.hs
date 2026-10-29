@@ -60,7 +60,7 @@ import DBOS.Transact
     Error (..),
     Forks (..),
     IdempotencyKey (..),
-    Message (..),
+    SendMessage (..),
     SendOptions (..),
     Topic (..),
     WorkflowCtx,
@@ -139,10 +139,10 @@ scenarioFanOut fx = do
   forkId <- fx.mfForkFrom original
   (skipped, originalOnce, forkOnce, included) <-
     mfRun fx sender $ \senderContext -> do
-      skipped <- sendWith senderContext original ("skipped" :: Text) sendOptionsDefault
+      skipped <- sendWith senderContext (SendMessage original ("skipped" :: Text) Nothing Nothing) sendOptionsDefault
       originalOnce <- fx.mfNotifyCount original
       forkOnce <- fx.mfNotifyCount forkId
-      included <- sendWith senderContext original ("included" :: Text) sendOptionsDefault {forks = ForksInclude}
+      included <- sendWith senderContext (SendMessage original ("included" :: Text) Nothing Nothing) sendOptionsDefault {sendToForks = ForksInclude}
       pure (skipped, originalOnce, forkOnce, included)
   originalTwice <- fx.mfNotifyCount original
   forkTwice <- fx.mfNotifyCount forkId
@@ -252,8 +252,8 @@ scenarioBulkSend fx = do
     mfRun fx source $ \sender ->
       sendBulk
         sender
-        [ Message destination ("one" :: Text) (Just (Topic "bulk")) Nothing,
-          Message destination ("two" :: Text) (Just (Topic "bulk")) Nothing
+        [ SendMessage destination ("one" :: Text) (Just (Topic "bulk")) Nothing,
+          SendMessage destination ("two" :: Text) (Just (Topic "bulk")) Nothing
         ]
   (first, second) <-
     mfRun fx destination $ \receiver -> do
@@ -269,7 +269,7 @@ scenarioBulkEmpty :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTi
                   => MessageFixture m -> m (Either (Error EngineOnly) (), Maybe StepRecord)
 scenarioBulkEmpty fx = do
   (source, _) <- fx.mfFreshPair "bulk-empty"
-  sent <- mfRun fx source $ \sender -> sendBulk sender ([] :: [Message Text])
+  sent <- mfRun fx source $ \sender -> sendBulk sender ([] :: [SendMessage Text])
   checkpoint <- fx.mfCheckStep source sendBulkStepName 0
   pure (sent, checkpoint)
 
@@ -303,7 +303,7 @@ scenarioKeyedFanOut fx = do
   forkId <- fx.mfForkFrom original
   included <-
     mfRun fx sender $ \senderContext ->
-      sendWith senderContext original ("included" :: Text) (sendOptionsDefault {forks = ForksInclude, idempotencyKey = Just (IdempotencyKey "fanout-key")})
+      sendWith senderContext (SendMessage original ("included" :: Text) Nothing (Just (IdempotencyKey "fanout-key"))) (sendOptionsDefault {sendToForks = ForksInclude})
   originalTwice <- fx.mfNotifyCount original
   forkTwice <- fx.mfNotifyCount forkId
   pure (included, originalTwice, forkTwice)
@@ -442,8 +442,8 @@ scenarioBatchNotifyUnique fx = do
     mfRun fx source $ \sender ->
       sendBulk
         sender
-        [ Message destination ("one" :: Text) (Just (Topic "approval")) Nothing,
-          Message destination ("two" :: Text) (Just (Topic "approval")) Nothing
+        [ SendMessage destination ("one" :: Text) (Just (Topic "approval")) Nothing,
+          SendMessage destination ("two" :: Text) (Just (Topic "approval")) Nothing
         ]
   ids <- fx.mfNotifyIds destination
   pure (sent, ids)

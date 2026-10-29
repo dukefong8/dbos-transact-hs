@@ -22,7 +22,7 @@ import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import DBOS.SystemDB
-  ( Applications (..),
+  ( AppScope (..),
     AwaitedOutcome (..),
     Fork (..),
     NewWorkflow (..),
@@ -867,7 +867,7 @@ tests =
             byId <- listWorkflows dbosA (defaultWorkflowFilter {workflowFilterWorkflowIds = [peerText]})
             case byId of
               Left err -> fail (show err)
-              Right [WorkflowRecord {workflowRecordId = foundId, workflowRecordApplicationName = owner}] -> do
+              Right [WorkflowRecord {workflowRecordId = foundId, workflowRecordAppName = owner}] -> do
                 foundId @?= WorkflowId peerText
                 owner @?= Just appBName
               other -> fail ("expected the peer's row, got: " <> show other)
@@ -884,7 +884,7 @@ tests =
                 dbosA
                 ( defaultWorkflowFilter
                     { workflowFilterWorkflowIds = [peerText],
-                      workflowFilterApplications = Named [appAName]
+                      workflowFilterAppScope = Named [appAName]
                     }
                 )
             narrowed @?= Right []
@@ -977,7 +977,7 @@ tests =
             -- nobody else could take it, and the peer does not poll that queue.
             peerRow <- readRow getBackend (WorkflowId peerNamedText)
             peerRow.workflowRecordStatus @?= Enqueued
-            peerRow.workflowRecordApplicationName @?= Just appBName
+            peerRow.workflowRecordAppName @?= Just appBName
     ]
 
 -- * Engine-only driver aliases

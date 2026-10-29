@@ -27,7 +27,8 @@ import Data.Text qualified as Text
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB
-  ( Error,
+  ( Dequeued (..),
+    Error,
     NewWorkflow (..),
     OnExistingQueue (..),
     QueueRecord,
@@ -82,6 +83,9 @@ import DBOS.Transact.QueueCases
     checkUnhonourable,
     checkUnlaunched,
     checkUpdateCoherent,
+    checkWalkFullPartition,
+    checkWalkSpentConcurrency,
+    checkWalkSpentRoom,
     scenarioBadEnqueue,
     scenarioCountedPartitioned,
     scenarioWorkerBudgetExhausted,
@@ -119,6 +123,9 @@ import DBOS.Transact.QueueCases
     scenarioUnhonourable,
     scenarioUnlaunched,
     scenarioUpdateCoherent,
+    scenarioWalkFullPartition,
+    scenarioWalkSpentConcurrency,
+    scenarioWalkSpentRoom,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -140,7 +147,7 @@ stageQueuedRow mem widText application = do
       ( (newWorkflow widText)
           { newWorkflowName = Just "fixture",
             newWorkflowQueueName = Just queueName,
-            newWorkflowApplicationName = application
+            newWorkflowAppName = application
           }
       )
       Nothing
@@ -151,7 +158,7 @@ stageQueuedRow mem widText application = do
 
 -- | The claim a listener makes: the same engine call the supervisor's
 -- poll makes for one queue.
-claim :: MemSystemDB s -> QueueRecord -> Text -> IOSim s (Either Error [WorkflowId])
+claim :: MemSystemDB s -> QueueRecord -> Text -> IOSim s (Either Error Dequeued)
 claim mem record executor = startQueuedWorkflows mem record executor "v1" Nothing 0 0 "tok-sim"
 
 rowExecutor :: MemSystemDB s -> Text -> IOSim s (Maybe Text)
@@ -168,7 +175,7 @@ rowExecutor mem widText = do
 -- order; the first claims, the second sees nothing. Returns the two
 -- results, the executor the row ended up stamped with, and the fork
 -- order the trace must show.
-scenarioRace :: IOSim s (Either Error [WorkflowId], Either Error [WorkflowId], Maybe Text, [ThreadId (IOSim s)])
+scenarioRace :: IOSim s (Either Error Dequeued, Either Error Dequeued, Maybe Text, [ThreadId (IOSim s)])
 scenarioRace = do
   mem <- newMemDBWithApplication (Just "foreign")
   record <- stageQueuedRow mem "race" Nothing
@@ -187,7 +194,7 @@ scenarioRace = do
 
 -- | A row that names its application: the foreign listener's sweep skips
 -- it, the owner's claims it.
-scenarioScoped :: IOSim s (Either Error [WorkflowId], Either Error [WorkflowId], Maybe Text)
+scenarioScoped :: IOSim s (Either Error Dequeued, Either Error Dequeued, Maybe Text)
 scenarioScoped = do
   mem <- newMemDBWithApplication (Just "foreign")
   record <- stageQueuedRow mem "scoped" (Just "owner")
@@ -249,8 +256,8 @@ tests =
         [ testCase "two listeners race for an unclaimed row; the first claims it" $ do
             ((firstClaimed, secondClaimed, executor, forked), tr) <- runSimCase scenarioRace
             printSimTrace tr
-            firstClaimed @?= Right [WorkflowId "race"]
-            secondClaimed @?= Right []
+            firstClaimed @?= Right (Dequeued [WorkflowId "race"] Nothing)
+            secondClaimed @?= Right (Dequeued [] Nothing)
             executor @?= Just "foreign"
             -- The fork order the scheduler used is the fork order we created,
             -- so the winner is fixed by the schedule, not by timing.
@@ -262,8 +269,8 @@ tests =
           testCase "an application-scoped row is claimed only by its application" $ do
             ((foreignClaim, owner, executor), tr) <- runSimCase scenarioScoped
             printSimTrace tr
-            foreignClaim @?= Right []
-            owner @?= Right [WorkflowId "scoped"]
+            foreignClaim @?= Right (Dequeued [] Nothing)
+            owner @?= Right (Dequeued [WorkflowId "scoped"] Nothing)
             executor @?= Just "owner"
         ],
       testGroup
@@ -303,6 +310,12 @@ tests =
           simLeaf (const Nothing) "updating a queue changes what a running worker honours" scenarioUpdateHonoured checkUpdateHonoured,
           simLeaf (const Nothing) "a partitioned queue runs one workflow per key at a time" scenarioPartitioned checkPartitioned,
           simLeaf (const Nothing) "a counted partitioned queue runs its limit per key" scenarioCountedPartitioned checkCountedPartitioned,
+          simLeaf (const (Just [])) "a walk with the queue-wide concurrency spent visits no partition" scenarioWalkSpentConcurrency checkWalkSpentConcurrency,
+          -- IO only: a spent queue-wide rate limit ends the walk after one
+          -- claim. Mem keeps no dequeue history, so the rate stop never
+          -- fires here; the live tree carries that twin.
+          simLeaf (const (Just [])) "a full partition does not end the walk" scenarioWalkFullPartition checkWalkFullPartition,
+          simLeaf (const (Just [])) "a walk stops once the queue-wide room is claimed" scenarioWalkSpentRoom checkWalkSpentRoom,
           simLeaf (const Nothing) "a saturated worker budget runs one at a time" scenarioWorkerBudgetExhausted checkWorkerBudgetExhausted,
           simLeaf (const Nothing) "another application's queue is not dequeued from" scenarioPeerQueue checkPeerQueue,
           -- IO only: the fixture rewrites the row through raw SQL into the

@@ -6,7 +6,7 @@ module DBOS.SystemDB.Types
     MessageUUID (..),
     NotificationRow (..),
     QueueName (..),
-    SendMessage (..),
+    EncodedSendMessage (..),
     Topic (..),
     Timestamp (..),
     Duration (..),
@@ -27,6 +27,7 @@ module DBOS.SystemDB.Types
     messageTo,
     messageUUIDForSend,
     validateSendKeys,
+    refuseSelfTarget,
     notificationRowForMessage,
     nullTopicSentinel,
     timestampFromEpochMs,
@@ -67,6 +68,9 @@ module DBOS.SystemDB.Types
     QueueRecord (..),
     QueueUpdate (..),
     ResolvedLimits (..),
+    Dequeued (..),
+    DequeueStop (..),
+    spansPartitions,
     NewQueue (..),
     PollingConcurrency (PollingDefault, PollingUnlimited),
     pollingAtMost,
@@ -76,7 +80,7 @@ module DBOS.SystemDB.Types
     NewSchedule (..),
     ScheduleUpdate (..),
     ScheduleFilter (..),
-    Applications (..),
+    AppScope (..),
     WorkflowFilter (..),
     StepRecord (..),
     Outcome (..),
@@ -153,6 +157,14 @@ module DBOS.SystemDB.Types
     secondsDuration,
     millisDuration,
     durationIsZero,
+    IdleTransactionTimeout (..),
+    idleTimeoutDefault,
+    idleTimeoutMax,
+    idleTimeoutMillis,
+    idleTimeoutValidate,
+    idleTimeoutParameter,
+    idleTimeoutOptionNames,
+    urlSetsIdleTimeout,
     newQueue,
     queueHasPartitionLimits,
     queueIsLegacyPartitioned,
@@ -211,7 +223,7 @@ newtype MessageUUID = MessageUUID Text
 newtype QueueName = QueueName Text
   deriving stock (Eq, Show)
 
-data SendMessage = SendMessage
+data EncodedSendMessage = EncodedSendMessage
   { sendDestinationId  :: WorkflowId,
     sendMessageBody    :: SerializedWorkflowValue,
     sendTopic          :: Maybe Topic,
@@ -237,9 +249,9 @@ internalQueueName :: QueueName
 internalQueueName = QueueName "_dbos_internal_queue"
 
 -- | A message to a workflow on the default topic, mirroring @Message::new@.
-message :: WorkflowId -> SerializedWorkflowValue -> SendMessage
+message :: WorkflowId -> SerializedWorkflowValue -> EncodedSendMessage
 message destination body =
-  SendMessage
+  EncodedSendMessage
     { sendDestinationId = destination,
       sendMessageBody = body,
       sendTopic = Nothing,
@@ -248,11 +260,11 @@ message destination body =
 
 -- | A message to a workflow on a named topic, mirroring
 -- @Message { topic: Some(..), ..Message::new(..) }@.
-messageTo :: WorkflowId -> Topic -> SerializedWorkflowValue -> SendMessage
+messageTo :: WorkflowId -> Topic -> SerializedWorkflowValue -> EncodedSendMessage
 messageTo destination topic body =
   (message destination body) {sendTopic = Just topic}
 
-notificationRowForMessage :: MessageUUID -> SendMessage -> NotificationRow
+notificationRowForMessage :: MessageUUID -> EncodedSendMessage -> NotificationRow
 notificationRowForMessage generatedUUID send =
   NotificationRow
     { notificationDestinationId = send.sendDestinationId,
@@ -267,7 +279,7 @@ notificationRowForMessage generatedUUID send =
 -- insert ends @ON CONFLICT (message_uuid) DO NOTHING@, so an unscoped
 -- fallback shared across destinations would collide with itself and deliver
 -- to one destination alone. Mirrors the oracle's @deliver@.
-messageUUIDForSend :: MessageUUID -> SendMessage -> MessageUUID
+messageUUIDForSend :: MessageUUID -> EncodedSendMessage -> MessageUUID
 messageUUIDForSend (MessageUUID fallback) send =
   let WorkflowId destination = send.sendDestinationId
    in case send.sendIdempotencyKey of
@@ -280,7 +292,7 @@ messageUUIDForSend (MessageUUID fallback) send =
 -- of the first. Checked on the caller's list, before fork fan-out — one key
 -- fanning out to many recipients is legal, each recipient scoping its own
 -- row id. Mirrors the oracle's check.
-validateSendKeys :: [SendMessage] -> Either Error ()
+validateSendKeys :: [EncodedSendMessage] -> Either Error ()
 validateSendKeys messages = go Set.empty messages
   where
     go _ [] = Right ()
@@ -290,6 +302,16 @@ validateSendKeys messages = go Set.empty messages
         | Text.null key -> Left (invalidInput "idempotency_key" "must be absent rather than empty")
         | Set.member key seen -> Left (invalidInput "idempotency_key" (key <> " is used by more than one message"))
         | otherwise -> go (Set.insert key seen) rest
+
+-- | Refuses a cancel or a resume the caller makes of itself by name: the
+-- @from_workflow@ check of @cancel_workflows@, before anything runs. A
+-- pure validator shared by both backends so the refusal reads the same
+-- everywhere. Mirrors Rust @refuse_self_target@.
+refuseSelfTarget :: Text -> [Text] -> Text -> Maybe Error
+refuseSelfTarget callerId targets action
+  | callerId `elem` targets =
+      Just (invalidInput "workflow_ids" ("workflow " <> callerId <> " cannot " <> action <> " itself"))
+  | otherwise = Nothing
 
 
 -- | A workflow being created, as opposed to one being read back. Mirrors
@@ -313,9 +335,9 @@ data NewWorkflow = NewWorkflow
     newWorkflowTimeout            :: Maybe Duration,
     newWorkflowDeadline           :: Maybe Timestamp,
     newWorkflowExecutorId         :: Maybe Text,
-    newWorkflowApplicationName    :: Maybe Text,
-    newWorkflowApplicationVersion :: Maybe Text,
-    newWorkflowApplicationId      :: Maybe Text,
+    newWorkflowAppName            :: Maybe Text,
+    newWorkflowAppVersion         :: Maybe Text,
+    newWorkflowAppId              :: Maybe Text,
     newWorkflowAuthenticatedUser  :: Maybe Text,
     newWorkflowAuthenticatedRoles :: [Text],
     newWorkflowAssumedRole        :: Maybe Text,
@@ -344,9 +366,9 @@ newWorkflow workflowId =
       newWorkflowTimeout = Nothing,
       newWorkflowDeadline = Nothing,
       newWorkflowExecutorId = Nothing,
-      newWorkflowApplicationName = Nothing,
-      newWorkflowApplicationVersion = Nothing,
-      newWorkflowApplicationId = Nothing,
+      newWorkflowAppName = Nothing,
+      newWorkflowAppVersion = Nothing,
+      newWorkflowAppId = Nothing,
       newWorkflowAuthenticatedUser = Nothing,
       newWorkflowAuthenticatedRoles = [],
       newWorkflowAssumedRole = Nothing,
@@ -376,7 +398,7 @@ validateNewWorkflow new
         ("schedule_name", new.newWorkflowScheduleName),
         ("input", new.newWorkflowInput),
         ("serialization", new.newWorkflowSerialization),
-        ("application_version", new.newWorkflowApplicationVersion)
+        ("application_version", new.newWorkflowAppVersion)
       ]
     findEmpty fields = case find (maybe False Text.null . snd) fields of
       Just (field, _) -> Just field
@@ -482,7 +504,7 @@ data WorkflowRecord = WorkflowRecord
     workflowRecordError              :: Maybe Text,
     workflowRecordSerialization      :: Maybe Text,
     workflowRecordExecutorId         :: Maybe Text,
-    workflowRecordApplicationVersion :: Maybe Text,
+    workflowRecordAppVersion         :: Maybe Text,
     workflowRecordRecoveryAttempts   :: Int64,
     workflowRecordQueueName          :: Maybe Text,
     workflowRecordCreatedAt          :: Timestamp,
@@ -494,12 +516,12 @@ data WorkflowRecord = WorkflowRecord
     workflowRecordWasForkedFrom      :: Bool,
     workflowRecordOwnerXid           :: Maybe Text,
     workflowRecordCreatorXid         :: Maybe Text,
-    workflowRecordApplicationId      :: Maybe Text,
+    workflowRecordAppId              :: Maybe Text,
     workflowRecordAuthenticatedUser  :: Maybe Text,
     workflowRecordAuthenticatedRoles :: [Text],
     workflowRecordAssumedRole        :: Maybe Text,
     workflowRecordRequest            :: Maybe Text,
-    workflowRecordApplicationName    :: Maybe Text,
+    workflowRecordAppName            :: Maybe Text,
     workflowRecordDeduplicationId    :: Maybe Text,
     workflowRecordPriority           :: Int,
     workflowRecordQueuePartitionKey  :: Maybe Text,
@@ -876,7 +898,7 @@ data QueueRecord = QueueRecord
     queueRecordPartitionWorkerConcurrency :: Maybe Int,
     queueRecordPartitionRateLimit         :: Maybe RateLimit,
     queueRecordPollingInterval            :: Duration,
-    queueRecordApplicationName            :: Maybe Text
+    queueRecordAppName                    :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -944,6 +966,44 @@ queueResolvedLimits record
           resolvedPartitionRateLimit = record.queueRecordPartitionRateLimit
         }
 
+-- | What one claim from a queue took, and why it took nothing if it did.
+-- Mirrors Rust @Dequeued@.
+data Dequeued = Dequeued
+  { dequeuedWorkflowIds :: [WorkflowId],
+    dequeuedStoppedBy   :: Maybe DequeueStop
+  }
+  deriving stock (Eq, Show)
+
+-- | The limit that left a claim no room to start anything. The first
+-- limit, in the order the claim checks them, whose remaining room came to
+-- zero: worker concurrency, then the rate limits, then the concurrency
+-- limits, the queue-wide one ahead of the per-partition one at each step.
+-- Constructor prefixes are the port's collision deviation (@RateLimit@ is
+-- taken). Mirrors Rust @DequeueStop@.
+data DequeueStop
+  = DequeueStopWorkerConcurrency
+  | DequeueStopPartitionWorkerConcurrency
+  | DequeueStopRateLimit
+  | DequeueStopPartitionRateLimit
+  | DequeueStopConcurrency
+  | DequeueStopPartitionConcurrency
+  deriving stock (Eq, Show)
+
+-- | Whether the limit is counted across the whole queue, whichever
+-- partition was claimed from. Such a limit leaves every other partition
+-- just as full, so a caller walking the partitions one at a time can end
+-- the walk on it rather than paying a claim per partition to learn the
+-- same thing. A per-partition limit says nothing about the next key.
+-- Mirrors @DequeueStop::spans_partitions@.
+spansPartitions :: DequeueStop -> Bool
+spansPartitions stop = case stop of
+  DequeueStopWorkerConcurrency -> True
+  DequeueStopRateLimit -> True
+  DequeueStopConcurrency -> True
+  DequeueStopPartitionWorkerConcurrency -> False
+  DequeueStopPartitionRateLimit -> False
+  DequeueStopPartitionConcurrency -> False
+
 -- | A queue to register, as the caller supplies it. Separate from
 -- 'QueueRecord' because registering does not require an owner. Mirrors Rust
 -- @NewQueue@.
@@ -958,7 +1018,7 @@ data NewQueue = NewQueue
     newQueuePartitionWorkerConcurrency :: Maybe Int,
     newQueuePartitionRateLimit         :: Maybe RateLimit,
     newQueuePollingInterval            :: Duration,
-    newQueueApplicationName            :: Maybe Text
+    newQueueAppName                    :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -976,7 +1036,7 @@ newQueue name =
       newQueuePartitionWorkerConcurrency = Nothing,
       newQueuePartitionRateLimit = Nothing,
       newQueuePollingInterval = secondsDuration 1,
-      newQueueApplicationName = Nothing
+      newQueueAppName = Nothing
     }
 
 -- | The fields of a registered queue that a partial update may change.
@@ -1096,7 +1156,7 @@ data ScheduleRecord = ScheduleRecord
     scheduleRecordAutomaticBackfill :: Bool,
     scheduleRecordCronTimezone      :: Maybe Text,
     scheduleRecordQueueName         :: Maybe Text,
-    scheduleRecordApplicationName   :: Maybe Text
+    scheduleRecordAppName           :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -1114,7 +1174,7 @@ data NewSchedule = NewSchedule
     newScheduleAutomaticBackfill :: Bool,
     newScheduleCronTimezone      :: Maybe Text,
     newScheduleQueueName         :: Maybe Text,
-    newScheduleApplicationName   :: Maybe Text
+    newScheduleAppName           :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -1133,7 +1193,7 @@ newSchedule name workflow expression =
       newScheduleAutomaticBackfill = False,
       newScheduleCronTimezone = Nothing,
       newScheduleQueueName = Nothing,
-      newScheduleApplicationName = Nothing
+      newScheduleAppName = Nothing
     }
 
 -- | The fields of a registered schedule that a partial update may change:
@@ -1173,7 +1233,7 @@ isScheduleUpdateEmpty update =
 -- applications plus the unclaimed rows. Mirrors Rust @Applications@, whose
 -- @Any@ case carries the prefix here (constructor-prefix deviation,
 -- ADR-0024).
-data Applications
+data AppScope
   = Unset
   | AnyApplication
   | Named [Text]
@@ -1184,12 +1244,12 @@ data Applications
 data WorkflowFilter = WorkflowFilter
   { workflowFilterWorkflowIds         :: [Text],
     workflowFilterWorkflowIdPrefixes  :: [Text],
-    workflowFilterApplications        :: Applications,
+    workflowFilterAppScope            :: AppScope,
     workflowFilterNames               :: [Text],
     workflowFilterClassNames          :: [Text],
     workflowFilterConfigNames         :: [Text],
     workflowFilterStatus              :: [WorkflowStatus],
-    workflowFilterApplicationVersions :: [Text],
+    workflowFilterAppVersions         :: [Text],
     workflowFilterExecutorIds         :: [Text],
     workflowFilterAuthenticatedUsers  :: [Text],
     workflowFilterQueueNames          :: [Text],
@@ -1226,12 +1286,12 @@ defaultWorkflowFilter =
   WorkflowFilter
     { workflowFilterWorkflowIds = [],
       workflowFilterWorkflowIdPrefixes = [],
-      workflowFilterApplications = Unset,
+      workflowFilterAppScope = Unset,
       workflowFilterNames = [],
       workflowFilterClassNames = [],
       workflowFilterConfigNames = [],
       workflowFilterStatus = [],
-      workflowFilterApplicationVersions = [],
+      workflowFilterAppVersions = [],
       workflowFilterExecutorIds = [],
       workflowFilterAuthenticatedUsers = [],
       workflowFilterQueueNames = [],
@@ -1264,7 +1324,7 @@ data ScheduleFilter = ScheduleFilter
   { scheduleFilterStatuses      :: [ScheduleStatus],
     scheduleFilterWorkflowNames :: [Text],
     scheduleFilterNamePrefixes  :: [Text],
-    scheduleFilterApplications  :: Applications
+    scheduleFilterAppScope      :: AppScope
   }
   deriving stock (Eq, Show)
 
@@ -1275,7 +1335,7 @@ defaultScheduleFilter =
     { scheduleFilterStatuses = [],
       scheduleFilterWorkflowNames = [],
       scheduleFilterNamePrefixes = [],
-      scheduleFilterApplications = Unset
+      scheduleFilterAppScope = Unset
     }
 
 -- | A step's recorded result, as @operation_outputs@ holds it. The field
@@ -1388,7 +1448,7 @@ data NotificationRecord = NotificationRecord
 
 -- | A registered version of the application. Mirrors Rust @VersionInfo@.
 data VersionInfo = VersionInfo
-  { versionInfoApplicationName :: Maybe Text,
+  { versionInfoAppName :: Maybe Text,
     versionInfoId              :: Text,
     versionInfoName            :: Text,
     versionInfoTimestamp       :: Timestamp,
@@ -1407,7 +1467,7 @@ data DebounceRequest = DebounceRequest
     debounceRequestPeriod          :: Duration,
     debounceRequestInputs          :: Maybe Text,
     debounceRequestSerialization   :: Maybe Text,
-    debounceRequestApplicationName :: Maybe Text
+    debounceRequestAppName         :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -1440,7 +1500,7 @@ debounceValidate request
         ("workflow.config_name", configName),
         ("inputs", request.debounceRequestInputs),
         ("serialization", request.debounceRequestSerialization),
-        ("application_name", request.debounceRequestApplicationName)
+        ("application_name", request.debounceRequestAppName)
       ]
     findRequired fields = case find (Text.null . snd) fields of
       Just (field, _) -> Just field
@@ -1468,7 +1528,7 @@ instance ToJSON DebounceHolder where
         "workflow_name" .= holder.debounceHolderWorkflowName,
         "class_name" .= holder.debounceHolderClassName,
         "config_name" .= holder.debounceHolderConfigName,
-        "application_name" .= holder.debounceHolderApplicationName
+        "application_name" .= holder.debounceHolderAppName
       ]
 
 instance FromJSON DebounceHolder where
@@ -1507,7 +1567,7 @@ data DebounceHolder = DebounceHolder
     debounceHolderWorkflowName    :: Maybe Text,
     debounceHolderClassName       :: Maybe Text,
     debounceHolderConfigName      :: Maybe Text,
-    debounceHolderApplicationName :: Maybe Text
+    debounceHolderAppName         :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -1563,7 +1623,7 @@ data ForkPoint
 
 -- | How forked workflows are created. Mirrors Rust @ForkOptions@.
 data ForkOptions = ForkOptions
-  { forkOptionsApplicationVersion  :: Maybe Text,
+  { forkOptionsAppVersion  :: Maybe Text,
     forkOptionsQueueName           :: Maybe Text,
     forkOptionsQueuePartitionKey   :: Maybe Text,
     forkOptionsTimeout             :: Maybe Duration,
@@ -1583,7 +1643,7 @@ data ForkOptions = ForkOptions
 defaultForkOptions :: ForkOptions
 defaultForkOptions =
   ForkOptions
-    { forkOptionsApplicationVersion = Nothing,
+    { forkOptionsAppVersion = Nothing,
       forkOptionsQueueName = Nothing,
       forkOptionsQueuePartitionKey = Nothing,
       forkOptionsTimeout = Nothing,
@@ -1609,7 +1669,7 @@ forkOptionProblems options =
       _ -> validateChildren options.forkOptionsReplacementChildren
   where
     optionals =
-      [ ("application_version", options.forkOptionsApplicationVersion),
+      [ ("application_version", options.forkOptionsAppVersion),
         ("queue_name", options.forkOptionsQueueName),
         ("queue_partition_key", options.forkOptionsQueuePartitionKey)
       ]
@@ -1637,7 +1697,7 @@ forkOptionProblems options =
 -- workflow's previous ones.
 data RewindOptions = RewindOptions
   { rewindStartStep           :: Int,
-    rewindApplicationVersion  :: Maybe Text,
+    rewindAppVersion          :: Maybe Text,
     rewindQueueName           :: Maybe Text,
     rewindQueuePartitionKey   :: Maybe Text
   }
@@ -1649,7 +1709,7 @@ data RewindOptions = RewindOptions
 -- sysdb form is built per call); here the field prefix keeps the two
 -- records unambiguous under @DuplicateRecordFields@.
 data SysRewindOptions = SysRewindOptions
-  { sysRewindApplicationVersion :: Maybe Text,
+  { sysRewindAppVersion :: Maybe Text,
     sysRewindQueueName          :: Maybe Text,
     sysRewindQueuePartitionKey  :: Maybe Text
   }
@@ -1661,7 +1721,7 @@ defaultRewindOptions :: RewindOptions
 defaultRewindOptions =
   RewindOptions
     { rewindStartStep = 0,
-      rewindApplicationVersion = Nothing,
+      rewindAppVersion = Nothing,
       rewindQueueName = Nothing,
       rewindQueuePartitionKey = Nothing
     }
@@ -1672,7 +1732,7 @@ defaultRewindOptions =
 sysRewindOptions :: RewindOptions -> SysRewindOptions
 sysRewindOptions options =
   SysRewindOptions
-    { sysRewindApplicationVersion = options.rewindApplicationVersion,
+    { sysRewindAppVersion = options.rewindAppVersion,
       sysRewindQueueName = options.rewindQueueName,
       sysRewindQueuePartitionKey = options.rewindQueuePartitionKey
     }
@@ -1687,7 +1747,7 @@ rewindOptionProblems :: RewindOptions -> Maybe (Text, Text)
 rewindOptionProblems options =
   rewindFieldsValid
     options.rewindStartStep
-    options.rewindApplicationVersion
+    options.rewindAppVersion
     options.rewindQueueName
     options.rewindQueuePartitionKey
 
@@ -1696,7 +1756,7 @@ rewindOptionProblems options =
 -- system-database entry points (which take the cut separately, as the
 -- oracle's trait does) refuse through this before opening a transaction.
 sysRewindValidate :: Int -> SysRewindOptions -> Either Error ()
-sysRewindValidate cut sys = case rewindFieldsValid cut (sys.sysRewindApplicationVersion) (sys.sysRewindQueueName) (sys.sysRewindQueuePartitionKey) of
+sysRewindValidate cut sys = case rewindFieldsValid cut (sys.sysRewindAppVersion) (sys.sysRewindQueueName) (sys.sysRewindQueuePartitionKey) of
   Nothing -> Right ()
   Just (field, detail) -> Left (invalidInput field detail)
 
@@ -2005,6 +2065,122 @@ durationFromSecs secs
 durationAsMillis :: Duration -> Integer
 durationAsMillis (Duration d) = floor (toRational (nominalDiffTimeToSeconds d) * 1000)
 
+-- | How long a system-database connection may sit idle inside an open
+-- transaction before the server ends its session, as
+-- @idle_in_transaction_session_timeout@. A process that stalls
+-- mid-transaction (a frozen container, a network partition) would
+-- otherwise hold the transaction's row locks, and the connection, for as
+-- long as the stall lasts. Connection options that already set the
+-- parameter keep their own, whatever this says; otherwise 'Default' and
+-- 'After' replace the server's setting, one made with @ALTER ROLE@ or
+-- @ALTER DATABASE@ included, and 'ServerSetting' leaves it alone.
+-- Mirrors Rust @IdleTransactionTimeout@.
+data IdleTransactionTimeout
+  = Default
+  | ServerSetting
+  | After Duration
+  deriving stock (Eq, Show)
+
+-- | What 'Default' is: sixty seconds. Mirrors
+-- @IdleTransactionTimeout::DEFAULT@.
+idleTimeoutDefault :: Duration
+idleTimeoutDefault = secondsDuration 60
+
+-- | The longest timeout the server takes: the parameter is a 32-bit count
+-- of milliseconds, about 24.8 days. Mirrors
+-- @IdleTransactionTimeout::MAX@.
+idleTimeoutMax :: Duration
+idleTimeoutMax = Duration (2147483647 / 1000)
+
+-- | The milliseconds to @SET@, if the connection sets any: 'Default'
+-- resolves to sixty seconds; an 'After' under a millisecond is a
+-- millisecond, since the server reads zero as no timeout; 'ServerSetting'
+-- sets nothing. Mirrors @IdleTransactionTimeout::millis@.
+idleTimeoutMillis :: IdleTransactionTimeout -> Maybe Integer
+idleTimeoutMillis timeout = case timeout of
+  Default -> Just (durationAsMillis idleTimeoutDefault)
+  ServerSetting -> Nothing
+  After duration -> Just (max 1 (durationAsMillis duration))
+
+-- | Rejects an 'After' the server cannot take: zero, or longer than
+-- 'idleTimeoutMax'. Zero is exact, not 'durationIsZero': a positive
+-- value under a millisecond is valid and floors to one, while only zero
+-- reads as no timeout to the server. Mirrors
+-- @IdleTransactionTimeout::validate@.
+idleTimeoutValidate :: IdleTransactionTimeout -> Either Error ()
+idleTimeoutValidate timeout = case timeout of
+  After duration
+    | duration == secondsDuration 0 ->
+        Left (invalidInput "idle_transaction_timeout" "must be more than zero; `ServerSetting` leaves the server's setting")
+  After duration
+    | durationAsMillis duration > durationAsMillis idleTimeoutMax ->
+        Left (invalidInput "idle_transaction_timeout" "must be at most 2147483647 milliseconds (about 24.8 days)")
+  _ -> Right ()
+
+-- | The server parameter the timeout is set as.
+idleTimeoutParameter :: Text
+idleTimeoutParameter = "idle_in_transaction_session_timeout"
+
+-- | The parameter names a libpq @options@ string assigns, as the server
+-- reads them: split on unescaped whitespace (a backslash escapes the next
+-- character), each assignment either @-c@ followed by @name=value@,
+-- @-cname=value@, or @--name=value@, and the name compared lowercased
+-- with dashes as underscores. Anything else, a value included, names
+-- nothing. Mirrors Rust @option_names@.
+idleTimeoutOptionNames :: Text -> [Text]
+idleTimeoutOptionNames options = assignNames (splitWords (Text.unpack options))
+  where
+    splitWords = finish [] []
+    finish found current [] = reverse (maybe found (: found) (nonEmpty current))
+    finish found current ('\\' : next : rest) = finish found (next : current) rest
+    finish found current ('\\' : []) = finish found current []
+    finish found current (c : rest)
+      | isSpace c = finish (maybe found (: found) (nonEmpty current)) [] rest
+      | otherwise = finish found (c : current) rest
+    nonEmpty [] = Nothing
+    nonEmpty current = Just (reverse current)
+    assignNames [] = []
+    assignNames ("-c" : assignment : rest) = assign assignment <> assignNames rest
+    assignNames (word : rest) = case word of
+      ('-' : '-' : assigned) -> assign assigned <> assignNames rest
+      ('-' : 'c' : assigned) -> assign assigned <> assignNames rest
+      _ -> assignNames rest
+    assign assignment = case break (== '=') assignment of
+      (name, _ : _) -> [Text.pack (map dashToUnderscore (map toLower name))]
+      _ -> []
+    dashToUnderscore '-' = '_'
+    dashToUnderscore c = c
+
+-- | Whether the connection options a database URL resolves to already set
+-- the idle-transaction parameter: the URL's @options@ parameter,
+-- percent-decoded, or the @PGOPTIONS@ value passed alongside. A URL
+-- without a query sets nothing, as does one that does not parse. Mirrors
+-- Rust @options_set_idle_transaction_timeout@ minus the process
+-- environment, which the caller reads.
+urlSetsIdleTimeout :: Text -> Maybe Text -> Bool
+urlSetsIdleTimeout url pgOptions =
+  any (== idleTimeoutParameter) (concatMap idleTimeoutOptionNames (urlOptions url <> maybe [] (: []) pgOptions))
+  where
+    urlOptions u = concatMap decodeOption (Text.splitOn "&" (Text.drop 1 (snd (Text.breakOn "?" u))))
+    decodeOption piece = case Text.breakOn "=" piece of
+      (key, value)
+        | Text.toLower (percentDecode key) == "options" -> [percentDecode (Text.drop 1 value)]
+        | otherwise -> []
+    percentDecode = Text.pack . goDecode . Text.unpack
+    goDecode [] = []
+    goDecode ('+' : rest) = ' ' : goDecode rest
+    goDecode ('%' : a : b : rest) = case hexByte a b of
+      Just byte -> chr byte : goDecode rest
+      Nothing -> '%' : a : b : goDecode rest
+    goDecode (c : rest) = c : goDecode rest
+    hexByte a b = do
+      high <- hexValue a
+      low <- hexValue b
+      pure (high * 16 + low)
+    hexValue c
+      | isHexDigit c = Just (digitToInt c)
+      | otherwise = Nothing
+
 -- | This instant plus a duration, or 'Nothing' on overflow. Mirrors
 -- @Timestamp::checked_add@: adding a timeout to a deadline is checked, and a
 -- deadline plus a deadline will not typecheck.
@@ -2138,7 +2314,7 @@ instance ToJSON WorkflowRecord where
         "workflowRecordError" .= record.workflowRecordError,
         "workflowRecordSerialization" .= record.workflowRecordSerialization,
         "workflowRecordExecutorId" .= record.workflowRecordExecutorId,
-        "workflowRecordApplicationVersion" .= record.workflowRecordApplicationVersion,
+        "workflowRecordApplicationVersion" .= record.workflowRecordAppVersion,
         "workflowRecordRecoveryAttempts" .= record.workflowRecordRecoveryAttempts,
         "workflowRecordQueueName" .= record.workflowRecordQueueName,
         "workflowRecordCreatedAt" .= record.workflowRecordCreatedAt,
@@ -2150,12 +2326,12 @@ instance ToJSON WorkflowRecord where
         "workflowRecordWasForkedFrom" .= record.workflowRecordWasForkedFrom,
         "workflowRecordOwnerXid" .= record.workflowRecordOwnerXid,
         "workflowRecordCreatorXid" .= record.workflowRecordCreatorXid,
-        "workflowRecordApplicationId" .= record.workflowRecordApplicationId,
+        "workflowRecordApplicationId" .= record.workflowRecordAppId,
         "workflowRecordAuthenticatedUser" .= record.workflowRecordAuthenticatedUser,
         "workflowRecordAuthenticatedRoles" .= record.workflowRecordAuthenticatedRoles,
         "workflowRecordAssumedRole" .= record.workflowRecordAssumedRole,
         "workflowRecordRequest" .= record.workflowRecordRequest,
-        "workflowRecordApplicationName" .= record.workflowRecordApplicationName,
+        "workflowRecordApplicationName" .= record.workflowRecordAppName,
         "workflowRecordDeduplicationId" .= record.workflowRecordDeduplicationId,
         "workflowRecordPriority" .= record.workflowRecordPriority,
         "workflowRecordQueuePartitionKey" .= record.workflowRecordQueuePartitionKey,

@@ -7,6 +7,7 @@ module DBOS.Transact.ConfigTest (tests) where
 import DBOS.Prelude
 import DBOS.Transact
   ( Config (..),
+    IdleTransactionTimeout (..),
     configNew,
     millisDuration,
     secondsDuration,
@@ -46,5 +47,22 @@ tests =
             assertBool
               "unlike `notification_coalesce`, zero here is not a setting"
               ("outcome_poll_interval" `Text.isInfixOf` Text.pack (show err))
+          Right () -> assertBool "refused" False,
+      testCase "an idle timeout the server cannot take is refused" $ do
+        let config timeout = (configNew "app" "postgres://x") {configIdleTransactionTimeout = timeout}
+        validateConfig (config Default) @?= Right ()
+        validateConfig (config ServerSetting) @?= Right ()
+        validateConfig (config (After (millisDuration 300))) @?= Right ()
+        case validateConfig (config (After (millisDuration 0))) of
+          Left err ->
+            assertBool
+              "a zero After is refused rather than read as the server's setting"
+              ("idle_transaction_timeout" `Text.isInfixOf` Text.pack (show err))
+          Right () -> assertBool "refused" False
+        case validateConfig (config (After (secondsDuration 3000000))) of
+          Left err ->
+            assertBool
+              "longer than i32 milliseconds is refused here rather than failing every connection"
+              ("idle_transaction_timeout" `Text.isInfixOf` Text.pack (show err))
           Right () -> assertBool "refused" False
     ]

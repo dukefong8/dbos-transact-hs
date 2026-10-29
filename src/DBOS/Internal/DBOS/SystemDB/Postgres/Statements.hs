@@ -72,6 +72,7 @@ module DBOS.SystemDB.Postgres.Statements
     RecvParams (..),
     recvProbeSession,
     recvTx,
+    recvStepRecord,
     SendMessagesParams (..),
     SendStep (..),
     sendMessagesTx,
@@ -80,7 +81,6 @@ module DBOS.SystemDB.Postgres.Statements
     CallerStep (..),
     checkCallerStep,
     checkOwnerTx,
-    refuseSelfTarget,
     SetEventParams (..),
     setEventTx,
     EventValueRaw (..),
@@ -107,6 +107,8 @@ module DBOS.SystemDB.Postgres.Statements
     dequeuePartitionRateLimitCountStatement,
     dequeueConcurrencyCountStatement,
     dequeuePartitionConcurrencyCountStatement,
+    showIdleTimeoutStatement,
+    tryAdvisoryLockStatement,
     latestVersionNamedStatement,
     latestVersionUnnamedStatement,
     latestVersionNameTx,
@@ -333,7 +335,7 @@ data WorkflowListParams = WorkflowListParams
     listLoadOutput          :: Bool,
     listWorkflowIds         :: [Text],
     listWorkflowIdPrefixes  :: [Text],
-    listNamedApplications   :: Maybe [Text],
+    listNamedAppScope       :: Maybe [Text],
     listUnsetApplication    :: Maybe Text,
     listNames               :: [Text],
     listClassNames          :: [Text],
@@ -430,7 +432,7 @@ listWorkflowsEncoder =
       contramap (.listLoadOutput) boolParam, -- $2
       contramap (.listWorkflowIds) textArrayParam, -- $3
       contramap (.listWorkflowIdPrefixes) textArrayParam, -- $4
-      contramap (.listNamedApplications) maybeTextArrayParam, -- $5
+      contramap (.listNamedAppScope) maybeTextArrayParam, -- $5
       contramap (.listUnsetApplication) maybeTextParam, -- $6
       contramap (.listNames) textArrayParam, -- $7
       contramap (.listClassNames) textArrayParam, -- $8
@@ -581,8 +583,8 @@ data InitWorkflowParams = InitWorkflowParams
     initParamAssumedRole        :: Maybe Text,
     initParamAuthenticatedRoles :: Maybe Text,
     initParamExecutorId         :: Maybe Text,
-    initParamApplicationVersion :: Maybe Text,
-    initParamApplicationId      :: Maybe Text,
+    initParamAppVersion         :: Maybe Text,
+    initParamAppId              :: Maybe Text,
     initParamUpdatedAt          :: Int64,
     initParamInitialAttempts    :: Int64,
     initParamTimeoutMs          :: Maybe Int64,
@@ -594,7 +596,7 @@ data InitWorkflowParams = InitWorkflowParams
     initParamScheduleName       :: Maybe Text,
     initParamDebounceTimeoutMs     :: Maybe Int64,
     initParamIsDebounced        :: Bool,
-    initParamApplicationName    :: Maybe Text
+    initParamAppName            :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -652,14 +654,14 @@ initWorkflowStatement params =
       (${initParamWorkflowId}, ${initParamStatus}, ${initParamName}, ${initParamClassName}, ${initParamConfigName},
        ${initParamQueueName}, ${initParamDeduplicationId}, ${initParamPriority}, ${initParamQueuePartitionKey}, case when ${initParamDelayMs}::bigint is null then null when ${initParamDebounceTimeoutMs}::bigint is null then case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end else least(case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end, case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDebounceTimeoutMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDebounceTimeoutMs}::bigint) end) end,
        ${initParamAuthenticatedUser}, ${initParamAssumedRole}, ${initParamAuthenticatedRoles},
-       ${initParamExecutorId}, ${initParamApplicationVersion}, ${initParamApplicationId},
+       ${initParamExecutorId}, ${initParamAppVersion}, ${initParamAppId},
        (extract(epoch from now()) * 1000)::bigint, ${initParamUpdatedAt}, ${initParamInitialAttempts},
        ${initParamTimeoutMs},
        coalesce(${initParamDeadline}, case when ${initParamStatus} = 'PENDING'
            then (extract(epoch from now()) * 1000)::bigint + ${initParamTimeoutMs}
          end),
        ${initParamParentWorkflowId}, case when ${initParamStatus} = 'PENDING' then ${initParamCreatorXid} end, ${initParamSerialization}, ${initParamAttributes}::text::jsonb, ${initParamScheduleName},
-       case when ${initParamDebounceTimeoutMs}::bigint is null then null when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDebounceTimeoutMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDebounceTimeoutMs}::bigint) end, ${initParamIsDebounced}, ${initParamApplicationName}, ${initParamCreatorXid})
+       case when ${initParamDebounceTimeoutMs}::bigint is null then null when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDebounceTimeoutMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDebounceTimeoutMs}::bigint) end, ${initParamIsDebounced}, ${initParamAppName}, ${initParamCreatorXid})
     on conflict (workflow_uuid) do update set
       creator_xid = dbos.workflow_status.creator_xid
     returning recovery_attempts, status, name, class_name::text, config_name::text, queue_name,
@@ -753,7 +755,7 @@ data RecordStepParams = RecordStepParams
     recordStepSerialization   :: Maybe Text,
     recordStepStartedAt       :: Maybe Int64,
     recordStepCompletedAt     :: Maybe Int64,
-    recordStepApplicationName :: Maybe Text,
+    recordStepAppName         :: Maybe Text,
     recordStepChildWorkflowId :: Maybe Text
   }
   deriving stock (Eq, Show)
@@ -777,7 +779,7 @@ recordStepStatement params =
        started_at_epoch_ms, completed_at_epoch_ms, application_name, child_workflow_id)
     values
       (${recordStepWorkflowId}, ${recordStepStepId}, ${recordStepStepName}, ${recordStepOutput}, ${recordStepError}, ${recordStepSerialization},
-       ${recordStepStartedAt}, ${recordStepCompletedAt}, ${recordStepApplicationName}, ${recordStepChildWorkflowId})
+       ${recordStepStartedAt}, ${recordStepCompletedAt}, ${recordStepAppName}, ${recordStepChildWorkflowId})
     on conflict (workflow_uuid, function_id) do update
     set completed_at_epoch_ms = dbos.operation_outputs.completed_at_epoch_ms
     returning completed_at_epoch_ms
@@ -796,11 +798,13 @@ claimExecutorSession workflowId executorId =
     where workflow_uuid = ${workflowId} and executor_id is distinct from ${executorId}
   |]
 
--- | What a @recv@ transaction decided: an adopted rival's step, or the
--- message this attempt took (or the absence a timeout produced).
+-- | What a @recv@ transaction decided: an adopted rival's step, the
+-- message this attempt took, or nothing to consume with time still left
+-- (which records nothing — the wait goes on). Mirrors the oracle's take.
 data RecvTxResult
   = RecvAdopted StepCheckRaw
-  | RecvTook (Maybe EncodedValueRaw)
+  | RecvTook EncodedValueRaw
+  | RecvMissed
   deriving stock (Eq, Show)
 
 -- | A message's payload and format, as taking it reads them.
@@ -816,7 +820,7 @@ data VersionRowRaw = VersionRowRaw
     versionRowName            :: Text,
     versionRowTimestamp       :: Int64,
     versionRowCreatedAt       :: Int64,
-    versionRowApplicationName :: Maybe Text
+    versionRowAppName         :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -1113,11 +1117,11 @@ data ForkParams = ForkParams
   { forkSources            :: [Text],
     forkIds                :: [Text],
     forkSteps              :: [Int],
-    forkApplicationVersion :: Maybe Text,
+    forkAppVersion         :: Maybe Text,
     forkQueue              :: Text,
     forkPartitionKey       :: Maybe Text,
     forkTimeoutMs          :: Maybe Int64,
-    forkApplicationName    :: Maybe Text,
+    forkAppName            :: Maybe Text,
     forkReplaceFrom        :: [Text],
     forkReplaceTo          :: [Text],
     forkCopiesAnything     :: Bool
@@ -1308,16 +1312,6 @@ checkOwnerStatement =
     (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowMaybe (Decoders.column (Decoders.nullable Decoders.text)))
 
--- | Refuses a cancel or a resume the caller makes of itself by name: the
--- @from_workflow@ check of @cancel_workflows@, before anything runs. Shared
--- by both backends so the refusal reads the same everywhere. Mirrors Rust
--- @refuse_self_target@.
-refuseSelfTarget :: Text -> [Text] -> Text -> Maybe Error
-refuseSelfTarget callerId targets action
-  | callerId `elem` targets =
-      Just (InvalidInput {field = "workflow_ids", detail = "workflow " <> callerId <> " cannot " <> action <> " itself"})
-  | otherwise = Nothing
-
 -- | How a caller step's recorded bytes are tagged. One codec writes portable
 -- JSON; NULL, the empty string and legacy @rust_serde@ read as native. An
 -- unreadable tag is reported, not guessed.
@@ -1355,7 +1349,7 @@ recordCallerOutcome params outcome = case params.rewindCaller of
                   recordStepSerialization = Just portableJsonSerialization,
                   recordStepStartedAt = Just params.rewindStartedAt,
                   recordStepCompletedAt = Just params.rewindCompletedAt,
-                  recordStepApplicationName = Nothing,
+                  recordStepAppName = Nothing,
                   recordStepChildWorkflowId = Nothing
                 }
           )
@@ -1550,11 +1544,11 @@ forkInsertParams params =
   ( params.forkSources,
     params.forkIds,
     map fromIntegral params.forkSteps,
-    params.forkApplicationVersion,
+    params.forkAppVersion,
     params.forkQueue,
     params.forkPartitionKey,
     params.forkTimeoutMs,
-    params.forkApplicationName
+    params.forkAppName
   )
 
 forkCopyStepsParams :: ForkParams -> ([Text], [Text], [Int32], [Text], [Text], Maybe Text)
@@ -1564,7 +1558,7 @@ forkCopyStepsParams params =
     map fromIntegral params.forkSteps,
     params.forkReplaceFrom,
     params.forkReplaceTo,
-    params.forkApplicationName
+    params.forkAppName
   )
 
 forkCopyTripleParams :: ForkParams -> ([Text], [Text], [Int32])
@@ -1876,10 +1870,14 @@ recvProbeStatement =
     textParam = Encoders.param (Encoders.nonNullable Encoders.text)
     decoder = fmap (maybe False (const True)) (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.int4)))
 
--- | Takes the oldest waiting message and records the step in one commit —
--- and it has to be one: a message taken but not recorded is gone, marked
+-- | One take: lock the row, adopt a recorded step, else consume. Takes
+-- the oldest waiting message and records the step in one commit — and it
+-- has to be one: a message taken but not recorded is gone, marked
 -- consumed, so a replay would report a timeout for a message that reached
--- nobody. A rival's record is adopted; a conflict on the record rolls the
+-- nobody. An empty take with time left records nothing (the caller rolls
+-- this transaction back and waits on); only a take at or past the
+-- deadline records the absence, through the same record the took path
+-- writes. A rival's record is adopted; a conflict on the record rolls the
 -- consumption back with it. Mirrors @recv@'s closing transaction.
 recvTx :: RecvParams -> Tx.Transaction RecvTxResult
 recvTx params = do
@@ -1888,8 +1886,14 @@ recvTx params = do
     Just row | row.stepCheckStepId /= Nothing -> pure (RecvAdopted row)
     _ -> do
       taken <- Tx.statement (params.recvWorkflowId, params.recvTopic, params.recvStepId) consumeStatement
-      Tx.statement () (recordStepStatement (recvStepRecord params taken))
-      pure (RecvTook taken)
+      case taken of
+        Just message -> do
+          Tx.statement () (recordStepStatement (recvStepRecord params (Just message)))
+          pure (RecvTook message)
+        -- Explicit, so the owner check's row lock goes now rather than
+        -- whenever the connection is next used: nothing was written, so
+        -- aborting changes nothing but the lock's release.
+        Nothing -> Tx.condemn >> pure RecvMissed
 
 -- | The step a @recv@ writes: the message's own payload under the sender's
 -- own format, and a @NULL@ output when the wait timed out.
@@ -1904,7 +1908,7 @@ recvStepRecord params taken =
       recordStepSerialization = taken >>= (.encodedRawSerialization),
       recordStepStartedAt = Just params.recvStartedAt,
       recordStepCompletedAt = Just params.recvCompletedAt,
-      recordStepApplicationName = Nothing,
+      recordStepAppName = Nothing,
       recordStepChildWorkflowId = Nothing
     }
 
@@ -2001,7 +2005,7 @@ sendStepRecord step =
       recordStepSerialization = Just portableJsonSerialization,
       recordStepStartedAt = Just step.sendStepStartedAt,
       recordStepCompletedAt = Just step.sendStepCompletedAt,
-      recordStepApplicationName = Nothing,
+      recordStepAppName = Nothing,
       recordStepChildWorkflowId = Nothing
     }
 
@@ -2094,7 +2098,7 @@ setEventStepRecord params =
       recordStepSerialization = Just portableJsonSerialization,
       recordStepStartedAt = Just params.setEventStartedAt,
       recordStepCompletedAt = Just params.setEventCompletedAt,
-      recordStepApplicationName = Nothing,
+      recordStepAppName = Nothing,
       recordStepChildWorkflowId = Nothing
     }
 
@@ -2158,7 +2162,7 @@ getEventStepRecord params =
       recordStepSerialization = params.getEventRecordSerialization,
       recordStepStartedAt = Just params.getEventRecordStartedAt,
       recordStepCompletedAt = Just params.getEventRecordCompletedAt,
-      recordStepApplicationName = Nothing,
+      recordStepAppName = Nothing,
       recordStepChildWorkflowId = Nothing
     }
 
@@ -2274,7 +2278,7 @@ data QueueRowRaw = QueueRowRaw
     queueRowPartitionRateLimitMax       :: Maybe Int,
     queueRowPartitionRateLimitPeriodSec :: Maybe Double,
     queueRowPollingIntervalSec          :: Maybe Double,
-    queueRowApplicationName             :: Maybe Text
+    queueRowAppName                     :: Maybe Text
   }
 
 -- | The queue columns every queue read selects, in the oracle's order.
@@ -2346,7 +2350,7 @@ data QueueInsertParams = QueueInsertParams
     queueInsertPartitionRateLimitPeriodSec :: Maybe Double,
     queueInsertPollingIntervalSec          :: Double,
     queueInsertUpdatedAt                   :: Int64,
-    queueInsertApplicationName             :: Maybe Text
+    queueInsertAppName                     :: Maybe Text
   }
 
 -- | Registers a queue, updating the stored limits or leaving them alone. The
@@ -2391,7 +2395,7 @@ queueInsertStatement onExisting =
         <> contramap (.queueInsertPartitionRateLimitPeriodSec) (Encoders.param (Encoders.nullable Encoders.float8))
         <> contramap (.queueInsertPollingIntervalSec) (Encoders.param (Encoders.nonNullable Encoders.float8))
         <> contramap (.queueInsertUpdatedAt) (Encoders.param (Encoders.nonNullable Encoders.int8))
-        <> contramap (.queueInsertApplicationName) (Encoders.param (Encoders.nullable Encoders.text))
+        <> contramap (.queueInsertAppName) (Encoders.param (Encoders.nullable Encoders.text))
 
 -- | Deletes a queue. Deleting nothing is success, as in the oracle.
 queueDeleteStatement :: Statement.Statement Text ()
@@ -2552,6 +2556,29 @@ dequeuePartitionConcurrencyCountStatement =
         <> contramap (\(_, _, queue) -> queue) (Encoders.param (Encoders.nonNullable Encoders.text))
     )
     (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8)))
+
+-- | The server's reading of the idle-transaction timeout on this
+-- session: what @connect@'s @initSession@ set, the URL's own options, or
+-- the server's setting. The connect twins read it back rather than
+-- trusting the request, so backend formatting differences cannot hide a
+-- missed @SET@.
+showIdleTimeoutStatement :: Statement.Statement () Text
+showIdleTimeoutStatement =
+  Statement.preparable
+    "show idle_in_transaction_session_timeout"
+    Encoders.noParams
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
+
+-- | Whether the idle twin's advisory lock is free: a session-level lock
+-- stands in for a row lock, and the server releases it with the session,
+-- so a second session can take it at once only if the first is gone. The
+-- key is a parameter so concurrent suites never share one.
+tryAdvisoryLockStatement :: Statement.Statement Int64 Bool
+tryAdvisoryLockStatement =
+  Statement.preparable
+    "select pg_try_advisory_lock($1)"
+    (contramap id (Encoders.param (Encoders.nonNullable Encoders.int8)))
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
 
 -- | The candidates for one claim: the queue's eligible head, priority first,
 -- locked so a rival process cannot take them. @$5@ says the caller's version
@@ -2724,7 +2751,7 @@ data DebounceBounceParams = DebounceBounceParams
     debounceBounceDeduplicationId :: Text,
     debounceBouncePeriodMs        :: Int64,
     debounceBounceSerialization   :: Maybe Text,
-    debounceBounceApplicationName :: Maybe Text,
+    debounceBounceAppName         :: Maybe Text,
     debounceBounceClassName       :: Maybe Text,
     debounceBounceConfigName      :: Maybe Text
   }
@@ -2748,7 +2775,7 @@ debounceBounceStatement =
         <> contramap (.debounceBounceDeduplicationId) (Encoders.param (Encoders.nonNullable Encoders.text))
         <> contramap (.debounceBouncePeriodMs) (Encoders.param (Encoders.nonNullable Encoders.int8))
         <> contramap (.debounceBounceSerialization) (Encoders.param (Encoders.nullable Encoders.text))
-        <> contramap (.debounceBounceApplicationName) (Encoders.param (Encoders.nullable Encoders.text))
+        <> contramap (.debounceBounceAppName) (Encoders.param (Encoders.nullable Encoders.text))
         <> contramap (.debounceBounceClassName) (Encoders.param (Encoders.nullable Encoders.text))
         <> contramap (.debounceBounceConfigName) (Encoders.param (Encoders.nullable Encoders.text))
     )
@@ -2776,7 +2803,7 @@ data DebounceHolderRaw = DebounceHolderRaw
     debounceHolderWorkflowName    :: Maybe Text,
     debounceHolderClassName       :: Maybe Text,
     debounceHolderConfigName      :: Maybe Text,
-    debounceHolderApplicationName :: Maybe Text
+    debounceHolderAppName         :: Maybe Text
   }
 
 debounceHolderStatement :: Statement.Statement (Text, Text) (Maybe DebounceHolderRaw)
@@ -2817,7 +2844,7 @@ data ScheduleRowRaw = ScheduleRowRaw
     scheduleRowAutomaticBackfill :: Bool,
     scheduleRowCronTimezone      :: Maybe Text,
     scheduleRowQueueName         :: Maybe Text,
-    scheduleRowApplicationName   :: Maybe Text
+    scheduleRowAppName           :: Maybe Text
   }
 
 -- | The schedule columns every schedule read selects, in the oracle's order.
@@ -2868,7 +2895,7 @@ data ScheduleInsertParams = ScheduleInsertParams
     scheduleInsertAutomaticBackfill :: Bool,
     scheduleInsertCronTimezone      :: Maybe Text,
     scheduleInsertQueueName         :: Maybe Text,
-    scheduleInsertApplicationName   :: Maybe Text
+    scheduleInsertAppName           :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -2885,7 +2912,7 @@ scheduleInsertEncoder =
     <> contramap (.scheduleInsertAutomaticBackfill) (Encoders.param (Encoders.nonNullable Encoders.bool))
     <> contramap (.scheduleInsertCronTimezone) (Encoders.param (Encoders.nullable Encoders.text))
     <> contramap (.scheduleInsertQueueName) (Encoders.param (Encoders.nullable Encoders.text))
-    <> contramap (.scheduleInsertApplicationName) (Encoders.param (Encoders.nullable Encoders.text))
+    <> contramap (.scheduleInsertAppName) (Encoders.param (Encoders.nullable Encoders.text))
 
 -- | Registers a schedule: a plain insert, so the unique index refuses a
 -- name already taken. Mirrors @create_schedule@'s insert.
@@ -2942,7 +2969,7 @@ data ScheduleListParams = ScheduleListParams
   { listScheduleStatuses      :: [Text],
     listScheduleWorkflowNames :: [Text],
     listScheduleNamePrefixes  :: [Text],
-    listScheduleApplications  :: Maybe [Text]
+    listScheduleAppScope      :: Maybe [Text]
   }
   deriving stock (Eq, Show)
 
@@ -2965,7 +2992,7 @@ scheduleListStatement =
       contramap (.listScheduleStatuses) (Encoders.param (Encoders.nonNullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text))))
         <> contramap (.listScheduleWorkflowNames) (Encoders.param (Encoders.nonNullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text))))
         <> contramap (.listScheduleNamePrefixes) (Encoders.param (Encoders.nonNullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text))))
-        <> contramap (.listScheduleApplications) (Encoders.param (Encoders.nullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text))))
+        <> contramap (.listScheduleAppScope) (Encoders.param (Encoders.nullable (Encoders.foldableArray (Encoders.nonNullable Encoders.text))))
 
 -- | Whether a schedule exists, for the empty update that still has to say
 -- whether the name is real. The explicit @::int4@ is the oracle's, chosen
@@ -3197,7 +3224,7 @@ data RecordChildWorkflowParams = RecordChildWorkflowParams
     recordChildStepName        :: Text,
     recordChildStartedAt       :: Maybe Int64,
     recordChildCompletedAt     :: Maybe Int64,
-    recordChildApplicationName :: Maybe Text
+    recordChildAppName         :: Maybe Text
   }
 
 -- | Records the launch, and reports back the stored child id: the same child
@@ -3212,7 +3239,7 @@ recordChildWorkflowStatement params =
        started_at_epoch_ms, completed_at_epoch_ms, application_name)
     values
       (${recordChildParentId}, ${recordChildStepId}, ${recordChildStepName}, ${recordChildChildId},
-       ${recordChildStartedAt}, ${recordChildCompletedAt}, ${recordChildApplicationName})
+       ${recordChildStartedAt}, ${recordChildCompletedAt}, ${recordChildAppName})
     on conflict (workflow_uuid, function_id) do update
     set child_workflow_id = dbos.operation_outputs.child_workflow_id
     returning child_workflow_id

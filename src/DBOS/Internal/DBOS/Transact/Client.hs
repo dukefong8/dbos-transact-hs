@@ -59,8 +59,8 @@ module DBOS.Transact.Client
     clientUpdateQueue,
     clientDeleteQueue,
     -- * Versions from outside
-    clientListApplicationVersions,
-    clientLatestApplicationVersion,
+    clientListAppVersions,
+    clientLatestAppVersion,
     clientPromoteVersion,
     clientListWorkflows,
     clientListWorkflowSteps,
@@ -82,7 +82,7 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (Applications (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), RewindOptions (..), SendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowKey (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
+import DBOS.SystemDB.Types (AppScope (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), IdleTransactionTimeout (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowKey (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, idleTimeoutValidate, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
 import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, withConnection)
 import DBOS.Transact.Error qualified as TransactError
@@ -111,10 +111,11 @@ data ClientConfig = ClientConfig
     -- listener, so this field is inert. Rust defaults it to false (#101): a
     -- listener pointed at executors that do not push waits out the
     -- 60-second fallback.
-    useListenNotify      :: Bool,
-    pollingConcurrency   :: PollingConcurrency,
-    outcomePollInterval  :: Maybe Duration,
-    notificationCoalesce :: Maybe Duration
+    useListenNotify        :: Bool,
+    pollingConcurrency     :: PollingConcurrency,
+    outcomePollInterval    :: Maybe Duration,
+    notificationCoalesce   :: Maybe Duration,
+    idleTransactionTimeout :: IdleTransactionTimeout
   }
   deriving stock (Eq, Show)
 
@@ -131,7 +132,8 @@ clientConfigNew databaseUrl =
       useListenNotify = False,
       pollingConcurrency = PollingDefault,
       outcomePollInterval = Nothing,
-      notificationCoalesce = Nothing
+      notificationCoalesce = Nothing,
+      idleTransactionTimeout = Default
     }
 
 -- | 'clientConfigNew', taking the database URL from @DBOS_DATABASE_URL@.
@@ -160,6 +162,8 @@ validateClientConfig config
   | Just interval <- config.outcomePollInterval,
     durationIsZero interval =
       Left (TransactError.ErrorConfig "`outcome_poll_interval` cannot be zero")
+  | Left err <- idleTimeoutValidate config.idleTransactionTimeout =
+      Left (TransactError.ErrorConfig (SystemDBError.renderError err))
   | otherwise = Right ()
 
 -- | How often a waiting caller looks, resolved.
@@ -219,11 +223,12 @@ connectClient config =
       Postgres.Config
         { Postgres.configUrl = config.databaseUrl,
           Postgres.configMaxConnections = fromIntegral config.maxConnections,
+          Postgres.configIdleTransactionTimeout = config.idleTransactionTimeout,
           Postgres.configSettings =
             (Postgres.defaultSettings :: Settings)
               { settingsSchema = config.schema,
                 settingsExecutorId = Nothing,
-                settingsApplicationName = config.appName,
+                settingsAppName = config.appName,
                 settingsPollingConcurrency = config.pollingConcurrency,
                 settingsNotificationCoalesce = config.notificationCoalesce
               }
@@ -261,7 +266,7 @@ withClientTransaction client operation action = case client.clientTxRunner of
 -- up front — nothing runs on a refusal — while foreign-key failures abort
 -- through the insert, as Python's raise aborts the caller's transaction.
 -- No step is recorded, like every client send.
-clientSendMessagesInTx :: Client IO -> Text -> Tx.Transaction () -> [SendMessage] -> Maybe Text -> [Text] -> Bool -> IO (Either (TransactError.Error TransactError.EngineOnly) ())
+clientSendMessagesInTx :: Client IO -> Text -> Tx.Transaction () -> [EncodedSendMessage] -> Maybe Text -> [Text] -> Bool -> IO (Either (TransactError.Error TransactError.EngineOnly) ())
 clientSendMessagesInTx client operation callerWrites messages serialization fallbacks sendToForks =
   case validateSendKeys messages of
     Left err -> pure (Left (TransactError.fromSystemDB err))
@@ -276,7 +281,7 @@ clientSendMessagesInTx client operation callerWrites messages serialization fall
 
 -- | Send one message with the caller's writes in one transaction, as
 -- 'clientSendMessagesInTx' sends a batch.
-clientSendMessageInTx :: Client IO -> Text -> Tx.Transaction () -> SendMessage -> Maybe Text -> Text -> Bool -> IO (Either (TransactError.Error TransactError.EngineOnly) ())
+clientSendMessageInTx :: Client IO -> Text -> Tx.Transaction () -> EncodedSendMessage -> Maybe Text -> Text -> Bool -> IO (Either (TransactError.Error TransactError.EngineOnly) ())
 clientSendMessageInTx client operation callerWrites message serialization fallback sendToForks =
   clientSendMessagesInTx client operation callerWrites [message] serialization [fallback] sendToForks
 
@@ -356,8 +361,8 @@ clientEnqueueWorkflowWith client workflow options input = do
                 newWorkflowDeadline = Nothing,
                 newWorkflowAttributes = encodeAttributes options.attributes,
                 newWorkflowExecutorId = Nothing,
-                newWorkflowApplicationName = applicationName,
-                newWorkflowApplicationVersion = options.appVersion
+                newWorkflowAppName = applicationName,
+                newWorkflowAppVersion = options.appVersion
               }
       started <- initOrJoin client.conn new (Just shape) Nothing
       pure $ case started of
@@ -412,8 +417,8 @@ clientEnqueueWorkflowInTx client workflow operation callerWrites options input =
                   newWorkflowDeadline = Nothing,
                   newWorkflowAttributes = encodeAttributes options.attributes,
                   newWorkflowExecutorId = Nothing,
-                  newWorkflowApplicationName = applicationName,
-                  newWorkflowApplicationVersion = options.appVersion
+                  newWorkflowAppName = applicationName,
+                  newWorkflowAppVersion = options.appVersion
                 }
         case validateNewWorkflow new of
           Left err -> pure (Left (TransactError.fromSystemDB err))
@@ -474,7 +479,7 @@ clientSendMessage :: Monad m
                   => Client m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> SerializedWorkflowValue -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 clientSendMessage client destination topic idempotencyKey value = do
   let message =
-        SendMessage
+        EncodedSendMessage
           { sendDestinationId = destination,
             sendMessageBody = value,
             sendTopic = topic,
@@ -485,7 +490,7 @@ clientSendMessage client destination topic idempotencyKey value = do
 
 -- | Send a batch from outside in one transaction: all or none.
 clientSendMessages :: Monad m
-                   => Client m -> [SendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+                   => Client m -> [EncodedSendMessage] -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 clientSendMessages client messages = do
   written <- withConnection client.conn (\db -> SystemDB.sendMessages db messages Nothing Nothing Nothing False)
   pure written
@@ -617,7 +622,7 @@ clientRegisterQueue client queueName options conflict = case reserved queueName 
       NeverUpdate -> upsert LeaveExisting
   where
     upsert policy = do
-      let new = (queueOptionsToNewQueue queueName options) {newQueueApplicationName = client.conn.connAppName}
+      let new = (queueOptionsToNewQueue queueName options) {newQueueAppName = client.conn.connAppName}
       inserted <- withConnection client.conn (\db -> SystemDB.upsertQueue db new policy)
       case inserted of
         Left err -> pure (Left err)
@@ -686,9 +691,9 @@ clientDeleteQueue client queueName = case reserved queueName of
     pure (() <$ result)
 
 -- | The registered application versions.
-clientListApplicationVersions :: Monad m
+clientListAppVersions :: Monad m
                               => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) [VersionInfo])
-clientListApplicationVersions client = do
+clientListAppVersions client = do
   withConnection client.conn SystemDB.listApplicationVersions
 
 -- | The latest registered application version, scoped to this client's
@@ -696,9 +701,9 @@ clientListApplicationVersions client = do
 -- reader, which takes no application: reading claims nothing, so it has
 -- nothing to say a name about. Passing no scope lets the backend fall back
 -- to the connection's own application name.
-clientLatestApplicationVersion :: Monad m
+clientLatestAppVersion :: Monad m
                                => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe VersionInfo))
-clientLatestApplicationVersion client = do
+clientLatestAppVersion client = do
   result <- withConnection client.conn (\db -> SystemDB.getLatestApplicationVersion db Nothing)
   pure result
 

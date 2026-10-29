@@ -17,7 +17,7 @@ import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Hasql.Transaction qualified as Tx
-import DBOS.SystemDB (Applications (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
+import DBOS.SystemDB (AppScope (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, forkNew, getWorkflow, millisDuration, secondsDuration)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres qualified as Postgres
@@ -36,13 +36,14 @@ import DBOS.Transact
     Environment (..),
     Error (..),
     IdempotencyKey (..),
+    IdleTransactionTimeout (..),
     Queue (..),
     QueueChange (..),
     QueueConflict (..),
     QueueOptions (..),
     WorkflowCtx,
     SerializedWorkflowValue (..),
-    SendMessage (..),
+    EncodedSendMessage (..),
     StreamReader,
     Topic (..),
     clientCancelWorkflows,
@@ -51,8 +52,8 @@ import DBOS.Transact
     clientDeleteWorkflows,
     clientDeleteQueue,
     clientForkWorkflows,
-    clientLatestApplicationVersion,
-    clientListApplicationVersions,
+    clientLatestAppVersion,
+    clientListAppVersions,
     clientListQueues,
     clientListQueuedWorkflows,
     clientReadStream,
@@ -147,6 +148,15 @@ tests =
           Right () -> fail "expected the empty url to be refused",
       testCase "the client's listen default matches Rust and the field stays inert" $
         (clientConfigNew "postgresql://x").useListenNotify @?= False,
+      testCase "an idle timeout the server cannot take is refused" $ do
+        let config timeout = (clientConfigNew "postgresql://x") {idleTransactionTimeout = timeout}
+        validateClientConfig (config Default) @?= Right ()
+        case validateClientConfig (config (After (millisDuration 0))) of
+          Left err ->
+            assertBool
+              "names the field"
+              ("idle_transaction_timeout" `Text.isInfixOf` Text.pack (show err))
+          Right () -> fail "expected a zero After to be refused",
       testCase "a client enqueues by name and the app runs it" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -440,7 +450,7 @@ tests =
             Right _ -> pure ()
           row <- readRow getBackend (WorkflowId workflowText)
           case row of
-            WorkflowRecord {workflowRecordName = name, workflowRecordClassName = className, workflowRecordConfigName = configName, workflowRecordQueueName = queue, workflowRecordPriority = priority, workflowRecordDeduplicationId = dedup, workflowRecordApplicationVersion = version, workflowRecordTimeout = budget, workflowRecordAttributes = attributes, workflowRecordStatus = status} -> do
+            WorkflowRecord {workflowRecordName = name, workflowRecordClassName = className, workflowRecordConfigName = configName, workflowRecordQueueName = queue, workflowRecordPriority = priority, workflowRecordDeduplicationId = dedup, workflowRecordAppVersion = version, workflowRecordTimeout = budget, workflowRecordAttributes = attributes, workflowRecordStatus = status} -> do
               name @?= Just "double"
               className @?= Just "cls"
               configName @?= Nothing
@@ -491,7 +501,7 @@ tests =
               Left err -> fail (show err)
               Right _ -> pure ()
             unclaimed <- readRow getBackend (WorkflowId unpolledText)
-            unclaimed.workflowRecordApplicationName @?= Nothing
+            unclaimed.workflowRecordAppName @?= Nothing
             -- On the queue the app polls, the row the client wrote unclaimed is
             -- claimed by the application that runs it, so the unclaimed
             -- partition drains on its own. Pinned to the app's version: an
@@ -514,7 +524,7 @@ tests =
                     assertEqual "the app ran the client's enqueue" (Right 7) decoded
                   other -> fail (show other)
                 claimed <- readRow getBackend (WorkflowId adoptedText)
-                claimed.workflowRecordApplicationName @?= Just appName,
+                claimed.workflowRecordAppName @?= Just appName,
       testCase "the workflow id is an idempotency key" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -645,8 +655,8 @@ tests =
             sent <-
               clientSendMessages
                 client
-                [ SendMessage enqueuedId (encodeWorkflowValue ("one" :: Text)) (Just (Topic "ping")) Nothing,
-                  SendMessage enqueuedId (encodeWorkflowValue ("two" :: Text)) (Just (Topic "ping")) Nothing
+                [ EncodedSendMessage enqueuedId (encodeWorkflowValue ("one" :: Text)) (Just (Topic "ping")) Nothing,
+                  EncodedSendMessage enqueuedId (encodeWorkflowValue ("two" :: Text)) (Just (Topic "ping")) Nothing
                 ]
             sent @?= Right ()
             _ <- dequeueWorkflows dbos
@@ -699,7 +709,7 @@ tests =
               (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
               (\_ -> do
                 fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
-                composed <- clientSendMessagesInTx client "probe-commit" (do _ <- Tx.statement "row-1" (insertProbe table); Tx.statement "row-2" (insertProbe table)) [SendMessage (WorkflowId receiver.workflowId) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "portable_json") [fallback] False
+                composed <- clientSendMessagesInTx client "probe-commit" (do _ <- Tx.statement "row-1" (insertProbe table); Tx.statement "row-2" (insertProbe table)) [EncodedSendMessage (WorkflowId receiver.workflowId) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "portable_json") [fallback] False
                 composed @?= Right ()
                 counted <- Postgres.runSession backend "client-tx-probe" (Session.statement () (countProbe table))
                 counted @?= Right 2
@@ -748,7 +758,7 @@ tests =
             (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
             (\_ -> do
               fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
-              let keyed destination = SendMessage destination (encodeWorkflowValue ("hello" :: Text)) (Just topic) (Just (IdempotencyKey "dup-key"))
+              let keyed destination = EncodedSendMessage destination (encodeWorkflowValue ("hello" :: Text)) (Just topic) (Just (IdempotencyKey "dup-key"))
               refused <- clientSendMessagesInTx client "probe-validation" (Tx.statement "row-1" (insertProbe table)) [keyed (WorkflowId ("client-tx-a-" <> suffix)), keyed (WorkflowId ("client-tx-b-" <> suffix))] (Just "portable_json") [fallback, fallback] False
               refused @?= Left (SystemDatabase (SystemDBError.InvalidInput {field = "idempotency_key", detail = "dup-key is used by more than one message"}))
               counted <- Postgres.runSession backend "client-tx-probe" (Session.statement () (countProbe table))
@@ -768,7 +778,7 @@ tests =
             (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
             (\_ -> do
               fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
-              aborted <- clientSendMessagesInTx client "probe-fk" (Tx.statement "row-1" (insertProbe table)) [SendMessage (WorkflowId ("client-tx-nowhere-" <> suffix)) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "portable_json") [fallback] False
+              aborted <- clientSendMessagesInTx client "probe-fk" (Tx.statement "row-1" (insertProbe table)) [EncodedSendMessage (WorkflowId ("client-tx-nowhere-" <> suffix)) (encodeWorkflowValue ("hello" :: Text)) (Just topic) Nothing] (Just "portable_json") [fallback] False
               case aborted of
                 Left _ -> pure ()
                 Right _ -> fail "expected the foreign key to abort the transaction"
@@ -811,7 +821,7 @@ tests =
               (\_ -> Postgres.runSession backend "client-tx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
               (\_ -> do
                 fallback <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
-                composed <- clientSendMessageInTx client "probe-forks" (Tx.statement "row-1" (insertProbe table)) (SendMessage (WorkflowId workflowText) (encodeWorkflowValue ("hello" :: Text)) (Just topic) (Just (IdempotencyKey "fork-key"))) (Just "portable_json") fallback True
+                composed <- clientSendMessageInTx client "probe-forks" (Tx.statement "row-1" (insertProbe table)) (EncodedSendMessage (WorkflowId workflowText) (encodeWorkflowValue ("hello" :: Text)) (Just topic) (Just (IdempotencyKey "fork-key"))) (Just "portable_json") fallback True
                 composed @?= Right ()
                 notified <- Postgres.runSession backend "client-tx-probe" (Session.statement topicName countTopic)
                 notified @?= Right 2),
@@ -1023,7 +1033,7 @@ tests =
         bracket (connectOrFail clientConfig) closeClient $ \client -> do
           bracket (newDBOS configA) shutdown $ \dbosA -> do
             exec <- launchClientExec dbosA isolatedEnvironment
-            listed <- clientListApplicationVersions client
+            listed <- clientListAppVersions client
             case listed of
               Left err -> fail (show err)
               Right versions -> do
@@ -1046,7 +1056,7 @@ tests =
               case promoted of
                 Left err -> fail (show err)
                 Right () -> pure ()
-              rolled <- clientListApplicationVersions client
+              rolled <- clientListAppVersions client
               case rolled of
                 Left err -> fail (show err)
                 Right versions -> assertAppLatest appName versionA versions,
@@ -1072,12 +1082,12 @@ tests =
             threadDelay 100000
             _ <- launchClientExec dbosB isolatedEnvironment
             bracket (connectOrFail clientConfigA) closeClient $ \clientA -> do
-              latestA <- clientLatestApplicationVersion clientA
+              latestA <- clientLatestAppVersion clientA
               case latestA of
                 Right (Just (VersionInfo {versionInfoName})) -> versionInfoName @?= versionA
                 other -> fail ("expected A's own latest " <> Text.unpack versionA <> ", got: " <> show other)
             bracket (connectOrFail clientConfigB) closeClient $ \clientB -> do
-              latestB <- clientLatestApplicationVersion clientB
+              latestB <- clientLatestAppVersion clientB
               case latestB of
                 Right (Just (VersionInfo {versionInfoName})) -> versionInfoName @?= versionB
                 other -> fail ("expected B's own latest " <> Text.unpack versionB <> ", got: " <> show other),
@@ -1178,7 +1188,7 @@ tests =
             -- No options names no version: the row is claimed only by the
             -- latest registered version.
             row <- readRow getBackend (WorkflowId handle.workflowId)
-            row.workflowRecordApplicationVersion @?= Nothing,
+            row.workflowRecordAppVersion @?= Nothing,
       testCase "a client cancelling a missing workflow gets nothing back" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -1698,7 +1708,7 @@ assertAppLatest :: Text -> Text -> [VersionInfo] -> IO ()
 assertAppLatest appName versionName versions = do
   let ours =
         [ (name, stamp)
-          | VersionInfo {versionInfoApplicationName = owner, versionInfoName = name, versionInfoTimestamp = stamp} <- versions,
+          | VersionInfo {versionInfoAppName = owner, versionInfoName = name, versionInfoTimestamp = stamp} <- versions,
             owner == Just appName
         ]
   case (lookup versionName ours, map snd ours) of

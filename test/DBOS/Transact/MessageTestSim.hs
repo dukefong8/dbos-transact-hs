@@ -126,7 +126,7 @@ simMessageFixture = do
               [wid]
               (ForkStep 0)
               ForkOptions
-                { forkOptionsApplicationVersion = Nothing,
+                { forkOptionsAppVersion = Nothing,
                   forkOptionsQueueName = Nothing,
                   forkOptionsQueuePartitionKey = Nothing,
                   forkOptionsTimeout = Nothing,
