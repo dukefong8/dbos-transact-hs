@@ -235,40 +235,10 @@ forkWorkflows conn forks options = case checkForkArgs forks options of
 checkForkArgs :: [Fork] -> ForkOptions -> Either (TransactError.Error e) ()
 checkForkArgs [] _ = Right ()
 checkForkArgs forks options = case refuseInvalidForks forks options of
-  Just (ForkBatchRefusal detail) -> Left (TransactError.InvalidArgument forkOperation detail)
-  Just (ForkRefusal fork field detail) -> Left (TransactError.InvalidArgument forkOperation (refusedFork fork field detail))
-  Just (ForkOptionsRefusal field detail) -> Left (TransactError.InvalidArgument forkOperation (refusedForkOptions field detail))
+  Just (ForkBatchRefusal detail) -> Left (TransactError.InvalidArgument TransactError.forkOperation detail)
+  Just (ForkRefusal fork field detail) -> Left (TransactError.InvalidArgument TransactError.forkOperation (TransactError.refusedFork fork field detail))
+  Just (ForkOptionsRefusal field detail) -> Left (TransactError.InvalidArgument TransactError.forkOperation (TransactError.refusedForkOptions field detail))
   Nothing -> Right ()
-
--- | What a fork call is refused as. Every fork surface refuses through
--- @refuse_invalid_forks@ under this operation. Mirrors Rust
--- @FORK_OPERATION@.
-forkOperation :: Text
-forkOperation = "fork a workflow"
-
--- | A fork's refusal of one of its arguments, naming the sysdb field as
--- the API spells it and the workflow it is about, when known. Mirrors
--- Rust @refused_fork@, spelled with the Haskell module separator: the
--- oracle writes @Fork::field@, the port writes @Fork.field@.
-refusedFork :: Fork -> Text -> Text -> Text
-refusedFork fork field detail = named <> ": " <> detail <> got
-  where
-    named
-      | fork.forkSourceId == "" = "Fork." <> field
-      | otherwise = "Fork." <> field <> " of `" <> fork.forkSourceId <> "`"
-    got
-      | field == "start_step" = ", got " <> showText fork.forkStartStep
-      | otherwise = ""
-
--- | An option's refusal, with the one column the API spells differently.
--- Mirrors Rust @refused_fork@ for the options, likewise module-spelled:
--- @ForkOptions.app_version@ for the oracle's @ForkOptions::app_version@.
-refusedForkOptions :: Text -> Text -> Text
-refusedForkOptions field detail = "ForkOptions." <> api <> ": " <> detail
-  where
-    api = case field of
-      "application_version" -> "app_version"
-      other -> other
 
 -- | The engine-layer fork-from validation: options plus the per-source
 -- checks the oracle makes by validating a synthesized fork per id — three
@@ -279,9 +249,9 @@ refusedForkOptions field detail = "ForkOptions." <> api <> ": " <> detail
 checkForkFromArgs :: [WorkflowId] -> ForkPoint -> ForkOptions -> Either (TransactError.Error e) ()
 checkForkFromArgs [] _ _ = Right ()
 checkForkFromArgs workflowIds point options = case perFork of
-  (fork, field, detail) : _ -> Left (TransactError.InvalidArgument "fork from workflows" (refusedFork fork field detail))
+  (fork, field, detail) : _ -> Left (TransactError.InvalidArgument "fork from workflows" (TransactError.refusedFork fork field detail))
   [] -> case forkOptionProblems options of
-    Just (field, detail) -> Left (TransactError.InvalidArgument "fork from workflows" (refusedForkOptions field detail))
+    Just (field, detail) -> Left (TransactError.InvalidArgument "fork from workflows" (TransactError.refusedForkOptions field detail))
     Nothing -> Right ()
   where
     givenStep = case point of
@@ -408,12 +378,10 @@ setWorkflowDelay :: Monad m
                  => Connection m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 setWorkflowDelay conn workflowId delay = do
   result <- runSystemDB conn.connSysdb (\db -> SystemDB.setWorkflowDelay db workflowId delay Nothing)
-  case result of
-    Left sysErr -> pure (Left (TransactError.refusedArgument delayOperation sysErr))
-    Right () -> do
-      let WorkflowId workflowText = workflowId
-      runTracer conn.connTracer (WorkflowDelayMoveAsked workflowText)
-      pure (Right ())
+  TransactError.refusing (TransactError.refusedArgument delayOperation) result $ \() -> do
+    let WorkflowId workflowText = workflowId
+    runTracer conn.connTracer (WorkflowDelayMoveAsked workflowText)
+    pure (Right ())
 
 -- | The operation name a refused delay reports under. Mirrors Rust
 -- @DELAY_OPERATION@.

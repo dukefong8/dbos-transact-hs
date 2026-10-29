@@ -466,9 +466,7 @@ refuseDurations period cap = do
     refuseDuration field duration
       | durationIsZero duration =
           Left (TransactError.refusedArgument debounceOperation (SystemDBError.invalidInput field "must be a positive, non-zero duration"))
-      | otherwise = case durationToMs field duration of
-          Left sysErr -> Left (TransactError.refusedArgument debounceOperation sysErr)
-          Right _ -> Right ()
+      | otherwise = void (first (TransactError.refusedArgument debounceOperation) (durationToMs field duration))
 
 -- | The deduplication key, spelled in one function: the workflow's full
 -- key display, then the debounce key (@wf/Billing/eu-key@ for a

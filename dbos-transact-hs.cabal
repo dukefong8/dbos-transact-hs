@@ -151,6 +151,7 @@ test-suite test
     DBOS.Transact.HandleTest
     DBOS.Transact.HandleTestSim
     DBOS.Transact.IdentityTest
+    DBOS.Transact.InteropTest
     DBOS.Transact.RegistryCases
     DBOS.Transact.RegistryTest
     DBOS.Transact.RegistryTestSim

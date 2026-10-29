@@ -18,6 +18,10 @@ module DBOS.Transact.Error
     controlOf,
     fromSystemDB,
     refusedArgument,
+    refusing,
+    forkOperation,
+    refusedFork,
+    refusedForkOptions,
     startRefusal,
     refusedStart,
     fromRegistryError,
@@ -42,7 +46,7 @@ import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Void (Void, absurd)
 import DBOS.Prelude
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, WorkflowKey (..), durationAsMillis, renderWorkflowKey)
+import DBOS.SystemDB.Types (Duration, Fork (Fork, forkSourceId, forkStartStep), WorkflowKey (..), durationAsMillis, renderWorkflowKey)
 import DBOS.Transact.Registry (RegistryError, decodeRegistryErrorPayload, encodeRegistryErrorPayload, renderRegistryError)
 import DBOS.Transact.Registry qualified as Registry
 import DBOS.Transact.Serialization (SerializationError, decodeSerializationError, encodeSerializationError, renderSerializationError)
@@ -317,6 +321,21 @@ refusedArgument operation = \case
   SystemDBError.InvalidInput {field, detail} -> InvalidArgument operation ("`" <> field <> "` " <> detail)
   err -> fromSystemDB err
 
+-- | Short-circuit a system-database answer onto the engine channel: a
+-- refusal converts through the given mapping and stops, anything else
+-- runs the continuation. The one shape behind every validation prefix —
+-- duration pre-checks, option checks, insert refusals — so a new error
+-- channel is threaded through one function, not N call sites. Record and
+-- adopt paths keep their explicit cases: there every branch decides
+-- something different, which a combinator would hide.
+refusing :: Monad m
+         => (SystemDBError.Error -> Error e)
+         -> Either SystemDBError.Error a
+         -> (a -> m (Either (Error e) b))
+         -> m (Either (Error e) b)
+refusing conv validated continue =
+  runExceptT (ExceptT (pure (first conv validated)) >>= ExceptT . continue)
+
 -- | What a start that runs at once is refused as. A start onto a queue,
 -- and with it every client enqueue, is refused as 'enqueueOperation'.
 -- Mirrors Rust @START_OPERATION@.
@@ -360,6 +379,36 @@ refusedStart queue = \case
       "queue_name" -> "name"
       "queue_partition_key" -> "partition_key"
       "name" -> "workflow"
+      "application_version" -> "app_version"
+      other -> other
+
+-- | What a fork call is refused as. Every fork surface refuses through
+-- @refuse_invalid_forks@ under this operation. Mirrors Rust
+-- @FORK_OPERATION@.
+forkOperation :: Text
+forkOperation = "fork a workflow"
+
+-- | A fork's refusal of one of its arguments, naming the sysdb field as
+-- the API spells it and the workflow it is about, when known. Mirrors
+-- Rust @refused_fork@, spelled with the Haskell module separator: the
+-- oracle writes @Fork::field@, the port writes @Fork.field@.
+refusedFork :: Fork -> Text -> Text -> Text
+refusedFork fork field detail = named <> ": " <> detail <> got
+  where
+    named
+      | fork.forkSourceId == "" = "Fork." <> field
+      | otherwise = "Fork." <> field <> " of `" <> fork.forkSourceId <> "`"
+    got
+      | field == "start_step" = ", got " <> showText fork.forkStartStep
+      | otherwise = ""
+
+-- | An option's refusal, with the one column the API spells differently.
+-- Mirrors Rust @refused_fork@ for the options, likewise module-spelled:
+-- @ForkOptions.app_version@ for the oracle's @ForkOptions::app_version@.
+refusedForkOptions :: Text -> Text -> Text
+refusedForkOptions field detail = "ForkOptions." <> api <> ": " <> detail
+  where
+    api = case field of
       "application_version" -> "app_version"
       other -> other
 
