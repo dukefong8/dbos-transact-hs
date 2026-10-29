@@ -16,7 +16,7 @@ import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOnWith, newMemDB, simInstance)
 import DBOS.Transact.Serialization (encodeWorkflowInput)
 import DBOS.Transact
-import DBOS.Transact.Management (stepInfoFromRecord)
+import DBOS.Transact.Management (ManagementEvent (..), stepInfoFromRecord)
 import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
 import DBOS.Transact.DebouncerCases
 import DBOS.Transact.Recovery (EngineEvent (..))
@@ -34,14 +34,14 @@ tests =
     AllFinish
     [ simCase simDebouncerFixture "a first debounce creates a delayed debounced row" scenarioFirstDebounceDelays checkFirstDebounceDelays traceFirstDebounceDelays,
       simCase simDebouncerFixture "a second debounce coalesces onto the same row" scenarioSecondDebounceCoalesces checkSecondDebounceCoalesces traceSecondDebounceCoalesces,
-      simCase simDebouncerFixture "a foreign holder refuses the debounce" scenarioForeignHolderRefused checkForeignHolderRefused traceForeignHolderRefused,
+      simCase simDebouncerFixture "a non-debounced holder refuses the debounce" scenarioForeignHolderRefused checkForeignHolderRefused traceForeignHolderRefused,
       simCase simDebouncerFixture "debouncing inside a workflow records a step" scenarioInWorkflowDebounceRecordsStep checkInWorkflowDebounceRecordsStep traceInWorkflowDebounceRecordsStep,
       simCase simDebouncerFixture "a timeout caps the extension" scenarioTimeoutCapsExtension checkTimeoutCapsExtension traceTimeoutCapsExtension,
       simCase simDebouncerFixture "a debounced creation lands its release on the deadline" scenarioDebouncedCapAtCreation checkDebouncedCapAtCreation traceDebouncedCapAtCreation,
       simCase simDebouncerFixture "a pinned id names the fresh row" scenarioPinnedIdNamesFreshRow checkPinnedIdNamesFreshRow tracePinnedId,
       simCase simDebouncerFixture "a pinned id reused across cycles is a conflict" scenarioPinnedIdReusedAcrossCycles checkPinnedIdReusedAcrossCycles tracePinnedId,
       simCase simDebouncerFixture "a zero or unstorable debounce duration is refused" scenarioDebounceDurationsRefused checkDebounceDurationsRefused tracePinnedId,
-      simCase simDebouncerFixture "a cancelled debounce frees its key" scenarioCancelledDebounceFreesKey checkCancelledDebounceFreesKey tracePinnedId,
+      simCase simDebouncerFixture "a cancelled debounce frees its key" scenarioCancelledDebounceFreesKey checkCancelledDebounceFreesKey traceCancelledFreesKey,
       simCase simDebouncerFixture "a debounce inside a step is refused" scenarioDebounceInsideStepRefused checkDebounceInsideStepRefused tracePinnedId,
       simCase simDebouncerFixture "a key collision between workflows is refused" scenarioKeyCollisionRefused checkKeyCollisionRefused tracePinnedId
     ]
@@ -146,12 +146,20 @@ traceDebouncedCapAtCreation :: forall a. SimTrace a -> IO ()
 traceDebouncedCapAtCreation tr = do
   selectTraceEventsDynamic tr @?= [EngineRecovered 0, EngineLaunched "sim-app" "sim-executor" "0.0.0"]
 
--- | The pinned creation, the refused reuse, and the refused durations
--- announce nothing row-specific: the user ids are engine-generated, so
--- the shared checks judge the rows and verdicts, not the trace.
+-- | The pinned creation, the refused reuse, the refused durations, the
+-- refused step, and the refused collision announce nothing row-specific:
+-- the user ids are engine-generated, so the shared checks judge the rows
+-- and verdicts, not the trace. The cancelled case announces its cancel
+-- and gets its own trace below.
 tracePinnedId :: forall a. SimTrace a -> IO ()
 tracePinnedId tr = do
   selectTraceEventsDynamic tr @?= [EngineRecovered 0, EngineLaunched "sim-app" "sim-executor" "0.0.0"]
+
+-- | The cancelled case announces the cancel alongside the launch.
+traceCancelledFreesKey :: forall a. SimTrace a -> IO ()
+traceCancelledFreesKey tr = do
+  selectTraceEventsDynamic tr @?= [EngineRecovered 0, EngineLaunched "sim-app" "sim-executor" "0.0.0"]
+  selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1]
 
 traceSecondDebounceCoalesces :: forall a. SimTrace a -> IO ()
 traceSecondDebounceCoalesces tr = do

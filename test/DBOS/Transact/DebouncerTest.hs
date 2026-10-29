@@ -30,7 +30,7 @@ tests =
         "Debouncer"
         [ liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a first debounce creates a delayed debounced row" scenarioFirstDebounceDelays checkFirstDebounceDelays,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a second debounce coalesces onto the same row" scenarioSecondDebounceCoalesces checkSecondDebounceCoalesces,
-          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a foreign holder refuses the debounce" scenarioForeignHolderRefused checkForeignHolderRefused,
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a non-debounced holder refuses the debounce" scenarioForeignHolderRefused checkForeignHolderRefused,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "debouncing inside a workflow records a step" scenarioInWorkflowDebounceRecordsStep checkInWorkflowDebounceRecordsStep,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a timeout caps the extension" scenarioTimeoutCapsExtension checkTimeoutCapsExtension,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a debounced creation lands its release on the deadline" scenarioDebouncedCapAtCreation checkDebouncedCapAtCreation,

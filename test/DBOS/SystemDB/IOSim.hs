@@ -123,6 +123,7 @@ import DBOS.SystemDB
     sysRewindValidate,
     sendStepName,
     validateSendKeys,
+    workflowKeyFromRow,
     workflowStatusText,
     writeStreamStepName,
     closeStreamStepName,
@@ -1133,10 +1134,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
             let newQueue
                   | Text.null oldQueue = recoveryQueue
                   | otherwise = oldQueue
-                dropped = case Map.lookup (oldQueue, key) index of
-                  Just holder | holder == widText -> Map.delete (oldQueue, key) index
-                  _ -> index
-             in Map.insert (newQueue, key) widText dropped
+             in Map.insert (newQueue, key) widText (dropMemHolds rows [widText] index)
           _ -> index
     modifyTVar db.memDedup (\held -> foldr rekey held candidates)
     pure (Right [WorkflowId widText | (widText, _) <- candidates])
@@ -1926,20 +1924,20 @@ memBounce scope request now rows = case Map.lookupMin (Map.filter isBouncable ro
   where
     queue = request.debounceRequestQueueName
     key = request.debounceRequestDeduplicationId
-    WorkflowKey workflowName className configName = request.debounceRequestWorkflow
     isHolder row = row.workflowRecordQueueName == Just queue && row.workflowRecordDeduplicationId == Just key
-    -- The update's guard, conjunct for conjunct: name and class and config
-    -- agree (empty spells absence on either side), the row still waits, it
-    -- debounces, and the scope admits it.
+    -- The update's guard, conjunct for conjunct: the holder's whole key
+    -- matches, the row still waits, it debounces, and the scope admits
+    -- it. Empty spells absence on either side through the shared
+    -- row-key reader, as the update's @NULLIF@ does.
     isBouncable row =
       isHolder row
-        && row.workflowRecordName == Just workflowName
-        && absent row.workflowRecordClassName == absent className
-        && absent row.workflowRecordConfigName == absent configName
+        && holderKey row == Just request.debounceRequestWorkflow
         && row.workflowRecordStatus == Delayed
         && row.workflowRecordIsDebounced
         && (scope == Nothing || row.workflowRecordApplicationName == scope || row.workflowRecordApplicationName == Nothing)
-    absent = (>>= \value -> if value == "" then Nothing else Just value)
+    holderKey row = case row.workflowRecordName of
+      Nothing -> Nothing
+      Just name -> Just (workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName)
 
 -- | The holder as the domain describes it: what holds the key, not merely
 -- that something does, so the caller can tell a collision from a

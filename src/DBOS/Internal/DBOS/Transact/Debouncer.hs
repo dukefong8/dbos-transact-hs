@@ -34,7 +34,6 @@ module DBOS.Transact.Debouncer
 where
 
 import DBOS.Prelude
-import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration, QueueName (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowKey (..), durationIsZero, durationToMs, internalQueueName, renderWorkflowKey, workflowKeyFromRow)
@@ -47,7 +46,7 @@ import DBOS.Transact.Handle (WorkflowHandle (..), pollingHandle)
 import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor, startWorkflow)
 import DBOS.Transact.Registry (registryInstanceId)
 import DBOS.Transact.Serialization (WorkflowInput (..), unWorkflowInput)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Timeout (..), StartOptions (..), WorkflowRef (..), childWorkflowId, enqueueNew, startChildWorkflow, startOptionsDefault)
+import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Timeout (..), StartOptions (..), WorkflowRef (..), childWorkflowId, enqueueNew, startChildWorkflow, startOptionsDefault, validateEnqueue)
 
 -- | What to debounce: which queue the user workflow finally runs on, how
 -- long to wait past the first trigger at most, and which application the
@@ -206,19 +205,18 @@ debounceInWorkflow wctx userRef def key period input = do
               pure (Left (TransactError.WrongInstance {operation = "debounce a workflow"}))
           | otherwise -> case refuseDurations period def.debouncerTimeout of
               Left err -> pure (Left err)
-              Right () -> do
-                stepId <- nextStepId wctx
-                generated <- generatedWorkflowId conn
-                let parentText = workflowId wctx
-                    pinned = childWorkflowId Nothing (Just (parentText, stepId)) generated
-                    caller = Just (WorkflowId parentText, stepId)
-                bounceLoop conn pinned caller
+              Right () -> bounceLoop conn
   where
     rawInput = unWorkflowInput <$> input
-    bounceLoop conn pinned caller = do
-      -- The period travels through: the write resolves it against the
-      -- database clock the release sweep compares it with, as the
-      -- oracle's @Bounce::request@ cannot fail.
+    -- Each attempt takes its own step id and pinned id, as the oracle
+    -- re-places both per attempt: a retry must bounce again, never
+    -- replay the recorded outcome.
+    bounceLoop conn = do
+      stepId <- nextStepId wctx
+      generated <- generatedWorkflowId conn
+      let parentText = workflowId wctx
+          pinned = childWorkflowId Nothing (Just (parentText, stepId)) generated
+          caller = Just (WorkflowId parentText, stepId)
       bounced <- withConnection conn (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest conn period) caller)
       case bounced of
             Left err -> pure (Left err)
@@ -226,7 +224,7 @@ debounceInWorkflow wctx userRef def key period input = do
             Right (DebounceHeld holder) -> case classifyBounce holder userRef.refKey (targetApp conn) of
               BounceRetry -> do
                 threadDelay retryPauseMicros
-                bounceLoop conn pinned caller
+                bounceLoop conn
               BounceRaise holderId ->
                 pure
                   ( Left
@@ -237,7 +235,7 @@ debounceInWorkflow wctx userRef def key period input = do
             Right DebounceUnheld -> do
               enqueued <- startChildWorkflow wctx userRef (debouncedStartOptions def queueName dedupKey period (Just (WorkflowId pinned))) input
               case enqueued of
-                Left (TransactError.SystemDatabase (SystemDBError.QueueDeduplicated {})) -> bounceLoop conn pinned caller
+                Left (TransactError.SystemDatabase (SystemDBError.QueueDeduplicated {})) -> bounceLoop conn
                 other -> pure (adoptHandleConn conn <$> other)
     bounceRequest conn bouncePeriod =
       DebounceRequest
@@ -305,12 +303,20 @@ debounceClientWith dc key period input call = do
     Left err -> pure (Left err)
     Right () -> case refuseDurations period dc.debouncerClientTimeout of
       Left err -> pure (Left err)
-      Right () -> do
-        generated <- generatedWorkflowId conn
-        let offered = case call.debounceOptionsWorkflowId of
-              Just (WorkflowId pinned) -> pinned
-              Nothing -> generated
-        bounceLoop offered
+      -- The enqueue leg would refuse these after the bounce already
+      -- extended the holder and replaced its inputs; validate first, as
+      -- the oracle validates its options before looping, reporting the
+      -- same errors the leg would.
+      Right () -> case validateEnqueue options.queue of
+        Left err -> pure (Left err)
+        Right () -> case traverse (durationToMs "timeout") options.timeout of
+          Left sysErr -> pure (Left (TransactError.fromSystemDB sysErr))
+          Right _ -> do
+            generated <- generatedWorkflowId conn
+            let offered = case call.debounceOptionsWorkflowId of
+                  Just (WorkflowId pinned) -> pinned
+                  Nothing -> generated
+            bounceLoop offered
   where
     conn = dc.debouncerClient.conn
     options = dc.debouncerClientOptions
@@ -400,9 +406,8 @@ retryPauseMicros = 100000
 
 classifyBounce :: DebounceHolder -> WorkflowKey -> Maybe Text -> BounceAction
 classifyBounce holder workflow targetApp
-  | not holder.debounceHolderIsDebounced = BounceRaise holder.debounceHolderWorkflowId
-  | not (sameWorkflow holder workflow) = BounceRaise holder.debounceHolderWorkflowId
-  | anotherApp holder targetApp = BounceRaise holder.debounceHolderWorkflowId
+  | not holder.debounceHolderIsDebounced || not (sameWorkflow holder workflow) || anotherApp holder targetApp =
+      BounceRaise holder.debounceHolderWorkflowId
   | otherwise = BounceRetry
   where
     sameWorkflow holder workflow = case holder.debounceHolderWorkflowName of
@@ -416,7 +421,9 @@ classifyBounce holder workflow targetApp
 -- | The fresh debounced enqueue: the period's delay, the debounced mark
 -- with the timeout's deadline, and no inherited deadline — a debounce
 -- delay can be long, so an inherited absolute deadline could expire before
--- the debounced workflow ever runs. Mirrors the oracle's enqueue leg.
+-- the debounced workflow ever runs. Mirrors the oracle's enqueue leg. The
+-- client leg builds the same columns on 'EnqueueOptions' rather than
+-- sharing this: the two option types force the parallel construction.
 debouncedStartOptions :: Debouncer -> Text -> Text -> Duration -> Maybe WorkflowId -> StartOptions
 debouncedStartOptions def queueName dedupKey period offered =
   startOptionsDefault
@@ -450,9 +457,9 @@ adoptHandleConn conn handle = pollingHandle conn handle.workflowId True
 -- database's own check, so the two cannot disagree about what is
 -- storable. Mirrors Rust @refuse_durations@.
 refuseDurations :: Duration -> Maybe Duration -> Either (TransactError.Error TransactError.EngineOnly) ()
-refuseDurations period timeout = do
+refuseDurations period cap = do
   refuseDuration "period" period
-  case timeout of
+  case cap of
     Nothing -> Right ()
     Just limit -> refuseDuration "debounce_timeout" limit
   where
@@ -463,10 +470,6 @@ refuseDurations period timeout = do
           Left sysErr -> Left (TransactError.refusedArgument debounceOperation sysErr)
           Right _ -> Right ()
 
--- | The deduplication key: the workflow name under the key, class-prefixed
--- for instance workflows. Free functions read as the Python oracle writes
--- them (@\<workflow\>-\<key\>@); instance workflows carry their class, as
--- the TypeScript oracle's @Class.workflow-key@ does.
 -- | The deduplication key, spelled in one function: the workflow's full
 -- key display, then the debounce key (@wf/Billing/eu-key@ for a
 -- configured instance, @wf-key@ for a free function). A @/@-or-@-@

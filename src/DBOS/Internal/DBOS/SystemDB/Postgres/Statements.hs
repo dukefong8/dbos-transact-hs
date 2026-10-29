@@ -583,7 +583,6 @@ data InitWorkflowParams = InitWorkflowParams
     initParamExecutorId         :: Maybe Text,
     initParamApplicationVersion :: Maybe Text,
     initParamApplicationId      :: Maybe Text,
-    initParamCreatedAt          :: Int64,
     initParamUpdatedAt          :: Int64,
     initParamInitialAttempts    :: Int64,
     initParamTimeoutMs          :: Maybe Int64,
@@ -601,12 +600,10 @@ data InitWorkflowParams = InitWorkflowParams
 
 -- | The columns @init_workflow@ reads back: enough to decide whether this
 -- caller created the row. @inserted@ tells this statement's own insert
--- from a found row: the insert stamps @created_at@ with the bound stamp,
--- so equality with it holds only for the row this attempt wrote — a retry
--- after a lost acknowledgement carries a fresh stamp and reads false.
--- Mirrors the oracle's @inserted@ (@created_at = now()@ there; the bound
--- stamp here, as this init binds its stamps rather than reading the
--- database clock for them).
+-- from a found row: the insert stamps @created_at@ with the transaction's
+-- clock reading, so equality with it holds only for the row this attempt
+-- wrote — a retry after a lost acknowledgement runs in a later
+-- transaction and reads false. Mirrors the oracle's @inserted@.
 type WorkflowInitRaw =
   SqlRow
     '[ '("recovery_attempts", Maybe Int64),
@@ -628,9 +625,15 @@ type WorkflowInitRaw =
 -- row and never changes — how a start that finds the row tells its own
 -- retried insert from another caller's; @owner_xid@ names the execution
 -- that owns the workflow now (this attempt, for a row it inserts @PENDING@
--- and so runs at once, nobody for a queued or delayed one). The conflict
+-- and so runs at once, nobody for a queued or delayed one). @created_at@
+-- is statement-stamped rather than bound: a retry after a lost
+-- acknowledgement re-runs this statement in a later transaction, so only
+-- the attempt that inserted reads @inserted@ — a bound stamp would repeat
+-- across retries and defeat the flag. The conflict
 -- arm changes nothing: it exists so @RETURNING@ reports the row that was
--- already there. Mirrors @init_workflow@.
+-- already there. The saturating adds below (release, deadline) share one
+-- shape with the bounce's @SET@: a clamp change lands in all three
+-- identically. Mirrors @init_workflow@.
 -- | The statement behind the init transaction, exposed so the atomic child
 -- start runs it on its own transaction.
 initWorkflowStatement :: InitWorkflowParams -> Statement.Statement () WorkflowInitRaw
@@ -650,7 +653,7 @@ initWorkflowStatement params =
        ${initParamQueueName}, ${initParamDeduplicationId}, ${initParamPriority}, ${initParamQueuePartitionKey}, case when ${initParamDelayMs}::bigint is null then null when ${initParamDebounceTimeoutMs}::bigint is null then case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end else least(case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end, case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDebounceTimeoutMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDebounceTimeoutMs}::bigint) end) end,
        ${initParamAuthenticatedUser}, ${initParamAssumedRole}, ${initParamAuthenticatedRoles},
        ${initParamExecutorId}, ${initParamApplicationVersion}, ${initParamApplicationId},
-       ${initParamCreatedAt}, ${initParamUpdatedAt}, ${initParamInitialAttempts},
+       (extract(epoch from now()) * 1000)::bigint, ${initParamUpdatedAt}, ${initParamInitialAttempts},
        ${initParamTimeoutMs},
        coalesce(${initParamDeadline}, case when ${initParamStatus} = 'PENDING'
            then (extract(epoch from now()) * 1000)::bigint + ${initParamTimeoutMs}
@@ -661,7 +664,7 @@ initWorkflowStatement params =
       creator_xid = dbos.workflow_status.creator_xid
     returning recovery_attempts, status, name, class_name::text, config_name::text, queue_name,
       deduplication_id, workflow_deadline_epoch_ms, creator_xid, serialization,
-      created_at is not distinct from ${initParamCreatedAt} as inserted,
+      created_at is not distinct from (extract(epoch from now()) * 1000)::bigint as inserted,
       (extract(epoch from clock_timestamp()) * 1000)::bigint as db_now
   |]
   where
@@ -2712,7 +2715,9 @@ partitionSweepFlipStatement =
 -- database clock, without ever pushing it past its debounce deadline,
 -- replaces its inputs, and returns the workflow it bounced, if any. The
 -- class and instance match null-agnostically, as rows written elsewhere
--- spell absence as the empty string. Mirrors the oracle's bounce update.
+-- spell absence as the empty string. The saturating add shares one shape
+-- with the init's release and deadline: a clamp change lands in all three
+-- identically. Mirrors the oracle's bounce update.
 data DebounceBounceParams = DebounceBounceParams
   { debounceBounceWorkflowName    :: Text,
     debounceBounceQueueName       :: Text,

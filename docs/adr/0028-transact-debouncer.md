@@ -104,6 +104,9 @@ structurally absent: every path answers the bounced or enqueued row's id.
   retries after `retryPauseMicros` (100ms, `MonadDelay` on the three
   entries) instead of busy-looping.
 - Facade grows by `DebounceOptions (..)`, `debounceOptionsDefault`,
-  `debounceWith`, `debounceOperation` (DebouncerClient rides the next
-  unit with its approval). The deduplication-id respelling is a separate
-  wire decision (adopted with its own ADR) and does not ride this note.
+  `debounceWith`, `debounceOperation` plus, with its approval given in
+  the same review, `DebouncerClient (..)`, `debouncerClientNew`,
+  `debounceClient`, `debounceClientWith` (the genuinely new surface; no
+  new module, extending the ADR-0028 home). The deduplication-id
+  respelling is a separate wire decision (adopted with its own ADR) and
+  does not ride this note.

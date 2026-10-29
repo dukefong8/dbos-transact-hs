@@ -1302,7 +1302,6 @@ initParams applicationName new status queued creatorXid now = do
       initParamExecutorId = new.newWorkflowExecutorId,
       initParamApplicationVersion = new.newWorkflowApplicationVersion,
       initParamApplicationId = new.newWorkflowApplicationId,
-      initParamCreatedAt = timestampToEpochMs now,
       initParamUpdatedAt = timestampToEpochMs now,
       initParamInitialAttempts = if queued then 0 else 1,
       initParamTimeoutMs = timeoutMs,
@@ -2407,7 +2406,11 @@ sendBatchInTx messages serialization fallbacks sendToForks = do
 -- no-op join and commits. A deduplication-index violation escapes like any
 -- statement failure and aborts the caller's commit. The queue-mismatch
 -- warning stays outside (it announces through a channel a caller
--- transaction cannot host); a fresh row never needs it.
+-- transaction cannot host); a fresh row never needs it. Deliberately no
+-- debounced-conflict arm: no debounced caller exists (the debouncer
+-- enqueues through the plain path), so a debounced shape meeting a rival
+-- here answers with the name conflict, and a later sweep unifying the
+-- arms must preserve this path's condemn-on-conflict contract.
 enqueueInTx :: NewWorkflow -> Maybe Text -> Text -> Timestamp -> Tx.Transaction (Either Error ())
 enqueueInTx new applicationName creatorXid now = do
   let status = initialStatus new
