@@ -40,7 +40,7 @@ Repo guide for DBOS Haskell.
 
 ## TDD Loop
 
-1. **MUST: after every reload, read `ghcid.txt` immediately — never sleep more than 5 seconds first.** It is the ground truth for typecheck errors: nothing compiles until it says so, and its whole result (compile errors and warnings, `All good (N modules)`, tasty eval output) belongs to that reload alone — sim announcement traces print to the watcher's stderr via `printSimTrace`, so read the tmux pane, not the file, for those. While a reload is in flight the file still holds the previous reload, so re-read until the content changes; long waits hide both the compiler error and the tasty result (`tail ghcid.txt` is enough). Do not pipe, redirect, or `tee` the watcher — ghciwatch owns the file and a second writer corrupts it. Read the file, not the tmux pane.
+1. **MUST: after every edit, run `make ghcid-wait` instead of sleeping — never sleep more than 5 seconds before checking `ghcid.txt`.** It blocks until the file is newer than every watched source and stable, then fails red on errors or FAILs. It is the ground truth for typecheck errors: nothing compiles until it says so, and its whole result (compile errors and warnings, `All good (N modules)`, tasty eval output) belongs to that reload alone — sim announcement traces print to the watcher's stderr via `printSimTrace`, so read the tmux pane, not the file, for those. While a reload is in flight the file still holds the previous reload; long sleeps hide both the compiler error and the tasty result (`tail ghcid.txt` is enough). Do not pipe, redirect, or `tee` the watcher — ghciwatch owns the file and a second writer corrupts it. Read the file, not the tmux pane. If the file never advances past an edit, the edit landed in the same second as the watcher's mtime poll — `touch` the edited file and wait again.
    - Sim trees that `printSimTrace` must use `dependentTestGroup ... AllFinish`: tasty runs cases in parallel by default and parallel stderr writers interleave mid-character on the pane; `AllFinish` keeps every case running on a failure, in order.
 2. **MUST: the watcher runs sim tests only.** Every `*Sim.tests` group (plus `SystemDBIOSim.tests` and `SimTest.tests`) stays enabled via the `-- $>` toggles in `test/Main.hs`; every live group stays `--- $>`-disabled. Sims run against mem/mock backends, so the eval never touches the live database: no fixture deadlock with the suite binary, and reloads stay to seconds. A reload that runs no tests verifies nothing. A live-only test (no sim twin) is verified through the suite binary (rule 8), never by enabling its group in the watcher — a live eval reintroduces the shared-row deadlock the sim-only loop exists to avoid.
 3. Use `ghci -e ':hoogle ...'` and `ghci -e ':browse ...'` before adding any new dependency.
@@ -89,6 +89,12 @@ The database must always be migrated with the Rust runner first: run `make db-mi
 - Do not add schema migrations in Haskell.
 - Keep Python DBOS schema compatibility as the boundary.
 - Use the existing tmux `make env` / `ghciwatch` pane; do not start duplicate watchers. `ghciwatch` owns `ghcid.txt`; never add a `tee` or redirect to it.
+
+## Enforcement
+
+| Rule | Enforced by |
+|---|---|
+| Never sleep to wait for a reload; `ghcid.txt` freshness decides | `make ghcid-wait` — blocks to a stable file, fails red on errors/FAILs and on a frozen watcher |
 
 ## Haskell Design Conventions (`~/dev/haskell-design-system`)
 

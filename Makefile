@@ -5,7 +5,7 @@ SHELL := bash
 GHC  ?= 9.12
 PACKAGE ?= dbos-transact-hs
 
-.PHONY: build dev env hie pg test neg db-migrate widget-db
+.PHONY: build dev env ghcid-wait hie pg test neg db-migrate widget-db
 
 dev:
 	ghciwatch --no-interrupt-reloads \
@@ -18,6 +18,31 @@ dev:
 		--enable-eval \
 		--watch src \
 		--watch test
+
+
+# The one supported way to wait for a watcher reload. Agents kept waiting
+# with blind `sleep N` before reading ghcid.txt: a long sleep hides the
+# compiler error and the tasty result behind dead time, and re-reads
+# during the wait are just polling. This blocks until ghcid.txt is newer
+# than every watched source and stable across two reads, then fails red
+# on errors or FAILs. Usage: `make ghcid-wait` after every edit instead
+# of sleeping. If the file never advances past an edit, the edit landed
+# in the same second as the watcher's mtime poll — `touch` the edited
+# file and run this again. If it times out, the watcher is frozen.
+ghcid-wait:
+	[ -f ghcid.txt ] || { echo "GATE RED: no ghcid.txt — start the watcher (make dev) first"; exit 1; }; \
+	deadline=$$(( $$(date +%s) + 300 )); \
+	while [ -n "$$(find src test -name '*.hs' -newer ghcid.txt | head -1)" ]; do \
+		[ $$(date +%s) -ge $$deadline ] && { echo "GATE RED: ghcid.txt is not advancing past the edited sources — the watcher may be frozen (pgrep -f ghciwatch; is its ghci child burning CPU?)"; exit 1; }; \
+		sleep 1; \
+	done; \
+	prev=""; cur="unread"; \
+	while [ "$$cur" = "unread" ] || [ "$$cur" != "$$prev" ]; do \
+		prev="$$cur"; sleep 1; cur=$$(cksum < ghcid.txt); \
+		[ $$(date +%s) -ge $$deadline ] && { echo "GATE RED: ghcid.txt keeps changing past the deadline — read it directly"; exit 1; }; \
+	done; \
+	if grep -qE "error: \[GHC-|FAIL" ghcid.txt; then echo "GATE RED: reload is red — read ghcid.txt"; exit 1; fi; \
+	tail -3 ghcid.txt
 
 
 build:
