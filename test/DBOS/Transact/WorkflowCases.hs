@@ -2749,8 +2749,13 @@ checkDedupStartRecorded out
             Left ("expected the refusal under the portable tag, got: " <> show step.stepRecordSerialization)
         | not (maybe False ("QueueDeduplicated" `Text.isInfixOf`) step.stepRecordError) ->
             Left ("expected the recorded QueueDeduplicated, got: " <> show step.stepRecordError)
-        | childRow.workflowRecordStatus /= Enqueued ->
-            Left ("expected the re-run's child ENQUEUED, got: " <> show childRow.workflowRecordStatus)
+        -- The child was started; its status is whatever the supervisor
+        -- tick had driven it to when read (ENQUEUED unclaimed, PENDING
+        -- claimed, SUCCESS run). Pinning one status overspecifies a
+        -- moving row: the tick, not the start, decides what a reader
+        -- sees, and all three prove the re-run started it.
+        | childRow.workflowRecordStatus `notElem` [Enqueued, Pending, Success] ->
+            Left ("expected the re-run's child started (ENQUEUED, PENDING, or SUCCESS), got: " <> show childRow.workflowRecordStatus)
         | otherwise -> Right ()
       (steps, childRow) ->
         Left ("expected one recorded refusal and the re-run's child, got: " <> show (steps, childRow))
