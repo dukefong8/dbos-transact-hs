@@ -21,6 +21,7 @@ module QueuePatterns.Workflows
     partitionedQueueName,
     rateLimitedQueueName,
     tenantEventKey,
+    debouncerInputKey,
     fairWorkMs,
 
     -- * Bodies
@@ -77,6 +78,13 @@ debouncerQueueName = "debouncer-queue"
 tenantEventKey :: Text
 tenantEventKey = "tenant_id"
 
+-- | The key the debounced workflow publishes the input it ran with under,
+-- so the list endpoint can show last-input-wins (the Python demo reads the
+-- row's input args; the facade exposes no row reads to demos, so the input
+-- travels as an event beside the tenant).
+debouncerInputKey :: Text
+debouncerInputKey = "debouncer_input"
+
 -- | How long the demo work sleeps (the Python @time.sleep(5)@), durable so a
 -- restart resumes the wait rather than restarting it.
 fairWorkMs :: Int
@@ -119,14 +127,16 @@ rateLimitedQueueWorkflow wctx = runExceptT $ do
   pure "rate-limited workflow completed"
 
 -- | Debounced work: executes with the last input submitted for its tenant.
--- Publishes the tenant first so the list endpoint can show it (the Python
--- demo reads the row's input args; the facade exposes no row reads).
+-- Publishes the tenant and the input first so the list endpoint can show
+-- them (the Python demo reads the row's input args; the facade exposes no
+-- row reads, so both travel as events).
 debouncerWorkflow ::
   forall exec.
   (Text, Text) ->
   WorkflowCtx exec IO ->
   IO (Either (Error EngineOnly) Text)
-debouncerWorkflow (tenant, _input) wctx = runExceptT $ do
+debouncerWorkflow (tenant, input) wctx = runExceptT $ do
   ExceptT (setEvent wctx tenantEventKey tenant)
+  ExceptT (setEvent wctx debouncerInputKey input)
   ExceptT (sleepStep wctx (millisDuration (fromIntegral fairWorkMs)))
   pure "debounced workflow completed"

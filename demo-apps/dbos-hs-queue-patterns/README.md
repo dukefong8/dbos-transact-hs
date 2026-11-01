@@ -29,5 +29,6 @@ PORT=8090 cabal run exe:demo-apps
 `POST /workflows/fair_queue?tenant_id=…` (or urlencoded `tenant_id`),
 `POST /workflows/rate_limited_queue`,
 `GET /workflows?tab=fair-queue|rate-limited|debouncer` listing
-`{workflow_id, workflow_status, tenant_id}`. A request carrying `HX-Request`
+`{workflow_id, workflow_status, tenant_id, input}` (`input` is populated on
+the debouncer tab once the workflow runs, null elsewhere). A request carrying `HX-Request`
 gets the rendered rows (polled every 2s) instead of JSON.

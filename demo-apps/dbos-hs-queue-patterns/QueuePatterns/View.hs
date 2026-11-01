@@ -46,12 +46,14 @@ data PatternsPage = PatternsPage
   deriving stock (Eq, Show)
 
 -- | One row of a pattern's workflow list (the Python @WorkflowStatus@
--- without its @start_time@: the facade exposes no row timestamps to demos,
--- so rows carry id, status and tenant only).
+-- without its @start_time@ and @workflow_name@: the facade exposes no row
+-- timestamps to demos, so rows carry id, status, tenant and the debounced
+-- input only).
 data PatternRow = PatternRow
   { prWorkflowId :: Text,
     prStatus     :: Text,
-    prTenant     :: Maybe Text
+    prTenant     :: Maybe Text,
+    prInput      :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -60,7 +62,8 @@ instance ToJSON PatternRow where
     object
       [ "workflow_id" .= r.prWorkflowId,
         "workflow_status" .= r.prStatus,
-        "tenant_id" .= r.prTenant
+        "tenant_id" .= r.prTenant,
+        "input" .= r.prInput
       ]
 
 -- * Page
@@ -236,6 +239,7 @@ patternRow r =
         <div class="font-mono text-sm text-gray-900">{r.prWorkflowId}</div>
         <div class="flex gap-2 mt-1">
           {tenantBadge}
+          {inputBadge}
         </div>
       </div>
       <span class={statusClass}>{r.prStatus}</span>
@@ -244,6 +248,9 @@ patternRow r =
   where
     tenantBadge = case r.prTenant of
       Just t -> [hsx|<span class="tenant-badge">{t}</span>|]
+      Nothing -> mempty
+    inputBadge = case r.prInput of
+      Just i -> [hsx|<span class="tenant-badge">{i}</span>|]
       Nothing -> mempty
     statusClass = "status-badge " <> statusKind r.prStatus :: Text
     -- Compared case-insensitively: the engine renders @Success@ while the

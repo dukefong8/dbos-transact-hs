@@ -28,7 +28,7 @@ import Demo.Http (RouteHandler, throwRouteError)
 import Network.HTTP.Types (status500)
 import QueuePatterns.App (QueuePatternsApp (..))
 import QueuePatterns.View (PatternRow (..), PatternsPage (..), PatternsTab (..))
-import QueuePatterns.Workflows (debouncerQueueName, debouncerWorkflowName, fairManagerWorkflowName, partitionedQueueName, rateLimitedQueueName, rateLimitedWorkflowName, tenantEventKey)
+import QueuePatterns.Workflows (debouncerInputKey, debouncerQueueName, debouncerWorkflowName, fairManagerWorkflowName, partitionedQueueName, rateLimitedQueueName, rateLimitedWorkflowName, tenantEventKey)
 import Prelude
 
 -- * Pages and lists
@@ -99,10 +99,12 @@ enqueueRateLimited app = do
 readRow :: DBOS IO -> (WorkflowId, WorkflowStatus) -> IO PatternRow
 readRow dbos (WorkflowId wid, status) = do
   stored <- (getWorkflowEvent dbos (WorkflowId wid) tenantEventKey (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Text)))
+  ranWith <- (getWorkflowEvent dbos (WorkflowId wid) debouncerInputKey (millisDuration 0) :: IO (Either (Error EngineOnly) (Maybe Text)))
   pure PatternRow
     { prWorkflowId = wid,
       prStatus = Text.pack (show status),
-      prTenant = either (const Nothing) id stored
+      prTenant = either (const Nothing) id stored,
+      prInput = either (const Nothing) id ranWith
     }
 
 tabWorkflow :: PatternsTab -> Text

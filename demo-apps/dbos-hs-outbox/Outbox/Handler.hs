@@ -52,7 +52,7 @@ placeOrderAtomic app customer item quantity = do
   case started of
     Left err -> throwRouteError status500 (textBody ("start failed: " <> Text.pack (show err)))
     Right wid -> do
-      found <- liftIO (getWorkflowEvent app.obDbos wid orderIdEventKey orderEventTimeout :: IO (Either (Error EngineOnly) (Maybe Text)))
+      found <- liftIO (getWorkflowEvent app.obDbos wid orderIdEventKey orderEventTimeout :: IO (Either (Error EngineOnly) (Maybe Int)))
       case found of
         Left err -> throwRouteError status500 (textBody ("event wait failed: " <> Text.pack (show err)))
         Right _ -> getOrders app
