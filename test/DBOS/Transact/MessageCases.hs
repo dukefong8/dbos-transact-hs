@@ -26,6 +26,7 @@ module DBOS.Transact.MessageCases
     scenarioReplayTakes,
     scenarioStepSend,
     scenarioRecvTimeoutSteps,
+    scenarioRecvTimed,
     scenarioSendNameMismatch,
     scenarioCapturedSend,
     scenarioCapturedRecv,
@@ -42,6 +43,7 @@ module DBOS.Transact.MessageCases
     checkReplayTakes,
     checkStepSend,
     checkRecvTimeoutSteps,
+    checkRecvTimed,
     checkSendNameMismatch,
     checkCapturedSend,
     checkCapturedRecv,
@@ -52,6 +54,7 @@ module DBOS.Transact.MessageCases
 where
 
 import DBOS.Prelude
+import Data.Word (Word64)
 import Data.List (nub)
 import DBOS.SystemDB (StepRecord (..), WorkflowId (..), recvStepName, sendBulkStepName, sendStepName, sleepStepName)
 import DBOS.SystemDB qualified as SysDB
@@ -65,6 +68,7 @@ import DBOS.Transact
     Topic (..),
     WorkflowCtx,
     millisDuration,
+    secondsDuration,
     recv,
     runStep,
     send,
@@ -200,7 +204,7 @@ scenarioSendNameMismatch :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
 scenarioSendNameMismatch fx = do
   (source, destination) <- fx.mfFreshPair "send-name-mismatch"
   -- The earlier run recorded a plain step at this position.
-  _ <- mfFreshRun fx source $ \sender -> runStep sender "probe" (\_ -> pure ())
+  _ <- mfFreshRun fx source $ \sender -> (runStep sender "probe" (\_ -> pure ()) :: m (Either (Error EngineOnly) ()))
   -- The changed body sends from the same position.
   refused <- mfFreshRun fx source $ \sender -> send sender destination (Just (Topic "approval")) Nothing ("ping" :: Text)
   count <- fx.mfNotifyCount destination
@@ -388,6 +392,28 @@ checkRecvTimeoutSteps (timedOut, recvOutput, sleepOutput, sleepName) = do
   case sleepOutput of
     Just (Just _) -> pure ()
     other -> Left ("expected the deadline step to carry its wake instant, got: " <> show other)
+
+-- | A recv timeout waits its duration on the monotonic clock from the
+-- database's reading: on a database an hour off this process, a wall-clock
+-- wait would sleep an hour too long, or record the absence at once.
+-- Returns the recv verdict with the nanoseconds the wait took on this
+-- process's monotonic clock. Mirrors the oracle's skewed-clock recv waits.
+scenarioRecvTimed :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMonotonicTimeNSec m)
+                  => MessageFixture m -> m (Either (Error EngineOnly) (Maybe Text), Word64)
+scenarioRecvTimed fx = do
+  (source, _) <- fx.mfFreshPair "recv-timed"
+  before <- getMonotonicTimeNSec
+  timedOut <- mfFreshRun fx source $ \receiver -> recv receiver (Just (Topic "quiet")) (secondsDuration 3)
+  after <- getMonotonicTimeNSec
+  pure (timedOut, after - before)
+
+-- | The recv times out with the absence, taking about its duration —
+-- seconds, never minutes — whatever the database's clock says.
+checkRecvTimed :: (Either (Error EngineOnly) (Maybe Text), Word64) -> Either String ()
+checkRecvTimed (timedOut, elapsedNs) = do
+  unless (timedOut == Right Nothing) $ Left ("expected the timeout absence, got: " <> show timedOut)
+  unless (elapsedNs >= 2000000000 && elapsedNs <= 60000000000) $
+    Left ("the recv must take about its duration, took (ns): " <> show elapsedNs)
 
 -- | The refusal names the recorded step, and nothing was delivered.
 checkSendNameMismatch :: (Either (Error EngineOnly) (), Int) -> Either String ()

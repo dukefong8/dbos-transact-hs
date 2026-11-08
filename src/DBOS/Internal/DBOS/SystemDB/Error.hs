@@ -39,6 +39,20 @@ data Error
     -- a value the first run never saw. Mirrors Rust @UnknownSerialization@.
     UnknownSerialization {name :: Text}
   | ConflictingWorkflow {workflowId :: Text, detail :: Text}
+  | -- | A workflow with this id already exists, and the caller asked for
+    -- a new one with 'Reject'. Raised whatever the existing workflow's
+    -- status, finished included, and before anything is written. An
+    -- answer rather than a failure, so it is never retried. Mirrors Rust
+    -- @Error::WorkflowIdInUse@. The name rides as 'existingName': 'name' is
+    -- taken in this module by 'Text' fields, and under
+    -- @DuplicateRecordFields@ a shared name must share its type. The wire
+    -- key stays @"name"@, so the recorded shape matches the oracle.
+    -- The status rides as text, as
+    -- 'WorkflowNotRewindable' carries it: the oracle holds a typed
+    -- @WorkflowStatus@, but this module is the leaf @Types@ imports, so a
+    -- typed field would cycle. The wire shape is identical — a status
+    -- serializes as its text either way.
+    WorkflowIdInUse {workflowId :: Text, status :: Text, existingName :: Maybe Text}
   | InvalidInput {field :: Text, detail :: Text}
   | QueueDeduplicated {workflowId :: Text, queueName :: Text, deduplicationId :: Text}
   | WorkflowCancelled {workflowId :: Text}
@@ -78,6 +92,7 @@ instance ToJSON Error where
     Malformed message -> tagged "Malformed" (toJSON message)
     UnknownSerialization {name} -> tagged "UnknownSerialization" (object ["name" .= name])
     ConflictingWorkflow {workflowId, detail} -> tagged "ConflictingWorkflow" (object ["workflow_id" .= workflowId, "detail" .= detail])
+    WorkflowIdInUse {workflowId, status, existingName} -> tagged "WorkflowIdInUse" (object ["workflow_id" .= workflowId, "status" .= status, "name" .= existingName])
     InvalidInput {field, detail} -> tagged "InvalidInput" (object ["field" .= field, "detail" .= detail])
     QueueDeduplicated {workflowId, queueName, deduplicationId} -> tagged "QueueDeduplicated" (object ["workflow_id" .= workflowId, "queue_name" .= queueName, "deduplication_id" .= deduplicationId])
     WorkflowCancelled {workflowId} -> tagged "WorkflowCancelled" (object ["workflow_id" .= workflowId])
@@ -101,6 +116,7 @@ instance FromJSON Error where
       "Malformed" -> Malformed <$> parseJSON payload
       "UnknownSerialization" -> withObject "UnknownSerialization" (\o -> UnknownSerialization <$> o .: "name") payload
       "ConflictingWorkflow" -> withObject "ConflictingWorkflow" (\o -> ConflictingWorkflow <$> o .: "workflow_id" <*> o .: "detail") payload
+      "WorkflowIdInUse" -> withObject "WorkflowIdInUse" (\o -> WorkflowIdInUse <$> o .: "workflow_id" <*> o .: "status" <*> o .: "name") payload
       "InvalidInput" -> withObject "InvalidInput" (\o -> InvalidInput <$> o .: "field" <*> o .: "detail") payload
       "QueueDeduplicated" -> withObject "QueueDeduplicated" (\o -> QueueDeduplicated <$> o .: "workflow_id" <*> o .: "queue_name" <*> o .: "deduplication_id") payload
       "WorkflowCancelled" -> withObject "WorkflowCancelled" (\o -> WorkflowCancelled <$> o .: "workflow_id") payload
@@ -157,6 +173,8 @@ renderError err =
     UnknownSerialization {name = tag} -> "serialization " <> tag <> " is not available"
     ConflictingWorkflow {workflowId = wid, detail = why} ->
       "workflow " <> wid <> " already exists: " <> why
+    WorkflowIdInUse {workflowId = wid, status = current, existingName = who} ->
+      "workflow id " <> wid <> " is already in use, by " <> maybe "a workflow" ("workflow " <>) who <> " (" <> current <> ")"
     InvalidInput {field = fieldName, detail = why} ->
       "invalid " <> fieldName <> ": " <> why
     QueueDeduplicated {workflowId = wid, queueName = queue, deduplicationId = key} ->
@@ -252,6 +270,7 @@ shouldRecord err = case err of
   Malformed _ -> False
   UnknownSerialization {} -> False
   ConflictingWorkflow {} -> True
+  WorkflowIdInUse {} -> True
   InvalidInput {} -> True
   QueueDeduplicated {} -> True
   WorkflowCancelled {} -> False

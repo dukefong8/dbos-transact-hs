@@ -15,7 +15,7 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Outcome (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, selectStepName)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, selectStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, memLaunchOnWith, memSetApplication, newMemDB, simIdentity, simInstance)
 import DBOS.Transact (shutdown, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
@@ -75,7 +75,7 @@ simWaitFixture = do
     WaitFixture
       { wfFreshWorkflowId = \label -> do
           let widText = "sim-wait-" <> label
-          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitTest"}) Nothing
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitTest"}) Nothing WorkflowIdReturnExisting
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),
@@ -114,7 +114,7 @@ simWaitExecFixture = do
     WaitExecFixture
       { weFreshWorkflowId = \label -> do
           let widText = "sim-waitexec-" <> label
-          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitExecTest"}) Nothing
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimWaitExecTest"}) Nothing WorkflowIdReturnExisting
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),

@@ -14,6 +14,8 @@ import Control.Monad.IOSim (IOSim, runSimOrThrow)
 import Data.Map.Strict qualified as Map
 import DBOS.SystemDB
   ( AppScope (..),
+    AttributeUpdate (..),
+    WakeTime (..),
     AwaitedOutcome (..),
     Change (..),
     Debounce (..),
@@ -53,6 +55,7 @@ import DBOS.SystemDB
     WorkflowDelay (..),
     WorkflowFilter (..),
     WorkflowId (..),
+    WorkflowIdReusePolicy (..),
     WorkflowInitResult (..),
     WorkflowRecord (..),
     DatabaseTime (..),
@@ -68,13 +71,14 @@ import DBOS.SystemDB
     newQueue,
     newSchedule,
     newWorkflow,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     parseApplicationName,
     secondsDuration,
     spansPartitions,
     timestampFromEpochMs,
     zeroRowCounts)
-import DBOS.SystemDB.IOSim (MemSystemDB (memRows), MockSystemDB (..), newMemDB)
+import DBOS.SystemDB.IOSim (MemSystemDB (memRows, memSteps), MockSystemDB (..), memInitWorkflowAs, newMemDB)
+import DBOS.Transact.WorkflowSimData (mockTimestamp)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -115,7 +119,7 @@ workflowTests =
   testGroup
     "Workflows"
     [ testCase "initWorkflow answers with an executable pending row" $ do
-        let result = run (initWorkflow backend (newWorkflow "wf-1") Nothing)
+        let result = run (initWorkflow backend (newWorkflow "wf-1") Nothing WorkflowIdReturnExisting)
         case result of
           Right initialized -> do
             initialized.initResultStatus @?= Pending
@@ -143,7 +147,7 @@ workflowTests =
       testCase "clearQueueAssignment releases the claim" $ do
         run (clearQueueAssignment backend (WorkflowId "wf-1")) @?= Right True,
       testCase "updateWorkflowAttributes succeeds" $ do
-        run (updateWorkflowAttributes backend (WorkflowId "wf-1") (Just "{}") Nothing) @?= Right (),
+        run (updateWorkflowAttributes backend (WorkflowId "wf-1") (Replace (Just "{}")) Nothing) @?= Right (),
       testCase "reenqueueForRecovery returns nothing to recover" $ do
         run (reenqueueForRecovery backend ["exec-1"] "app" "0.0.0") @?= Right [],
       testCase "transitionDelayedWorkflows moves nothing" $ do
@@ -195,7 +199,10 @@ stepTests =
           Right steps -> map (.stepRecordStepName) steps @?= ["mock-step"]
           Left err -> fail (show err),
       testCase "recordSleep answers its wake time" $ do
-        run (recordSleep backend (WorkflowId "wf-1") 0 (secondsDuration 1) "mock-token") @?= Right at,
+        let woken = run (recordSleep backend (WorkflowId "wf-1") 0 (secondsDuration 1) "mock-token")
+        case woken of
+          Right wake -> wake.wakeAt @?= mockTimestamp
+          other -> fail ("expected the mock wake time, got: " <> show other),
       testCase "checkChildResult uses the provided default" $ do
         run (checkChildResult backend (WorkflowId "parent") 0) @?= Right Nothing,
       testCase "recordChildWorkflow succeeds" $ do
@@ -307,7 +314,7 @@ queueTests =
         }
     debounceRequest =
       DebounceRequest
-        { debounceRequestWorkflow = newWorkflowKey "wf",
+        { debounceRequestWorkflow = newQualifiedWorkflowName "wf",
           debounceRequestQueueName = "q",
           debounceRequestDeduplicationId = "key",
           debounceRequestPeriod = secondsDuration 1,
@@ -385,8 +392,8 @@ memTests =
     [ testCase "a start runs only the row it created" $ do
         (firstExecute, firstCreator, secondExecute, owner) <- runMem $ do
           mem <- newMemDB
-          first <- orFailSim =<< initWorkflow mem (newWorkflow "wf-c") Nothing
-          second <- orFailSim =<< initWorkflow mem (newWorkflow "wf-c") Nothing
+          first <- orFailSim =<< initWorkflow mem (newWorkflow "wf-c") Nothing WorkflowIdReturnExisting
+          second <- orFailSim =<< initWorkflow mem (newWorkflow "wf-c") Nothing WorkflowIdReturnExisting
           row <- orJustSim "the created row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-c")
           pure (first.initResultShouldExecute, first.initResultCreatorXid, second.initResultShouldExecute, row.workflowRecordOwnerXid)
         firstExecute @?= True
@@ -411,7 +418,7 @@ memTests =
                   }
               bounce =
                 DebounceRequest
-                  { debounceRequestWorkflow = newWorkflowKey "bouncer",
+                  { debounceRequestWorkflow = newQualifiedWorkflowName "bouncer",
                     debounceRequestQueueName = "q",
                     debounceRequestDeduplicationId = "key",
                     debounceRequestPeriod = secondsDuration 1,
@@ -419,13 +426,13 @@ memTests =
                     debounceRequestSerialization = Nothing,
                     debounceRequestAppName = Nothing
                   }
-          _ <- orFailSim =<< initWorkflow mem base Nothing
-          lost <- initWorkflow mem base Nothing
-          conflicted <- initWorkflow mem (base {newWorkflowDeduplicationId = Just "other"}) Nothing
+          _ <- orFailSim =<< initWorkflow mem base Nothing WorkflowIdReturnExisting
+          lost <- initWorkflow mem base Nothing WorkflowIdReturnExisting
+          conflicted <- initWorkflow mem (base {newWorkflowDeduplicationId = Just "other"}) Nothing WorkflowIdReturnExisting
           _ <- orFailSim =<< debounceDelayedWorkflow mem bounce Nothing
           -- A re-init under another token loses the key again; what matters
           -- is the input it must not touch.
-          _ <- initWorkflow mem base Nothing
+          _ <- initWorkflow mem base Nothing WorkflowIdReturnExisting
           kept <- orJustSim "the bounced row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-b")
           pure (lost, conflicted, kept.workflowRecordInput)
         case lost of
@@ -435,12 +442,78 @@ memTests =
           Left (ConflictingWorkflow {}) -> pure ()
           other -> fail ("expected ConflictingWorkflow, got: " <> show other)
         kept @?= Just "{\"n\":2}",
+      -- Twin of the live rejecting-insert arms: under Reject a row another
+      -- caller created is refused whatever its status, writing nothing; a
+      -- retry staging a lost acknowledgement under the same token finds
+      -- its own row, and the default joins.
+      testCase "a rejecting insert refuses another caller but not its own retry" $ do
+        (created, retried, refused, joined, kept) <- runMem $ do
+          mem <- newMemDB
+          let new =
+                (newWorkflow "wf-taken")
+                  { newWorkflowName = Just "charge",
+                    newWorkflowInput = Just "\"first\""
+                  }
+          created <- memInitWorkflowAs mem new Nothing WorkflowIdReject "creator"
+          retried <- memInitWorkflowAs mem new Nothing WorkflowIdReject "creator"
+          refused <- memInitWorkflowAs mem (new {newWorkflowInput = Just "\"second\""}) Nothing WorkflowIdReject "rejecter"
+          joined <- memInitWorkflowAs mem new Nothing WorkflowIdReturnExisting "joiner"
+          kept <- orJustSim "the taken row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-taken")
+          pure (created, retried, refused, joined, kept.workflowRecordInput)
+        case created of
+          Right result -> result.initResultShouldExecute @?= True
+          Left err -> fail ("expected the insert to create, got: " <> show err)
+        case retried of
+          Right result -> result.initResultShouldExecute @?= True
+          Left err -> fail ("expected the retry to recognise its own row, got: " <> show err)
+        case refused of
+          Left (WorkflowIdInUse {workflowId = "wf-taken", status = "PENDING", existingName = Just "charge"}) -> pure ()
+          other -> fail ("expected WorkflowIdInUse, got: " <> show other)
+        case joined of
+          Right result -> result.initResultShouldExecute @?= False
+          Left err -> fail ("expected the join, got: " <> show err)
+        kept @?= Just "\"first\"",
+      -- Twin of the live rewound-adoption arm: a parent's own child that
+      -- no step records is adopted, and the adoption writes the parent's
+      -- record — so a later start of the same id at another step is a
+      -- reuse. Without the record the second start would adopt again. The
+      -- record delete is what a rewind of the parent leaves behind.
+      testCase "a rewound child adoption writes the parent's record" $ do
+        (adopted, retried, racing) <- runMem $ do
+          mem <- newMemDB
+          parent <- orFailSim =<< memInitWorkflowAs mem (newWorkflow "wf-mom") Nothing WorkflowIdReturnExisting "mom"
+          let at step =
+                Just
+                  ( InitWorkflowCaller
+                      { initCallerParentWorkflowId = WorkflowId "wf-mom",
+                        initCallerStepId = step,
+                        initCallerStepName = "child",
+                        initCallerStartedAt = Timestamp 0,
+                        initCallerToken = parent.initResultCreatorXid
+                      }
+                  )
+              child = (newWorkflow "wf-kid") {newWorkflowName = Just "child"}
+          _ <- orFailSim =<< memInitWorkflowAs mem child (at 1) WorkflowIdReject "first"
+          atomically $ modifyTVar mem.memSteps (Map.filterWithKey (\(wid, _) _ -> wid /= "wf-mom"))
+          adopted <- memInitWorkflowAs mem child (at 1) WorkflowIdReject "replay"
+          retried <- memInitWorkflowAs mem child (at 1) WorkflowIdReject "replay"
+          racing <- memInitWorkflowAs mem child (at 3) WorkflowIdReject "racing"
+          pure (adopted, retried, racing)
+        case adopted of
+          Right result -> result.initResultShouldExecute @?= False
+          Left err -> fail ("expected the replayed parent to adopt, got: " <> show err)
+        case retried of
+          Right result -> result.initResultShouldExecute @?= False
+          Left err -> fail ("expected a retried adoption to adopt again, got: " <> show err)
+        case racing of
+          Left (WorkflowIdInUse {}) -> pure ()
+          other -> fail ("expected the other-step start to be a reuse, got: " <> show other),
       -- Twin of the live stale-parent case: the refused start creates no
       -- child row.
       testCase "a stale parent starts nothing" $ do
         (refused, missing) <- runMem $ do
           mem <- newMemDB
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-parent") Nothing
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-parent") Nothing WorkflowIdReturnExisting
           let caller =
                 InitWorkflowCaller
                   { initCallerParentWorkflowId = WorkflowId "wf-parent",
@@ -449,7 +522,7 @@ memTests =
                     initCallerStartedAt = Timestamp 0,
                     initCallerToken = "someone-else"
                   }
-          refused <- initWorkflow mem (newWorkflow "wf-child") (Just caller)
+          refused <- initWorkflow mem (newWorkflow "wf-child") (Just caller) WorkflowIdReturnExisting
           missing <- orFailSim =<< getWorkflow mem (WorkflowId "wf-child")
           pure (refused, missing)
         case refused of
@@ -468,7 +541,7 @@ memTests =
         (first, second, row) <- runMem $ do
           mem <- newMemDB
           _ <- upsertQueue mem (newQueue "q") {newQueueWorkerConcurrency = Just 1} UpdateExisting
-          _ <- initWorkflow mem ((newWorkflow "wf-q") {newWorkflowQueueName = Just "q"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-q") {newWorkflowQueueName = Just "q"}) Nothing WorkflowIdReturnExisting
           queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "q"
           first <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-first"
           second <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-second"
@@ -484,10 +557,10 @@ memTests =
           _ <- upsertQueue mem (newQueue "orders") UpdateExisting
           _ <- upsertQueue mem (newQueue "invoices") UpdateExisting
           empty <- orFailSim =<< countPendingQueueWorkflows mem "orders"
-          _ <- initWorkflow mem ((newWorkflow "wf-a") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
-          _ <- initWorkflow mem ((newWorkflow "wf-b") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "beta"}) Nothing
-          _ <- initWorkflow mem ((newWorkflow "wf-c") {newWorkflowQueueName = Just "invoices"}) Nothing
-          _ <- initWorkflow mem ((newWorkflow "wf-w") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "gamma"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-a") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing WorkflowIdReturnExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-b") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "beta"}) Nothing WorkflowIdReturnExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-c") {newWorkflowQueueName = Just "invoices"}) Nothing WorkflowIdReturnExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-w") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "gamma"}) Nothing WorkflowIdReturnExisting
           orders <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "orders"
           _ <- orFailSim =<< startQueuedWorkflows mem orders "exec" "v1" (Just "alpha") 0 0 "tok-a"
           _ <- orFailSim =<< startQueuedWorkflows mem orders "exec" "v1" (Just "beta") 0 0 "tok-b"
@@ -498,8 +571,8 @@ memTests =
         stopped <- runMem $ do
           mem <- newMemDB
           _ <- upsertQueue mem ((newQueue "orders") {newQueueConcurrency = Just 1, newQueuePartitionConcurrency = Just 1}) UpdateExisting
-          _ <- initWorkflow mem ((newWorkflow "wf-running") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
-          _ <- initWorkflow mem ((newWorkflow "wf-waiting") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "beta"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-running") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing WorkflowIdReturnExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-waiting") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "beta"}) Nothing WorkflowIdReturnExisting
           queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "orders"
           _ <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-run"
           orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" (Just "beta") 0 0 "tok-c"
@@ -512,8 +585,8 @@ memTests =
         stopped <- runMem $ do
           mem <- newMemDB
           _ <- upsertQueue mem ((newQueue "orders") {newQueueConcurrency = Just 10, newQueuePartitionConcurrency = Just 1}) UpdateExisting
-          _ <- initWorkflow mem ((newWorkflow "wf-running") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
-          _ <- initWorkflow mem ((newWorkflow "wf-waiting") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-running") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing WorkflowIdReturnExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-waiting") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing WorkflowIdReturnExisting
           queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "orders"
           _ <- orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" Nothing 0 0 "tok-run"
           orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" (Just "alpha") 0 0 "tok-c"
@@ -523,7 +596,7 @@ memTests =
         stopped <- runMem $ do
           mem <- newMemDB
           _ <- upsertQueue mem ((newQueue "orders") {newQueueWorkerConcurrency = Just 1, newQueuePartitionConcurrency = Just 1}) UpdateExisting
-          _ <- initWorkflow mem ((newWorkflow "wf-waiting") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-waiting") {newWorkflowQueueName = Just "orders", newWorkflowQueuePartitionKey = Just "alpha"}) Nothing WorkflowIdReturnExisting
           queue <- orJustSim "the stored queue" =<< orFailSim =<< getQueue mem "orders"
           orFailSim =<< startQueuedWorkflows mem queue "exec" "v1" (Just "alpha") 1 0 "tok-c"
         stopped @?= Dequeued [] (Just DequeueStopWorkerConcurrency)
@@ -531,7 +604,7 @@ memTests =
       testCase "a delayed row whose instant passed transitions to enqueued" $ do
         (before, moved, after) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-d") {newWorkflowQueueName = Just "q", newWorkflowDelay = Just (millisDuration 1)}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-d") {newWorkflowQueueName = Just "q", newWorkflowDelay = Just (millisDuration 1)}) Nothing WorkflowIdReturnExisting
           _ <- setWorkflowDelay mem (WorkflowId "wf-d") (DelayUntil (Timestamp 0)) Nothing
           before <- orJustSim "the delayed row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-d")
           moved <- orFailSim =<< transitionDelayedWorkflows mem
@@ -543,8 +616,8 @@ memTests =
       testCase "the timeout sweep cancels expired rows and spares live ones" $ do
         (swept, ended, kept) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-expired") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing
-          _ <- initWorkflow mem ((newWorkflow "wf-live") {newWorkflowDeadline = Just (timestampFromEpochMs 4102444800000)}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-expired") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing WorkflowIdReturnExisting
+          _ <- initWorkflow mem ((newWorkflow "wf-live") {newWorkflowDeadline = Just (timestampFromEpochMs 4102444800000)}) Nothing WorkflowIdReturnExisting
           swept <- orFailSim =<< cancelTimedOutWorkflows mem 100
           ended <- orJustSim "the swept row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-expired")
           kept <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-live")
@@ -556,7 +629,7 @@ memTests =
       testCase "the timed-out cancel honors ownership" $ do
         (refused, held, taken, ended) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-owned") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-owned") {newWorkflowDeadline = Just (timestampFromEpochMs 0)}) Nothing WorkflowIdReturnExisting
           refused <- orFailSim =<< cancelIfTimedOut mem (WorkflowId "wf-owned") "someone-else"
           held <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-owned")
           owner <- orJustSim "the owner" held.workflowRecordOwnerXid
@@ -573,7 +646,7 @@ memTests =
       testCase "a workflow cannot cancel itself" $ do
         (refused, survived) <- runMem $ do
           mem <- newMemDB
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-self") Nothing
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-self") Nothing WorkflowIdReturnExisting
           refused <- cancelWorkflows mem [WorkflowId "wf-self"] False Nothing (Just "wf-self")
           survived <- orFailSim =<< getWorkflow mem (WorkflowId "wf-self")
           pure (refused, survived)
@@ -586,7 +659,7 @@ memTests =
       testCase "a workflow cannot resume itself" $ do
         (refused, stayed) <- runMem $ do
           mem <- newMemDB
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-self") Nothing
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-self") Nothing WorkflowIdReturnExisting
           _ <- orFailSim =<< cancelWorkflows mem [WorkflowId "wf-self"] False Nothing Nothing
           refused <- resumeWorkflows mem [WorkflowId "wf-self"] (Just "q") Nothing (Just "wf-self")
           stayed <- orFailSim =<< getWorkflow mem (WorkflowId "wf-self")
@@ -600,7 +673,7 @@ memTests =
       testCase "a cancel cascade reaching the caller names the tree" $ do
         (refused, survived) <- runMem $ do
           mem <- newMemDB
-          parentCreated <- orFailSim =<< initWorkflow mem (newWorkflow "wf-root") Nothing
+          parentCreated <- orFailSim =<< initWorkflow mem (newWorkflow "wf-root") Nothing WorkflowIdReturnExisting
           let caller =
                 InitWorkflowCaller
                   { initCallerParentWorkflowId = WorkflowId "wf-root",
@@ -609,7 +682,7 @@ memTests =
                     initCallerStartedAt = Timestamp 0,
                     initCallerToken = parentCreated.initResultCreatorXid
                   }
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-child") (Just caller)
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-child") (Just caller) WorkflowIdReturnExisting
           refused <- cancelWorkflows mem [WorkflowId "wf-root"] True Nothing (Just "wf-child")
           survived <- orFailSim =<< getWorkflow mem (WorkflowId "wf-root")
           pure (refused, survived)
@@ -625,7 +698,7 @@ memTests =
       testCase "a stale token's step write is refused and writes nothing" $ do
         (refused, steps) <- runMem $ do
           mem <- newMemDB
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-stale") Nothing
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-stale") Nothing WorkflowIdReturnExisting
           refused <- recordStep mem (WorkflowId "wf-stale") 1 "DBOS.step" (OutcomeOutput (Just "spy")) Nothing Nothing "someone-else"
           steps <- orFailSim =<< listSteps mem (WorkflowId "wf-stale") True Nothing Nothing Nothing
           pure (refused, steps)
@@ -636,7 +709,7 @@ memTests =
       testCase "a stale token's outcome write adopts instead" $ do
         (adopted, row) <- runMem $ do
           mem <- newMemDB
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-stale") Nothing
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-stale") Nothing WorkflowIdReturnExisting
           adopted <- orFailSim =<< recordWorkflowOutcome mem (WorkflowId "wf-stale") (OutcomeOutput (Just "spy")) "someone-else"
           row <- orJustSim "the spared row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-stale")
           pure (adopted, row)
@@ -648,8 +721,8 @@ memTests =
       testCase "a stale token's delete is refused and removes nothing" $ do
         (refused, targetRow) <- runMem $ do
           mem <- newMemDB
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-target") Nothing
-          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-caller") Nothing
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-target") Nothing WorkflowIdReturnExisting
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-caller") Nothing WorkflowIdReturnExisting
           refused <-
             deleteWorkflows
               mem
@@ -669,9 +742,9 @@ memTests =
       testCase "dead-letter parks only over-limit pending rows" $ do
         (parked, overRow, withinRow) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem (newWorkflow "wf-over") Nothing
-          _ <- initWorkflow mem (newWorkflow "wf-within") Nothing
-          _ <- initWorkflow mem (newWorkflow "wf-settled") Nothing
+          _ <- initWorkflow mem (newWorkflow "wf-over") Nothing WorkflowIdReturnExisting
+          _ <- initWorkflow mem (newWorkflow "wf-within") Nothing WorkflowIdReturnExisting
+          _ <- initWorkflow mem (newWorkflow "wf-settled") Nothing WorkflowIdReturnExisting
           let attempts widText count = Map.adjust (\row -> row {workflowRecordRecoveryAttempts = count}) widText
           atomically $
             modifyTVar
@@ -691,7 +764,7 @@ memTests =
       testCase "recovery re-enqueues the named executor's pending rows" $ do
         (recovered, row) <- runMem $ do
           mem <- newMemDB
-          _ <- initWorkflow mem ((newWorkflow "wf-r") {newWorkflowExecutorId = Just "exec-1", newWorkflowAppVersion = Just "v1"}) Nothing
+          _ <- initWorkflow mem ((newWorkflow "wf-r") {newWorkflowExecutorId = Just "exec-1", newWorkflowAppVersion = Just "v1"}) Nothing WorkflowIdReturnExisting
           recovered <- orFailSim =<< reenqueueForRecovery mem ["exec-1"] "v1" "recovery-q"
           row <- orJustSim "the recovered row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-r")
           pure (recovered, row)
@@ -702,7 +775,7 @@ memTests =
         result <- runMem $ do
           mem <- newMemDB
           received <- newEmptyMVar
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-m") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-m") Nothing WorkflowIdReturnExisting
           _ <- forkIO (recv mem (WorkflowId "wf-m") 0 0 (Just "topic") (secondsDuration 10) created.initResultCreatorXid >>= putMVar received)
           threadDelay 1000
           _ <- sendMessage mem (message (WorkflowId "wf-m") (SerializedWorkflowValue "\"v\"" Nothing)) {sendTopic = Just (Topic "topic")} (Just "portable_json") Nothing Nothing False
@@ -716,7 +789,7 @@ memTests =
           mem <- newMemDB
           firstTaken <- newEmptyMVar
           secondTaken <- newEmptyMVar
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-m") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-m") Nothing WorkflowIdReturnExisting
           let token = created.initResultCreatorXid
               receive step box =
                 recv mem (WorkflowId "wf-m") step step (Just "topic") (secondsDuration 10) token >>= putMVar box
@@ -745,8 +818,8 @@ memTests =
       testCase "a stale token's send is refused and delivers nothing" $ do
         (refused, quiet, received) <- runMem $ do
           mem <- newMemDB
-          senderCreated <- orFailSim =<< initWorkflow mem (newWorkflow "wf-sender") Nothing
-          destinationCreated <- orFailSim =<< initWorkflow mem (newWorkflow "wf-destination") Nothing
+          senderCreated <- orFailSim =<< initWorkflow mem (newWorkflow "wf-sender") Nothing WorkflowIdReturnExisting
+          destinationCreated <- orFailSim =<< initWorkflow mem (newWorkflow "wf-destination") Nothing WorkflowIdReturnExisting
           let stale = Just (WorkflowOwner {ownerWorkflowId = WorkflowId "wf-sender", ownerToken = "someone-else"})
               owned = Just (WorkflowOwner {ownerWorkflowId = WorkflowId "wf-sender", ownerToken = senderCreated.initResultCreatorXid})
               envelope body = message (WorkflowId "wf-destination") (SerializedWorkflowValue body Nothing)
@@ -763,7 +836,7 @@ memTests =
       testCase "a recv with nothing parked records the timeout as absence" $ do
         result <- runMem $ do
           mem <- newMemDB
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-m") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-m") Nothing WorkflowIdReturnExisting
           recv mem (WorkflowId "wf-m") 0 0 (Just "quiet") (millisDuration 5) created.initResultCreatorXid
         result @?= Right Nothing,
       -- Twin of the live stale-take case: the refused consume rolls back,
@@ -771,7 +844,7 @@ memTests =
       testCase "a stale token's recv take is refused and the message stays parked" $ do
         (refused, taken) <- runMem $ do
           mem <- newMemDB
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-m") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-m") Nothing WorkflowIdReturnExisting
           _ <- sendMessage mem (message (WorkflowId "wf-m") (SerializedWorkflowValue "\"held\"" Nothing)) {sendTopic = Just (Topic "topic")} (Just "portable_json") Nothing Nothing False
           refused <- recv mem (WorkflowId "wf-m") 0 0 (Just "topic") (millisDuration 5) "someone-else"
           taken <- recv mem (WorkflowId "wf-m") 0 0 (Just "topic") (millisDuration 5) created.initResultCreatorXid
@@ -788,7 +861,7 @@ memTests =
         -- own check closes the narrower take-to-record hand-off window.
         (refused, taken) <- runMem $ do
           mem <- newMemDB
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-s") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-s") Nothing WorkflowIdReturnExisting
           refused <- recv mem (WorkflowId "wf-s") 0 0 (Just "topic") (millisDuration 0) "someone-else"
           _ <- sendMessage mem (message (WorkflowId "wf-s") (SerializedWorkflowValue "\"late\"" Nothing)) {sendTopic = Just (Topic "topic")} (Just "portable_json") Nothing Nothing False
           taken <- recv mem (WorkflowId "wf-s") 0 0 (Just "topic") (secondsDuration 10) created.initResultCreatorXid
@@ -800,7 +873,7 @@ memTests =
       testCase "a rewind clears the finished row's outcome with its steps" $ do
         (before, rewound, row, steps) <- runMem $ do
           mem <- newMemDB
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-rw") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-rw") Nothing WorkflowIdReturnExisting
           _ <- orFailSim =<< recordStep mem (WorkflowId "wf-rw") 0 "DBOS.step" (OutcomeOutput (Just "\"one\"")) Nothing Nothing created.initResultCreatorXid
           _ <- orFailSim =<< recordWorkflowOutcome mem (WorkflowId "wf-rw") (OutcomeOutput (Just "\"done\"")) created.initResultCreatorXid
           started <- orJustSim "the finished row" =<< orFailSim =<< getWorkflow mem (WorkflowId "wf-rw")
@@ -831,7 +904,7 @@ memTests =
         result <- runMem $ do
           mem <- newMemDB
           received <- newEmptyMVar
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-e") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-e") Nothing WorkflowIdReturnExisting
           _ <- forkIO (getEvent mem (WorkflowId "wf-e") "key" (secondsDuration 10) Nothing >>= putMVar received)
           threadDelay 1000
           _ <- setEvent mem (WorkflowId "wf-e") 0 "key" "\"v\"" (Just "portable_json") created.initResultCreatorXid
@@ -842,7 +915,7 @@ memTests =
       testCase "a stale token's publish is refused and publishes nothing" $ do
         (refused, found) <- runMem $ do
           mem <- newMemDB
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-e") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-e") Nothing WorkflowIdReturnExisting
           refused <- setEvent mem (WorkflowId "wf-e") 0 "key" "\"spy\"" Nothing "someone-else"
           _ <- setEvent mem (WorkflowId "wf-e") 0 "key" "\"v\"" (Just "portable_json") created.initResultCreatorXid
           found <- getEvent mem (WorkflowId "wf-e") "key" (millisDuration 5) Nothing
@@ -856,7 +929,7 @@ memTests =
       testCase "a stale token's stream write is refused and appends nothing" $ do
         (refused, entries) <- runMem $ do
           mem <- newMemDB
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-s") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-s") Nothing WorkflowIdReturnExisting
           refused <- writeStream mem (WorkflowId "wf-s") 0 "progress" "spy" Nothing Workflow "someone-else"
           _ <- writeStream mem (WorkflowId "wf-s") 0 "progress" "one" Nothing Workflow created.initResultCreatorXid
           entries <- orFailSim =<< getAllStreamEntries mem (WorkflowId "wf-s")
@@ -874,7 +947,7 @@ memTests =
       testCase "a stale token's replayed publish is refused" $ do
         (refused, found) <- runMem $ do
           mem <- newMemDB
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-er") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-er") Nothing WorkflowIdReturnExisting
           _ <- setEvent mem (WorkflowId "wf-er") 0 "key" "\"v\"" (Just "portable_json") created.initResultCreatorXid
           refused <- setEvent mem (WorkflowId "wf-er") 0 "key" "\"v\"" (Just "portable_json") "someone-else"
           found <- getEvent mem (WorkflowId "wf-er") "key" (millisDuration 5) Nothing
@@ -886,7 +959,7 @@ memTests =
       testCase "a stale token's replayed stream write is refused" $ do
         (refused, entries) <- runMem $ do
           mem <- newMemDB
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-sr") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-sr") Nothing WorkflowIdReturnExisting
           _ <- writeStream mem (WorkflowId "wf-sr") 0 "progress" "one" Nothing Workflow created.initResultCreatorXid
           refused <- writeStream mem (WorkflowId "wf-sr") 0 "progress" "one" Nothing Workflow "someone-else"
           entries <- orFailSim =<< getAllStreamEntries mem (WorkflowId "wf-sr")
@@ -936,7 +1009,7 @@ memTests =
       testCase "awaitFirstWorkflowId settles on a recorded outcome" $ do
         result <- runMem $ do
           mem <- newMemDB
-          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-a") Nothing
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-a") Nothing WorkflowIdReturnExisting
           _ <- recordWorkflowOutcome mem (WorkflowId "wf-a") (OutcomeOutput (Just "\"v\"")) created.initResultCreatorXid
           awaitFirstWorkflowId mem [WorkflowId "wf-a"] (secondsDuration 1)
         result @?= Right (WorkflowId "wf-a")

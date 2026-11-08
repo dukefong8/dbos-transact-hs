@@ -23,11 +23,11 @@ import DBOS.Transact.Workflow (maxRecoveryAttempts)
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact ( Config (..), DBOS, WorkflowCtx, Executor, EngineOnly, Environment (..), Error (..), QueueConflict (..), Serialization (..), SerializedWorkflowValue (..),
  WorkflowId (..),
- WorkflowKey,
+ QualifiedWorkflowName,
  WorkflowRef,
  WorkflowHandle, configFromEnv, defaultQueueOptions, enqueueWorkflow, handleResult, handleStatus,
  launchWithEnvironment,
- newDBOS, newWorkflowKey, registerWorkflowRef, registerWorkflow, registerQueue, retrieveWorkflow, shutdown, waitForWorkflow)
+ newDBOS, newQualifiedWorkflowName, registerWorkflowRef, registerWorkflow, registerQueue, retrieveWorkflow, shutdown, waitForWorkflow)
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.QueueCases
   ( QueueFixture (..),
@@ -66,6 +66,7 @@ import DBOS.Transact.QueueCases
     checkReregister,
     checkReserved,
     checkSentinel,
+    checkPausedZero,
     checkUnhonourable,
     checkUnlaunched,
     checkUpdateCoherent,
@@ -108,6 +109,7 @@ import DBOS.Transact.QueueCases
     scenarioReregister,
     scenarioReserved,
     scenarioSentinel,
+    scenarioPausedZero,
     scenarioUnhonourable,
     scenarioUnlaunched,
     scenarioUpdateCoherent,
@@ -208,7 +210,7 @@ tests =
         base <- configFromEnv appName
         let config = base {configAppVersion = Just version}
         bracket (newDBOS config) shutdown $ \dbos -> do
-          let key = newWorkflowKey "doubles"
+          let key = newQualifiedWorkflowName "doubles"
               body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
               body input _ = pure (Right (input * 2))
           registered <- registerWorkflow dbos key body
@@ -292,6 +294,7 @@ tests =
       leaf getBackend (const Nothing) "a stored row cannot redefine the internal queue" scenarioInternalRow checkInternalRow,
       leaf getBackend (const Nothing) "another application's queue is not dequeued from" scenarioPeerQueue checkPeerQueue,
       leaf getBackend (const Nothing) "an unhonourable queue configuration is refused" scenarioUnhonourable checkUnhonourable,
+      leaf getBackend (const Nothing) "a queue-wide limit of 0 pauses the queue until it is raised" scenarioPausedZero checkPausedZero,
       leaf getBackend (const Nothing) "a per-process limit may equal the fleet limit" scenarioEqualLimits checkEqualLimits,
       leaf getBackend (const Nothing) "the fleet limit has two spellings, setting both is refused" scenarioConcurrencySpellings checkConcurrencySpellings,
       leaf getBackend (const Nothing) "an update names one spelling at a time" scenarioConcurrencyUpdate checkConcurrencyUpdate,
@@ -400,13 +403,13 @@ releaseSuiteBackend backend = do
 
 -- | Register a body at the engine-only channel: the polymorphic
 -- registration cannot infer the JSON types from a local binding.
-registerRefOf :: DBOS IO -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
+registerRefOf :: DBOS IO -> QualifiedWorkflowName -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
 registerRefOf = registerWorkflowRef
 
 -- | Register a @Text -> Text@ body at the engine-only channel.
-registerTextRefOf :: DBOS IO -> WorkflowKey -> (forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
+registerTextRefOf :: DBOS IO -> QualifiedWorkflowName -> (forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
 registerTextRefOf = registerWorkflowRef
 
 -- | Register a @() -> Text@ body at the engine-only channel.
-registerUnitTextRefOf :: DBOS IO -> WorkflowKey -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
+registerUnitTextRefOf :: DBOS IO -> QualifiedWorkflowName -> (forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)) -> IO (Either (Error EngineOnly) (WorkflowRef IO EngineOnly))
 registerUnitTextRefOf = registerWorkflowRef

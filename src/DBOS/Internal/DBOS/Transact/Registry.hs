@@ -5,7 +5,7 @@
 -- named body into a JSON-in / JSON-out closure the executor can call knowing
 -- only a row. This module owns the registration refusal vocabulary
 -- ('RegistryError') and the dumb key-to-body map; the workflow identity
--- ('WorkflowKey') lives in 'DBOS.SystemDB.Types', where the oracle moved it
+-- ('QualifiedWorkflowName') lives in 'DBOS.SystemDB.Types', where the oracle moved it
 -- in #135 so the system-database layer names keys without depending on the
 -- engine (ADR-0041 amendment). Bodies take the pool explicitly — there is
 -- no ambient context — plus the workflow id their steps run under and the
@@ -20,6 +20,7 @@ module DBOS.Transact.Registry
     renderRegistryError,
     encodeRegistryErrorPayload,
     decodeRegistryErrorPayload,
+    workflowField,
     Registry,
     Snapshot,
     newRegistry,
@@ -35,8 +36,8 @@ module DBOS.Transact.Registry
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB.Types (WorkflowKey (..), renderWorkflowKey)
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.!=), (.=))
+import DBOS.SystemDB.Types (QualifiedWorkflowName, renderQualifiedWorkflowName)
+import Data.Aeson (FromJSON (..), ToJSON (..), Object, Value, object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -50,7 +51,7 @@ import Data.Text qualified as Text
 -- registry ('Datasource') reuses the same vocabulary for its own freeze
 -- refusal rather than minting a parallel one.
 data RegistryError
-  = AlreadyRegistered {key :: WorkflowKey}
+  = AlreadyRegistered {workflow :: QualifiedWorkflowName}
   | AlreadyLaunched {operation :: Text}
   deriving stock (Eq, Show)
 
@@ -58,7 +59,7 @@ data RegistryError
 -- existing render path delegates here for these two arms.
 renderRegistryError :: RegistryError -> Text
 renderRegistryError = \case
-  AlreadyRegistered key -> "a workflow is already registered as " <> renderWorkflowKey key
+  AlreadyRegistered workflow -> "a workflow is already registered as " <> renderQualifiedWorkflowName workflow
   AlreadyLaunched operation -> "cannot " <> operation <> " after DBOS is launched"
 
 -- | The exception mechanism carries the human rendering, matching the
@@ -70,13 +71,19 @@ instance Exception RegistryError where
 -- the envelope owns tag spellings, the fragment owns payloads.
 encodeRegistryErrorPayload :: RegistryError -> Value
 encodeRegistryErrorPayload = \case
-  AlreadyRegistered key -> object ["key" .= key]
+  AlreadyRegistered workflow -> object ["workflow" .= workflow]
   AlreadyLaunched operation -> object ["operation" .= operation]
 
 decodeRegistryErrorPayload :: Text -> Value -> Parser RegistryError
-decodeRegistryErrorPayload "AlreadyRegistered" payload = withObject "AlreadyRegistered" (\o -> AlreadyRegistered <$> o .: "key") payload
+decodeRegistryErrorPayload "AlreadyRegistered" payload = withObject "AlreadyRegistered" (\o -> AlreadyRegistered <$> workflowField o) payload
 decodeRegistryErrorPayload "AlreadyLaunched" payload = withObject "AlreadyLaunched" (\o -> AlreadyLaunched <$> o .: "operation") payload
 decodeRegistryErrorPayload tag _ = fail ("unknown registry error variant " <> show tag)
+
+-- | The name a registration error carries. Errors are checkpointed, so the
+-- field keeps its pre-rename spelling as an alias and one recorded before
+-- the rename still replays. Mirrors Rust's @#[serde(alias = "key")]@.
+workflowField :: Object -> Parser QualifiedWorkflowName
+workflowField fields = fields .: "workflow" <|> fields .: "key"
 
 -- | The mutable set of registrations. Its lock protects both the map and
 -- whether launch has frozen it, so insertion cannot slip past a snapshot.
@@ -84,10 +91,10 @@ decodeRegistryErrorPayload tag _ = fail ("unknown registry error variant " <> sh
 -- boundary, never here.
 newtype Registry m b = Registry (StrictMVar m (RegistryState m b))
 
-data RegistryState m b = RegistryState (Map WorkflowKey b) Bool (Maybe Text)
+data RegistryState m b = RegistryState (Map QualifiedWorkflowName b) Bool (Maybe Text)
 
 -- | The immutable set held by one launched executor.
-newtype Snapshot m b = Snapshot (Map WorkflowKey b)
+newtype Snapshot m b = Snapshot (Map QualifiedWorkflowName b)
 
 newRegistry :: MonadMVar m => m (Registry m b)
 newRegistry = Registry <$> newMVar (RegistryState Map.empty False Nothing)
@@ -110,7 +117,7 @@ registryInstanceId (Registry stateVar) =
 -- | Add a type-erased workflow unless the full identity is already present
 -- or launch has taken its snapshot.
 registerErasedWorkflow :: MonadMVar m
-                       => Registry m b -> WorkflowKey -> b -> m (Either RegistryError ())
+                       => Registry m b -> QualifiedWorkflowName -> b -> m (Either RegistryError ())
 registerErasedWorkflow (Registry stateVar) key workflow =
   modifyMVar stateVar $ \state@(RegistryState workflows frozen instanceId) ->
     if frozen
@@ -132,14 +139,14 @@ thawRegistry (Registry stateVar) =
   modifyMVar_ stateVar $ \(RegistryState workflows _ instanceId) ->
     pure (RegistryState workflows False instanceId)
 
-lookupSnapshotWorkflow :: WorkflowKey -> Snapshot m b -> Maybe b
+lookupSnapshotWorkflow :: QualifiedWorkflowName -> Snapshot m b -> Maybe b
 lookupSnapshotWorkflow key (Snapshot workflows) = Map.lookup key workflows
 
 -- | The body registered under a key, read from the live registry rather
 -- than from a launch snapshot. Equivalent to the snapshot for as long as
 -- an executor holds it — launch freezes registration — and it is what a
 -- call site holding only a 'WorkflowRef' can reach.
-lookupRegistryWorkflow :: MonadMVar m => WorkflowKey -> Registry m b -> m (Maybe b)
+lookupRegistryWorkflow :: MonadMVar m => QualifiedWorkflowName -> Registry m b -> m (Maybe b)
 lookupRegistryWorkflow key registry = case registry of
   Registry mvar -> do
     RegistryState workflows _ _ <- readMVar mvar

@@ -63,6 +63,7 @@ import DBOS.Transact.WorkflowCases
     checkDedupStartRecorded,
     checkQueuedStartClaimedByNextPass,
     checkConflictStartRecorded,
+    checkRejectStartRecorded,
     checkJoinTakesId,
     checkLiftChildError,
     checkLosingTokenFired,
@@ -115,6 +116,7 @@ import DBOS.Transact.WorkflowCases
     scenarioDedupStartRecorded,
     scenarioQueuedStartClaimedByNextPass,
     scenarioConflictStartRecorded,
+    scenarioRejectStartRecorded,
     scenarioJoinTakesId,
     scenarioLiftChildError,
     scenarioLosingTokenFired,
@@ -203,6 +205,7 @@ tests =
       -- claims it, so a reader that runs after a tick sees PENDING.
       simCase simWfFixture "a queued start is pending once the next pass claims it" scenarioQueuedStartClaimedByNextPass checkQueuedStartClaimedByNextPass traceQueuedStartClaimedByNextPass,
       simCase simWfFixture "a taken child id replays after the row is deleted" scenarioConflictStartRecorded checkConflictStartRecorded traceConflictStartRecorded,
+      simCase simWfFixture "a rejected child start replays after the row is deleted" scenarioRejectStartRecorded checkRejectStartRecorded traceRejectStartRecorded,
       simCase simWfFixture "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
       simCase simWfFixture "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
       simCase simWfFixture "a panicking workflow leaves its row pending" scenarioPanic checkPanic tracePanic,
@@ -441,6 +444,16 @@ traceConflictStartRecorded tr = do
   selectTraceEventsDynamic tr
     @?= [ WorkflowsDeleted 1,
           WorkflowForked "sim-conflict-parent-fork"
+        ]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- The first child's row is deleted, then the single fork of the refusing
+-- parent is announced; the replay returns the recorded error.
+traceRejectStartRecorded :: forall a. SimTrace a -> IO ()
+traceRejectStartRecorded tr = do
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowsDeleted 1,
+          WorkflowForked "sim-reject-parent-fork"
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 

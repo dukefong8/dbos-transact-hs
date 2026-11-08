@@ -15,7 +15,7 @@ collisions between unrelated workflows by whole-key comparison at
 ## Decision
 
 Adopt the Rust spelling: `debounceDedupKey` renders
-`renderWorkflowKey workflow <> "-" <> debKey`, shared by the engine and
+`renderQualifiedWorkflowName workflow <> "-" <> debKey`, shared by the engine and
 client loops. Whole-key comparison (name, class, and configured
 instance, empty as absent) already landed with the classify port, so the
 collision refusal the spelling relies on is in place.
@@ -35,3 +35,16 @@ collision refusal the spelling relies on is in place.
 - No twin pins the literal spelling (checks assert presence and
   coalescing, never the text), so the change is covered by the existing
   debounce suites running green on both stacks.
+
+## Note 2026-11-08 (Rust #136)
+
+Rust #136 spells the id from the name's parts rather than through
+`Display` (which is now for people to read), keeping one definition for
+the stored form. `debounceDedupKey` follows: it matches on
+`(qualifiedClassName, qualifiedConfigName)` directly instead of rendering
+first. The output is unchanged in all four arms
+(`f-k`, `f/C-k`, `f/C/eu-k`, `f//eu-k`), so the wire-break accounting
+above still holds, and a unit test now pins the literal spelling per arm
+(`each shape of name spells its own deduplication id` in
+`SystemDB.TypesTest`, mirroring Rust
+`each_key_spells_its_deduplication_id`).

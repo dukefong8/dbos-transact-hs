@@ -23,7 +23,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.Transact (DBOS, Debouncer (..), Duration, Enqueue (..), EngineOnly, Error, StartOptions (..), WorkflowId (..), WorkflowStatus, debounce, debouncerNew, encodeWorkflowInput, enqueueWorkflow, enqueueNew, fetchWorkflowStatuses, getWorkflowEvent, listWorkflowIdsByName, millisDuration, newWorkflowKey, secondsDuration, startWorkflow, startOptionsDefault)
+import DBOS.Transact (DBOS, Debouncer (..), Duration, QueueRequest (..), EngineOnly, Error, StartOptions (..), WorkflowId (..), WorkflowStatus, debounce, debouncerNew, encodeWorkflowInput, enqueueWorkflow, queueRequestNew, fetchWorkflowStatuses, getWorkflowEvent, listWorkflowIdsByName, millisDuration, newQualifiedWorkflowName, secondsDuration, startWorkflow, startOptionsDefault)
 import Demo.Http (RouteHandler, throwRouteError)
 import Network.HTTP.Types (status500)
 import QueuePatterns.App (QueuePatternsApp (..))
@@ -77,7 +77,7 @@ startManager :: QueuePatternsApp -> Text -> ExceptT (Error EngineOnly) IO Workfl
 startManager app tenant = do
   wid <- liftIO (WorkflowId . ("fair-" <>) . UUID.toText <$> UUID.V4.nextRandom)
   let input = Just (encodeWorkflowInput tenant)
-      options = startOptionsDefault {startWorkflowId = Just wid, startQueue = Just ((enqueueNew partitionedQueueName) {partitionKey = Just tenant})}
+      options = startOptionsDefault {startWorkflowId = Just wid, startQueue = Just ((queueRequestNew partitionedQueueName) {partitionKey = Just tenant})}
   _ <- ExceptT (startWorkflow app.qpExec app.qpFairManager options input)
   pure wid
 
@@ -87,7 +87,7 @@ enqueueRateLimited app = do
   enqueued <-
     enqueueWorkflow
       app.qpDbos
-      (newWorkflowKey rateLimitedWorkflowName)
+      (newQualifiedWorkflowName rateLimitedWorkflowName)
       wid
       Nothing
       rateLimitedQueueName

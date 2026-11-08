@@ -11,7 +11,7 @@ import DBOS.Transact
 
 -- GOOD (boundary): calling through a captured executor compiles — outside form.
 goodOutsideCall ::
-  forall exec. Executor IO -> WorkflowKey -> WorkflowId -> WorkflowCtx exec IO -> IO ()
+  forall exec. Executor IO -> QualifiedWorkflowName -> WorkflowId -> WorkflowCtx exec IO -> IO ()
 goodOutsideCall exec key wid wctx = do
   _ <- runStep wctx "probe" $ \_sctx -> do
     _ <- (runWorkflow exec key wid Nothing :: IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
@@ -29,7 +29,7 @@ goodOutsideStart exec ref wctx = do
 
 -- GOOD (boundary): enqueueing through a captured DBOS compiles — outside form.
 goodOutsideEnqueue ::
-  forall exec. DBOS IO -> WorkflowKey -> WorkflowId -> WorkflowCtx exec IO -> IO ()
+  forall exec. DBOS IO -> QualifiedWorkflowName -> WorkflowId -> WorkflowCtx exec IO -> IO ()
 goodOutsideEnqueue dbos key wid wctx = do
   _ <- runStep wctx "probe" $ \_sctx -> do
     _ <- (fmap (const ()) <$> enqueueWorkflow dbos key wid Nothing "q" :: IO (Either (Error EngineOnly) ()))

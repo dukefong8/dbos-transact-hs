@@ -34,7 +34,7 @@ where
 
 import Control.Monad.Except (ExceptT (..), runExceptT)
 import Data.Text (Text)
-import DBOS.Transact (EngineOnly, Error, StartOptions (..), WorkflowCtx, WorkflowRef, awaitChild, enqueueNew, millisDuration, setEvent, sleepStep, startChildWorkflow, startOptionsDefault)
+import DBOS.Transact (EngineOnly, Error, StartOptions (..), WorkflowCtx, WorkflowRef, awaitChild, queueRequestNew, millisDuration, setEvent, sleepStep, startChildWorkflow, startOptionsDefault)
 import Prelude
 
 -- * Names and keys (main.py)
@@ -113,7 +113,7 @@ fairQueueConcurrencyManager ::
   IO (Either (Error EngineOnly) Text)
 fairQueueConcurrencyManager fairRef tenant wctx = runExceptT $ do
   ExceptT (setEvent wctx tenantEventKey tenant)
-  handle <- ExceptT (startChildWorkflow wctx fairRef (startOptionsDefault {startQueue = Just (enqueueNew concurrencyQueueName)}) Nothing)
+  handle <- ExceptT (startChildWorkflow wctx fairRef (startOptionsDefault {startQueue = Just (queueRequestNew concurrencyQueueName)}) Nothing)
   _ <- ExceptT (awaitChild wctx handle)
   pure "manager completed"
 

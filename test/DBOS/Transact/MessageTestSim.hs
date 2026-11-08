@@ -16,10 +16,11 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
+import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
-import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow)
+import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
+import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, newMemDB, newMemDBSkewed, simIdentity)
 import DBOS.Transact.Connection (nextExecutionIdentity)
 import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState)
 import DBOS.Transact.MessageCases
@@ -37,6 +38,7 @@ import DBOS.Transact.MessageCases
     checkSendDeliveredOnce,
     checkStepSend,
     checkRecvTimeoutSteps,
+    checkRecvTimed,
     checkSendNameMismatch,
     checkThirdParty,
     checkTopics,
@@ -53,6 +55,7 @@ import DBOS.Transact.MessageCases
     scenarioSendDeliveredOnce,
     scenarioStepSend,
     scenarioRecvTimeoutSteps,
+    scenarioRecvTimed,
     scenarioSendNameMismatch,
     scenarioThirdParty,
     scenarioTopics,
@@ -65,8 +68,13 @@ import Test.Tasty.HUnit (assertBool)
 -- same store in the same simulation so delivery is genuine. Each workflow
 -- holds one scope per case; replays run fresh scopes that restart it.
 simMessageFixture :: forall s. IOSim s (MessageFixture (IOSim s))
-simMessageFixture = do
-  mem <- newMemDB
+simMessageFixture = newMemDB >>= simMessageFixtureOn
+
+simMessageFixtureSkewed :: forall s. Int64 -> IOSim s (MessageFixture (IOSim s))
+simMessageFixtureSkewed skewMs = newMemDBSkewed skewMs >>= simMessageFixtureOn
+
+simMessageFixtureOn :: forall s. MemSystemDB s -> IOSim s (MessageFixture (IOSim s))
+simMessageFixtureOn mem = do
   states <- newTVarIO Map.empty
   let -- The context holds the row's own creator token, as an execution built
       -- from the init result would: anything else is refused at the first
@@ -95,7 +103,7 @@ simMessageFixture = do
           let sourceText = "sim-message-" <> label <> "-source"
               destinationText = "sim-message-" <> label <> "-destination"
               create workflowText workflowName =
-                SystemDB.initWorkflow mem ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Nothing
+                SystemDB.initWorkflow mem ((newWorkflow workflowText) {newWorkflowName = Just workflowName}) Nothing WorkflowIdReturnExisting
           sourceCreated <- create sourceText "SimMessageSource"
           destinationCreated <- create destinationText "SimMessageDestination"
           case (sourceCreated, destinationCreated) of
@@ -161,6 +169,8 @@ tests =
       simCase simMessageFixture "a replay takes the recorded message and sends once" scenarioReplayTakes checkReplayTakes traceMessageSilent,
       simCase simMessageFixture "a step may send but may not receive" scenarioStepSend checkStepSend traceStepSend,
       simCase simMessageFixture "a timed-out recv records its deadline step beside it" scenarioRecvTimeoutSteps checkRecvTimeoutSteps traceMessageSilent,
+      simCase (simMessageFixtureSkewed 3600000) "a recv timeout waits its duration with the database clock an hour ahead" scenarioRecvTimed checkRecvTimed traceMessageSilent,
+      simCase (simMessageFixtureSkewed (-3600000)) "a recv timeout waits its duration with the database clock an hour behind" scenarioRecvTimed checkRecvTimed traceMessageSilent,
       simCase simMessageFixture "a send from a renamed position is refused" scenarioSendNameMismatch checkSendNameMismatch traceStepSend,
       simCase simMessageFixture "a send through a captured parent is plain and moves no id" scenarioCapturedSend checkCapturedSend traceMessageSilent,
       simCase simMessageFixture "a recv through a captured parent is refused" scenarioCapturedRecv checkCapturedRecv traceMessageSilent,
@@ -185,9 +195,9 @@ traceStepSend tr =
 -- | The batch checkpoints once under its bulk step.
 traceBulkSend :: SimTrace a -> IO ()
 traceBulkSend tr =
-  assertBool "the batch must checkpoint once" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.send_bulk" 0])
+  assertBool "the batch must checkpoint once" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.sendBulk" 0])
 
 -- | The empty batch still takes its step.
 traceBulkEmpty :: SimTrace a -> IO ()
 traceBulkEmpty tr =
-  assertBool "the empty batch must take its step" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.send_bulk" 0])
+  assertBool "the empty batch must take its step" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.sendBulk" 0])

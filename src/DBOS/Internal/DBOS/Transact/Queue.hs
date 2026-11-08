@@ -78,7 +78,10 @@ data Queue = Queue
 -- because both SDK oracles keep it. The two spellings are mutually
 -- exclusive (Python @_queue.py@: setting both is refused). There is no
 -- priority option: every queue dispatches in priority order, so
--- registration always persists the legacy column as true.
+-- registration always persists the legacy column as true. A queue-wide
+-- limit of 0 pauses the queue — nothing is dequeued until an update
+-- raises it — while the per-partition and rate limits stay at least 1:
+-- a partition is paused by pausing its queue, not one key at a time.
 data QueueOptions = QueueOptions
   { -- | Deprecated alias for 'globalConcurrency': explicit wins. Retained
     -- because both SDK oracles keep it. (A @DEPRECATED@ pragma would fire
@@ -249,8 +252,8 @@ validateQueueOptions queueName options =
     firstInvalid =
       first
         [ bothSpellings options.concurrency options.globalConcurrency,
-          positive "concurrency" fleet,
-          positive "worker_concurrency" options.workerConcurrency,
+          nonnegative "concurrency" fleet,
+          nonnegative "worker_concurrency" options.workerConcurrency,
           ordered "worker_concurrency" "concurrency" options.workerConcurrency fleet,
           nonzeroDuration "polling_interval" options.pollingInterval,
           rate "rate_limit" options.rateLimit,
@@ -271,10 +274,18 @@ validateQueueOptions queueName options =
     positive field = \case
       Just value | value < 1 -> Just (field, "must be at least 1, got " <> Text.pack (show value))
       _ -> Nothing
+    -- A queue-wide limit of 0 pauses the queue; only a negative one is
+    -- refused. The per-partition and rate limits stay 'positive' above: a
+    -- partition is paused by pausing its queue, not one key at a time.
+    -- Mirrors the oracle's @validate_fields@; the field rides backticked
+    -- in the detail so the refusal names the limit exactly.
+    nonnegative field = \case
+      Just value | value < 0 -> Just (field, "`" <> field <> "` must not be negative, got " <> Text.pack (show value))
+      _ -> Nothing
     ordered field outer innerValue outerValue =
       case (innerValue, outerValue) of
         (Just inner, Just outer') | inner > outer' ->
-          Just (field, "must not exceed `" <> outer <> "`, got " <> Text.pack (show inner) <> " and " <> Text.pack (show outer'))
+          Just (field, "`" <> outer <> "` must be greater than or equal to `" <> field <> "`, got " <> Text.pack (show outer') <> " and " <> Text.pack (show inner))
         _ -> Nothing
     nonzeroDuration field duration
       | durationIsZero duration = Just (field, "cannot be zero")

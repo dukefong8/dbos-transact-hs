@@ -12,7 +12,7 @@ import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import Data.Text qualified as Text
-import DBOS.SystemDB (NewWorkflow (..), Outcome (OutcomeOutput), StepRecord (stepRecordStepName), StepTiming (..), WorkflowId (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, patchMarkerName)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (OutcomeOutput), StepRecord (stepRecordStepName), StepTiming (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, patchMarkerName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact
@@ -101,7 +101,7 @@ simPatchFixture = do
       { pfFreshWorkflowId = do
           n <- atomically (readTVar fresh >>= \k -> writeTVar fresh (k + 1) >> pure k)
           let widText = "sim-patch-" <> Text.pack (show n)
-          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimPatchTest"}) Nothing
+          created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "SimPatchTest"}) Nothing WorkflowIdReturnExisting
           case created of
             Left err -> error (show err)
             Right _ -> pure (WorkflowId widText),

@@ -11,10 +11,12 @@
 :set -Werror=deferred-out-of-scope-variables
 :set -Werror=deferred-type-errors
 
+:set -Wno-ambiguous-fields
 :set -Wno-type-defaults
+:set -Wno-name-shadowing
+:set -Wno-unused-matches
 :set -Wno-unused-imports
 :set -Wno-unused-top-binds
-:set -Wno-ambiguous-fields
 
 :set -fdefer-type-errors
 :set -fno-defer-typed-holes

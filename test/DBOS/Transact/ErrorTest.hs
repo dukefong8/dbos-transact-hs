@@ -13,8 +13,9 @@ import DBOS.Transact
   (
     EngineOnly,
     Error (..),
-    WorkflowKey,
-    newWorkflowKey,
+    QualifiedWorkflowName,
+    newQualifiedWorkflowName,
+    methodQualifiedWorkflowName,
   )
 import DBOS.Transact.Error (Failure (..), controlOf, decodeErrorText, encodeErrorText, failureOf, fromSystemDB, liftEngine)
 import Test.Tasty (TestTree, testGroup)
@@ -75,19 +76,26 @@ tests =
             renamed =
               [ NotLaunched {operation = "op"},
                 AlreadyLaunched {operation = "op"},
-                AlreadyRegistered {key = newWorkflowKey "k"},
+                AlreadyRegistered {workflow = newQualifiedWorkflowName "k"},
                 Deserialization {what = "in", message = "bad"},
                 UnknownSerialization {name = "pickle"},
-                NotRegistered {key = newWorkflowKey "k"},
+                NotRegistered {workflow = newQualifiedWorkflowName "k"},
                 WorkflowClaimLost {workflowId = "wf"},
                 WorkflowFailed {workflowId = "wf", message = "bad"}
               ]
         mapM_ (\err -> decodeErrorText (encodeErrorText err) @?= Right err) renamed,
-      testCase "a key with missing optional fields decodes like Rust" $ do
+      testCase "a name with missing optional fields decodes like Rust" $ do
         -- Rust's derived Deserialize treats absent Option fields as None;
-        -- aeson's .: does not, so the key instance uses .:? instead.
-        (fromJSON (object ["name" .= ("x" :: Text)]) :: Result WorkflowKey)
-          @?= Success (newWorkflowKey "x"),
+        -- aeson's .: does not, so the name instance uses .:? instead.
+        (fromJSON (object ["name" .= ("x" :: Text)]) :: Result QualifiedWorkflowName)
+          @?= Success (newQualifiedWorkflowName "x"),
+      testCase "a registration error recorded as key still decodes" $ do
+        -- Errors are checkpointed, so the field keeps its pre-rename spelling
+        -- as an alias and one recorded before the rename still replays.
+        decodeErrorText "{\"NotRegistered\":{\"key\":{\"name\":\"f\",\"class_name\":\"C\",\"config_name\":null}}}"
+          @?= Right (NotRegistered {workflow = methodQualifiedWorkflowName "f" "C"} :: Error CardDeclined)
+        decodeErrorText "{\"AlreadyRegistered\":{\"key\":{\"name\":\"f\",\"class_name\":null,\"config_name\":null}}}"
+          @?= Right (AlreadyRegistered {workflow = newQualifiedWorkflowName "f"} :: Error CardDeclined),
       testCase "patch nondeterminism round-trips under its own tag" $ do
         let err = PatchNondeterminism {workflowId = "wf", patch = "v2", stepId = 0} :: Error CardDeclined
         decodeErrorText (encodeErrorText err) @?= Right err

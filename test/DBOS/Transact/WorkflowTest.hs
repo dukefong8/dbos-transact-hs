@@ -17,7 +17,7 @@ import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (AwaitedOutcome (..), DatabaseTime (..), NewWorkflow (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), getWorkflow, listSteps, newWorkflow)
+import DBOS.SystemDB (AwaitedOutcome (..), DatabaseTime (..), NewWorkflow (..), StepRecord (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (..), WorkflowRecord (..), getWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, unWorkflowInput, CodecError (..))
@@ -37,25 +37,31 @@ import DBOS.Transact
     Executor,
     WorkflowStatus (..),
     awaitChild,
+    cancelWorkflowsInWorkflow,
     configFromEnv,
+    enqueueWorkflow,
     launchWithEnvironment,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerWorkflowRef,
     registerWorkflow,
-    WorkflowKey,
+    QualifiedWorkflowName,
     WorkflowRef,
     runWorkflow,
     runWorkflowRef,
     runOptionsDefault,
     runStep,
     selectWorkflow,
+    setEvent,
     startChildWorkflow,
     shutdown,
     startWorkflow,
+    queueRequestNew,
+    handleResult,
     startOptionsDefault,
     waitForWorkflow,
   )
+import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Error (decodeErrorText)
@@ -65,6 +71,11 @@ import DBOS.Transact.Context (spawnLocal)
 import DBOS.SystemDB.Retry (uuidEntropy)
 import DBOS.Transact.ContextTest (ctxOver)
 import GHC.Conc (ThreadStatus (..), threadStatus)
+import Data.Int (Int64)
+import Hasql.Decoders qualified as Decoders
+import Hasql.Encoders qualified as Encoders
+import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 import DBOS.Transact.WorkflowCases
@@ -117,6 +128,7 @@ import DBOS.Transact.WorkflowCases
     scenarioEnqueuedChildReplays,
     scenarioDedupStartRecorded,
     scenarioConflictStartRecorded,
+    scenarioRejectStartRecorded,
     checkRegisteredResult,
     checkJoinTakesId,
     checkFreshJoinPolls,
@@ -163,6 +175,7 @@ import DBOS.Transact.WorkflowCases
     checkEnqueuedChildReplays,
     checkDedupStartRecorded,
     checkConflictStartRecorded,
+    checkRejectStartRecorded,
     taskAbortAllWaits,
     taskFinishedNotRegistered,
     taskRefusedAfterSweep,
@@ -191,7 +204,7 @@ tests =
             executorId = "hs-l2-recovery-executor-" <> suffix
             workflowText = "hs-l2-recovery-workflow-" <> suffix
             workflowId = WorkflowId workflowText
-            key = newWorkflowKey "recover"
+            key = newQualifiedWorkflowName "recover"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
         shouldCrash <- newIORef True
@@ -234,6 +247,117 @@ tests =
               let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
               assertEqual "a duplicate run awaits and adopts the stored result" (Right 42) decoded
             other -> fail (show other),
+      -- IO only: the 0.5 step-names replay (slice #154). The parent sets
+      -- an event, starts and awaits a child, and cancels a workflow queued
+      -- where nothing polls, then blocks at a gate; shutdown abandons it
+      -- there. The history's names are overwritten with 0.5's literals, so
+      -- the relaunch must replay every recorded step from its checkpoint —
+      -- without starting the child again — and finish. A constant renamed
+      -- away from 0.5's spelling fails the replay with UnexpectedStep, not
+      -- just the pin test above. Mirrors the oracle's
+      -- @a_history_under_the_0_5_step_names_replays@; the recorded step
+      -- sequence is derived from our own engine (setEvent, child start
+      -- under the child's name, getResult await, cancelWorkflow), not from
+      -- the oracle's step ids.
+      testCase "a history under the 0.5 step names replays" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-stepnames-" <> Text.take 12 suffix
+            appVersion = "hs-l2-stepnames-version-" <> suffix
+            executorId = "hs-l2-stepnames-executor-" <> suffix
+            parentText = "hs-l2-stepnames-parent-" <> suffix
+            targetText = "hs-l2-stepnames-target-" <> suffix
+            childKey = newQualifiedWorkflowName "child"
+            targetKey = newQualifiedWorkflowName "target"
+            parentKey = newQualifiedWorkflowName "parent"
+        reached <- newEmptyMVar
+        release <- newEmptyMVar
+        childRuns <- newIORef (0 :: Int)
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
+            childBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            childBody n _ = modifyIORef' childRuns (+ 1) >> pure (Right (n * 2))
+            targetBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            targetBody () _ = pure (Right 1)
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          childRefE <- registerWorkflowRef dbos childKey childBody
+          childRef <- case childRefE of
+            Left err -> fail (show err)
+            Right ref -> pure ref
+          targetRegistered <- registerWorkflow dbos targetKey targetBody
+          case targetRegistered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          let parentBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+              parentBody targetId wctx = do
+                setR <- setEvent wctx "progress" (1 :: Int)
+                case setR of
+                  Left err -> pure (Left err)
+                  Right () -> do
+                    started <- startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput (21 :: Int)))
+                    case started of
+                      Left err -> pure (Left err)
+                      Right handle -> do
+                        awaited <- awaitChild wctx handle
+                        case awaited of
+                          Left err -> pure (Left err)
+                          Right Nothing -> pure (Left (StepFailed "parent" "no child output"))
+                          Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+                            Left err -> pure (Left (StepFailed "parent" (Text.pack (show err))))
+                            Right doubled -> do
+                              cancelled <- cancelWorkflowsInWorkflow wctx [WorkflowId targetId] False
+                              case cancelled of
+                                Left err -> pure (Left err)
+                                Right _ -> putMVar reached () >> takeMVar release >> pure (Right doubled)
+          parentRegistered <- registerWorkflow dbos parentKey parentBody
+          case parentRegistered of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          exec <- launchExec dbos isolatedEnvironment
+          -- The target sits on a queue nothing polls, so it is there to be cancelled.
+          enqueued <- enqueueWorkflow dbos targetKey (WorkflowId targetText) Nothing "nothing-polls-this"
+          case enqueued of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          worker <- async (runWf exec parentKey (WorkflowId parentText) (Just (encodeWorkflowInput targetText)))
+          entered <- timeout 15000000 (takeMVar reached)
+          case entered of
+            Nothing -> fail "the workflow never reached its gate"
+            Just _ -> pure ()
+          -- Abandoned at the gate: the steps above are recorded, the gate
+          -- below is not.
+          shutdown dbos
+          cancel worker
+          -- Write 0.5's names over whatever this build recorded.
+          backend <- getBackend
+          let expected = [(0, "DBOS.setEvent"), (1, "child"), (2, "DBOS.getResult"), (3, "DBOS.cancelWorkflow")]
+          forM_ expected $ \(step, name) -> do
+            updated <- Postgres.runSession backend "step-names-rewrite" (Session.statement (parentText, step, name) rewriteStepName)
+            case updated of
+              Right 1 -> pure ()
+              other -> fail ("no step " <> show step <> " to rewrite: " <> show other)
+          history <- listSteps backend (WorkflowId parentText) False Nothing Nothing Nothing
+          case history of
+            Left err -> fail (show err)
+            Right found -> assertEqual "the history is 0.5's" expected (map (\record -> (record.stepRecordStepId, record.stepRecordStepName)) found)
+          _ <- launchExec dbos isolatedEnvironment
+          reentered <- timeout 15000000 (takeMVar reached)
+          case reentered of
+            Nothing -> fail "the recovered workflow never reached its gate again"
+            Just _ -> pure ()
+          putMVar release ()
+          settled <- timeout 10000000 (waitForWorkflow dbos (WorkflowId parentText))
+          case settled of
+            Just (Right (AwaitedSucceeded (Just output) serialization)) -> do
+              let stored = SerializedWorkflowValue output (Serialization <$> serialization)
+                  decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
+              assertEqual "recovery completes with the doubled child result" (Right 42) decoded
+            other -> fail (show other)
+          assertEqual "the child ran once" 1 =<< readIORef childRuns
+          replayed <- listSteps backend (WorkflowId parentText) False Nothing Nothing Nothing
+          case replayed of
+            Left err -> fail (show err)
+            Right found -> assertEqual "the replay recorded nothing new" expected (map (\record -> (record.stepRecordStepId, record.stepRecordStepName)) found),
       -- IO only: same recovery sweep as above.
       testCase "an unregistered workflow is skipped and the rest recover" $ do
         fresh <- UUID.V4.nextRandom
@@ -248,8 +372,8 @@ tests =
             secondExec = execId
             ghostText = "hs-l2-skip-ghost-" <> suffix
             keeperText = "hs-l2-skip-keeper-" <> suffix
-            ghostKey = newWorkflowKey "ghost"
-            keeperKey = newWorkflowKey "keeper"
+            ghostKey = newQualifiedWorkflowName "ghost"
+            keeperKey = newQualifiedWorkflowName "keeper"
         gate <- newEmptyMVar
         enteredGhost <- newEmptyMVar
         enteredKeeper <- newEmptyMVar
@@ -321,8 +445,8 @@ tests =
             executorId = "hs-l2-replay-await-executor-" <> suffix
             parentText = "hs-l2-replay-await-parent-" <> suffix
             childText = parentText <> "-0"
-            childKey = newWorkflowKey "child"
-            parentKey = newWorkflowKey "parent"
+            childKey = newQualifiedWorkflowName "child"
+            parentKey = newQualifiedWorkflowName "parent"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             childBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -422,7 +546,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-foreign-" <> Text.take 12 suffix
             payText = "hs-l2-foreign-pay-" <> suffix
-            payKey = newWorkflowKey "pay"
+            payKey = newQualifiedWorkflowName "pay"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
         bracket (newDBOS config) shutdown $ \dbos -> do
@@ -460,7 +584,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-first-" <> Text.take 12 suffix
             waiterText = "hs-l2-first-waiter-" <> suffix
-            childKey = newWorkflowKey "blocked"
+            childKey = newQualifiedWorkflowName "blocked"
             childText n = "hs-l2-first-blocked-" <> Text.pack (show (n :: Int)) <> "-" <> suffix
         entered <- mapM (const newEmptyMVar) [0, 1, 2 :: Int]
         gates <- mapM (const newEmptyMVar) [0, 1, 2 :: Int]
@@ -496,6 +620,7 @@ tests =
               reader
               ((newWorkflow waiterText) {newWorkflowName = Just "L2FirstWaiter"})
               Nothing
+              WorkflowIdReturnExisting
           case waiterCreated of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -522,6 +647,70 @@ tests =
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "an in-workflow enqueue is a recorded child start that replays" scenarioEnqueuedChildReplays checkEnqueuedChildReplays,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a refused child start replays after the key is freed" scenarioDedupStartRecorded checkDedupStartRecorded,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a taken child id replays after the row is deleted" scenarioConflictStartRecorded checkConflictStartRecorded,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a rejected child start replays after the row is deleted" scenarioRejectStartRecorded checkRejectStartRecorded,
+      testCase "a rejecting start refuses a taken id and joins by default" $ do
+        -- Mirrors Rust @a_rejecting_start_or_enqueue_refuses_a_taken_id@: a
+        -- Reject start or enqueue whose id is taken runs nothing, even when
+        -- the holder finished; the default joins it.
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-reuse-policy-" <> Text.take 12 suffix
+            appVersion = "hs-l2-reuse-policy-version-" <> suffix
+            executorId = "hs-l2-reuse-policy-executor-" <> suffix
+            takenText = "hs-l2-reuse-policy-id-" <> suffix
+            queueName = "hs-l2-reuse-policy-q-" <> Text.take 12 suffix
+            key = newQualifiedWorkflowName "counted"
+        config0 <- configFromEnv appName
+        let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
+        runs <- newIORef (0 :: Int)
+        let body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            body value _ = modifyIORef' runs (+ 1) >> pure (Right value)
+        bracket (newDBOS config) shutdown $ \dbos -> do
+          registered <- registerWorkflowRef dbos key body
+          counted <- case registered of
+            Left err -> fail (show err)
+            Right ref -> pure ref
+          exec <- launchExec dbos isolatedEnvironment
+          let rejecting queue =
+                (startOptionsDefault {startWorkflowId = Just (WorkflowId takenText), startWorkflowIdReusePolicy = WorkflowIdReject}) {startQueue = queue}
+          firstStarted <- startWfRef exec counted (rejecting Nothing) (Just (encodeWorkflowInput (1 :: Int)))
+          firstHandle <- case firstStarted of
+            Left err -> fail ("a fresh id is not in use, got: " <> show err)
+            Right handle -> pure handle
+          first <- handleResult firstHandle
+          case first of
+            Right (Just stored) ->
+              case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+                Right 1 -> pure ()
+                other -> fail ("expected the first run's result, got: " <> show other)
+            other -> fail ("expected the first run's result, got: " <> show other)
+          let checkRefused queueName' queue = do
+                refused <- startWfRef exec counted (rejecting queue) (Just (encodeWorkflowInput (2 :: Int)))
+                case refused of
+                  Left (SystemDatabase (SystemDBError.WorkflowIdInUse {workflowId = wid, status = st, existingName = name})) -> do
+                    wid @?= takenText
+                    st @?= "SUCCESS"
+                    name @?= Just "counted"
+                  other -> fail ("expected WorkflowIdInUse, got: " <> show other)
+          checkRefused "plain" Nothing
+          checkRefused "queued" (Just (queueRequestNew queueName))
+          joined <- runWfRef exec counted (runOptionsDefault {runWorkflowId = Just (WorkflowId takenText)}) (Just (encodeWorkflowInput (3 :: Int)))
+          case joined of
+            Right (Just stored) ->
+              case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+                Right 1 -> pure ()
+                other -> fail ("expected the joined result, got: " <> show other)
+            other -> fail ("expected the joined result, got: " <> show other)
+          let checkNeedsId queue = do
+                refused <- startWfRef exec counted ((startOptionsDefault {startWorkflowIdReusePolicy = WorkflowIdReject}) {startQueue = queue}) (Just (encodeWorkflowInput (4 :: Int)))
+                case refused of
+                  Left (InvalidArgument _ detail) ->
+                    assertBool "needs a workflow_id" ("`WorkflowIdReusePolicy::Reject` needs a `workflow_id`" `Text.isInfixOf` detail)
+                  other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+          checkNeedsId Nothing
+          checkNeedsId (Just (queueRequestNew queueName))
+          runsFinal <- readIORef runs
+          runsFinal @?= 1,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a panicking workflow leaves its row pending" scenarioPanic checkPanic,
@@ -653,7 +842,7 @@ launchExec dbos env = do
 -- for the compiler to guess. Local copies are deliberate — this module
 -- carries only the aliases it uses, and a sibling test module repeats
 -- the ones it needs.
-runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 runWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> RunOptions -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
@@ -685,6 +874,21 @@ readWorkflowStatus getBackend wid = do
     Left err -> fail (show err)
     Right Nothing -> pure Nothing
     Right (Just WorkflowRecord {workflowRecordStatus = status}) -> pure (Just status)
+
+-- | Overwrites one recorded step's name with a 0.5 literal: the replay
+-- must adopt it, so a constant renamed away from 0.5's spelling fails
+-- the replay itself. Asserts one row moved, as the oracle's rewrite does.
+rewriteStepName :: Statement.Statement (Text, Int, Text) Int64
+rewriteStepName =
+  Statement.preparable sql encoder Decoders.rowsAffected
+  where
+    sql =
+      "UPDATE dbos.operation_outputs SET function_name = $3 \
+      \WHERE workflow_uuid = $1 AND function_id = $2"
+    encoder =
+      contramap (\(wid, _, _) -> wid) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, step, _) -> fromIntegral step) (Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> contramap (\(_, _, name) -> name) (Encoders.param (Encoders.nonNullable Encoders.text))
 
 isolatedEnvironment :: Environment
 isolatedEnvironment =

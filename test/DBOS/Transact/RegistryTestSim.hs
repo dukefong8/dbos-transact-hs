@@ -30,6 +30,7 @@ import DBOS.Transact.RegistryCases
     checkMethodDistinct,
     checkReferenceIdentity,
     checkSnapshotReopen,
+    checkUnregistrableRefused,
     checkZeroArgCall,
     scenarioDuplicateRefRefused,
     scenarioDuplicateRefused,
@@ -41,6 +42,7 @@ import DBOS.Transact.RegistryCases
     scenarioMethodDistinct,
     scenarioReferenceIdentity,
     scenarioSnapshotReopen,
+    scenarioUnregistrableRefused,
     scenarioZeroArgCall,
   )
 import DBOS.Transact.Step (WorkflowEvent (..))
@@ -91,5 +93,6 @@ tests =
       simCase simFixture "a class-bound key with no instance is its own identity" scenarioMethodDistinct checkMethodDistinct traceSilent,
       simCase simFixture "a reference holds the identity it registered under" scenarioReferenceIdentity checkReferenceIdentity traceSilent,
       simCase simFixture "a reference to a duplicate identity is refused" scenarioDuplicateRefRefused checkDuplicateRefRefused traceSilent,
-      simCase simFixture "a zero argument workflow is called with no input at all" scenarioZeroArgCall checkZeroArgCall traceSilent
+      simCase simFixture "a zero argument workflow is called with no input at all" scenarioZeroArgCall checkZeroArgCall traceSilent,
+      simCase simFixture "a name for nothing is refused and registers nothing" scenarioUnregistrableRefused checkUnregistrableRefused traceSilent
     ]

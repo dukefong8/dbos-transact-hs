@@ -12,7 +12,7 @@ instead of the suite plus a Postgres read-back is not a proof.
 
 Key facts (all observed in-repo, Oct 2026):
 
-- System database URL is `$DBOS_DATABASE_URL`
+- System database URL is `$DBOS_SYSTEM_DATABASE_URL`
   (`postgresql://postgres:pgpasswd@127.0.0.1:5432/postgres` here).
   App datasource falls back to it when `APP_DATABASE_URL` is unset.
   `DATABASE_URL` is **not** ours: `ihp-typed-sql` reads it at compile time
@@ -50,9 +50,9 @@ Reach a usable state from an empty checkout. Every step is required, in order:
    Rust corpus moved or the wrong database was migrated.
 2. `make widget-db` — bootstraps the `widget_store` app schema for the
    compile-time `typedSql` describe. Uses `$DATABASE_URL` falling back to
-   `$DBOS_DATABASE_URL`.
+   `$DBOS_SYSTEM_DATABASE_URL`.
 3. Build the suite binary (standalone, since `cabal build` does not
-   resolve — see Key facts). `$DBOS_DATABASE_URL` (and `DATABASE_URL`)
+   resolve — see Key facts). `$DBOS_SYSTEM_DATABASE_URL` (and `DATABASE_URL`)
    must be set for the `typedSql` describe:
 
    ```bash
@@ -88,12 +88,12 @@ never `tee` into it). Build artifacts live under `/tmp` (`/tmp/dbuild`,
 One read-only check, run first whenever anything looks off. All must hold:
 
 ```bash
-psql "$DBOS_DATABASE_URL" -tAc "select version from dbos.dbos_migrations order by 1 desc limit 1"
+psql "$DBOS_SYSTEM_DATABASE_URL" -tAc "select version from dbos.dbos_migrations order by 1 desc limit 1"
 ```
 
 Expect a migration version at or above the ceiling-probe floor in
 `PostgresTest.hs`. If the database is unreachable or below floor, confirm
-`DBOS_DATABASE_URL` points at the database `make db-migrate` migrated
+`DBOS_SYSTEM_DATABASE_URL` points at the database `make db-migrate` migrated
 before running anything.
 
 ## Drive
@@ -148,7 +148,7 @@ Proof standards:
 
   ```bash
   NOW_MS=$(python3 -c "import time; print(int(time.time()*1000))")
-  psql "$DBOS_DATABASE_URL" -tAc \
+  psql "$DBOS_SYSTEM_DATABASE_URL" -tAc \
     "select 'workflow_status', count(*) from dbos.workflow_status \
        where created_at >= $((NOW_MS - 3600000)) \
      union all select 'notifications', count(*) from dbos.notifications \

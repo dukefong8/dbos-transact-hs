@@ -12,7 +12,7 @@ Use `DBOS.Transact.Debouncer` to delay workflow execution until some time has pa
 ```haskell
 -- Register once, before launch: the debounced workflow itself.
 debouncedRef <-
-  registerWorkflowRef dbos (newWorkflowKey "processInput") processInput
+  registerWorkflowRef dbos (newQualifiedWorkflowName "processInput") processInput
     >>= either (die . show) pure
 
 -- Every keystroke debounces; the workflow runs once, with the last input.
@@ -24,7 +24,8 @@ Key behaviors (same as TS):
 
 - The `key` groups executions debounced together (e.g. per user).
 - The period delays execution by that amount from the last call.
-- `debouncerTimeout` (`Maybe Duration`) caps the wait since the first trigger; `Nothing` waits indefinitely.
+- `debouncerDebounceTimeout` (`Maybe Duration`) caps the wait since the first trigger; `Nothing` waits indefinitely.
+- `debouncerTimeout` (`Maybe Duration`) budgets the released workflow once it runs; `Nothing` means none (never inherited).
 - `debouncerQueueName` (`Maybe Text`) runs the released workflow on a queue; `Nothing` runs it on the internal queue.
 - When the workflow finally executes, it uses the **last** set of inputs.
 - Once the period expires and the workflow is released, the next `debounce` call starts a new cycle.

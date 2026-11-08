@@ -91,6 +91,7 @@ module DBOS.SystemDB.Postgres.Statements
     setWorkflowDelaySession,
     clearQueueAssignmentSession,
     updateWorkflowAttributesSession,
+    mergeWorkflowAttributesSession,
     reenqueueForRecoverySession,
     InitWorkflowParams (..),
     initWorkflowInputStatement,
@@ -135,6 +136,7 @@ module DBOS.SystemDB.Postgres.Statements
     allStreamEntriesStatement,
     RecordChildWorkflowParams (..),
     recordChildWorkflowStatement,
+    rewoundChildStatement,
     QueueInsertParams (..),
     queueInsertStatement,
     queueDeleteStatement,
@@ -165,7 +167,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Error (Error (..), decodePortableError, encodePortableError, shouldRecord)
-import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..), WorkflowStatus (Cancelled), isActiveStatus, parseWorkflowStatus, portableJsonSerialization, rewindStepName, streamClosedSentinel)
+import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..), WorkflowStatus (Cancelled), getEventStepName, isActiveStatus, parseWorkflowStatus, portableJsonSerialization, recvStepName, rewindStepName, setEventStepName, streamClosedSentinel)
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
@@ -618,6 +620,7 @@ type WorkflowInitRaw =
        '("workflow_deadline_epoch_ms", Maybe Int64),
        '("creator_xid", Maybe Text),
        '("serialization", Maybe Text),
+       '("parent_workflow_id", Maybe Text),
        '("inserted", Maybe Bool),
        '("db_now", Maybe Int64)
      ]
@@ -665,7 +668,7 @@ initWorkflowStatement params =
     on conflict (workflow_uuid) do update set
       creator_xid = dbos.workflow_status.creator_xid
     returning recovery_attempts, status, name, class_name::text, config_name::text, queue_name,
-      deduplication_id, workflow_deadline_epoch_ms, creator_xid, serialization,
+      deduplication_id, workflow_deadline_epoch_ms, creator_xid, serialization, parent_workflow_id,
       created_at is not distinct from (extract(epoch from now()) * 1000)::bigint as inserted,
       (extract(epoch from clock_timestamp()) * 1000)::bigint as db_now
   |]
@@ -1902,7 +1905,7 @@ recvStepRecord params taken =
   RecordStepParams
     { recordStepWorkflowId = params.recvWorkflowId,
       recordStepStepId = params.recvStepId,
-      recordStepStepName = "DBOS.recv",
+      recordStepStepName = recvStepName,
       recordStepOutput = (.encodedRawValue) <$> taken,
       recordStepError = Nothing,
       recordStepSerialization = taken >>= (.encodedRawSerialization),
@@ -2092,7 +2095,7 @@ setEventStepRecord params =
   RecordStepParams
     { recordStepWorkflowId = params.setEventWorkflowId,
       recordStepStepId = params.setEventStepId,
-      recordStepStepName = "DBOS.set_event",
+      recordStepStepName = setEventStepName,
       recordStepOutput = Nothing,
       recordStepError = Nothing,
       recordStepSerialization = Just portableJsonSerialization,
@@ -2156,7 +2159,7 @@ getEventStepRecord params =
   RecordStepParams
     { recordStepWorkflowId = params.getEventRecordWorkflowId,
       recordStepStepId = params.getEventRecordStepId,
-      recordStepStepName = "DBOS.get_event",
+      recordStepStepName = getEventStepName,
       recordStepOutput = params.getEventRecordOutput,
       recordStepError = Nothing,
       recordStepSerialization = params.getEventRecordSerialization,
@@ -2201,6 +2204,20 @@ updateWorkflowAttributesSession workflowId attributes =
   sqlExecTypedSession [typedSql|
     update dbos.workflow_status
     set attributes = ${attributes}::text::jsonb,
+      updated_at = (extract(epoch from now()) * 1000)::bigint
+    where workflow_uuid = ${workflowId}
+  |]
+
+-- | Merges keys into a workflow's attributes. Read and written in the one
+-- statement, so a concurrent merge either lands first and is merged into,
+-- or waits on the row lock and merges into this one. Anything that is not
+-- an object counts as an empty one, as Python's merge does. Mirrors the
+-- oracle's merge arm of @update_workflow_attributes@.
+mergeWorkflowAttributesSession :: Text -> Text -> Session.Session Int64
+mergeWorkflowAttributesSession workflowId attributes =
+  sqlExecTypedSession [typedSql|
+    update dbos.workflow_status
+    set attributes = (case when jsonb_typeof(attributes) = 'object' then attributes else '{}'::jsonb end || ${attributes}::text::jsonb),
       updated_at = (extract(epoch from now()) * 1000)::bigint
     where workflow_uuid = ${workflowId}
   |]
@@ -3226,6 +3243,23 @@ data RecordChildWorkflowParams = RecordChildWorkflowParams
     recordChildCompletedAt     :: Maybe Int64,
     recordChildAppName         :: Maybe Text
   }
+
+-- | Whether any step of the parent but this one still records the child:
+-- a rewind deletes a parent's step records from its rewind point on and
+-- keeps the children they named, so a replayed parent re-reaching the start
+-- adopts the child rather than refusing the id as in use. A record at the
+-- caller's own step is this start's own, written by an adoption whose commit
+-- acknowledgement was lost, so it does not count. Mirrors the oracle's
+-- @is_rewound_child@ lookup (@EXISTS@ reads as a boolean on every backend).
+rewoundChildStatement :: Statement.Statement (Text, Text, Int32) Bool
+rewoundChildStatement =
+  Statement.preparable
+    "select exists (select 1 from dbos.operation_outputs where workflow_uuid = $1 and child_workflow_id = $2 and function_id <> $3)"
+    ( contramap (\(parent, _, _) -> parent) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, child, _) -> child) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, _, step) -> step) (Encoders.param (Encoders.nonNullable Encoders.int4))
+    )
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
 
 -- | Records the launch, and reports back the stored child id: the same child
 -- is an idempotent retry, a different one is nondeterminism. The self-update

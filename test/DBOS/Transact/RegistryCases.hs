@@ -23,6 +23,7 @@ module DBOS.Transact.RegistryCases
     checkMethodDistinct,
     checkReferenceIdentity,
     checkSnapshotReopen,
+    checkUnregistrableRefused,
     checkZeroArgCall,
     scenarioDuplicateRefused,
     scenarioDuplicateRefRefused,
@@ -34,6 +35,7 @@ module DBOS.Transact.RegistryCases
     scenarioMethodDistinct,
     scenarioReferenceIdentity,
     scenarioSnapshotReopen,
+    scenarioUnregistrableRefused,
     scenarioZeroArgCall,
   )
 where
@@ -41,8 +43,8 @@ where
 import DBOS.Prelude
 import Data.Text qualified as Text
 import DBOS.SystemDB (WorkflowId (..))
-import DBOS.SystemDB.Types (WorkflowKey (..), instanceWorkflowKey, methodWorkflowKey, renderWorkflowKey, workflowKeyFromRow)
-import DBOS.Transact (EngineOnly, Error, SerializedWorkflowValue (..), WorkflowCtx, newWorkflowKey)
+import DBOS.SystemDB.Types (QualifiedWorkflowName, instanceQualifiedWorkflowName, methodQualifiedWorkflowName, renderQualifiedWorkflowName, qualifiedWorkflowNameFromRow)
+import DBOS.Transact (EngineOnly, Error, SerializedWorkflowValue (..), WorkflowCtx, newQualifiedWorkflowName)
 import DBOS.Transact.Connection (Connection)
 import DBOS.Transact.Context (testOwner, withWorkflow)
 import DBOS.Transact.Error (Error (..), Failure (..))
@@ -57,7 +59,7 @@ import DBOS.Transact.Registry
   )
 import DBOS.Transact.Workflow
   ( ErasedWorkflow (..),
-    WorkflowRef (refKey),
+    WorkflowRef (refQualifiedName),
     refName,
     registerTypedWorkflow,
     registerWorkflowRef,
@@ -75,7 +77,7 @@ data RegistryFixture m = RegistryFixture
 
 -- | A key displays as the triple the references spell.
 scenarioKeyTriple :: forall m. Monad m => RegistryFixture m -> m Text
-scenarioKeyTriple _ = pure (renderWorkflowKey (newWorkflowKey "checkout"))
+scenarioKeyTriple _ = pure (renderQualifiedWorkflowName (newQualifiedWorkflowName "checkout"))
 
 checkKeyTriple :: Text -> Either String ()
 checkKeyTriple rendered
@@ -87,7 +89,7 @@ checkKeyTriple rendered
 scenarioDuplicateRefused :: forall m. MonadMVar m => RegistryFixture m -> m (Either String Text)
 scenarioDuplicateRefused _ = do
   registry <- newRegistry
-  let key = newWorkflowKey "same"
+  let key = newQualifiedWorkflowName "same"
       body :: ErasedWorkflow m
       body = ErasedWorkflow (\_ _ -> pure (Right Nothing))
   first <- registerErasedWorkflow registry key body
@@ -112,16 +114,16 @@ checkDuplicateRefused result = case result of
 scenarioSnapshotReopen :: forall m. MonadMVar m => RegistryFixture m -> m (Either String (Int, Text, Bool))
 scenarioSnapshotReopen _ = do
   registry <- newRegistry
-  let key = newWorkflowKey "before"
+  let key = newQualifiedWorkflowName "before"
       body :: ErasedWorkflow m
       body = ErasedWorkflow (\_ _ -> pure (Right Nothing))
   _ <- registerErasedWorkflow registry key body
   snapshot <- snapshotRegistry registry
-  refused <- registerErasedWorkflow registry (newWorkflowKey "after") body
+  refused <- registerErasedWorkflow registry (newQualifiedWorkflowName "after") body
   case refused of
     Left err -> do
       thawRegistry registry
-      reopened <- registerErasedWorkflow registry (newWorkflowKey "after") body
+      reopened <- registerErasedWorkflow registry (newQualifiedWorkflowName "after") body
       case reopened of
         Left reopenErr -> pure (Left ("expected registration after thaw to succeed, got: " <> displayException reopenErr))
         Right () ->
@@ -140,9 +142,9 @@ checkSnapshotReopen result = case result of
 -- | A name and an instance of it are different identities.
 scenarioInstanceDistinct :: forall m. Monad m => RegistryFixture m -> m (Bool, Text)
 scenarioInstanceDistinct _ = do
-  let free = newWorkflowKey "shared"
-      method = instanceWorkflowKey "shared" "Checkout" "eu"
-  pure (free /= method, renderWorkflowKey method)
+  let free = newQualifiedWorkflowName "shared"
+      method = instanceQualifiedWorkflowName "shared" "Checkout" "eu"
+  pure (free /= method, renderQualifiedWorkflowName method)
 
 checkInstanceDistinct :: (Bool, Text) -> Either String ()
 checkInstanceDistinct (distinct, rendered)
@@ -152,13 +154,13 @@ checkInstanceDistinct (distinct, rendered)
 
 -- | A class-bound key with no instance is its own identity: it differs
 -- from the bare name and from the configured instance, and renders the
--- pair. Mirrors @WorkflowKey::method@.
+-- pair. Mirrors @QualifiedWorkflowName::method@.
 scenarioMethodDistinct :: forall m. Monad m => RegistryFixture m -> m (Bool, Bool, Text)
 scenarioMethodDistinct _ = do
-  let free = newWorkflowKey "shared"
-      method = methodWorkflowKey "shared" "Checkout"
-      configured = instanceWorkflowKey "shared" "Checkout" "eu"
-  pure (free /= method, method /= configured, renderWorkflowKey method)
+  let free = newQualifiedWorkflowName "shared"
+      method = methodQualifiedWorkflowName "shared" "Checkout"
+      configured = instanceQualifiedWorkflowName "shared" "Checkout" "eu"
+  pure (free /= method, method /= configured, renderQualifiedWorkflowName method)
 
 checkMethodDistinct :: (Bool, Bool, Text) -> Either String ()
 checkMethodDistinct (fromFree, fromConfigured, rendered)
@@ -170,7 +172,7 @@ checkMethodDistinct (fromFree, fromConfigured, rendered)
 -- | Empty class and config names resolve like nulls.
 scenarioEmptyNamesResolve :: forall m. Monad m => RegistryFixture m -> m Bool
 scenarioEmptyNamesResolve _ =
-  pure (workflowKeyFromRow "checkout" (Just "") (Just "") == newWorkflowKey "checkout")
+  pure (qualifiedWorkflowNameFromRow "checkout" (Just "") (Just "") == newQualifiedWorkflowName "checkout")
 
 checkEmptyNamesResolve :: Bool -> Either String ()
 checkEmptyNamesResolve resolved
@@ -182,7 +184,7 @@ checkEmptyNamesResolve resolved
 scenarioErasedRoundTrip :: forall m. (MonadMVar m, MonadSTM m) => RegistryFixture m -> m (Either String Int)
 scenarioErasedRoundTrip fixture = do
   registry <- newRegistry
-  let key = newWorkflowKey "double"
+  let key = newQualifiedWorkflowName "double"
       double :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       double value _ = pure (Right (value * 2))
   registered <- registerTypedWorkflow registry key double
@@ -215,7 +217,7 @@ checkErasedRoundTrip result = case result of
 scenarioMalformedReported :: forall m. (MonadMVar m, MonadSTM m) => RegistryFixture m -> m (Either String Text)
 scenarioMalformedReported fixture = do
   registry <- newRegistry
-  let key = newWorkflowKey "double"
+  let key = newQualifiedWorkflowName "double"
       double :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       double value _ = pure (Right (value * 2))
   registered <- registerTypedWorkflow registry key double
@@ -246,13 +248,13 @@ checkMalformedReported result = case result of
 scenarioReferenceIdentity :: forall m. MonadMVar m => RegistryFixture m -> m (Either String (Bool, Text))
 scenarioReferenceIdentity _ = do
   registry <- newRegistry
-  let key = instanceWorkflowKey "checkout" "Checkout" "eu"
+  let key = instanceQualifiedWorkflowName "checkout" "Checkout" "eu"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body value _ = pure (Right (value * 2))
   registered <- registerWorkflowRef registry key body
   case registered of
     Left err -> pure (Left ("expected registration to succeed, got: " <> displayException err))
-    Right ref -> pure (Right (ref.refKey == key, refName ref))
+    Right ref -> pure (Right (ref.refQualifiedName == key, refName ref))
 
 checkReferenceIdentity :: Either String (Bool, Text) -> Either String ()
 checkReferenceIdentity result = case result of
@@ -266,7 +268,7 @@ checkReferenceIdentity result = case result of
 scenarioDuplicateRefRefused :: forall m. MonadMVar m => RegistryFixture m -> m (Either String Text)
 scenarioDuplicateRefRefused _ = do
   registry <- newRegistry
-  let key = newWorkflowKey "same"
+  let key = newQualifiedWorkflowName "same"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body value _ = pure (Right value)
   first <- registerWorkflowRef registry key body
@@ -285,11 +287,38 @@ checkDuplicateRefRefused result = case result of
     | otherwise -> Left ("expected the duplicate refusal, got: " <> Text.unpack rendered)
   Left problem -> Left problem
 
+-- | An empty name, or a config with no class, names nothing a workflow
+-- could be registered as, and registers nothing. Mirrors Rust
+-- @a_key_naming_nothing_is_refused@.
+scenarioUnregistrableRefused :: forall m. MonadMVar m => RegistryFixture m -> m (Either String (Text, Text, Int))
+scenarioUnregistrableRefused _ = do
+  registry <- newRegistry
+  let body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+      body value _ = pure (Right value)
+  emptyName <- registerWorkflowRef registry (newQualifiedWorkflowName "") body
+  unclassed <- registerWorkflowRef registry (instanceQualifiedWorkflowName "unclassed" "" "eu") body
+  snapshot <- snapshotRegistry registry
+  case (emptyName, unclassed) of
+    (Left (InvalidArgument _ emptyDetail), Left (InvalidArgument _ classDetail)) ->
+      pure (Right (emptyDetail, classDetail, snapshotSize snapshot))
+    (Left err, _) -> pure (Left ("expected the empty name refused as an argument, got: " <> displayException err))
+    (_, Left err) -> pure (Left ("expected the classless config refused as an argument, got: " <> displayException err))
+    _ -> pure (Left "expected names for nothing to be refused")
+
+checkUnregistrableRefused :: Either String (Text, Text, Int) -> Either String ()
+checkUnregistrableRefused result = case result of
+  Right (emptyDetail, classDetail, held)
+    | not ("needs a name" `Text.isInfixOf` emptyDetail) -> Left ("expected the nameless refusal, got: " <> Text.unpack emptyDetail)
+    | not ("needs a class" `Text.isInfixOf` classDetail) -> Left ("expected the classless refusal, got: " <> Text.unpack classDetail)
+    | held /= 0 -> Left ("expected nothing registered, got: " <> show held)
+    | otherwise -> Right ()
+  Left problem -> Left problem
+
 -- | A zero argument workflow is called with no input at all.
 scenarioZeroArgCall :: forall m. (MonadMVar m, MonadSTM m) => RegistryFixture m -> m (Either String Text)
 scenarioZeroArgCall fixture = do
   registry <- newRegistry
-  let key = newWorkflowKey "nothing"
+  let key = newQualifiedWorkflowName "nothing"
       nothing :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
       nothing () _ = pure (Right "nothing")
   registered <- registerTypedWorkflow registry key nothing

@@ -46,7 +46,12 @@ class Monad m => SystemDB db m where
   -- | Starts a workflow row, joining the stored one under a repeated id.
   -- A debounced creation is never joined: an id that already names a row
   -- is a conflict (or the holder's key racing back to the bounce).
-  initWorkflow :: db -> NewWorkflow -> Maybe InitWorkflowCaller -> m (Either Error WorkflowInitResult)
+  -- @reusePolicy@ says what the insert does when the id already names
+  -- another caller's workflow: join it, or refuse with 'WorkflowIdInUse'
+  -- before writing anything. A retry that finds this call's own row after
+  -- a lost commit acknowledgement is not a reuse. Mirrors Rust
+  -- @SystemDatabase::init_workflow@.
+  initWorkflow :: db -> NewWorkflow -> Maybe InitWorkflowCaller -> WorkflowIdReusePolicy -> m (Either Error WorkflowInitResult)
   getWorkflow :: db -> WorkflowId -> m (Either Error (Maybe WorkflowRecord))
   listWorkflows :: db -> WorkflowFilter -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowRecord])
   getWorkflowChildren :: db -> WorkflowId -> m (Either Error [WorkflowId])
@@ -59,7 +64,7 @@ class Monad m => SystemDB db m where
                    => db -> [WorkflowId] -> Duration -> m (Either Error ())
   setWorkflowDelay :: db -> WorkflowId -> WorkflowDelay -> Maybe (WorkflowId, Int) -> m (Either Error ())
   clearQueueAssignment :: db -> WorkflowId -> m (Either Error Bool)
-  updateWorkflowAttributes :: db -> WorkflowId -> Maybe Text -> Maybe (WorkflowId, Int) -> m (Either Error ())
+  updateWorkflowAttributes :: db -> WorkflowId -> AttributeUpdate -> Maybe (WorkflowId, Int) -> m (Either Error ())
   reenqueueForRecovery :: db -> [Text] -> Text -> Text -> m (Either Error [WorkflowId])
   transitionDelayedWorkflows :: db -> m (Either Error Word64)
   cancelIfTimedOut :: db -> WorkflowId -> Text -> m (Either Error Bool)
@@ -101,7 +106,7 @@ class Monad m => SystemDB db m where
   checkStep :: db -> WorkflowId -> Int -> Text -> m (Either Error (Maybe StepRecord))
   recordStep :: db -> WorkflowId -> Int -> Text -> Outcome -> Maybe Text -> Maybe StepTiming -> Text -> m (Either Error ())
   listSteps :: db -> WorkflowId -> Bool -> Maybe Int64 -> Maybe Int64 -> Maybe (WorkflowId, Int) -> m (Either Error [StepRecord])
-  recordSleep :: db -> WorkflowId -> Int -> Duration -> Text -> m (Either Error Timestamp)
+  recordSleep :: db -> WorkflowId -> Int -> Duration -> Text -> m (Either Error WakeTime)
   setEvent :: db -> WorkflowId -> Int -> Text -> Text -> Maybe Text -> Text -> m (Either Error ())
   getEvent :: (MonadDelay m, MonadTime m)
            => db -> WorkflowId -> Text -> Duration -> Maybe GetEventCaller -> m (Either Error (Maybe EncodedValue))

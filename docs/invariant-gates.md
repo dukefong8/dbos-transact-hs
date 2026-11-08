@@ -16,7 +16,7 @@ halves are unproven, not "probably fine".
 | G4 | **Runtime negative** | the misuse that types cannot reach is refused with the exact ADT shape (`InsideStep "…"`, `WrongInstance "…"`) **and** leaves no trace: counter unmoved, no rows, no trace events | capture defeats: the residual runtime half |
 
 Live-DB invariants add the standing gates on top: `make db-migrate`,
-psql row verification against `$DBOS_DATABASE_URL`, read-only oracle
+psql row verification against `$DBOS_SYSTEM_DATABASE_URL`, read-only oracle
 spot-check. Durable-state assertions are part of G4's "no trace" half.
 
 ## 2. Why the witness control is mandatory (G3)

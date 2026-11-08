@@ -5,7 +5,7 @@ rebuilt on the Haskell queue engine and the IHP web stack. All three patterns
 are ported:
 
 - **Fair queueing**: the handler enqueues a concurrency-manager workflow onto
-  `partitioned-queue` with the tenant as its `Enqueue.partitionKey` (the
+  `partitioned-queue` with the tenant as its `QueueRequest.partitionKey` (the
   Python `SetEnqueueOptions`); the manager publishes the tenant as an event
   (the facade exposes no row reads, so the list cannot read
   `queue_partition_key` directly), enqueues the real work on

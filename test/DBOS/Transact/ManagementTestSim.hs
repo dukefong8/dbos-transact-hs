@@ -32,7 +32,7 @@ import DBOS.Transact
     Executor,
     Error (..),
     WorkflowHandle,
-    WorkflowKey,
+    QualifiedWorkflowName,
     WorkflowRef,
     handleResult,
     handleStatus,
@@ -74,6 +74,8 @@ import DBOS.Transact.ManagementCases
     checkForkInheritsOwner,
     checkAttributes,
     checkAttributesInWorkflow,
+    checkMergeAttributes,
+    checkMissingAttributesReplay,
     checkDelayRelease,
     checkDelayReleaseInWorkflow,
     checkSetDelayRefusal,
@@ -121,6 +123,8 @@ import DBOS.Transact.ManagementCases
     scenarioForkInheritsOwner,
     scenarioAttributes,
     scenarioAttributesInWorkflow,
+    scenarioMergeAttributes,
+    scenarioMissingAttributesReplay,
     scenarioDelayRelease,
     scenarioDelayReleaseInWorkflow,
     scenarioSetDelayRefusal,
@@ -207,6 +211,8 @@ tests =
       simCase simMgmtFixture "a fork onto a partitioned queue carries the key it is given" scenarioForkPartitioned checkForkPartitioned traceForkPartitioned,
       simCase simMgmtFixture "attributes are replaced and can be searched" scenarioAttributes checkAttributes traceAttributes,
       simCase simMgmtFixture "a workflow replacing another attributes as its step stores the replacement" scenarioAttributesInWorkflow checkAttributesInWorkflow traceAttributesInWorkflow,
+      simCase simMgmtFixture "attributes are merged from outside and inside a workflow" scenarioMergeAttributes checkMergeAttributes traceMergeAttributes,
+      simCase simMgmtFixture "an attribute update on a missing workflow is refused and replayed" scenarioMissingAttributesReplay checkMissingAttributesReplay traceMissingAttributesReplay,
       simCase simMgmtFixture "a delayed workflow can be released sooner" scenarioDelayRelease checkDelayRelease traceDelayRelease,
       simCase simMgmtFixture "an unstorable moved delay is refused and a saturating one accepted" scenarioSetDelayRefusal checkSetDelayRefusal traceSetDelayRefusal,
       simCase simMgmtFixture "a workflow moving another delay as its step releases the target" scenarioDelayReleaseInWorkflow checkDelayReleaseInWorkflow traceDelayReleaseInWorkflow,
@@ -275,6 +281,23 @@ traceMgmtSilent tr = do
 traceAttributesInWorkflow :: forall a. SimTrace a -> IO ()
 traceAttributesInWorkflow tr = do
   selectTraceEventsDynamic tr @?= [WorkflowAttributesReplaceAsked "hs-l2-mgmt-attributes-target-sim", WorkflowAttributesReplaceAsked "hs-l2-mgmt-attributes-target-sim"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | Merges announce as asked-to merges: two from outside, one from inside
+-- the merger workflow.
+traceMergeAttributes :: forall a. SimTrace a -> IO ()
+traceMergeAttributes tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowAttributesMergeAsked "hs-l2-mgmt-merge-target-sim", WorkflowAttributesMergeAsked "hs-l2-mgmt-merge-target-sim", WorkflowAttributesMergeAsked "hs-l2-mgmt-merge-target-sim"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The missing-id merge is refused before any announcement (the call
+-- announces the request only once the write succeeds, as the oracle's
+-- early return does); the fork's replay answers from the record and
+-- writes nothing, so it announces nothing either. The fork itself is the
+-- only management announcement.
+traceMissingAttributesReplay :: forall a. SimTrace a -> IO ()
+traceMissingAttributesReplay tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-mgmt-attributes-tagger-sim-fork"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | Rewind announcements name the rewound id; the re-run's own steps and
@@ -443,7 +466,7 @@ traceListStepsInWorkflow tr = do
   selectTraceEventsDynamic tr
     @?= [ StepRunning "first" 0,
           StepOutputRecorded "first" 0,
-          StepOutputRecorded "DBOS.list_workflow_steps" 1,
+          StepOutputRecorded "DBOS.listWorkflowSteps" 1,
           WorkflowCompleted "hs-l2-mgmt-liststeps-in-sim"
         ]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
@@ -567,21 +590,21 @@ traceForkRefusals tr = do
 -- still completes and the launch still shuts down.
 traceSelfCancelResume :: forall a. SimTrace a -> IO ()
 traceSelfCancelResume tr = do
-  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.cancel_workflow" 0, StepErrorRecorded "DBOS.resume_workflow" 1, WorkflowCompleted "hs-l2-mgmt-self-target-sim"]
+  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.cancelWorkflow" 0, StepErrorRecorded "DBOS.resumeWorkflow" 1, WorkflowCompleted "hs-l2-mgmt-self-target-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | The refused delete is recorded as its step's error; the workflow
 -- still completes and the launch still shuts down.
 traceSelfDelete :: forall a. SimTrace a -> IO ()
 traceSelfDelete tr = do
-  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.delete_workflow" 0, WorkflowCompleted "hs-l2-mgmt-self-delete-sim"]
+  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.deleteWorkflow" 0, WorkflowCompleted "hs-l2-mgmt-self-delete-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | The child's refused delete is recorded as its step's error; both
 -- workflows still complete and the launch still shuts down.
 traceAncestorDelete :: forall a. SimTrace a -> IO ()
 traceAncestorDelete tr = do
-  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.delete_workflow" 0, WorkflowCompleted "hs-l2-mgmt-ancestor-sim-0", WorkflowCompleted "hs-l2-mgmt-ancestor-sim"]
+  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.deleteWorkflow" 0, WorkflowCompleted "hs-l2-mgmt-ancestor-sim-0", WorkflowCompleted "hs-l2-mgmt-ancestor-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | An invalid batch announces nothing at all: the refusal precedes any
@@ -670,7 +693,7 @@ stagedBody ran _ wctx = do
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWfSim :: Executor (IOSim s) -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWfSim :: Executor (IOSim s) -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> IOSim s (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWfSim = runWorkflow
 
 retrieveWfSim :: DBOS (IOSim s) -> WorkflowId -> IOSim s (Either (Error EngineOnly) (WorkflowHandle (IOSim s) EngineOnly))
@@ -686,11 +709,11 @@ statusWfSim = handleStatus
 -- signature, so the channel's @e@ stays ambiguous; these pin it while
 -- leaving @s@ universally quantified.
 registerWfSim :: (FromJSON a, ToJSON r)
-              => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
+              => DBOS (IOSim s) -> QualifiedWorkflowName -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) ())
 registerWfSim = registerWorkflow
 
 registerWfRefSim :: (FromJSON a, ToJSON r)
-                 => DBOS (IOSim s) -> WorkflowKey -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
+                 => DBOS (IOSim s) -> QualifiedWorkflowName -> (forall exec. a -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) r)) -> IOSim s (Either (Error EngineOnly) (WorkflowRef (IOSim s) EngineOnly))
 registerWfRefSim = registerWorkflowRef
 
 -- * Helpers
@@ -698,10 +721,10 @@ registerWfRefSim = registerWorkflowRef
 
 -- | Register an @Int -> Int@ body under IOSim, pinning the JSON types the
 -- polymorphic registration cannot infer from a local binding.
-registerIntRef :: DBOS (IOSim s) -> WorkflowKey -> (forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
+registerIntRef :: DBOS (IOSim s) -> QualifiedWorkflowName -> (forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s (WorkflowRef (IOSim s) EngineOnly)
 registerIntRef dbos key body = orFail =<< registerWfRefSim dbos key body
 
-registerIntWorkflow :: DBOS (IOSim s) -> WorkflowKey -> (forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s ()
+registerIntWorkflow :: DBOS (IOSim s) -> QualifiedWorkflowName -> (forall exec. Int -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Int)) -> IOSim s ()
 registerIntWorkflow dbos key body = orFail =<< registerWfSim dbos key body
 
 orFail :: Either (Error EngineOnly) a -> IOSim s a

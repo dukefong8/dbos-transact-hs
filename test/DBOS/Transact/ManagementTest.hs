@@ -13,7 +13,7 @@ import DBOS.DualStack (liveCase)
 import DBOS.Prelude
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
@@ -25,12 +25,14 @@ import DBOS.SystemDB
   ( AppScope (..),
     AwaitedOutcome (..),
     Fork (..),
+    ForkPoint (..),
     NewWorkflow (..),
     QueueName (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
     WorkflowFilter (..),
     WorkflowId (..),
+    WorkflowIdReusePolicy (..),
     WorkflowInitResult (initResultCreatorXid),
     WorkflowOwner (..),
     WorkflowRecord (..),
@@ -42,6 +44,7 @@ import DBOS.SystemDB
     internalQueueName,
     newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
+import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
@@ -54,14 +57,16 @@ import DBOS.Transact
     Environment (..),
     Error (..),
     QueueConflict (..),
+    RunOptions (..),
     StartOptions (..),
+    awaitChild,
     StepInfo (..),
     StepOutcome (..),
     StepOutput (..),
     StepFailure (..),
     PortableWorkflowError (..),
     WorkflowHandle (workflowId),
-    WorkflowKey,
+    QualifiedWorkflowName,
     WorkflowRef,
     cancelWorkflowsInWorkflow,
     clientCancelWorkflows,
@@ -84,7 +89,7 @@ import DBOS.Transact
     listWorkflows,
     listWorkflowsInWorkflow,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerWorkflow,
     registerWorkflowRef,
     registerQueue,
@@ -92,6 +97,10 @@ import DBOS.Transact
     resumeWorkflowsInWorkflow,
     retrieveWorkflow,
     runWorkflow,
+    runWorkflowRef,
+    runOptionsDefault,
+    rewindWorkflow,
+    forkWorkflow,
     runStep,
     shutdown,
     startWorkflow,
@@ -137,6 +146,8 @@ import DBOS.Transact.ManagementCases
     checkForkInheritsOwner,
     checkAttributes,
     checkAttributesInWorkflow,
+    checkMergeAttributes,
+    checkMissingAttributesReplay,
     checkDelayRelease,
     checkDelayReleaseInWorkflow,
     checkSetDelayRefusal,
@@ -187,6 +198,8 @@ import DBOS.Transact.ManagementCases
     scenarioForkInheritsOwner,
     scenarioAttributes,
     scenarioAttributesInWorkflow,
+    scenarioMergeAttributes,
+    scenarioMissingAttributesReplay,
     scenarioDelayRelease,
     scenarioDelayReleaseInWorkflow,
     scenarioSetDelayRefusal,
@@ -275,7 +288,7 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a child cannot delete its ancestor tree" scenarioAncestorDelete checkAncestorDelete,
       testCase "resuming onto a named queue through a full launch puts the workflow there" $
         withInstance "mgmt-resume-queue" $ \dbos suffix -> do
-          let key = newWorkflowKey "queued"
+          let key = newQualifiedWorkflowName "queued"
               wid = WorkflowId ("hs-l2-mgmt-resume-q-" <> suffix)
               echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
               echoWorkflow message _ = pure (Right message)
@@ -302,13 +315,15 @@ tests =
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "forking from the last failure restarts at the failed step" scenarioForkFromFailure checkForkFromFailure,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "attributes are replaced and can be searched" scenarioAttributes checkAttributes,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow replacing another attributes as its step stores the replacement" scenarioAttributesInWorkflow checkAttributesInWorkflow,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "attributes are merged from outside and inside a workflow" scenarioMergeAttributes checkMergeAttributes,
+      liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an attribute update on a missing workflow is refused and replayed" scenarioMissingAttributesReplay checkMissingAttributesReplay,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a delayed workflow can be released sooner" scenarioDelayRelease checkDelayRelease,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "an unstorable moved delay is refused and a saturating one accepted" scenarioSetDelayRefusal checkSetDelayRefusal,
       liveCase (liveMgmtFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow moving another delay as its step releases the target" scenarioDelayReleaseInWorkflow checkDelayReleaseInWorkflow,
       testCase "management calls from inside a workflow are recorded as steps" $
         withInstance "mgmt-in-workflow" $ \dbos suffix -> do
-          let targetKey = newWorkflowKey "target"
-              operatorKey = newWorkflowKey "operator"
+          let targetKey = newQualifiedWorkflowName "target"
+              operatorKey = newQualifiedWorkflowName "operator"
               targetText = "hs-l2-mgmt-op-target-" <> suffix
               operatorText = "hs-l2-mgmt-operator-" <> suffix
               -- A queue nothing polls, so the target sits there to be
@@ -365,15 +380,15 @@ tests =
           case listed of
             Right steps ->
               map (\StepRecord {stepRecordStepId = sid, stepRecordStepName = name} -> (sid, name)) steps
-                @?= [(0, "DBOS.cancel_workflow"), (1, "DBOS.list_workflows")]
+                @?= [(0, "DBOS.cancelWorkflow"), (1, "DBOS.listWorkflows")]
             other -> fail (show other),
       testCase "a replayed fork hands back the id it recorded" $
         withInstance "mgmt-fork-replay" $ \dbos suffix -> do
           -- A fork generates a new id, so a replay without the checkpoint
           -- would write a second fork: crash after the fork is recorded
           -- and let recovery prove the replay adopts it.
-          let sourceKey = newWorkflowKey "forked-source"
-              operatorKey = newWorkflowKey "forking-operator"
+          let sourceKey = newQualifiedWorkflowName "forked-source"
+              operatorKey = newQualifiedWorkflowName "forking-operator"
               sourceText = "hs-l2-mgmt-replay-src-" <> suffix
               operatorText = "hs-l2-mgmt-replay-op-" <> suffix
               sourceBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -426,14 +441,83 @@ tests =
           case forks of
             Right rows -> length rows @?= 1
             other -> fail ("expected exactly one fork row, got: " <> show other),
+      testCase "a rewound parent adopts a child it started with reject" $
+        withInstance "mgmt-rewind-reject" $ \dbos suffix -> do
+          -- Mirrors Rust @a_rewound_parent_adopts_a_child_it_started_with_reject@:
+          -- the child is the parent's own, started at a step the rewind
+          -- erased, so the replay is not a reuse of the id.
+          let childKey = newQualifiedWorkflowName "child"
+              parentKey = newQualifiedWorkflowName "parent"
+              childText = "hs-l2-mgmt-reject-child-" <> suffix
+              parentText = "hs-l2-mgmt-reject-parent-" <> suffix
+          childRuns <- newIORef (0 :: Int)
+          let childBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+              childBody value _ = modifyIORef' childRuns (+ 1) >> pure (Right (value * 2))
+          childRegistered <- registerWorkflowRef dbos childKey childBody
+          childRef <- case childRegistered of
+            Left err -> fail (show err)
+            Right ref -> pure ref
+          let parentBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+              parentBody () wctx = do
+                started <-
+                  startChildWorkflow
+                    wctx
+                    childRef
+                    (startOptionsDefault {startWorkflowId = Just (WorkflowId childText), startWorkflowIdReusePolicy = WorkflowIdReject})
+                    (Just (encodeWorkflowInput (21 :: Int)))
+                case started of
+                  Left err -> pure (Left err)
+                  Right handle -> do
+                    awaited <- awaitChild wctx handle
+                    case awaited of
+                      Left err -> pure (Left err)
+                      Right (Just stored) ->
+                        pure $ case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+                          Right value -> Right value
+                          Left err -> Left (StepFailed "parent" (Text.pack (show err)))
+                      Right Nothing -> pure (Left (StepFailed "parent" "no child output"))
+          parentRegistered <- registerWorkflowRef dbos parentKey parentBody
+          parentRef <- case parentRegistered of
+            Left err -> fail (show err)
+            Right ref -> pure ref
+          exec <- launchOrFail dbos
+          first <- runWorkflowRef exec parentRef (runOptionsDefault {runWorkflowId = Just (WorkflowId parentText)}) Nothing
+          case first of
+            Right (Just stored) ->
+              case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+                Right 42 -> pure ()
+                other -> fail ("expected the first run, got: " <> show other)
+            other -> fail ("expected the first run, got: " <> show other)
+          rewound <- rewindWorkflow dbos (WorkflowId parentText) defaultRewindOptions
+          reHandle <- case rewound of
+            Left err -> fail (show err)
+            Right handle -> pure (handle :: WorkflowHandle IO EngineOnly)
+          rerun <- handleResult reHandle
+          case rerun of
+            Right (Just stored) ->
+              case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+                Right 42 -> pure ()
+                other -> fail ("expected the re-run, got: " <> show other)
+            other -> fail ("expected the re-run, got: " <> show other)
+          runsFinal <- readIORef childRuns
+          runsFinal @?= 1
+          -- A different parent reaching the same id is a reuse, and is refused.
+          forked <- forkWorkflow dbos (WorkflowId parentText) (Just (ForkStep 0)) defaultForkOptions
+          forkHandle <- case forked of
+            Left err -> fail (show err)
+            Right handle -> pure (handle :: WorkflowHandle IO EngineOnly)
+          replayed <- handleResult forkHandle
+          case replayed of
+            Left (SystemDatabase (SystemDBError.WorkflowIdInUse {})) -> pure ()
+            other -> fail ("expected the fork to refuse the reuse, got: " <> show other),
       testCase "a recovered caller does not rewind its target again" $
         withInstance "mgmt-rewind-replay" $ \dbos suffix -> do
           -- A rewind commits under the same id, so a replay without the
           -- checkpoint would meet an ENQUEUED target and fail: crash after
           -- the call is recorded and let recovery prove the replay adopts
           -- it.
-          let targetKey = newWorkflowKey "rewind-target"
-              operatorKey = newWorkflowKey "rewinding-operator"
+          let targetKey = newQualifiedWorkflowName "rewind-target"
+              operatorKey = newQualifiedWorkflowName "rewinding-operator"
               targetText = "hs-l2-mgmt-rewind-replay-tgt-" <> suffix
               operatorText = "hs-l2-mgmt-rewind-replay-op-" <> suffix
               targetBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -482,12 +566,12 @@ tests =
             other -> fail ("expected the recovery to finish, got: " <> show other)
           listed <- listWorkflowSteps dbos (WorkflowId operatorText)
           case listed of
-            Right records -> map (.stepInfoName) records @?= ["DBOS.rewind_workflow"]
+            Right records -> map (.stepInfoName) records @?= ["DBOS.rewindWorkflow"]
             other -> fail ("expected one recorded rewind step, got: " <> show other),
       testCase "resume puts a cancelled workflow on a queue that runs it" $
         withInstance "mgmt-resume-run" $ \dbos suffix -> do
-          let targetKey = newWorkflowKey "resumable"
-              operatorKey = newWorkflowKey "resumer"
+          let targetKey = newQualifiedWorkflowName "resumable"
+              operatorKey = newQualifiedWorkflowName "resumer"
               targetText = "hs-l2-mgmt-resume-target-" <> suffix
               operatorText = "hs-l2-mgmt-resumer-" <> suffix
               quietQueue = "hs-l2-mgmt-quiet-" <> suffix
@@ -547,14 +631,14 @@ tests =
           case listed of
             Right steps ->
               map (\StepRecord {stepRecordStepId = sid, stepRecordStepName = name} -> (sid, name)) steps
-                @?= [(0, "DBOS.cancel_workflow"), (1, "DBOS.resume_workflow")]
+                @?= [(0, "DBOS.cancelWorkflow"), (1, "DBOS.resumeWorkflow")]
             other -> fail (show other),
       testCase "a clients management call inside a workflow is not a step" $
         withInstance "mgmt-client-call" $ \dbos suffix -> do
           -- A client has no step counter of its own to agree with the
           -- workflow's, so its calls run again on replay instead of
           -- checkpointing: by construction they cannot spend step ids.
-          let operatorKey = newWorkflowKey "caller"
+          let operatorKey = newQualifiedWorkflowName "caller"
               operatorText = "hs-l2-mgmt-client-op-" <> suffix
           clientConfig <- clientConfigFromEnv
           bracket (connectClient clientConfig) (either (const (pure ())) closeClient) $ \connected ->
@@ -588,7 +672,7 @@ tests =
                   other -> fail ("expected only the probe at step zero, got: " <> show other),
       testCase "a client lists a workflow's steps without recording one" $
         withInstance "mgmt-client-steps" $ \dbos suffix -> do
-          let key = newWorkflowKey "client-listed"
+          let key = newQualifiedWorkflowName "client-listed"
               wid = WorkflowId ("hs-l2-mgmt-client-steps-" <> suffix)
               body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
               body () wctx = do
@@ -679,7 +763,7 @@ tests =
         fresh <- freshSuffix
         let workflowText = "hs-l2-mgmt-refusal-" <> fresh
             initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2MgmtRefusal"}
-        created <- SystemDB.initWorkflow backend initialWorkflow Nothing
+        created <- SystemDB.initWorkflow backend initialWorkflow Nothing WorkflowIdReturnExisting
         creator <- case created of
           Left err -> fail (show err)
           Right result -> pure result.initResultCreatorXid
@@ -711,7 +795,7 @@ tests =
         fresh <- freshSuffix
         let workflowText = "hs-l2-mgmt-empty-" <> fresh
             initialWorkflow = (newWorkflow workflowText) {newWorkflowName = Just "L2MgmtEmpty"}
-        created <- SystemDB.initWorkflow backend initialWorkflow Nothing
+        created <- SystemDB.initWorkflow backend initialWorkflow Nothing WorkflowIdReturnExisting
         creator <- case created of
           Left err -> fail (show err)
           Right result -> pure result.initResultCreatorXid
@@ -723,7 +807,7 @@ tests =
         listed <- SystemDB.listSteps backend (WorkflowId workflowText) False Nothing Nothing Nothing
         case listed of
           Right [StepRecord {stepRecordStepId = sid, stepRecordStepName = name}] ->
-            (sid, name) @?= (0, "DBOS.fork_workflow")
+            (sid, name) @?= (0, "DBOS.forkWorkflow")
           other -> fail ("expected the empty batch at step zero, got: " <> show other),
       -- IO only: the assertion reads @operation_outputs.application_name@, a
       -- column no ported type carries (Rust's step listing omits it too), but
@@ -732,7 +816,7 @@ tests =
       -- the value without inventing a field.
       testCase "a workflow's step rows carry the owner and a fork's copies carry it too" $
         withInstance "mgmt-step-owner" $ \dbos suffix -> do
-          let key = newWorkflowKey "owned-step"
+          let key = newQualifiedWorkflowName "owned-step"
               sourceText = "hs-l1-mgmt-step-owner-" <> suffix
               forkedText = "hs-l1-mgmt-step-owner-fork-" <> suffix
               appName = "hs-l2-mgmt-step-owner-" <> Text.take 16 suffix
@@ -768,7 +852,7 @@ tests =
       -- fixture cannot build (its store keys rows by id alone, with no owner).
       testCase "an identity read reaches a peer's row while an unset list stays scoped" $
         withInstance "mgmt-read-scope" $ \dbosA suffix -> do
-          let key = newWorkflowKey "peer-workflow"
+          let key = newQualifiedWorkflowName "peer-workflow"
               appAName = "hs-l2-mgmt-read-scope-" <> Text.take 16 suffix
               appBName = "hs-l2-mgmt-read-peer-" <> Text.take 16 suffix
               ownText = "hs-l1-mgmt-read-mine-" <> suffix
@@ -855,7 +939,7 @@ tests =
       -- ownership separates them.
       testCase "a claim skips another application's queued rows" $
         withInstance "mgmt-claim-scope" $ \dbosA suffix -> do
-          let key = newWorkflowKey "claimable"
+          let key = newQualifiedWorkflowName "claimable"
               appBName = "hs-l2-mgmt-claim-peer-" <> Text.take 16 suffix
               sharedQueue = "hs-l1-mgmt-claim-shared-" <> Text.take 12 suffix
               peerQueue = "hs-l1-mgmt-claim-qb-" <> Text.take 12 suffix
@@ -939,7 +1023,7 @@ tests =
 -- for the compiler to guess. Local copies are deliberate — this module
 -- carries only the aliases it uses, and a sibling test module repeats
 -- the ones it needs.
-runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 startWfRef :: Executor IO -> WorkflowRef IO EngineOnly -> StartOptions -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
@@ -1081,7 +1165,7 @@ isolatedEnvironment =
     }
 
 registerRefOrFail :: (FromJSON argument, ToJSON result)
-                  => DBOS IO -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) result)) -> IO (WorkflowRef IO EngineOnly)
+                  => DBOS IO -> QualifiedWorkflowName -> (forall exec. argument -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) result)) -> IO (WorkflowRef IO EngineOnly)
 registerRefOrFail dbos key body = do
   registered <- registerWorkflowRef dbos key body
   either (fail . show) pure registered

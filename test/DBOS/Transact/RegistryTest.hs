@@ -27,6 +27,7 @@ import DBOS.Transact.RegistryCases
     checkMethodDistinct,
     checkReferenceIdentity,
     checkSnapshotReopen,
+    checkUnregistrableRefused,
     checkZeroArgCall,
     scenarioDuplicateRefRefused,
     scenarioDuplicateRefused,
@@ -38,6 +39,7 @@ import DBOS.Transact.RegistryCases
     scenarioMethodDistinct,
     scenarioReferenceIdentity,
     scenarioSnapshotReopen,
+    scenarioUnregistrableRefused,
     scenarioZeroArgCall,
   )
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -84,5 +86,6 @@ tests =
         liveCase (liveFixture <$> getBackend) "a class-bound key with no instance is its own identity" scenarioMethodDistinct checkMethodDistinct,
         liveCase (liveFixture <$> getBackend) "a reference holds the identity it registered under" scenarioReferenceIdentity checkReferenceIdentity,
         liveCase (liveFixture <$> getBackend) "a reference to a duplicate identity is refused" scenarioDuplicateRefRefused checkDuplicateRefRefused,
-        liveCase (liveFixture <$> getBackend) "a zero argument workflow is called with no input at all" scenarioZeroArgCall checkZeroArgCall
+        liveCase (liveFixture <$> getBackend) "a zero argument workflow is called with no input at all" scenarioZeroArgCall checkZeroArgCall,
+        liveCase (liveFixture <$> getBackend) "a name for nothing is refused and registers nothing" scenarioUnregistrableRefused checkUnregistrableRefused
       ]

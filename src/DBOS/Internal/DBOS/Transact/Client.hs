@@ -26,10 +26,13 @@ module DBOS.Transact.Client
     -- * Workflows from outside
     EnqueueOptions (..),
     enqueueOptionsNew,
-    enqueueOptionsOn,
+    queueRequest,
+    refuseEmptyQueueName,
     clientEnqueueWorkflow,
     clientEnqueueWorkflowInTx,
     clientEnqueueWorkflowWith,
+    clientEnqueueWorkflowWithDebounce,
+    refuseNamelessWorkflow,
     clientRetrieveWorkflow,
     clientWorkflowStatus,
     clientWorkflowRecord,
@@ -48,6 +51,7 @@ module DBOS.Transact.Client
     clientForkWorkflows,
     clientRewindWorkflows,
     clientUpdateWorkflowAttributes,
+    clientMergeWorkflowAttributes,
     clientSetWorkflowDelay,
     -- * Queues from outside
     clientListQueues,
@@ -82,18 +86,18 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (AppScope (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), IdleTransactionTimeout (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowKey (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, idleTimeoutValidate, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
-import DBOS.Transact.Config (Serializer (..), databaseUrlEnv, defaultOutcomePollInterval, serializerName)
+import DBOS.SystemDB.Types (AppScope (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), IdleTransactionTimeout (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), QualifiedWorkflowName, qualifiedName, qualifiedClassName, qualifiedConfigName, WorkflowRecord (..), WorkflowStatus, durationIsZero, idleTimeoutValidate, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
+import DBOS.Transact.Config (Serializer (..), systemDatabaseUrlEnv, defaultOutcomePollInterval, serializerName)
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, withConnection)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, WorkflowHandle (workflowId), pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
 import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
+import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, mergeWorkflowAttributes, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
 import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
 import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
 import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Submitted (..), enqueueNew, initOrJoin, storedPriority, validateStart)
+import DBOS.Transact.Workflow (DuplicationPolicy (..), QueueRequest (..), Submitted (..), queueRequestNew, initOrJoin, storedPriority, validateStart)
 import Hasql.Transaction qualified as Tx
 import System.Environment (lookupEnv)
 
@@ -136,11 +140,11 @@ clientConfigNew databaseUrl =
       idleTransactionTimeout = Default
     }
 
--- | 'clientConfigNew', taking the database URL from @DBOS_DATABASE_URL@.
+-- | 'clientConfigNew', taking the database URL from @DBOS_SYSTEM_DATABASE_URL@.
 -- The URL is the only thing it reads; 'app_name' stays 'Nothing'.
 clientConfigFromEnv :: IO ClientConfig
 clientConfigFromEnv = do
-  url <- lookupEnv (Text.unpack databaseUrlEnv)
+  url <- lookupEnv (Text.unpack systemDatabaseUrlEnv)
   pure (clientConfigNew (maybe "" Text.pack url))
 
 -- | Checks what can be checked before anything is connected.
@@ -150,7 +154,7 @@ validateClientConfig config
       Left
         ( TransactError.ErrorConfig
             ( "no database URL: set `database_url`, or the "
-                <> databaseUrlEnv
+                <> systemDatabaseUrlEnv
                 <> " environment variable if the configuration came from `ClientConfig::from_env`"
             )
         )
@@ -285,41 +289,91 @@ clientSendMessageInTx :: Client IO -> Text -> Tx.Transaction () -> EncodedSendMe
 clientSendMessageInTx client operation callerWrites message serialization fallback sendToForks =
   clientSendMessagesInTx client operation callerWrites [message] serialization [fallback] sendToForks
 
--- | What an enqueue may say about how, beside the workflow and its input.
--- Mirrors Rust @EnqueueOptions@: the queue-shaped asks live on 'Enqueue',
--- where the runtime's start keeps them too, so the two surfaces never spell
--- the same things differently.
+-- | What a client may say about an enqueue, beyond the input. Flat, as
+-- Python's and Java's @EnqueueOptions@ are: what to ask of the queue sits
+-- beside everything else, so an enqueue by name is one type. A start says
+-- the same queue-shaped things in a 'QueueRequest', under
+-- 'StartOptions' 'startQueue', because there the queue is optional and
+-- those settings exist only with one. Apart from the queue's own name,
+-- the two spell each setting the same way, and are checked by the same
+-- rules. Mirrors Rust @EnqueueOptions@.
 data EnqueueOptions = EnqueueOptions
-  { queue      :: Enqueue,
+  { queueName :: Text,
+    deduplicationId :: Maybe Text,
+    duplicationPolicy :: DuplicationPolicy,
+    priority :: Maybe Word32,
+    partitionKey :: Maybe Text,
+    delay :: Maybe Duration,
     workflowId :: Maybe Text,
-    appName    :: Maybe Text,
+    workflowIdReusePolicy :: WorkflowIdReusePolicy,
+    appName :: Maybe Text,
     appVersion :: Maybe Text,
-    timeout    :: Maybe Duration,
+    timeout :: Maybe Duration,
     attributes :: Maybe (Map Text Value)
   }
   deriving stock (Eq, Show)
 
+-- | The refusal a client enqueue of a nameless workflow gets: nothing could
+-- ever dequeue the row. A client takes the name from its caller; an
+-- executor's starts take theirs from a registration, which refuses it.
+-- Mirrors Rust @EnqueueOptions::validate@.
+refuseNamelessWorkflow :: QualifiedWorkflowName -> Text -> Maybe (TransactError.Error e)
+refuseNamelessWorkflow workflow queueName
+  | Text.null (qualifiedName workflow) =
+      Just
+        ( TransactError.InvalidArgument
+            "enqueue a workflow"
+            ("queue `" <> queueName <> "`: `workflow` must not be empty")
+        )
+  | otherwise = Nothing
+
+-- | Refuses an empty queue name up front, naming the field the caller
+-- wrote — rather than leaving the insert to refuse the column under the
+-- name a start's request gives it. Mirrors the @queue_name@ arm of Rust
+-- @EnqueueOptions::validate@.
+refuseEmptyQueueName :: Text -> Maybe (TransactError.Error e)
+refuseEmptyQueueName queueName
+  | Text.null queueName =
+      Just (TransactError.InvalidArgument "enqueue a workflow" "`queue_name` must not be empty")
+  | otherwise = Nothing
+
 -- | A plain enqueue onto a queue, asking for nothing else.
 enqueueOptionsNew :: Text -> EnqueueOptions
-enqueueOptionsNew queueName = enqueueOptionsOn (enqueueNew queueName)
+enqueueOptionsNew queueName =
+  let request = queueRequestNew queueName
+   in EnqueueOptions
+        { queueName = request.name,
+          deduplicationId = request.deduplicationId,
+          duplicationPolicy = request.duplicationPolicy,
+          priority = request.priority,
+          partitionKey = request.partitionKey,
+          delay = request.delay,
+          workflowId = Nothing,
+          workflowIdReusePolicy = WorkflowIdReturnExisting,
+          appName = Nothing,
+          appVersion = Nothing,
+          timeout = Nothing,
+          attributes = Nothing
+        }
 
--- | The same, for an enqueue that has something to ask of the queue itself.
-enqueueOptionsOn :: Enqueue -> EnqueueOptions
-enqueueOptionsOn shape =
-  EnqueueOptions
-    { queue = shape,
-      workflowId = Nothing,
-      appName = Nothing,
-      appVersion = Nothing,
-      timeout = Nothing,
-      attributes = Nothing
+-- | The queue-shaped half, as a start would say it, which is what the row
+-- and the shared checks are written against. Mirrors Rust
+-- @EnqueueOptions::queue_request@.
+queueRequest :: EnqueueOptions -> QueueRequest
+queueRequest options =
+  (queueRequestNew options.queueName)
+    { deduplicationId = options.deduplicationId,
+      duplicationPolicy = options.duplicationPolicy,
+      priority = options.priority,
+      partitionKey = options.partitionKey,
+      delay = options.delay
     }
 
 -- | Enqueues a workflow, onto a queue, and hands back a polling
--- handle to it. The workflow is the key it was registered under; a free
+-- handle to it. The workflow is the name it was registered under; a free
 -- function's name alone converts into one. Mirrors @Client::enqueue@.
 clientEnqueueWorkflow :: MonadSTM m
-                      => Client m -> WorkflowKey -> Text -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+                      => Client m -> QualifiedWorkflowName -> Text -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 clientEnqueueWorkflow client workflow queueName input =
   clientEnqueueWorkflowWith client workflow (enqueueOptionsNew queueName) input
 
@@ -329,46 +383,62 @@ clientEnqueueWorkflow client workflow queueName input =
 -- executors running exactly that code. A deduplication collision is refused,
 -- unless the policy asks to join the holder instead.
 clientEnqueueWorkflowWith :: MonadSTM m
-                          => Client m -> WorkflowKey -> EnqueueOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
-clientEnqueueWorkflowWith client workflow options input = do
-  case validateStart (Just options.queue) options.timeout of
-    Left err -> pure (Left err)
-    Right () -> do
-      generated <- generatedWorkflowId client.conn
-      let shape = options.queue
-          workflowText = fromMaybe generated options.workflowId
-          serialization = case rawInput >>= (.serializedSerialization) of
-            Just (Serialization name) -> Just name
-            Nothing                   -> Just (serializerName client.conn.connSerializer)
-          applicationName = case options.appName of
-            Just name -> Just name
-            Nothing   -> client.conn.connAppName
-          new =
-            (newWorkflow workflowText)
-              { newWorkflowName = Just workflow.name,
-                newWorkflowClassName = workflow.className,
-                newWorkflowConfigName = workflow.configName,
-                newWorkflowInput = (.serializedText) <$> rawInput,
-                newWorkflowSerialization = serialization,
-                newWorkflowQueueName = Just shape.name,
-                newWorkflowDeduplicationId = shape.deduplicationId,
-                newWorkflowPriority = storedPriority shape,
-                newWorkflowQueuePartitionKey = shape.partitionKey,
-                newWorkflowDelay = shape.delay,
-                newWorkflowIsDebounced = shape.isDebounced,
-                newWorkflowDebounceTimeout = shape.debounceTimeout,
-                newWorkflowTimeout = options.timeout,
-                newWorkflowDeadline = Nothing,
-                newWorkflowAttributes = encodeAttributes options.attributes,
-                newWorkflowExecutorId = Nothing,
-                newWorkflowAppName = applicationName,
-                newWorkflowAppVersion = options.appVersion
-              }
-      started <- initOrJoin client.conn new (Just shape) Nothing
-      pure $ case started of
-        Right (SubmittedCreated _)     -> Right (handle True workflowText)
-        Right (SubmittedJoined holder) -> Right holder
-        Left err                       -> Left (TransactError.refusedStart (Just shape.name) err)
+                          => Client m -> QualifiedWorkflowName -> EnqueueOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+clientEnqueueWorkflowWith client workflow options input =
+  clientEnqueueWorkflowWithDebounce client workflow options Nothing input
+
+-- | 'clientEnqueueWorkflowWith', stamping the fresh row debounced when the
+-- call is a debounce's fresh creation. The flag is two-level, as the
+-- oracle's @Option<Debounced>@ is: 'Nothing' is a plain enqueue, while
+-- 'Just' (even of no cap) marks a debounced creation whose release frees
+-- the key — a debounce with no hold cap still debounces. Only the
+-- debouncer passes 'Just'. Mirrors the oracle's @debounce@ argument to
+-- @enqueue_encoded@.
+clientEnqueueWorkflowWithDebounce :: MonadSTM m
+                                   => Client m -> QualifiedWorkflowName -> EnqueueOptions -> Maybe (Maybe Duration) -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+clientEnqueueWorkflowWithDebounce client workflow options debounceCreation input =
+  case refuseNamelessWorkflow workflow options.queueName of
+    Just err -> pure (Left err)
+    Nothing -> case refuseEmptyQueueName options.queueName of
+      Just err -> pure (Left err)
+      Nothing -> case validateStart (Just (queueRequest options)) options.timeout options.workflowId options.workflowIdReusePolicy of
+        Left err -> pure (Left err)
+        Right () -> do
+          generated <- generatedWorkflowId client.conn
+          let request = queueRequest options
+              workflowText = fromMaybe generated options.workflowId
+              serialization = case rawInput >>= (.serializedSerialization) of
+                Just (Serialization name) -> Just name
+                Nothing                   -> Just (serializerName client.conn.connSerializer)
+              applicationName = case options.appName of
+                Just name -> Just name
+                Nothing   -> client.conn.connAppName
+              new =
+                (newWorkflow workflowText)
+                { newWorkflowName = Just (qualifiedName workflow),
+                  newWorkflowClassName = qualifiedClassName workflow,
+                  newWorkflowConfigName = qualifiedConfigName workflow,
+                  newWorkflowInput = (.serializedText) <$> rawInput,
+                  newWorkflowSerialization = serialization,
+                  newWorkflowQueueName = Just options.queueName,
+                  newWorkflowDeduplicationId = options.deduplicationId,
+                  newWorkflowPriority = storedPriority request,
+                  newWorkflowQueuePartitionKey = options.partitionKey,
+                  newWorkflowDelay = options.delay,
+                  newWorkflowIsDebounced = isJust debounceCreation,
+                  newWorkflowDebounceTimeout = fromMaybe Nothing debounceCreation,
+                  newWorkflowTimeout = options.timeout,
+                  newWorkflowDeadline = Nothing,
+                  newWorkflowAttributes = encodeAttributes options.attributes,
+                  newWorkflowExecutorId = Nothing,
+                  newWorkflowAppName = applicationName,
+                  newWorkflowAppVersion = options.appVersion
+                }
+          started <- initOrJoin client.conn new (Just request) options.workflowIdReusePolicy Nothing
+          pure $ case started of
+            Right (SubmittedCreated _)     -> Right (handle True workflowText)
+            Right (SubmittedJoined holder) -> Right holder
+            Left err                       -> Left (TransactError.refusedStart (Just options.queueName) err)
   where
     rawInput = unWorkflowInput <$> input
     handle failMissing workflowText =
@@ -383,53 +453,57 @@ clientEnqueueWorkflowWith client workflow options input = do
 -- condemns the whole transaction; an identical row is a no-op join. The
 -- returned handle is polling, and is only usable once the transaction
 -- commits.
-clientEnqueueWorkflowInTx :: Client IO -> WorkflowKey -> Text -> Tx.Transaction () -> EnqueueOptions -> Maybe WorkflowInput -> IO (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle IO e))
+clientEnqueueWorkflowInTx :: Client IO -> QualifiedWorkflowName -> Text -> Tx.Transaction () -> EnqueueOptions -> Maybe WorkflowInput -> IO (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle IO e))
 clientEnqueueWorkflowInTx client workflow operation callerWrites options input =
-  case validateStart (Just options.queue) options.timeout of
-    Left err -> pure (Left err)
-    Right () -> case options.queue.duplicationPolicy of
-      ReturnExisting ->
-        pure (Left (TransactError.InvalidArgument "enqueue in transaction" "duplication_policy 'return-existing' is not supported by enqueue_in_transaction. Use enqueue instead."))
-      _ -> do
-        generated <- generatedWorkflowId client.conn
-        let shape = options.queue
-            rawInput = unWorkflowInput <$> input
-            workflowText = fromMaybe generated options.workflowId
-            serialization = case rawInput >>= (.serializedSerialization) of
-              Just (Serialization name) -> Just name
-              Nothing -> Just (serializerName client.conn.connSerializer)
-            applicationName = case options.appName of
-              Just name -> Just name
-              Nothing -> client.conn.connAppName
-            new =
-              (newWorkflow workflowText)
-                { newWorkflowName = Just workflow.name,
-                  newWorkflowClassName = workflow.className,
-                  newWorkflowConfigName = workflow.configName,
-                  newWorkflowInput = (.serializedText) <$> rawInput,
-                  newWorkflowSerialization = serialization,
-                  newWorkflowQueueName = Just shape.name,
-                  newWorkflowDeduplicationId = shape.deduplicationId,
-                  newWorkflowPriority = storedPriority shape,
-                  newWorkflowQueuePartitionKey = shape.partitionKey,
-                  newWorkflowDelay = shape.delay,
-                  newWorkflowTimeout = options.timeout,
-                  newWorkflowDeadline = Nothing,
-                  newWorkflowAttributes = encodeAttributes options.attributes,
-                  newWorkflowExecutorId = Nothing,
-                  newWorkflowAppName = applicationName,
-                  newWorkflowAppVersion = options.appVersion
-                }
-        case validateNewWorkflow new of
-          Left err -> pure (Left (TransactError.refusedStart (Just shape.name) err))
-          Right () -> do
-            creatorXid <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
-            now <- timestampNow
-            composed <- withClientTransaction client operation (callerWrites >> Postgres.enqueueInTx new applicationName creatorXid now)
-            pure $ case composed of
-              Left err -> Left err
-              Right (Left sysErr) -> Left (TransactError.refusedStart (Just shape.name) sysErr)
-              Right (Right ()) -> Right (pollingHandle client.conn workflowText True)
+  case refuseNamelessWorkflow workflow options.queueName of
+    Just err -> pure (Left err)
+    Nothing -> case refuseEmptyQueueName options.queueName of
+      Just err -> pure (Left err)
+      Nothing -> case validateStart (Just (queueRequest options)) options.timeout options.workflowId options.workflowIdReusePolicy of
+        Left err -> pure (Left err)
+        Right () -> case options.duplicationPolicy of
+          ReturnExisting ->
+            pure (Left (TransactError.InvalidArgument "enqueue in transaction" "duplication_policy 'return-existing' is not supported by enqueue_in_transaction. Use enqueue instead."))
+          _ -> do
+            generated <- generatedWorkflowId client.conn
+            let request = queueRequest options
+                rawInput = unWorkflowInput <$> input
+                workflowText = fromMaybe generated options.workflowId
+                serialization = case rawInput >>= (.serializedSerialization) of
+                  Just (Serialization name) -> Just name
+                  Nothing -> Just (serializerName client.conn.connSerializer)
+                applicationName = case options.appName of
+                  Just name -> Just name
+                  Nothing -> client.conn.connAppName
+                new =
+                  (newWorkflow workflowText)
+                    { newWorkflowName = Just (qualifiedName workflow),
+                      newWorkflowClassName = qualifiedClassName workflow,
+                      newWorkflowConfigName = qualifiedConfigName workflow,
+                      newWorkflowInput = (.serializedText) <$> rawInput,
+                      newWorkflowSerialization = serialization,
+                      newWorkflowQueueName = Just options.queueName,
+                      newWorkflowDeduplicationId = options.deduplicationId,
+                      newWorkflowPriority = storedPriority request,
+                      newWorkflowQueuePartitionKey = options.partitionKey,
+                      newWorkflowDelay = options.delay,
+                      newWorkflowTimeout = options.timeout,
+                      newWorkflowDeadline = Nothing,
+                      newWorkflowAttributes = encodeAttributes options.attributes,
+                      newWorkflowExecutorId = Nothing,
+                      newWorkflowAppName = applicationName,
+                      newWorkflowAppVersion = options.appVersion
+                    }
+            case validateNewWorkflow new of
+              Left err -> pure (Left (TransactError.refusedStart (Just options.queueName) err))
+              Right () -> do
+                creatorXid <- Text.pack . UUID.toString <$> UUID.V4.nextRandom
+                now <- timestampNow
+                composed <- withClientTransaction client operation (callerWrites >> Postgres.enqueueInTx new applicationName options.workflowIdReusePolicy creatorXid now)
+                pure $ case composed of
+                  Left err -> Left err
+                  Right (Left sysErr) -> Left (TransactError.refusedStart (Just options.queueName) sysErr)
+                  Right (Right ()) -> Right (pollingHandle client.conn workflowText True)
 
 -- | A handle to a workflow that already exists, by id. Always polling, and
 -- never checked: the id is not read until the handle is used. The one
@@ -573,12 +647,19 @@ clientRewindWorkflows client workflowId@(WorkflowId workflowText) options =
 
 -- | Replace a workflow's attributes from outside, or clear them when
 -- given 'Nothing'. The write lives in 'Management', as the engine's own
--- update does; the backend replaces rather than merges (Rust parity —
--- Python's @merge@ has no counterpart in either).
+-- update does.
 clientUpdateWorkflowAttributes :: Monad m
                                => Client m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 clientUpdateWorkflowAttributes client workflowId attributes =
   updateWorkflowAttributes client.conn workflowId attributes
+
+-- | Merge keys into a workflow's attributes from outside, in one
+-- statement. The write lives in 'Management', as the engine's own merge
+-- does.
+clientMergeWorkflowAttributes :: Monad m
+                              => Client m -> WorkflowId -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+clientMergeWorkflowAttributes client workflowId attributes =
+  mergeWorkflowAttributes client.conn workflowId attributes
 
 -- | Move a delayed workflow's release from outside.
 clientSetWorkflowDelay :: Monad m

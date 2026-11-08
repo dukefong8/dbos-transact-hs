@@ -110,3 +110,20 @@ structurally absent: every path answers the bounced or enqueued row's id.
   new module, extending the ADR-0028 home). The deduplication-id
   respelling is a separate wire decision (adopted with its own ADR) and
   does not ride this note.
+
+## Note 2026-11-08 (Rust #137)
+
+Rust #137 gives the debouncers their own fields, and the port follows:
+`Debouncer` holds the queue, the budget (`debouncerTimeout`, never
+inherited), the hold cap (`debouncerDebounceTimeout`), the app and the
+attributes; `DebouncerClient` holds the queue name (the constructor takes
+it, not options), the budget, the version, the app, the attributes and
+the hold cap. The runtime refusals for caller-set queue options are gone
+with the fields they guarded — what a debounce sets is unbuildable now,
+not refused — and the budget is validated on the start's channel before
+the durations, with the app name refused per call (`refuseDebounceAppName`,
+reusing the shared rule's wording). The "no stored-id counterpart" and
+"app-name stays at config/launch" notes above are superseded accordingly;
+a per-call serialization choice stays out (inputs carry their own tag).
+The bounce errors the loop meets now map through `refusedArgument` on
+this operation, as the oracle's loop does.

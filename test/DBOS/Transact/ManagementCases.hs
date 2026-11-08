@@ -53,6 +53,8 @@ module DBOS.Transact.ManagementCases
     scenarioForkInheritsOwner,
     scenarioAttributes,
     scenarioAttributesInWorkflow,
+    scenarioMergeAttributes,
+    scenarioMissingAttributesReplay,
     scenarioDelayRelease,
     scenarioDelayReleaseInWorkflow,
     scenarioSetDelayRefusal,
@@ -99,6 +101,8 @@ module DBOS.Transact.ManagementCases
     checkForkInheritsOwner,
     checkAttributes,
     checkAttributesInWorkflow,
+    checkMergeAttributes,
+    checkMissingAttributesReplay,
     checkDelayRelease,
     checkDelayReleaseInWorkflow,
     checkSetDelayRefusal,
@@ -123,14 +127,14 @@ import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import GHC.Stack (HasCallStack)
-import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (..), QueueName (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, durationFromMs, durationFromSecs, forkNew, internalQueueName, newWorkflow, streamClosedSentinel, portableJsonSerialization)
+import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (..), QueueName (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, durationFromMs, durationFromSecs, forkNew, internalQueueName, newWorkflow, streamClosedSentinel, portableJsonSerialization)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
     Config (..),
     DBOS,
-    Enqueue (..),
+    QueueRequest (..),
     EngineOnly,
     Error (..),
     Executor,
@@ -144,7 +148,7 @@ import DBOS.Transact
     PortableWorkflowError (..),
     WorkflowCtx,
     WorkflowHandle (workflowId),
-    WorkflowKey,
+    QualifiedWorkflowName,
     WorkflowRef,
     cancelWorkflow,
     cancelWorkflows,
@@ -155,7 +159,7 @@ import DBOS.Transact
     deleteWorkflows,
     deleteWorkflowsInWorkflow,
     enqueueWorkflow,
-    enqueueNew,
+    queueRequestNew,
     forkWorkflow,
     forkFrom,
     forkWorkflows,
@@ -164,7 +168,7 @@ import DBOS.Transact
     handleStatus,
     millisDuration,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     recv,
     registerDataSource,
     registerWorkflow,
@@ -188,6 +192,8 @@ import DBOS.Transact
     setWorkflowDelay,
     setWorkflowDelayInWorkflow,
     Topic (..),
+    mergeWorkflowAttributes,
+    mergeWorkflowAttributesInWorkflow,
     updateWorkflowAttributes,
     updateWorkflowAttributesInWorkflow,
     ListWorkflowStepsOptions (..),
@@ -290,7 +296,7 @@ mkMgmtFixture config identity connApp genId genEntropy sysdb tracer freshBase = 
 -- error channel pins to 'EngineOnly' once instead of at each call site.
 -- Local copies are deliberate: this module carries only the aliases it uses.
 runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-      => Executor m -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+      => Executor m -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 startWfRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
@@ -396,7 +402,7 @@ scenarioCancelResumeRun fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     ran <- newTVarIO (0 :: Int)
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "cancellable"
+    let key = newQualifiedWorkflowName "cancellable"
         workflowText = "hs-l2-mgmt-cancel-resume-" <> suffix
         wid = WorkflowId workflowText
     refE <- registerWorkflowRef dbos key (cancellableBody ran)
@@ -408,7 +414,7 @@ scenarioCancelResumeRun fx = do
       startWfRef
         exec
         ref
-        (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just (enqueueNew "no-runner-here")})
+        (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just (queueRequestNew "no-runner-here")})
         (Just (encodeWorkflowInput (0 :: Int)))
     case started of
       Left err -> throwIO (userError (show err))
@@ -455,7 +461,7 @@ scenarioResumeOntoQueue :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mon
 scenarioResumeOntoQueue fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "resumable"
+    let key = newQualifiedWorkflowName "resumable"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body input _ = pure (Right input)
         wid = WorkflowId ("hs-l2-mgmt-resume-queue-" <> suffix)
@@ -468,7 +474,7 @@ scenarioResumeOntoQueue fx = do
       startWfRef
         exec
         ref
-        (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just (enqueueNew "no-runner-here")})
+        (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just (queueRequestNew "no-runner-here")})
         (Just (encodeWorkflowInput (7 :: Int)))
     case started of
       Left err -> throwIO (userError (show err))
@@ -502,8 +508,8 @@ scenarioCancelTree fx = do
     childStarted <- newEmptyMVar
     gate <- newEmptyMVar
     suffix <- fx.mfFreshBase
-    let childKey = newWorkflowKey "tree-child"
-        parentKey = newWorkflowKey "tree-parent"
+    let childKey = newQualifiedWorkflowName "tree-child"
+        parentKey = newQualifiedWorkflowName "tree-parent"
         parentText = "hs-l2-mgmt-tree-parent-" <> suffix
         parentId = WorkflowId parentText
     childRefE <- registerWorkflowRef dbos childKey (treeChildBody childStarted gate)
@@ -545,7 +551,7 @@ scenarioDelete :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m
 scenarioDelete fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "deletable"
+    let key = newQualifiedWorkflowName "deletable"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body input wctx = runStep wctx "work" (const (pure input))
         wid = WorkflowId ("hs-l2-mgmt-delete-" <> suffix)
@@ -579,7 +585,7 @@ scenarioRetrieve :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer
 scenarioRetrieve fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "retrievable"
+    let key = newQualifiedWorkflowName "retrievable"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body input _ = pure (Right (input * 3))
         wid = WorkflowId ("hs-l2-mgmt-retrieve-" <> suffix)
@@ -618,7 +624,7 @@ scenarioListSteps :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTime
 scenarioListSteps fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "three-steps"
+    let key = newQualifiedWorkflowName "three-steps"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
         body () wctx = do
           one <- runStep wctx "one" (const (pure ()))
@@ -662,7 +668,7 @@ scenarioListStepsWithoutOutputs :: forall m. (MonadAsync m, MonadFork m, MonadMa
 scenarioListStepsWithoutOutputs fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "big-then-fails"
+    let key = newQualifiedWorkflowName "big-then-fails"
         wid = WorkflowId ("hs-l2-mgmt-steps-no-output-" <> suffix)
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
         body () wctx = do
@@ -691,7 +697,7 @@ scenarioListStepsPaging :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mon
 scenarioListStepsPaging fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "five-steps"
+    let key = newQualifiedWorkflowName "five-steps"
         wid = WorkflowId ("hs-l2-mgmt-steps-page-" <> suffix)
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
         body () wctx = do
@@ -730,7 +736,7 @@ scenarioListStepsInWorkflow :: forall m. (MonadAsync m, MonadFork m, MonadMask m
 scenarioListStepsInWorkflow fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "self-lister"
+    let key = newQualifiedWorkflowName "self-lister"
         wid = WorkflowId ("hs-l2-mgmt-liststeps-in-" <> suffix)
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) [Text])
         body () wctx = do
@@ -762,7 +768,7 @@ scenarioListStepsInWorkflow fx = do
         (\db -> SystemDB.listSteps db wid True Nothing Nothing Nothing)
     listingText <- case recorded of
       Left err -> throwIO (userError (show err))
-      Right records -> case [text | StepRecord {stepRecordStepName = name, stepRecordOutput = Just text} <- records, name == "DBOS.list_workflow_steps"] of
+      Right records -> case [text | StepRecord {stepRecordStepName = name, stepRecordOutput = Just text} <- records, name == "DBOS.listWorkflowSteps"] of
         [text] -> pure text
         other -> throwIO (userError ("expected one recorded listing, got: " <> show other))
     pure (inside, outsideNames, listingText)
@@ -776,7 +782,7 @@ scenarioSingular :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer
 scenarioSingular fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "singular"
+    let key = newQualifiedWorkflowName "singular"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body input _ = pure (Right input)
         wid :: Int -> WorkflowId
@@ -790,7 +796,7 @@ scenarioSingular fx = do
       startWfRef
         exec
         ref
-        (startOptionsDefault {startWorkflowId = Just (wid 1), startQueue = Just (enqueueNew "no-runner-here")})
+        (startOptionsDefault {startWorkflowId = Just (wid 1), startQueue = Just (queueRequestNew "no-runner-here")})
         (Just (encodeWorkflowInput (1 :: Int)))
     ran2 <- runWf exec key (wid 2) (Just (encodeWorkflowInput (2 :: Int)))
     ran3 <- runWf exec key (wid 3) (Just (encodeWorkflowInput (3 :: Int)))
@@ -910,7 +916,7 @@ checkListStepsPaging =
 checkListStepsInWorkflow :: ([Text], [Text], Text) -> Either String ()
 checkListStepsInWorkflow (inside, outside, recorded) = do
   checkEq ["first"] inside
-  checkEq ["first", "DBOS.list_workflow_steps"] outside
+  checkEq ["first", "DBOS.listWorkflowSteps"] outside
   checkEq True ("[true," `Text.isPrefixOf` recorded)
 
 -- | Cancel leaves it cancelled, resume re-enqueues it, delete removes the
@@ -988,7 +994,7 @@ scenarioForkFromBeginning fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     attempts <- newTVarIO (0 :: Int)
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "forkable"
+    let key = newQualifiedWorkflowName "forkable"
         sourceText = "hs-l2-mgmt-fork-src-" <> suffix
         sourceId = WorkflowId sourceText
     refE <- registerWorkflowRef dbos key (forkableBody attempts)
@@ -1051,8 +1057,8 @@ scenarioForkReplacesChild fx =
     broken <- newTVarIO True
     beforeCount <- newTVarIO (0 :: Int)
     childCount <- newTVarIO (0 :: Int)
-    let childKey = newWorkflowKey "replace-child"
-        parentKey = newWorkflowKey "replace-parent"
+    let childKey = newQualifiedWorkflowName "replace-child"
+        parentKey = newQualifiedWorkflowName "replace-parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = do
           atomically (modifyTVar childCount (+ 1))
@@ -1216,7 +1222,7 @@ scenarioForkTakesIdAndQueue :: forall m. (MonadFork m, MonadMask m, MonadMVar m,
 scenarioForkTakesIdAndQueue fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "placed"
+    let key = newQualifiedWorkflowName "placed"
         sourceText = "hs-l2-mgmt-fork-placed-src-" <> suffix
         forkedText = "hs-l2-mgmt-fork-placed-" <> suffix
         sourceId = WorkflowId sourceText
@@ -1258,7 +1264,7 @@ scenarioForkInheritsOwner :: forall m. (MonadFork m, MonadMask m, MonadMVar m, M
 scenarioForkInheritsOwner fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "owned"
+    let key = newQualifiedWorkflowName "owned"
         sourceText = "hs-l2-mgmt-fork-owner-src-" <> suffix
         forkedText = "hs-l2-mgmt-fork-owner-" <> suffix
         sourceId = WorkflowId sourceText
@@ -1297,7 +1303,7 @@ scenarioForkFromStep fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     ran <- newTVarIO ([] :: [Text])
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "staged"
+    let key = newQualifiedWorkflowName "staged"
         sourceText = "hs-l2-mgmt-fork-step-src-" <> suffix
         sourceId = WorkflowId sourceText
     refE <- registerWorkflowRef dbos key (stagedBody ran)
@@ -1339,7 +1345,7 @@ scenarioForkFromFailure fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     calls <- newTVarIO (0 :: Int)
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "flaky"
+    let key = newQualifiedWorkflowName "flaky"
         sourceText = "hs-l2-mgmt-fork-fail-src-" <> suffix
         sourceId = WorkflowId sourceText
         flakyBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -1430,7 +1436,7 @@ scenarioBulkCancelResume :: forall m. (MonadFork m, MonadMVar m, MonadSTM m, Mon
 scenarioBulkCancelResume fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "queued"
+    let key = newQualifiedWorkflowName "queued"
         firstText = "hs-l2-mgmt-bulk-1-" <> suffix
         secondText = "hs-l2-mgmt-bulk-2-" <> suffix
         first = WorkflowId firstText
@@ -1467,7 +1473,7 @@ scenarioBulkFork :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer
 scenarioBulkFork fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "doubling"
+    let key = newQualifiedWorkflowName "doubling"
         firstText = "hs-l2-mgmt-bulk-fork-1-" <> suffix
         secondText = "hs-l2-mgmt-bulk-fork-2-" <> suffix
         first = WorkflowId firstText
@@ -1511,7 +1517,7 @@ scenarioForkPartitioned :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mon
 scenarioForkPartitioned fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "queued"
+    let key = newQualifiedWorkflowName "queued"
         sourceId = WorkflowId ("hs-l2-mgmt-fork-key-src-" <> suffix)
     regE <- registerWorkflow dbos key echoTextBody
     case regE of
@@ -1686,7 +1692,7 @@ scenarioStartRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Monad
 scenarioStartRefusals fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey ("refused-start-" <> Text.take 12 suffix)
+    let key = newQualifiedWorkflowName ("refused-start-" <> Text.take 12 suffix)
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
         body () _ = pure (Right ())
         queueName = "hs-l2-mgmt-start-refused-q-" <> Text.take 12 suffix
@@ -1696,8 +1702,8 @@ scenarioStartRefusals fx = do
       Nothing -> error "a storable-busting duration must build"
       Just duration -> pure duration
     plain <- startWfRef executor ref (startOptionsDefault {startTimeout = Explicit huge}) Nothing
-    queued <- startWfRef executor ref (startOptionsDefault {startTimeout = Explicit huge, startQueue = Just (enqueueNew queueName)}) Nothing
-    delayed <- startWfRef executor ref (startOptionsDefault {startQueue = Just ((enqueueNew queueName) {delay = Just huge})}) Nothing
+    queued <- startWfRef executor ref (startOptionsDefault {startTimeout = Explicit huge, startQueue = Just (queueRequestNew queueName)}) Nothing
+    delayed <- startWfRef executor ref (startOptionsDefault {startQueue = Just ((queueRequestNew queueName) {delay = Just huge})}) Nothing
     pure (void plain, void queued, void delayed)
 
 -- | Each refusal arrives as InvalidArgument on the start's own operation,
@@ -1733,7 +1739,7 @@ scenarioSelfCancelResume :: forall m. (MonadFork m, MonadAsync m, MonadMask m, M
 scenarioSelfCancelResume fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "self-targeting"
+    let key = newQualifiedWorkflowName "self-targeting"
         wid = WorkflowId ("hs-l2-mgmt-self-target-" <> suffix)
         body :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) (Text, Text))
         body ownId wctx = do
@@ -1774,7 +1780,7 @@ scenarioSelfDelete :: forall m. (MonadFork m, MonadAsync m, MonadMask m, MonadMV
 scenarioSelfDelete fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "self-deleter"
+    let key = newQualifiedWorkflowName "self-deleter"
         wid = WorkflowId ("hs-l2-mgmt-self-delete-" <> suffix)
         body :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         body ownId wctx = do
@@ -1807,8 +1813,8 @@ scenarioAncestorDelete :: forall m. (MonadFork m, MonadAsync m, MonadMask m, Mon
 scenarioAncestorDelete fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let childKey = newWorkflowKey "deleting-child"
-        parentKey = newWorkflowKey "deleted-parent"
+    let childKey = newQualifiedWorkflowName "deleting-child"
+        parentKey = newQualifiedWorkflowName "deleted-parent"
         rootText = "hs-l2-mgmt-ancestor-" <> suffix
         childBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         childBody root wctx = do
@@ -1860,7 +1866,7 @@ scenarioAttributes :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTim
 scenarioAttributes fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "tagged"
+    let key = newQualifiedWorkflowName "tagged"
         widText = "hs-l2-mgmt-attributes-" <> suffix
         wid = WorkflowId widText
         tenant = "acme-" <> suffix
@@ -1922,8 +1928,8 @@ scenarioAttributesInWorkflow :: forall m. (MonadAsync m, MonadFork m, MonadMask 
 scenarioAttributesInWorkflow fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let targetKey = newWorkflowKey "tagged-target"
-        callerKey = newWorkflowKey "attributes-caller"
+    let targetKey = newQualifiedWorkflowName "tagged-target"
+        callerKey = newQualifiedWorkflowName "attributes-caller"
         targetText = "hs-l2-mgmt-attributes-target-" <> suffix
         callerText = "hs-l2-mgmt-attributes-caller-" <> suffix
         replacement = "{\"tenant\":\"acme-" <> suffix <> "\",\"tier\":\"gold-" <> suffix <> "\"}"
@@ -1979,7 +1985,160 @@ checkAttributesInWorkflow (stored, cleared, names) = do
       | otherwise -> Left ("expected the replacement attributes, got: " <> show stored)
     Nothing -> Left "expected the replacement attributes, got nothing"
   checkEq Nothing cleared
-  checkEq ["DBOS.update_workflow_attributes"] names
+  checkEq ["DBOS.updateWorkflowAttributes"] names
+
+-- | A merge adds keys and keeps the rest, from outside a workflow and from
+-- inside one, where it is a step recorded under the same name as a
+-- replacement. Mirrors the oracle's
+-- @attributes_are_merged_from_outside_and_inside_a_workflow@.
+scenarioMergeAttributes :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                        => MgmtFixture m -> m (Maybe Text, [Text])
+scenarioMergeAttributes fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let targetKey = newQualifiedWorkflowName "merge-target"
+        mergerKey = newQualifiedWorkflowName "attributes-merger"
+        targetText = "hs-l2-mgmt-merge-target-" <> suffix
+        mergerText = "hs-l2-mgmt-merge-caller-" <> suffix
+        tenant = "acme-" <> suffix
+        tags = "{\"tenant\":\"" <> tenant <> "\",\"tier\":\"gold-" <> suffix <> "\"}"
+        tier = "{\"tier\":\"silver-" <> suffix <> "\"}"
+        mergerBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        mergerBody target wctx = do
+          merged <- mergeWorkflowAttributesInWorkflow wctx (WorkflowId target) "{\"reviewed\":true}"
+          case merged of
+            Left err -> pure (Left err)
+            Right () -> pure (Right target)
+    targetRegistered <- registerWorkflow dbos targetKey zeroBody
+    case targetRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    mergerRegistered <- registerWorkflow dbos mergerKey mergerBody
+    case mergerRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ranTarget <- runWf exec targetKey (WorkflowId targetText) (Just (encodeWorkflowInput ()))
+    case ranTarget of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    mergedTags <- mergeWorkflowAttributes dbos (WorkflowId targetText) tags
+    case mergedTags of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    mergedTier <- mergeWorkflowAttributes dbos (WorkflowId targetText) tier
+    case mergedTier of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    ranMerger <- runWf exec mergerKey (WorkflowId mergerText) (Just (encodeWorkflowInput targetText))
+    decoded <- case ranMerger of
+      Left err -> throwIO (userError (show err))
+      Right Nothing -> throwIO (userError "expected the merger result")
+      Right (Just output) ->
+        case decodeWorkflowValue "result" (Just output) :: Either CodecError Text of
+          Right value -> pure value
+          Left err -> throwIO (userError (show err))
+    unless (decoded == targetText) $ throwIO (userError ("expected the target id back, got: " <> show decoded))
+    row <- fx.mfReadRow (WorkflowId targetText)
+    listed <- listStepsWf dbos (WorkflowId mergerText)
+    names <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepInfoName | record <- records]
+    pure (row.workflowRecordAttributes, names)
+
+-- | The merges land together: the tenant from the first, the silver tier
+-- from the second, the reviewed flag from inside the workflow — and the
+-- inside merge took the replacement's step name.
+checkMergeAttributes :: (Maybe Text, [Text]) -> Either String ()
+checkMergeAttributes (stored, names) = do
+  case stored of
+    Just attributes
+      | "tenant" `Text.isInfixOf` attributes && "silver" `Text.isInfixOf` attributes && "reviewed" `Text.isInfixOf` attributes -> pure ()
+      | otherwise -> Left ("expected the merged attributes, got: " <> show stored)
+    Nothing -> Left "expected the merged attributes, got nothing"
+  checkEq ["DBOS.updateWorkflowAttributes"] names
+
+-- | An attribute update from inside a workflow on an id no workflow has is
+-- refused, and the refusal is the step's recorded outcome: a replay
+-- refuses again even once a workflow with that id exists. Mirrors the
+-- oracle's @an_attribute_update_on_a_missing_workflow_is_refused_and_replayed@.
+scenarioMissingAttributesReplay :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                                 => MgmtFixture m -> m (Bool, [(Text, Bool)], Bool, Maybe Text)
+scenarioMissingAttributesReplay fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let targetKey = newQualifiedWorkflowName "missing-target"
+        taggerKey = newQualifiedWorkflowName "attributes-tagger"
+        missingText = "hs-l2-mgmt-missing-attributes-" <> suffix
+        taggerText = "hs-l2-mgmt-attributes-tagger-" <> suffix
+        taggerBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Bool)
+        taggerBody target wctx = do
+          -- The refusal is the answer this workflow reports, not a failure
+          -- of its own.
+          merged <- mergeWorkflowAttributesInWorkflow wctx (WorkflowId target) "{\"tagged\":true}"
+          case merged of
+            Left (SystemDatabase (SystemDB.NonExistentWorkflow {})) -> pure (Right True)
+            Left err -> pure (Left err)
+            Right () -> pure (Right False)
+    targetRegistered <- registerWorkflow dbos targetKey zeroBody
+    case targetRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    taggerRegistered <- registerWorkflow dbos taggerKey taggerBody
+    case taggerRegistered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    ranTagger <- runWf exec taggerKey (WorkflowId taggerText) (Just (encodeWorkflowInput missingText))
+    refused <- case ranTagger of
+      Left err -> throwIO (userError (show err))
+      Right Nothing -> throwIO (userError "expected the tagger result")
+      Right (Just output) ->
+        case decodeWorkflowValue "result" (Just output) :: Either CodecError Bool of
+          Right value -> pure value
+          Left err -> throwIO (userError (show err))
+    listed <- listStepsWf dbos (WorkflowId taggerText)
+    steps <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [(record.stepInfoName, isRecordedRefusal record.stepInfoOutcome) | record <- records]
+    -- The id exists now, so only the record can answer a replay with the
+    -- refusal.
+    ranTarget <- runWf exec targetKey (WorkflowId missingText) (Just (encodeWorkflowInput ()))
+    case ranTarget of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    forked <- forkWorkflows dbos [Fork taggerText Nothing 1] defaultForkOptions
+    forkedText <- case forked of
+      Left err -> throwIO (userError (show err))
+      Right [WorkflowId text] -> pure text
+      other -> throwIO (userError ("expected exactly one fork, got: " <> show other))
+    drove <- dequeueWorkflows dbos
+    case drove of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    waited <- waitForWorkflow dbos (WorkflowId forkedText)
+    replayed <- case waited of
+      Right (SystemDB.AwaitedSucceeded (Just output) _) ->
+        case decodeWorkflowValue "result" (Just (SystemDB.SerializedWorkflowValue output Nothing)) :: Either CodecError Bool of
+          Right value -> pure value
+          Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the fork to replay the refusal, got: " <> show other))
+    row <- fx.mfReadRow (WorkflowId missingText)
+    pure (refused, steps, replayed, row.workflowRecordAttributes)
+  where
+    isRecordedRefusal outcome = case outcome of
+      StepOutcomeFailed _ -> True
+      _ -> False
+
+-- | The first run refused, the refusal is the recorded step outcome, the
+-- replay refused again without writing, and the target carries no
+-- attributes.
+checkMissingAttributesReplay :: (Bool, [(Text, Bool)], Bool, Maybe Text) -> Either String ()
+checkMissingAttributesReplay (refused, steps, replayed, attributes) = do
+  checkEq True refused
+  checkEq [("DBOS.updateWorkflowAttributes", True)] steps
+  checkEq True replayed
+  checkEq Nothing attributes
 
 -- | The workflow waited as delayed, then ran its body on release.
 checkDelayRelease :: (Maybe WorkflowStatus, Int) -> Either String ()
@@ -2004,7 +2163,7 @@ scenarioSetDelayRefusal fx = do
     let wid = WorkflowId ("hs-l2-mgmt-set-delay-" <> suffix)
         WorkflowId widText = wid
         queued = (newWorkflow widText) {newWorkflowQueueName = Just "set-delay-q"}
-    planted <- runSystemDB fx.mfSystemDB (\db -> SystemDB.initWorkflow db queued Nothing)
+    planted <- runSystemDB fx.mfSystemDB (\db -> SystemDB.initWorkflow db queued Nothing WorkflowIdReturnExisting)
     case planted of
       Left err -> throwIO (userError (show err))
       Right _ -> pure ()
@@ -2195,7 +2354,7 @@ scenarioRewindRunsAgain fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     ran <- newTVarIO (0 :: Int)
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "rewindable"
+    let key = newQualifiedWorkflowName "rewindable"
         wid = WorkflowId ("hs-l2-mgmt-rewind-runs-" <> suffix)
     registered <- registerWorkflow dbos key (rewindCountBody ran)
     case registered of
@@ -2246,7 +2405,7 @@ scenarioDelayRelease :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadT
 scenarioDelayRelease fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "delayable"
+    let key = newQualifiedWorkflowName "delayable"
         wid = WorkflowId ("hs-l2-mgmt-delayed-" <> suffix)
         QueueName internal = internalQueueName
     refE <- registerWorkflowRef dbos key zeroBody
@@ -2258,7 +2417,7 @@ scenarioDelayRelease fx = do
       startWfRef
         exec
         ref
-        (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just ((enqueueNew internal) {delay = Just (secondsDuration 3600)})})
+        (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just ((queueRequestNew internal) {delay = Just (secondsDuration 3600)})})
         Nothing
     case started of
       Left err -> throwIO (userError (show err))
@@ -2290,8 +2449,8 @@ scenarioDelayReleaseInWorkflow :: forall m. (MonadAsync m, MonadFork m, MonadMas
 scenarioDelayReleaseInWorkflow fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let targetKey = newWorkflowKey "delayable-target"
-        callerKey = newWorkflowKey "delay-caller"
+    let targetKey = newQualifiedWorkflowName "delayable-target"
+        callerKey = newQualifiedWorkflowName "delay-caller"
         targetText = "hs-l2-mgmt-delay-target-" <> suffix
         callerText = "hs-l2-mgmt-delay-caller-" <> suffix
         QueueName internal = internalQueueName
@@ -2314,7 +2473,7 @@ scenarioDelayReleaseInWorkflow fx = do
       startWfRef
         exec
         targetRef
-        (startOptionsDefault {startWorkflowId = Just (WorkflowId targetText), startQueue = Just ((enqueueNew internal) {delay = Just (secondsDuration 3600)})})
+        (startOptionsDefault {startWorkflowId = Just (WorkflowId targetText), startQueue = Just ((queueRequestNew internal) {delay = Just (secondsDuration 3600)})})
         Nothing
     case started of
       Left err -> throwIO (userError (show err))
@@ -2350,7 +2509,7 @@ checkDelayReleaseInWorkflow :: (Text, Int, [Text]) -> Either String ()
 checkDelayReleaseInWorkflow (decoded, released, names) = do
   checkEq True ("hs-l2-mgmt-delay-target-" `Text.isPrefixOf` decoded)
   checkEq 0 released
-  checkEq ["DBOS.set_workflow_delay"] names
+  checkEq ["DBOS.setWorkflowDelay"] names
 
 -- | The fork ran only the steps at or above the fork point; the steps below
 -- replayed from the copied history.
@@ -2403,8 +2562,8 @@ scenarioRewindRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mona
 scenarioRewindRefusals fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "rewindable"
-        refKey = newWorkflowKey "rewindable-ref"
+    let key = newQualifiedWorkflowName "rewindable"
+        refKey = newQualifiedWorkflowName "rewindable-ref"
         finished = WorkflowId ("hs-l2-mgmt-rewind-done-" <> suffix)
         active = WorkflowId ("hs-l2-mgmt-rewind-active-" <> suffix)
     registered <- registerWorkflow dbos key zeroBody
@@ -2427,7 +2586,7 @@ scenarioRewindRefusals fx = do
       startWfRef
         exec
         ref
-        (startOptionsDefault {startWorkflowId = Just active, startQueue = Just (enqueueNew "no-runner-here")})
+        (startOptionsDefault {startWorkflowId = Just active, startQueue = Just (queueRequestNew "no-runner-here")})
         (Just (encodeWorkflowInput ()))
     case started of
       Left err -> throwIO (userError (show err))
@@ -2479,7 +2638,7 @@ undoAt :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadM
 undoAt fx cut = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "rewind-undo"
+    let key = newQualifiedWorkflowName "rewind-undo"
         widText = "hs-l2-mgmt-rewind-undo-" <> suffix
         wid = WorkflowId widText
     registered <- registerWorkflow dbos key rewindUndoBody
@@ -2578,7 +2737,7 @@ scenarioRewindKeepStreamClose :: forall m. (MonadFork m, MonadMask m, MonadMVar 
 scenarioRewindKeepStreamClose fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "rewind-stream-close"
+    let key = newQualifiedWorkflowName "rewind-stream-close"
         widText = "hs-l2-mgmt-rewind-stream-close-" <> suffix
         wid = WorkflowId widText
     registered <- registerWorkflow dbos key streamCloseBody
@@ -2625,7 +2784,7 @@ scenarioRewindQueueVersion :: forall m. (MonadFork m, MonadMask m, MonadMVar m, 
 scenarioRewindQueueVersion fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "rewindable-qv"
+    let key = newQualifiedWorkflowName "rewindable-qv"
         wid = WorkflowId ("hs-l2-mgmt-rewind-qv-" <> suffix)
     registered <- registerWorkflow dbos key zeroBody
     case registered of
@@ -2673,8 +2832,8 @@ scenarioRewindInWorkflow :: forall m. (MonadAsync m, MonadFork m, MonadMask m, M
 scenarioRewindInWorkflow fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let targetKey = newWorkflowKey "rewind-target"
-        callerKey = newWorkflowKey "rewind-caller"
+    let targetKey = newQualifiedWorkflowName "rewind-target"
+        callerKey = newQualifiedWorkflowName "rewind-caller"
         targetText = "hs-l2-mgmt-rewind-target-" <> suffix
         callerText = "hs-l2-mgmt-rewind-caller-" <> suffix
         callerBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
@@ -2717,7 +2876,7 @@ checkRewindInWorkflow :: (Text, WorkflowStatus, [Text]) -> Either String ()
 checkRewindInWorkflow (decoded, status, names) = do
   checkEq True ("hs-l2-mgmt-rewind-target-" `Text.isPrefixOf` decoded)
   checkEq Enqueued status
-  checkEq ["DBOS.rewind_workflow"] names
+  checkEq ["DBOS.rewindWorkflow"] names
 
 -- | The executor rewind drops the datasource checkpoints from the cut on:
 -- the fake holds one checkpoint before the rewind and none after, while
@@ -2733,7 +2892,7 @@ scenarioRewindDropsDatasourceCheckpoints fx = do
     case registeredDs of
       Left err -> throwIO (userError (show err))
       Right () -> pure ()
-    let key = newWorkflowKey "rewind-tx"
+    let key = newQualifiedWorkflowName "rewind-tx"
         wid = WorkflowId ("hs-l2-mgmt-rewind-tx-" <> suffix)
     registered <- registerWorkflow dbos key zeroBody
     case registered of
@@ -2781,8 +2940,8 @@ scenarioCompletionClearsCheckpoints fx = do
       Right () -> pure ()
     midDirect <- newTVarIO (0 :: Int)
     midDriven <- newTVarIO (0 :: Int)
-    let directKey = newWorkflowKey "clearing-direct"
-        drivenRefKey = newWorkflowKey "clearing-driven-ref"
+    let directKey = newQualifiedWorkflowName "clearing-direct"
+        drivenRefKey = newQualifiedWorkflowName "clearing-driven-ref"
         directWid = WorkflowId ("hs-l2-mgmt-clear-direct-" <> suffix)
         drivenWid = WorkflowId ("hs-l2-mgmt-clear-driven-" <> suffix)
         QueueName internal = internalQueueName
@@ -2805,7 +2964,7 @@ scenarioCompletionClearsCheckpoints fx = do
       startWfRef
         exec
         drivenRef
-        (startOptionsDefault {startWorkflowId = Just drivenWid, startQueue = Just (enqueueNew internal)})
+        (startOptionsDefault {startWorkflowId = Just drivenWid, startQueue = Just (queueRequestNew internal)})
         (Just (encodeWorkflowInput ()))
     case started of
       Left err -> throwIO (userError (show err))
@@ -2873,8 +3032,8 @@ scenarioChildClearsCheckpoints fx = do
       Right () -> pure ()
     midChild <- newTVarIO (0 :: Int)
     midParent <- newTVarIO (0 :: Int)
-    let childKey = newWorkflowKey "clearing-child"
-        parentKey = newWorkflowKey "clearing-parent"
+    let childKey = newQualifiedWorkflowName "clearing-child"
+        parentKey = newQualifiedWorkflowName "clearing-parent"
         parentWid = WorkflowId ("hs-l2-mgmt-clear-child-" <> suffix)
     childRefE <- registerWorkflowRef dbos childKey (txCountBody fake midChild)
     childRef <- case childRefE of
@@ -2912,7 +3071,7 @@ scenarioRewindCallerStep :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mo
 scenarioRewindCallerStep fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let key = newWorkflowKey "rewind-caller-target"
+    let key = newQualifiedWorkflowName "rewind-caller-target"
         wid = WorkflowId ("hs-l2-mgmt-rewind-caller-" <> suffix)
     registered <- registerWorkflow dbos key zeroBody
     case registered of
@@ -2943,7 +3102,7 @@ checkRewindCallerStep :: (Bool, Bool, [Text], WorkflowStatus, Bool) -> Either St
 checkRewindCallerStep (first, second, names, status, invalidRefused) = do
   checkEq True first
   checkEq True second
-  checkEq ["DBOS.rewind_workflow"] names
+  checkEq ["DBOS.rewindWorkflow"] names
   checkEq Enqueued status
   checkEq True invalidRefused
 
@@ -2957,8 +3116,8 @@ scenarioRewindAdoptsChild fx = do
     suffix <- fx.mfFreshBase
     parentRan <- newTVarIO (0 :: Int)
     childRan <- newTVarIO (0 :: Int)
-    let childKey = newWorkflowKey "adopted-child"
-        parentKey = newWorkflowKey "adopting-parent"
+    let childKey = newQualifiedWorkflowName "adopted-child"
+        parentKey = newQualifiedWorkflowName "adopting-parent"
         wid = WorkflowId ("hs-l2-mgmt-rewind-adopt-" <> suffix)
     childRefE <- registerWorkflowRef dbos childKey (adoptChildBody childRan)
     childRef <- case childRefE of
@@ -3013,8 +3172,8 @@ scenarioRewindRefusedTakesNoStep :: forall m. (MonadAsync m, MonadFork m, MonadM
 scenarioRewindRefusedTakesNoStep fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
     suffix <- fx.mfFreshBase
-    let targetKey = newWorkflowKey "rewind-target"
-        callerKey = newWorkflowKey "refused-caller"
+    let targetKey = newQualifiedWorkflowName "rewind-target"
+        callerKey = newQualifiedWorkflowName "refused-caller"
         targetText = "hs-l2-mgmt-rewind-refused-tgt-" <> suffix
         callerText = "hs-l2-mgmt-rewind-refused-op-" <> suffix
     targetRegistered <- registerWorkflow dbos targetKey zeroBody

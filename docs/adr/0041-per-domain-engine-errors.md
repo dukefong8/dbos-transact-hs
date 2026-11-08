@@ -18,7 +18,7 @@ modularity exists (`SystemDB.Error` + `shouldRecord` vs `Transact.Error` +
 modularity does not.
 
 This ADR supersedes ADR-0040: once `Registry` drops its engine-`Error`
-import (below), the import cycle that forced the `WorkflowKey` leaf is gone,
+import (below), the import cycle that forced the `QualifiedWorkflowName` leaf is gone,
 so the key merges back into `Registry` and the leaf file is deleted (history
 in git). ADR-0040 stays on record as the superseded rationale.
 
@@ -27,8 +27,8 @@ in git). ADR-0040 stays on record as the superseded rationale.
 Split the engine side into per-owner fragments under a thin central
 envelope that keeps the exact wire shape:
 
-- `DBOS.Transact.Registry` (homed, not a leaf): `WorkflowKey` (type, smart
-  constructors, `workflowKeyFromRow`, render, Rust-shaped JSON with `.:?`
+- `DBOS.Transact.Registry` (homed, not a leaf): `QualifiedWorkflowName` (type, smart
+  constructors, `qualifiedWorkflowNameFromRow`, render, Rust-shaped JSON with `.:?`
   absence per slice-7 review) and `RegistryError` (`AlreadyRegistered`,
   `AlreadyLaunched`). Constructor and field names stay verbatim per the
   one-type-one-name rule; the resulting ambiguity with the central envelope's
@@ -125,11 +125,11 @@ old rows.
   erasure boundary homed in `Workflow`; Rust `error.rs` maps to central
   `Error` plus the `Registry`-homed and `Serialization`-homed fragments.
   No constructor changes owner without amending this ADR.
-- Amendment 2026-10-28 (S10-U1): the oracle itself moved `WorkflowKey`
+- Amendment 2026-10-28 (S10-U1): the oracle itself moved `QualifiedWorkflowName`
   (`registry.rs` → `sysdb/types.rs` in #135, so the sysdb layer names keys
-  without depending on the engine), and the port follows: `WorkflowKey`
-  (type, smart constructors, `workflowKeyFromRow`, render, JSON,
-  `workflowRecordKey`) now lives in `DBOS.SystemDB.Types`. `RegistryError`
+  without depending on the engine), and the port follows: `QualifiedWorkflowName`
+  (type, smart constructors, `qualifiedWorkflowNameFromRow`, render, JSON,
+  `workflowRecordQualifiedName`) now lives in `DBOS.SystemDB.Types`. `RegistryError`
   stays homed in `Registry` and names the imported key. Double-move
   history: ADR-0040 leaf → this ADR's Registry merge → this move. The move
   is DAG-safe: `Types` imports only Prelude/Aeson/containers/Set/

@@ -15,6 +15,6 @@ q <- registerQueue dbos "per-customer"
   NeverUpdate
 ```
 
-Enqueue with the partition key on the `Enqueue` value. A partitioned queue without a key on enqueue is refused.
+Enqueue with the partition key on the `QueueRequest` value (or flat on `EnqueueOptions` for a client enqueue). A partitioned queue without a key on enqueue is refused.
 
 Difference from TS: TS `partitionQueue` constructor was removed in 5.x; partitioning is now queue options. Haskell never had the constructor — options only.

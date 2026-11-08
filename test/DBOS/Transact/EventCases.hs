@@ -24,6 +24,7 @@ module DBOS.Transact.EventCases
     inStepReaderBody,
     outOfOrderBody,
     scenarioPublishReplay,
+    scenarioGetEventTimed,
     scenarioCheckpointedRead,
     scenarioRefusedSet,
     scenarioCapturedRead,
@@ -32,6 +33,7 @@ module DBOS.Transact.EventCases
     scenarioWrongInstance,
     scenarioOutOfOrderIds,
     checkPublishReplay,
+    checkGetEventTimed,
     checkCheckpointedRead,
     checkRefusedSet,
     checkCapturedRead,
@@ -44,7 +46,8 @@ module DBOS.Transact.EventCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
+import Data.Word (Word64)
+import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact.Instance (getWorkflowEventSerialized)
@@ -61,8 +64,9 @@ import DBOS.Transact
     WorkflowRef,
     getEvent,
     millisDuration,
+    secondsDuration,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     pendingGetEvent,
     pendingSetEvent,
     pendingSleep,
@@ -154,7 +158,7 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
         efConn = pure conn,
         efIdentity = identity,
         efInitRow = \widText name -> do
-          created <- runSystemDB sysdb (\db -> initWorkflow db ((newWorkflow widText) {newWorkflowName = Just name}) Nothing)
+          created <- runSystemDB sysdb (\db -> initWorkflow db ((newWorkflow widText) {newWorkflowName = Just name}) Nothing WorkflowIdReturnExisting)
           case created of
             Left err -> throwIO (userError (show err))
             Right result -> pure (WorkflowOwner {ownerWorkflowId = WorkflowId widText, ownerToken = result.initResultCreatorXid}),
@@ -259,7 +263,7 @@ inStepReaderBody other () wctx = do
 
 -- | Builds a sleep, a set, a get, and a step, then drives them out of
 -- build order. The ids stay in build order regardless.
-outOfOrderBody :: forall exec m. (MonadMVar m, MonadAsync m, MonadTime m, MonadDelay m, MonadCatch m)
+outOfOrderBody :: forall exec m. (MonadMVar m, MonadAsync m, MonadTime m, MonadDelay m, MonadCatch m, MonadMonotonicTimeNSec m)
                => DBOS m ->
                   () ->
                   WorkflowCtx exec m ->
@@ -446,7 +450,7 @@ scenarioRecoveryKeepsFirst fx = do
     offer <- newEmptyMVar
     release <- newEmptyMVar
     putMVar offer ("first" :: Text)
-    refE <- registerWorkflowRef dbos (newWorkflowKey "progress") (progressBody offer release)
+    refE <- registerWorkflowRef dbos (newQualifiedWorkflowName "progress") (progressBody offer release)
     ref <- case refE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
@@ -491,11 +495,11 @@ scenarioWrongInstance :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Monad
 scenarioWrongInstance fx = do
   bracket fx.efNewOtherDBOS shutdown $ \other ->
     bracket fx.efNewDBOS shutdown $ \owner -> do
-      readerE <- registerWorkflowRef owner (newWorkflowKey "reads_through_other") (readerBody other)
+      readerE <- registerWorkflowRef owner (newQualifiedWorkflowName "reads_through_other") (readerBody other)
       readerRef <- case readerE of
         Left err -> throwIO (userError (show err))
         Right ref -> pure ref
-      inStepE <- registerWorkflowRef owner (newWorkflowKey "reads_in_step") (inStepReaderBody other)
+      inStepE <- registerWorkflowRef owner (newQualifiedWorkflowName "reads_in_step") (inStepReaderBody other)
       inStepRef <- case inStepE of
         Left err -> throwIO (userError (show err))
         Right ref -> pure ref
@@ -523,7 +527,7 @@ scenarioOutOfOrderIds :: forall m. (MonadAsync m, MonadFork m, MonadMask m, Mona
                          m [(Int, Text)]
 scenarioOutOfOrderIds fx = do
   bracket fx.efNewDBOS shutdown $ \dbos -> do
-    refE <- registerWorkflowRef dbos (newWorkflowKey "joins") (outOfOrderBody dbos)
+    refE <- registerWorkflowRef dbos (newQualifiedWorkflowName "joins") (outOfOrderBody dbos)
     ref <- case refE of
       Left err -> throwIO (userError (show err))
       Right r -> pure r
@@ -539,6 +543,36 @@ scenarioOutOfOrderIds fx = do
 -- recorded value.
 checkPublishReplay :: (Maybe Text, Maybe Text) -> Either String ()
 checkPublishReplay = checkEq (Just ("ready" :: Text), Just ("ready" :: Text))
+
+-- | A get_event timeout waits its duration on the monotonic clock from the
+-- database's reading: on a database an hour off this process, a wall-clock
+-- wait would sleep an hour too long, or record the absence at once.
+-- Returns the read with the nanoseconds the wait took on this process's
+-- monotonic clock. Mirrors the oracle's skewed-clock event waits.
+scenarioGetEventTimed :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m, MonadMonotonicTimeNSec m)
+                      => EventFixture m -> m (Maybe Text, Word64)
+scenarioGetEventTimed fx = do
+  wid <- fx.efFreshId "event-timed"
+  let WorkflowId widText = wid
+  widOwner <- fx.efInitRow widText "L2EventTest"
+  conn <- fx.efConn
+  before <- getMonotonicTimeNSec
+  outcome <-
+    withWorkflow conn fx.efIdentity wid Nothing widOwner $ \wctx ->
+      (getEvent wctx wid "never-published" (secondsDuration 3) :: m (Either (Error EngineOnly) (Maybe Text)))
+  after <- getMonotonicTimeNSec
+  read <- case outcome of
+    Left err -> throwIO (userError (show err))
+    Right value -> pure value
+  pure (read, after - before)
+
+-- | The read times out with the absence, taking about its duration —
+-- seconds, never minutes — whatever the database's clock says.
+checkGetEventTimed :: (Maybe Text, Word64) -> Either String ()
+checkGetEventTimed (read, elapsedNs) = do
+  checkEq Nothing read
+  unless (elapsedNs >= 2000000000 && elapsedNs <= 60000000000) $
+    Left ("the read must take about its duration, took (ns): " <> show elapsedNs)
 
 -- | The outside read checkpoints its get and sleep; the in-step read
 -- records only its step and leaves the slot after empty.

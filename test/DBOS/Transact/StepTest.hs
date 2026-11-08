@@ -18,7 +18,8 @@ import DBOS.Transact
     Error (..),
     StepCtx,
     WorkflowCtx,
-    WorkflowId (..)
+    WorkflowId (..),
+    WorkflowIdReusePolicy (..)
   )
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Identity (Identity (..))
@@ -129,7 +130,7 @@ mkStepFixture getBackend = pure StepFixture
     sfIdentity = scopedTestIdentity,
     sfInitRow = \wid@(WorkflowId widText) -> do
       backend <- getBackend
-      created <- initWorkflow backend (newWorkflow widText) {newWorkflowName = Just "L2StepCases"} Nothing
+      created <- initWorkflow backend (newWorkflow widText) {newWorkflowName = Just "L2StepCases"} Nothing WorkflowIdReturnExisting
       case created of
         Left err -> throwIO (userError (show err))
         Right result -> pure (WorkflowOwner {ownerWorkflowId = wid, ownerToken = result.initResultCreatorXid}),

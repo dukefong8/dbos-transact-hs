@@ -3,17 +3,17 @@
 
 -- | The debouncer: delay a workflow until its triggers go quiet. Mirrors
 -- Rust @debouncer.rs@ for the engine surface (@Debouncer@,
--- @DebounceOptions@, the refusal chain, the coalesce loop); the queue,
--- timeout, and application it runs under follow the TypeScript @Debouncer@
--- the Python oracle implements, as Rust folds those into its start
--- options. The deduplication-id spelling still follows the TypeScript
--- oracle (class-prefixed); the Rust full-key spelling rides a later unit
--- with its ADR.
+-- @DebounceOptions@, the refusal chain, the coalesce loop): the debouncer
+-- holds only what a debounce uses — queue, budget, hold cap, app and
+-- attributes — and names no workflow id, deduplication id, delay, join
+-- policy, priority or partition key. The deduplication id spells the workflow's full name
+-- (@name@, @name/class@, @name/class/config@, or @name//config@ for a
+-- config with no class), as Rust's @deduplication_id@ does.
 --
 -- The mechanism is the oracle's sysdb bounce, not a framework workflow:
 -- each call tries to extend the DELAYED debounced row holding the
--- deduplication key (@\<workflow\>-\<key\>@, class-prefixed for instance
--- workflows as the oracle prefixes its own); when the key is free the call
+-- deduplication id (@echo/Billing/eu-key@ for a configured instance,
+-- @echo-key@ for a free function); when the key is free the call
 -- enqueues a fresh debounced row instead. A lost enqueue race loops back to
 -- the bounce, as the oracle's does. Every caller gets a handle to the same
 -- user workflow id.
@@ -30,55 +30,70 @@ module DBOS.Transact.Debouncer
     debouncerClientNew,
     debounceClient,
     debounceClientWith,
+    debounceDedupKey,
+    classifyBounce,
   )
 where
 
 import DBOS.Prelude
+import Data.Aeson (Value)
+import Data.Map.Strict (Map)
+import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration, QueueName (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowKey (..), durationIsZero, durationToMs, internalQueueName, renderWorkflowKey, workflowKeyFromRow)
+import DBOS.SystemDB.Types (Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration, QueueName (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), QualifiedWorkflowName, WorkflowIdReusePolicy (..), qualifiedName, qualifiedClassName, qualifiedConfigName, durationIsZero, durationToMs, internalQueueName)
 import DBOS.Transact.Config (serializerName)
-import DBOS.Transact.Client (Client (..), EnqueueOptions (..), clientEnqueueWorkflowWith)
+import DBOS.Transact.Client (Client (..), EnqueueOptions (..), clientEnqueueWorkflowWithDebounce, refuseNamelessWorkflow)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, withConnection)
 import DBOS.Transact.Context (WorkflowCtx (wctxConn), insideAStep, nextStepId, workflowId)
+import DBOS.Transact.Identity (validateAppName)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), pollingHandle)
 import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor, startWorkflow)
 import DBOS.Transact.Registry (registryInstanceId)
 import DBOS.Transact.Serialization (WorkflowInput (..), unWorkflowInput)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), Enqueue (..), Timeout (..), StartOptions (..), WorkflowRef (..), childWorkflowId, enqueueNew, startChildWorkflow, startOptionsDefault, validateEnqueue)
+import DBOS.Transact.Workflow (DuplicationPolicy (Reject), QueueRequest (..), Timeout (..), StartOptions (..), WorkflowRef (..), checkStartDuration, childWorkflowId, queueRequestNew, startChildWorkflow, startOptionsDefault, validateStart)
 
--- | What to debounce: which queue the user workflow finally runs on, how
--- long to wait past the first trigger at most, and which application the
--- debounce acts for. Mirrors the TypeScript @Debouncer@ options: @queue@,
--- @debounceTimeoutMs@, and @applicationName@ — all optional. The debounced
--- workflow itself comes from the reference each call passes, as the
--- oracle's constructor takes its workflow.
+-- | What a debounce sets: the fields apply to every workflow a debounce
+-- enqueues. They are the part of a start a debounce leaves to its caller:
+-- the debounce writes the workflow's deduplication id (the key) and its
+-- delay (the period) itself, and enqueues many workflows, so it takes no
+-- workflow id but the one a single call names. 'debouncerQueueName' is the
+-- queue the debounced workflow waits and runs on, and the scope of its key
+-- ('Nothing' is the internal queue every app dequeues). 'debouncerTimeout'
+-- is the workflow's budget once it runs, never a calling workflow's
+-- deadline: a debounce can hold the workflow back for longer than the
+-- caller lives. 'debouncerDebounceTimeout' caps the hold, counted from
+-- the debounce that enqueued it. 'debouncerAttributes' go on the row of a
+-- fresh workflow. Mirrors Rust @Debouncer@ (a per-call serialization
+-- choice has no counterpart here: inputs carry their own tag and the
+-- connection names the default, so the outcome is the same without the
+-- field).
 data Debouncer = Debouncer
   { debouncerQueueName :: Maybe Text,
     debouncerTimeout :: Maybe Duration,
-    debouncerAppName :: Maybe Text
+    debouncerDebounceTimeout :: Maybe Duration,
+    debouncerAppName :: Maybe Text,
+    debouncerAttributes :: Maybe (Map Text Value)
   }
   deriving stock (Eq, Show)
 
--- | Debounce onto the internal queue, with no timeout, for the caller's
--- own application: the user workflow starts directly once its triggers go
--- quiet.
+-- | Debounce onto the internal queue, with no budget, no hold cap, for
+-- the caller's own application and no attributes: the user workflow
+-- starts directly once its triggers go quiet.
 debouncerNew :: Debouncer
 debouncerNew =
   Debouncer
     { debouncerQueueName = Nothing,
       debouncerTimeout = Nothing,
-      debouncerAppName = Nothing
+      debouncerDebounceTimeout = Nothing,
+      debouncerAppName = Nothing,
+      debouncerAttributes = Nothing
     }
 
 -- | Per-call debounce options: only the id a fresh row may take. A call
 -- that coalesces ignores it; an id naming an existing workflow is a
--- conflict, never a join. There is no stored counterpart on 'Debouncer'
--- to refuse (the oracle's @refuse_stored_workflow_id@ has no trigger
--- here), and the queue options a debounce owns are built internally, so
--- the owned-options refusal has no trigger either. Mirrors Rust
--- @DebounceOptions@.
+-- conflict, never a join. Mirrors Rust @DebounceOptions@.
 data DebounceOptions = DebounceOptions
   { debounceOptionsWorkflowId :: Maybe WorkflowId
   }
@@ -123,14 +138,22 @@ debounceWith :: (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTimer
                 DebounceOptions ->
                 m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 debounceWith dbos userRef def key period input options = do
-  withExecutor dbos debounceOperation $ \exec -> case refuseDurations period def.debouncerTimeout of
-    Left err -> pure (Left err)
-    Right () -> do
-      generated <- generatedWorkflowId exec.conn
-      let offered = case options.debounceOptionsWorkflowId of
-            Just (WorkflowId pinned) -> pinned
-            Nothing -> generated
-      bounceLoop exec offered Nothing
+  withExecutor dbos debounceOperation $ \exec ->
+    -- The checks come first, so a refused debounce moves nothing: the
+    -- budget the enqueue leg would refuse, then the durations, then the
+    -- app name. Mirrors the oracle's validation order.
+    case traverse_ (checkStartDuration (Just queueName) "timeout") def.debouncerTimeout of
+      Left err -> pure (Left err)
+      Right () -> case refuseDurations period def.debouncerDebounceTimeout of
+        Left err -> pure (Left err)
+        Right () -> case refuseDebounceAppName def.debouncerAppName of
+          Left err -> pure (Left err)
+          Right () -> do
+            generated <- generatedWorkflowId exec.conn
+            let offered = case options.debounceOptionsWorkflowId of
+                  Just (WorkflowId pinned) -> pinned
+                  Nothing -> generated
+            bounceLoop exec offered Nothing
   where
     rawInput = unWorkflowInput <$> input
     bounceLoop exec pinned caller = do
@@ -139,9 +162,10 @@ debounceWith dbos userRef def key period input options = do
       -- oracle's @Bounce::request@ cannot fail.
       bounced <- withConnection exec.conn (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest exec period) caller)
       case bounced of
+            Left (TransactError.SystemDatabase sysErr) -> pure (Left (TransactError.refusedArgument debounceOperation sysErr))
             Left err -> pure (Left err)
             Right (Debounced wid) -> pure (Right (pollingHandle exec.conn wid True))
-            Right (DebounceHeld holder) -> case classifyBounce holder userRef.refKey (targetApp exec) of
+            Right (DebounceHeld holder) -> case classifyBounce holder userRef.refQualifiedName (targetApp exec) of
               BounceRetry -> do
                 threadDelay retryPauseMicros
                 bounceLoop exec pinned caller
@@ -163,7 +187,7 @@ debounceWith dbos userRef def key period input options = do
                 other -> pure (adoptHandle exec <$> other)
     bounceRequest exec bouncePeriod =
       DebounceRequest
-        { debounceRequestWorkflow = userRef.refKey,
+        { debounceRequestWorkflow = userRef.refQualifiedName,
           debounceRequestQueueName = queueName,
           debounceRequestDeduplicationId = dedupKey,
           debounceRequestPeriod = bouncePeriod,
@@ -174,7 +198,7 @@ debounceWith dbos userRef def key period input options = do
     queueName = case def.debouncerQueueName of
       Just name -> name
       Nothing -> case internalQueueName of QueueName name -> name
-    dedupKey = debounceDedupKey userRef.refKey key
+    dedupKey = debounceDedupKey userRef.refQualifiedName key
     targetApp exec = def.debouncerAppName <|> exec.conn.connAppName
 
 -- | Debounce from inside a running workflow: the bounce commits atomically
@@ -203,9 +227,13 @@ debounceInWorkflow wctx userRef def key period input = do
         Just instanceId
           | instanceId /= conn.connInstanceId ->
               pure (Left (TransactError.WrongInstance {operation = "debounce a workflow"}))
-          | otherwise -> case refuseDurations period def.debouncerTimeout of
+          | otherwise -> case traverse_ (checkStartDuration (Just queueName) "timeout") def.debouncerTimeout of
               Left err -> pure (Left err)
-              Right () -> bounceLoop conn
+              Right () -> case refuseDurations period def.debouncerDebounceTimeout of
+                Left err -> pure (Left err)
+                Right () -> case refuseDebounceAppName def.debouncerAppName of
+                  Left err -> pure (Left err)
+                  Right () -> bounceLoop conn
   where
     rawInput = unWorkflowInput <$> input
     -- Each attempt takes its own step id and pinned id, as the oracle
@@ -219,9 +247,10 @@ debounceInWorkflow wctx userRef def key period input = do
           caller = Just (WorkflowId parentText, stepId)
       bounced <- withConnection conn (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest conn period) caller)
       case bounced of
+            Left (TransactError.SystemDatabase sysErr) -> pure (Left (TransactError.refusedArgument debounceOperation sysErr))
             Left err -> pure (Left err)
             Right (Debounced wid) -> pure (Right (pollingHandle conn wid True))
-            Right (DebounceHeld holder) -> case classifyBounce holder userRef.refKey (targetApp conn) of
+            Right (DebounceHeld holder) -> case classifyBounce holder userRef.refQualifiedName (targetApp conn) of
               BounceRetry -> do
                 threadDelay retryPauseMicros
                 bounceLoop conn
@@ -239,7 +268,7 @@ debounceInWorkflow wctx userRef def key period input = do
                 other -> pure (adoptHandleConn conn <$> other)
     bounceRequest conn bouncePeriod =
       DebounceRequest
-        { debounceRequestWorkflow = userRef.refKey,
+        { debounceRequestWorkflow = userRef.refQualifiedName,
           debounceRequestQueueName = queueName,
           debounceRequestDeduplicationId = dedupKey,
           debounceRequestPeriod = bouncePeriod,
@@ -250,7 +279,7 @@ debounceInWorkflow wctx userRef def key period input = do
     queueName = case def.debouncerQueueName of
       Just name -> name
       Nothing -> case internalQueueName of QueueName name -> name
-    dedupKey = debounceDedupKey userRef.refKey key
+    dedupKey = debounceDedupKey userRef.refQualifiedName key
     targetApp conn = def.debouncerAppName <|> conn.connAppName
 
 -- * Helpers
@@ -258,24 +287,35 @@ debounceInWorkflow wctx userRef def key period input = do
 -- | A debouncer over a client connection: the same bounce loop with no
 -- workflow steps and no placement — a client runs nothing, so there is
 -- nothing to checkpoint. The workflow is named by key, as
--- @Client::enqueue@ names it; what every fresh row carries rides the
--- options, and the longest hold rides the debouncer. Mirrors Rust
+-- @Client::enqueue@ names it; the other fields apply to every workflow a
+-- debounce enqueues, as the same fields of 'EnqueueOptions' would to an
+-- enqueue, and leave out what a debounce sets itself. Mirrors Rust
 -- @DebouncerClient@.
 data DebouncerClient m = DebouncerClient
   { debouncerClient :: Client m,
-    debouncerClientWorkflow :: WorkflowKey,
-    debouncerClientOptions :: EnqueueOptions,
-    debouncerClientTimeout :: Maybe Duration
+    debouncerClientWorkflow :: QualifiedWorkflowName,
+    debouncerClientQueue :: Text,
+    debouncerClientTimeout :: Maybe Duration,
+    debouncerClientAppVersion :: Maybe Text,
+    debouncerClientAppName :: Maybe Text,
+    debouncerClientAttributes :: Maybe (Map Text Value),
+    debouncerClientDebounceTimeout :: Maybe Duration
   }
 
--- | Debounce through a client with the given options and no timeout.
-debouncerClientNew :: Client m -> WorkflowKey -> EnqueueOptions -> DebouncerClient m
-debouncerClientNew client workflow options =
+-- | Debounce through a client on a queue, with no budget, for the
+-- client's own application and no version: one call's workflow takes an
+-- engine-generated id unless the call pins one.
+debouncerClientNew :: Client m -> QualifiedWorkflowName -> Text -> DebouncerClient m
+debouncerClientNew client workflow queueName =
   DebouncerClient
     { debouncerClient = client,
       debouncerClientWorkflow = workflow,
-      debouncerClientOptions = options,
-      debouncerClientTimeout = Nothing
+      debouncerClientQueue = queueName,
+      debouncerClientTimeout = Nothing,
+      debouncerClientAppVersion = Nothing,
+      debouncerClientAppName = Nothing,
+      debouncerClientAttributes = Nothing,
+      debouncerClientDebounceTimeout = Nothing
     }
 
 -- | Debounce a key through a client: quiet calls collapse onto one
@@ -299,35 +339,36 @@ debounceClientWith :: (MonadSTM m, MonadDelay m, MonadTimer m, MonadMonotonicTim
                       DebounceOptions ->
                       m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 debounceClientWith dc key period input call = do
-  case refuseClientOptions dc of
-    Left err -> pure (Left err)
-    Right () -> case refuseDurations period dc.debouncerClientTimeout of
-      Left err -> pure (Left err)
-      -- The enqueue leg would refuse these after the bounce already
-      -- extended the holder and replaced its inputs; validate first, as
-      -- the oracle validates its options before looping, reporting the
-      -- same errors the leg would.
-      Right () -> case validateEnqueue options.queue of
+  -- A client takes the name from its caller, so an empty one is refused
+  -- before anything bounces or writes, as a client enqueue is; then the
+  -- budget the enqueue leg would refuse, then the durations, then the app
+  -- name. Mirrors Rust @DebouncerClient::debounce_with@'s order.
+  case refuseNamelessWorkflow dc.debouncerClientWorkflow dc.debouncerClientQueue of
+    Just err -> pure (Left err)
+    Nothing ->
+      case validateStart (Just (queueRequestNew dc.debouncerClientQueue)) dc.debouncerClientTimeout Nothing WorkflowIdReturnExisting of
         Left err -> pure (Left err)
-        Right () -> case traverse (durationToMs "timeout") options.timeout of
-          Left sysErr -> pure (Left (TransactError.fromSystemDB sysErr))
-          Right _ -> do
-            generated <- generatedWorkflowId conn
-            let offered = case call.debounceOptionsWorkflowId of
-                  Just (WorkflowId pinned) -> pinned
-                  Nothing -> generated
-            bounceLoop offered
+        Right () -> case refuseDurations period dc.debouncerClientDebounceTimeout of
+          Left err -> pure (Left err)
+          Right () -> case refuseDebounceAppName dc.debouncerClientAppName of
+            Left err -> pure (Left err)
+            Right () -> do
+              generated <- generatedWorkflowId conn
+              let offered = case call.debounceOptionsWorkflowId of
+                    Just (WorkflowId pinned) -> pinned
+                    Nothing -> generated
+              bounceLoop offered
   where
     conn = dc.debouncerClient.conn
-    options = dc.debouncerClientOptions
+    queueName = dc.debouncerClientQueue
     dedupKey = debounceDedupKey dc.debouncerClientWorkflow key
-    targetApp = options.appName <|> conn.connAppName
+    targetApp = dc.debouncerClientAppName <|> conn.connAppName
     rawInput = unWorkflowInput <$> input
     bounceLoop offered = do
       let request =
             DebounceRequest
               { debounceRequestWorkflow = dc.debouncerClientWorkflow,
-                debounceRequestQueueName = options.queue.name,
+                debounceRequestQueueName = queueName,
                 debounceRequestDeduplicationId = dedupKey,
                 debounceRequestPeriod = period,
                 debounceRequestInputs = (.serializedText) <$> rawInput,
@@ -336,6 +377,7 @@ debounceClientWith dc key period input call = do
               }
       bounced <- withConnection conn (\db -> SystemDB.debounceDelayedWorkflow db request Nothing)
       case bounced of
+        Left (TransactError.SystemDatabase sysErr) -> pure (Left (TransactError.refusedArgument debounceOperation sysErr))
         Left err -> pure (Left err)
         Right (Debounced wid) -> pure (Right (pollingHandle conn wid True))
         Right (DebounceHeld holder) -> case classifyBounce holder dc.debouncerClientWorkflow targetApp of
@@ -346,47 +388,43 @@ debounceClientWith dc key period input call = do
             pure
               ( Left
                   ( TransactError.fromSystemDB
-                      (SystemDBError.QueueDeduplicated {workflowId = holderId, queueName = options.queue.name, deduplicationId = dedupKey})
+                      (SystemDBError.QueueDeduplicated {workflowId = holderId, queueName = queueName, deduplicationId = dedupKey})
                   )
               )
         Right DebounceUnheld -> do
-          let shape = options.queue {deduplicationId = Just dedupKey, delay = Just period, isDebounced = True, debounceTimeout = dc.debouncerClientTimeout}
-              fresh = options {queue = shape, workflowId = Just offered, appName = targetApp}
-          enqueued <- clientEnqueueWorkflowWith dc.debouncerClient dc.debouncerClientWorkflow fresh input
+          let fresh =
+                EnqueueOptions
+                  { queueName = queueName,
+                    deduplicationId = Just dedupKey,
+                    duplicationPolicy = Reject,
+                    priority = Nothing,
+                    partitionKey = Nothing,
+                    delay = Just period,
+                    workflowId = Just offered,
+                    workflowIdReusePolicy = WorkflowIdReturnExisting,
+                    appName = targetApp,
+                    appVersion = dc.debouncerClientAppVersion,
+                    timeout = dc.debouncerClientTimeout,
+                    attributes = dc.debouncerClientAttributes
+                  }
+          enqueued <- clientEnqueueWorkflowWithDebounce dc.debouncerClient dc.debouncerClientWorkflow fresh (Just dc.debouncerClientDebounceTimeout) input
           case enqueued of
             -- A concurrent debounce grabbed the key between bounce and
             -- enqueue; loop to bounce that workflow instead.
             Left (TransactError.SystemDatabase (SystemDBError.QueueDeduplicated {})) -> bounceLoop offered
             other -> pure other
 
--- | Refuses a stored workflow id and the queue options a debounce owns,
--- as 'InvalidArgument' to this operation. A debouncer serves many keys
--- and many release cycles, so an id stored on the options would name
--- every fresh workflow it ever enqueues; the deduplication id, delay,
--- join policy, priority, and partition key are the debounce's own to
--- write. Mirrors Rust @refuse_stored_workflow_id@ plus
--- @refuse_owned_options@.
-refuseClientOptions :: DebouncerClient m -> Either (TransactError.Error TransactError.EngineOnly) ()
-refuseClientOptions dc = case dc.debouncerClientOptions.workflowId of
-  Just _ ->
-    Left
-      ( TransactError.InvalidArgument
-          debounceOperation
-          "`options.workflow_id` cannot be set on a debouncer, which enqueues many workflows: pass the id for one call in `DebounceOptions.workflow_id`, to `debounceClientWith`"
-      )
-  Nothing -> refuseOwnedOptions dc.debouncerClientOptions.queue
-  where
-    refuseOwnedOptions queue
-      | Just _ <- queue.deduplicationId = refuse "a `deduplication_id` cannot be set: the debounce key is the workflow's deduplication id"
-      | Just _ <- queue.delay = refuse "a `delay` cannot be set: the debounce period is the workflow's delay"
-      | queue.duplicationPolicy == ReturnExisting = refuse "`DuplicationPolicy::ReturnExisting` cannot be set: a debounce owns the workflow's deduplication"
-      | Just _ <- queue.priority = refuse "a `priority` cannot be set: debounced workflows do not support priority"
-      | Just _ <- queue.partitionKey = refuse "a `partition_key` cannot be set: debounced workflows do not support partition keys"
-      | otherwise = Right ()
-    refuse detail =
-      Left (TransactError.InvalidArgument debounceOperation ("queue `" <> queueName <> "`: " <> detail))
-      where
-        queueName = dc.debouncerClientOptions.queue.name
+-- | Refuses an empty or malformed app name as `app_name`, not as the
+-- column it would fill: a row stamped with a name no other executor
+-- spells the same way is a row nothing claims. Reuses the shared rule's
+-- wording on this operation's channel. Mirrors Rust @refuse_app_name@.
+refuseDebounceAppName :: Maybe Text -> Either (TransactError.Error TransactError.EngineOnly) ()
+refuseDebounceAppName appName = case appName of
+  Nothing -> Right ()
+  Just name -> case validateAppName name of
+    Right () -> Right ()
+    Left (TransactError.ErrorConfig detail) -> Left (TransactError.InvalidArgument debounceOperation detail)
+    Left err -> Left err
 
 -- | What a bounce that found no debounced row to extend means. Mirrors
 -- the oracle's @classify@: a holder that is not debounced, one of a
@@ -404,16 +442,23 @@ data BounceAction = BounceRetry | BounceRaise Text
 retryPauseMicros :: Int
 retryPauseMicros = 100000
 
-classifyBounce :: DebounceHolder -> WorkflowKey -> Maybe Text -> BounceAction
+classifyBounce :: DebounceHolder -> QualifiedWorkflowName -> Maybe Text -> BounceAction
 classifyBounce holder workflow targetApp
   | not holder.debounceHolderIsDebounced || not (sameWorkflow holder workflow) || anotherApp holder targetApp =
       BounceRaise holder.debounceHolderWorkflowId
   | otherwise = BounceRetry
   where
-    sameWorkflow holder workflow = case holder.debounceHolderWorkflowName of
-      Nothing -> False
-      Just name ->
-        workflowKeyFromRow name holder.debounceHolderClassName holder.debounceHolderConfigName == workflow
+    sameWorkflow holder workflow =
+      case holder.debounceHolderWorkflowName of
+        Nothing -> False
+        Just name ->
+          name == qualifiedName workflow
+            && presentPart holder.debounceHolderClassName == qualifiedClassName workflow
+            && presentPart holder.debounceHolderConfigName == qualifiedConfigName workflow
+    -- A stored '' is absent, as it is to a name built from a row.
+    presentPart part = case part of
+      Just text | Text.null text -> Nothing
+      other -> other
     anotherApp holder target = case (target, holder.debounceHolderAppName) of
       (Just waiting, Just owner) -> waiting /= owner
       _ -> False
@@ -428,14 +473,18 @@ debouncedStartOptions :: Debouncer -> Text -> Text -> Duration -> Maybe Workflow
 debouncedStartOptions def queueName dedupKey period offered =
   startOptionsDefault
     { startWorkflowId = offered,
-      startTimeout = None,
+      -- Never the caller's deadline: the debounce can hold the workflow
+      -- back for longer than the caller lives, so a missing budget means
+      -- none. Mirrors the oracle's @timeout.map_or(Timeout::None)@.
+      startTimeout = maybe None Explicit def.debouncerTimeout,
+      startAttributes = def.debouncerAttributes,
       startQueue =
         Just
-          ( (enqueueNew queueName)
+          ( (queueRequestNew queueName)
               { deduplicationId = Just dedupKey,
                 delay = Just period,
                 isDebounced = True,
-                debounceTimeout = def.debouncerTimeout,
+                debounceTimeout = def.debouncerDebounceTimeout,
                 applicationName = def.debouncerAppName
               }
           )
@@ -468,13 +517,23 @@ refuseDurations period cap = do
           Left (TransactError.refusedArgument debounceOperation (SystemDBError.invalidInput field "must be a positive, non-zero duration"))
       | otherwise = void (first (TransactError.refusedArgument debounceOperation) (durationToMs field duration))
 
--- | The deduplication key, spelled in one function: the workflow's full
--- key display, then the debounce key (@wf/Billing/eu-key@ for a
--- configured instance, @wf-key@ for a free function). A @/@-or-@-@
--- collision between unrelated workflows is refused by whole-key
--- comparison at classify, not escaped. Mirrors Rust @deduplication_id@.
-debounceDedupKey :: WorkflowKey -> Text -> Text
-debounceDedupKey workflow debKey = renderWorkflowKey workflow <> "-" <> debKey
+-- | The deduplication key, spelled here and nowhere else from the
+-- workflow's parts: @name@, @name/class@, @name/class/config@, or
+-- @name//config@ for a config with no class, then the debounce key
+-- (@wf/Billing/eu-key@ for a configured instance, @wf-key@ for a free
+-- function). Spelled from the parts rather than the display, which is for
+-- people to read. A @/@-or-@-@ collision between unrelated workflows is
+-- refused by whole-name comparison at classify, not escaped. Mirrors Rust
+-- @deduplication_id@.
+debounceDedupKey :: QualifiedWorkflowName -> Text -> Text
+debounceDedupKey workflow debKey =
+  qualifiedName workflow <> qualifier <> "-" <> debKey
+  where
+    qualifier = case (qualifiedClassName workflow, qualifiedConfigName workflow) of
+      (Nothing, Nothing) -> ""
+      (Just className, Nothing) -> "/" <> className
+      (Just className, Just configName) -> "/" <> className <> "/" <> configName
+      (Nothing, Just configName) -> "//" <> configName
 
 -- | The stored wire for one pass-through input, or the connection's own
 -- serialization when the input names none. Mirrors the start path, which

@@ -52,7 +52,7 @@ import DBOS.Transact
     SerializedWorkflowValue (..),
     Timeout (..),
     WorkflowCtx,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerWorkflowRef,
     runStep,
     runWorkflowRef,
@@ -94,7 +94,7 @@ scenarioWithinDeadline fx = do
   (dbos, wid) <- fx.dfSetup
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right 7)
-  ref <- registerWorkflowRef dbos (newWorkflowKey "quick") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newQualifiedWorkflowName "quick") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
   ran <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing
   status <- fx.dfReadStatus wid
@@ -111,7 +111,7 @@ scenarioPastDeadline fx = do
       body () _ = do
         threadDelay 30000000
         pure (Right 1)
-  ref <- registerWorkflowRef dbos (newWorkflowKey "runs-forever") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newQualifiedWorkflowName "runs-forever") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
   ran <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (millisDuration 100)}) Nothing
   status <- fx.dfReadStatus wid
@@ -128,7 +128,7 @@ scenarioKeptDeadline fx = do
   gate <- newEmptyMVar
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = takeMVar gate >> pure (Right 7)
-  ref <- registerWorkflowRef dbos (newWorkflowKey "gated") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newQualifiedWorkflowName "gated") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
   worker <- async (runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing)
   first <- waitForDeadline fx wid
@@ -150,7 +150,7 @@ scenarioShutdownPending fx = do
   gate <- newEmptyMVar
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = takeMVar gate >> pure (Right 7)
-  ref <- registerWorkflowRef dbos (newWorkflowKey "gated") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newQualifiedWorkflowName "gated") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
   worker <- async (runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing)
   _ <- waitForDeadline fx wid
@@ -167,7 +167,7 @@ scenarioBeatenDeadline fx = do
   (dbos, wid) <- fx.dfSetup
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right 7)
-  ref <- registerWorkflowRef dbos (newWorkflowKey "quick") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newQualifiedWorkflowName "quick") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
   first <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (secondsDuration 30)}) Nothing
   second <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (millisDuration 1)}) Nothing
@@ -256,7 +256,7 @@ scenarioFinishedIdAdopts fx = do
   (dbos, wid) <- fx.dfSetup
   let body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () wctx = runStep wctx "only" (const (pure 7))
-  ref <- registerWorkflowRef dbos (newWorkflowKey "finished-once") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newQualifiedWorkflowName "finished-once") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
   first <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = None}) Nothing
   second <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = None}) Nothing
@@ -286,7 +286,7 @@ scenarioSkewHoldsBudget fx = do
       body () _ = do
         threadDelay 30000000
         pure (Right 1)
-  ref <- registerWorkflowRef dbos (newWorkflowKey "bounded") body >>= either (error . show) pure
+  ref <- registerWorkflowRef dbos (newQualifiedWorkflowName "bounded") body >>= either (error . show) pure
   exec <- fx.dfLaunch dbos
   before <- getCurrentTime
   _ran <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowId = Just wid, runTimeout = Explicit (millisDuration 500)}) Nothing

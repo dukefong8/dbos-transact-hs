@@ -18,7 +18,7 @@ rebuilt on the Haskell transactional-step datasource and the IHP web stack:
 ## Run
 
 ```sh
-make widget-db          # schema.sql -> $DBOS_DATABASE_URL (compile-time typedSql describe)
+make widget-db          # schema.sql -> $DBOS_SYSTEM_DATABASE_URL (compile-time typedSql describe)
 cabal run demo-apps
 # http://localhost:8080
 ```

@@ -30,7 +30,7 @@ import DBOS.Transact
     handleStatus,
     launchWithEnvironment,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerDataSource,
     registerWorkflowRef,
     releaseAppDataSource,
@@ -250,12 +250,12 @@ withWidgetFixture body = do
   _ <- registerDataSource dbos ds >>= either (fail . show) pure
   checkoutTid <- newTVarIO Nothing
   dispatchTid <- newTVarIO Nothing
-  dispatchRef <- registerWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchBody ds (\tx -> captureDispatchThread dispatchTid (pgDispatchSteps tables tx))) >>= either (fail . show) pure
-  checkoutRef <- registerWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (checkoutBody ds (\tx -> captureCheckoutThread checkoutTid (pgCheckoutSteps tables tx)) dispatchRef) >>= either (fail . show) pure
-  failingRef <- registerWorkflowRef dbos (newWorkflowKey "CheckoutCannedFailWorkflow") (checkoutBody ds (\tx -> failingPgCheckoutSteps tables tx) dispatchRef) >>= either (fail . show) pure
+  dispatchRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "DispatchOrderWorkflow") (dispatchBody ds (\tx -> captureDispatchThread dispatchTid (pgDispatchSteps tables tx))) >>= either (fail . show) pure
+  checkoutRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "CheckoutWorkflow") (checkoutBody ds (\tx -> captureCheckoutThread checkoutTid (pgCheckoutSteps tables tx)) dispatchRef) >>= either (fail . show) pure
+  failingRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "CheckoutCannedFailWorkflow") (checkoutBody ds (\tx -> failingPgCheckoutSteps tables tx) dispatchRef) >>= either (fail . show) pure
   acked <- newTVarIO 0
   let lostDs = lostAckOnce acked ds
-  lostRef <- registerWorkflowRef dbos (newWorkflowKey "CheckoutLostAckWorkflow") (checkoutBody lostDs (\tx -> pgCheckoutSteps tables tx) dispatchRef) >>= either (fail . show) pure
+  lostRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "CheckoutLostAckWorkflow") (checkoutBody lostDs (\tx -> pgCheckoutSteps tables tx) dispatchRef) >>= either (fail . show) pure
   postgresConfig <- Postgres.configFromEnv
   backend <- Postgres.acquirePostgresSystemDB postgresConfig nullTracer
   Postgres.activatePostgresSystemDB backend

@@ -337,7 +337,7 @@ supervisor directly and `shutdown` joins it.
 
 ### `registry.rs` → `Transact.Registry` ◐
 
-`WorkflowKey` + `new`/`instance`/`from_row`/`renderWorkflowKey` ✓.
+`QualifiedWorkflowName` + `new`/`instance`/`from_row`/`renderQualifiedWorkflowName` ✓.
 `WorkflowRef` is unparameterized (registry + key; no `DBOS` handle, so
 capturing one cannot pin an instance) with `refKey`/`refName`/
 `registerWorkflowRef`; the typed `register_workflow`/

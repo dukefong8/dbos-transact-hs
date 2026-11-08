@@ -2,16 +2,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | How a DBOS application is configured. Mirrors Rust @config.rs@: the
--- fields, @Config::new@, @Config::from_env@ (which reads @DBOS_DATABASE_URL@
+-- fields, @Config::new@, @Config::from_env@ (which reads @DBOS_SYSTEM_DATABASE_URL@
 -- and no other variable — the identity variables are launch's to read, so a
 -- hand-written config and one from here resolve to the same identity),
 -- @validate@, and @outcome_poll_interval@.
 --
--- The system database comes from @DBOS_DATABASE_URL@; the application's own
+-- The system database comes from @DBOS_SYSTEM_DATABASE_URL@; the application's own
 -- datasource reads @APP_DATABASE_URL@ (see 'appDatabaseUrlFromEnv'), so the
 -- two may point at different servers.
 module DBOS.Transact.Config
-  ( databaseUrlEnv,
+  ( systemDatabaseUrlEnv,
     appDatabaseUrlEnv,
     appDatabaseUrlFromEnv,
     Serializer (..),
@@ -32,13 +32,15 @@ import DBOS.SystemDB.Types (Duration, IdleTransactionTimeout (..), PollingConcur
 import DBOS.Transact.Error (EngineOnly, Error (..))
 import System.Environment (lookupEnv)
 
--- | The one variable @from_env@ reads: the system database.
-databaseUrlEnv :: Text
-databaseUrlEnv = "DBOS_DATABASE_URL"
+-- | The one variable @from_env@ reads: the system database. Mirrors Rust
+-- @SYSTEM_DATABASE_URL_ENV@; the old @DBOS_DATABASE_URL@ name is not read as
+-- a fallback, matching the oracle.
+systemDatabaseUrlEnv :: Text
+systemDatabaseUrlEnv = "DBOS_SYSTEM_DATABASE_URL"
 
 -- | The variable the *application* datasource reads: the app's own database,
 -- which may be a different server than the system database. Distinct from
--- the system database's @DBOS_DATABASE_URL@, and from the plain
+-- the system database's @DBOS_SYSTEM_DATABASE_URL@, and from the plain
 -- @DATABASE_URL@ that libpq tooling and the compile-time typedSql describe
 -- already use; a single-database deployment sets all three to the same URL.
 appDatabaseUrlEnv :: Text
@@ -108,12 +110,12 @@ configNew appName databaseUrl =
       configIdleTransactionTimeout = Default
     }
 
--- | @configNew@, taking the database URL from @DBOS_DATABASE_URL@. A
+-- | @configNew@, taking the database URL from @DBOS_SYSTEM_DATABASE_URL@. A
 -- missing or empty variable leaves the URL empty rather than failing here;
 -- launch is where an empty URL is reported.
 configFromEnv :: Text -> IO Config
 configFromEnv appName = do
-  url <- lookupEnv (Text.unpack databaseUrlEnv)
+  url <- lookupEnv (Text.unpack systemDatabaseUrlEnv)
   pure (configNew appName (maybe "" Text.pack url))
 
 -- | Mirrors @Config::validate@: refuse a configuration that cannot work,
@@ -124,7 +126,7 @@ validateConfig config
       Left
         ( ErrorConfig
             ( "no database URL: set `database_url`, or the "
-                <> databaseUrlEnv
+                <> systemDatabaseUrlEnv
                 <> " environment variable if the configuration came from `Config::from_env`"
             )
         )

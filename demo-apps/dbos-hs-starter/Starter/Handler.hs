@@ -48,7 +48,7 @@ import DBOS.Transact
     getWorkflowEvent,
     listWorkflowIdsByName,
     millisDuration,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     queue,
     startWorkflow,
     startOptionsDefault,
@@ -129,7 +129,7 @@ enqueueWorkflows app =
   liftIO $
     replicateM_ enqueueBatchSize $ do
       workflowId <- freshId "queued"
-      _ <- enqueueWorkflow app.staDbos (newWorkflowKey enqueuedWorkflowName) workflowId Nothing demoQueueName
+      _ <- enqueueWorkflow app.staDbos (newQualifiedWorkflowName enqueuedWorkflowName) workflowId Nothing demoQueueName
       pure ()
 
 applyConcurrency :: StarterApp -> Int -> RouteHandler ()

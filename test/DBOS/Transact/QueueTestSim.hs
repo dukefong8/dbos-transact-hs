@@ -34,6 +34,7 @@ import DBOS.SystemDB
     OnExistingQueue (..),
     QueueRecord,
     WorkflowId (..),
+    WorkflowIdReusePolicy (..),
     WorkflowRecord (..),
     getQueue,
     getWorkflow,
@@ -82,6 +83,7 @@ import DBOS.Transact.QueueCases
     checkReregister,
     checkReserved,
     checkSentinel,
+    checkPausedZero,
     checkUnhonourable,
     checkUnlaunched,
     checkUpdateCoherent,
@@ -123,6 +125,7 @@ import DBOS.Transact.QueueCases
     scenarioReregister,
     scenarioReserved,
     scenarioSentinel,
+    scenarioPausedZero,
     scenarioUnhonourable,
     scenarioUnlaunched,
     scenarioUpdateCoherent,
@@ -154,6 +157,7 @@ stageQueuedRow mem widText application = do
           }
       )
       Nothing
+      WorkflowIdReturnExisting
   record <- getQueue mem queueName
   case record of
     Right (Just queue) -> pure queue
@@ -289,6 +293,7 @@ tests =
           simLeaf (const Nothing) "incoherent limits are refused before they reach the row" scenarioIncoherent checkIncoherent,
           simLeaf (const Nothing) "an update cannot leave a queue incoherent" scenarioUpdateCoherent checkUpdateCoherent,
           simLeaf (const Nothing) "an unhonourable queue configuration is refused" scenarioUnhonourable checkUnhonourable,
+          simLeaf (const Nothing) "a queue-wide limit of 0 pauses the queue until it is raised" scenarioPausedZero checkPausedZero,
           simLeaf (const Nothing) "a per-process limit may equal the fleet limit" scenarioEqualLimits checkEqualLimits,
           simLeaf (const Nothing) "the fleet limit has two spellings, setting both is refused" scenarioConcurrencySpellings checkConcurrencySpellings,
           simLeaf (const Nothing) "an update names one spelling at a time" scenarioConcurrencyUpdate checkConcurrencyUpdate,

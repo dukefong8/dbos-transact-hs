@@ -128,8 +128,8 @@ simOutboxFixture = do
   tagCounter <- newTVarIO (0 :: Int)
   widCounter <- newTVarIO (0 :: Int)
   let ds = mkSimDs storeVar
-      atomicKey = newWorkflowKey "place_order"
-      notifyKey = newWorkflowKey "send_notification_workflow"
+      atomicKey = newQualifiedWorkflowName "place_order"
+      notifyKey = newQualifiedWorkflowName "send_notification_workflow"
       consumeTxFault = atomically $ do
         fault <- readTVar faultVar
         writeTVar faultVar TxOk
@@ -171,7 +171,7 @@ simOutboxFixture = do
                   newWorkflowAppName = Just "sim-app",
                   newWorkflowAppVersion = Just "0.0.0"
                 }
-        created <- runSystemDB (SomeSystemDB mem) (\db -> SystemDB.initWorkflow db row Nothing)
+        created <- runSystemDB (SomeSystemDB mem) (\db -> SystemDB.initWorkflow db row Nothing WorkflowIdReturnExisting)
         case created of
           Left err -> throwIO (userError (show err))
           Right _ -> pure (WorkflowId widText)

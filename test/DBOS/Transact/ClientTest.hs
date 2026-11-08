@@ -17,7 +17,7 @@ import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Hasql.Transaction qualified as Tx
-import DBOS.SystemDB (AppScope (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, durationFromSecs, forkNew, getWorkflow, millisDuration, secondsDuration)
+import DBOS.SystemDB (AppScope (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, durationFromSecs, forkNew, getWorkflow, millisDuration, secondsDuration)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres qualified as Postgres
@@ -31,7 +31,7 @@ import DBOS.Transact
     DBOS,
     Executor,
     DuplicationPolicy (..),
-    Enqueue (..),
+    QueueRequest (..),
     EnqueueOptions (..),
     Environment (..),
     Error (..),
@@ -62,6 +62,7 @@ import DBOS.Transact
     clientRetrieveQueue,
     clientUpdateQueue,
     clientUpdateWorkflowAttributes,
+    clientMergeWorkflowAttributes,
     clientSetWorkflowDelay,
     clientWaitFirst,
     clientListWorkflows,
@@ -78,6 +79,7 @@ import DBOS.Transact
     configFromEnv,
     connectClient,
     DebounceOptions (..),
+    DebouncerClient (..),
     debounceClient,
     debounceClientWith,
     debounceOptionsDefault,
@@ -89,14 +91,14 @@ import DBOS.Transact
     clientEnqueueWorkflowInTx,
     clientEnqueueWorkflowWith,
     clientEnqueueWorkflow,
-    enqueueNew,
+    queueRequestNew,
     enqueueOptionsNew,
-    enqueueOptionsOn,
     handleResult,
+    instanceQualifiedWorkflowName,
     launchWithEnvironment,
-    methodWorkflowKey,
+    methodQualifiedWorkflowName,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerDataSource,
     registerWorkflow,
     registerQueue,
@@ -108,7 +110,7 @@ import DBOS.Transact
     shutdown,
     validateClientConfig,
     RewindOptions (rewindStartStep),
-    WorkflowKey,
+    QualifiedWorkflowName,
     clientWorkflowStatus,
     clientWorkflowRecord,
     WorkflowHandle (workflowId),
@@ -123,7 +125,7 @@ import DBOS.Transact.Datasource (DataSource (..))
 import DBOS.Transact.Datasource qualified as DSTx (Tx (Tx))
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Instance (dequeueWorkflows)
-import DBOS.Transact.Client (clientGetEventSerialized)
+import DBOS.Transact.Client (clientGetEventSerialized, queueRequest)
 import DBOS.Transact.Workflow (storedPriority, validateEnqueue, validateStart)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
@@ -144,7 +146,7 @@ tests =
     [ testCase "connect reports a missing url by the name of the variable that sets it" $ do
         case validateClientConfig (clientConfigNew "") of
           Left err ->
-            assertBool "names the variable" ("DBOS_DATABASE_URL" `Text.isInfixOf` Text.pack (show err))
+            assertBool "names the variable" ("DBOS_SYSTEM_DATABASE_URL" `Text.isInfixOf` Text.pack (show err))
           Right () -> fail "expected the empty url to be refused",
       testCase "the client's listen default matches Rust and the field stays inert" $
         (clientConfigNew "postgresql://x").useListenNotify @?= False,
@@ -164,7 +166,7 @@ tests =
             appVersion = "hs-l2-client-version-" <> suffix
             executorId = "hs-l2-client-executor-" <> suffix
             queueName = "hs-l2-client-q-" <> Text.take 12 suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
         config0 <- configFromEnv appName
         -- The driven dequeue and the background supervisor sweep this case's
         -- queue only, not every fixture queue on the shared database.
@@ -188,7 +190,7 @@ tests =
             -- claimed by the latest registered version, and this shared
             -- database always has a newer nameless row.
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (21 :: Int)))
+            enqueued <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") options (Just (encodeWorkflowInput (21 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right handle -> do
@@ -206,7 +208,7 @@ tests =
             appVersion = "hs-l2-client-debounce-version-" <> suffix
             executorId = "hs-l2-client-debounce-executor-" <> suffix
             queueName = "hs-l2-client-debounce-q-" <> Text.take 12 suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         config0 <- configFromEnv appName
@@ -224,7 +226,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            let dc = debouncerClientNew client key ((enqueueOptionsNew queueName) {appVersion = Just appVersion})
+            let dc = (debouncerClientNew client key queueName) {debouncerClientAppVersion = Just appVersion}
             created <- debounceClient dc "user-7" (secondsDuration 3) (Just (encodeWorkflowInput (21 :: Int)))
             wid1 <- case created of
               Left err -> fail (show err)
@@ -255,7 +257,7 @@ tests =
             appVersion = "hs-l2-client-pinned-version-" <> suffix
             executorId = "hs-l2-client-pinned-executor-" <> suffix
             queueName = "hs-l2-client-pinned-q-" <> Text.take 12 suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
             offered = WorkflowId ("hs-l2-client-pinned-id-" <> suffix)
             WorkflowId offeredText = offered
             options = debounceOptionsDefault {debounceOptionsWorkflowId = Just offered}
@@ -276,7 +278,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            let dc = debouncerClientNew client key ((enqueueOptionsNew queueName) {appVersion = Just appVersion})
+            let dc = (debouncerClientNew client key queueName) {debouncerClientAppVersion = Just appVersion}
             created <- debounceClientWith dc "user-9" (secondsDuration 1) (Just (encodeWorkflowInput (21 :: Int))) options
             wid1 <- case created of
               Left err -> fail (show err)
@@ -291,50 +293,120 @@ tests =
             case reused of
               Left (SystemDatabase (SystemDBError.ConflictingWorkflow {})) -> pure ()
               other -> fail ("expected a conflict, not a join, got: " <> show other),
-      testCase "a client debounce owning queue options is refused" $ do
+      testCase "what a client debouncer cannot act on is refused" $ do
+        -- Mirrors the client half of Rust @what_a_debouncer_cannot_act_on_is_refused@:
+        -- a zero period, a zero budget, an empty queue and an empty app name
+        -- are refused, and nothing is written.
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
-            appName = "hs-l2-client-debounce-owned-" <> Text.take 12 suffix
-            queueName = "hs-l2-client-debounce-owned-q-" <> Text.take 12 suffix
-            key = newWorkflowKey "double"
+            appName = "hs-l2-client-debounce-refused-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-debounce-refused-q-" <> Text.take 12 suffix
+            key = newQualifiedWorkflowName "double"
         config0 <- configFromEnv appName
-        let config = config0 {configExecutorId = Just ("hs-l2-client-debounce-owned-exec-" <> suffix)}
-        bracket (newDBOS config) shutdown $ \dbos -> do
+        let config = config0 {configExecutorId = Just ("hs-l2-client-debounce-refused-exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \_dbos -> do
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            let tryOpts label opts = do
-                  refused <- debounceClient (debouncerClientNew client key opts) "user-1" (secondsDuration 1) Nothing
+            let dc = debouncerClientNew client key queueName
+                refusedBy label action field = do
+                  refused <- action
                   case refused of
-                    Left (InvalidArgument operation detail) -> do
-                      operation @?= "debounce a workflow"
-                      assertBool (label <> " names the queue") (("queue `" <> queueName <> "`") `Text.isInfixOf` detail)
+                    Left (InvalidArgument _ detail) ->
+                      assertBool (label <> " names " <> field) (Text.pack field `Text.isInfixOf` detail)
                     other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
-            tryOpts "dedup" ((enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {deduplicationId = Just "k"}})
-            tryOpts "delay" ((enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {delay = Just (secondsDuration 1)}})
-            stored <- debounceClient (debouncerClientNew client key (enqueueOptionsNew queueName) {workflowId = Just "stored"}) "user-1" (secondsDuration 1) Nothing
-            case stored of
+            refusedBy "period" (debounceClient dc "user-1" (millisDuration 0) Nothing) "period"
+            refusedBy "budget" (debounceClient (dc {debouncerClientTimeout = Just (millisDuration 0)}) "user-1" (secondsDuration 1) Nothing) "timeout"
+            refusedBy "queue" (debounceClient (debouncerClientNew client key "") "user-1" (secondsDuration 1) Nothing) "name"
+            refusedBy "app" (debounceClient (dc {debouncerClientAppName = Just ""}) "user-1" (secondsDuration 1) Nothing) "app_name"
+            queued <- clientListWorkflows client (defaultWorkflowFilter {workflowFilterQueueNames = [""]})
+            case queued of
+              Left err -> fail (show err)
+              Right records -> records @?= [],
+      testCase "a client debounce of a nameless workflow is refused" $ do
+        -- Mirrors Rust @a_client_debounce_of_a_nameless_workflow_is_refused@:
+        -- refused before anything bounces or writes.
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-debounce-nameless-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-debounce-nameless-q-" <> Text.take 12 suffix
+        config0 <- configFromEnv appName
+        let config = config0 {configExecutorId = Just ("hs-l2-client-debounce-nameless-exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \_dbos -> do
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            refused <- debounceClient (debouncerClientNew client (newQualifiedWorkflowName "") queueName) "user-1" (secondsDuration 1) Nothing
+            case refused of
               Left (InvalidArgument operation detail) -> do
-                operation @?= "debounce a workflow"
-                assertBool "names the per-call options" ("DebounceOptions.workflow_id" `Text.isInfixOf` detail)
-              other -> fail ("expected a stored-id refusal, got: " <> show other),
+                operation @?= "enqueue a workflow"
+                detail @?= ("queue `" <> queueName <> "`: `workflow` must not be empty")
+              other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+            listed <- clientListWorkflows client (defaultWorkflowFilter {workflowFilterNames = [""]})
+            case listed of
+              Left err -> fail (show err)
+              Right records -> records @?= [],
+      testCase "a config with no class debounces apart from the free function" $ do
+        -- Mirrors Rust @a_config_with_no_class_debounces_apart_from_the_free_function@:
+        -- its deduplication id keeps the config.
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-debounce-unclassed-" <> Text.take 12 suffix
+            queueName = "hs-l2-client-debounce-unclassed-q-" <> Text.take 12 suffix
+        config0 <- configFromEnv appName
+        let config = config0 {configExecutorId = Just ("hs-l2-client-debounce-unclassed-exec-" <> suffix)}
+        bracket (newDBOS config) shutdown $ \_dbos -> do
+          clientConfig0 <- clientConfigFromEnv
+          let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+          bracket (connectOrFail clientConfig) closeClient $ \client -> do
+            let free = debouncerClientNew client (newQualifiedWorkflowName "echo") queueName
+                unclassed = debouncerClientNew client (instanceQualifiedWorkflowName "echo" "" "eu") queueName
+            first <- debounceClient free "key" (secondsDuration 60) (Just (encodeWorkflowInput (1 :: Int)))
+            second <- debounceClient unclassed "key" (secondsDuration 60) (Just (encodeWorkflowInput (2 :: Int)))
+            case (first, second) of
+              (Right held1, Right held2) -> do
+                assertBool "separate debounces" (held1.workflowId /= held2.workflowId)
+                found <- clientWorkflowRecord client (WorkflowId held2.workflowId)
+                case found of
+                  Right (Just row) -> do
+                    row.workflowRecordClassName @?= Nothing
+                    row.workflowRecordConfigName @?= Just "eu"
+                    row.workflowRecordDeduplicationId @?= Just "echo//eu-key"
+                  other -> fail ("expected the unclassed row, got: " <> show other)
+              other -> fail ("expected two debounces, got: " <> show other),
+      testCase "an enqueue asks for a queue and nothing else" $ do
+        -- Mirrors Rust @an_enqueue_asks_for_a_queue_and_nothing_else@: the
+        -- flat fields build the request a start would make.
+        let options = enqueueOptionsNew "work"
+        queueRequest options @?= queueRequestNew "work"
+        options.workflowId @?= Nothing
+        options.appVersion @?= Nothing
+        options.timeout @?= Nothing
+        options.duplicationPolicy @?= Reject,
+      testCase "flat queue fields make the queue request" $ do
+        -- Mirrors Rust @flat_queue_fields_make_the_queue_request@: the row
+        -- and the shared checks see what the caller wrote.
+        let options =
+              ((enqueueOptionsNew "billing") {priority = Just 3, partitionKey = Just "tenant-7", workflowId = Just "order-42"} :: EnqueueOptions)
+        queueRequest options
+          @?= (((queueRequestNew "billing") {priority = Just 3, partitionKey = Just "tenant-7"}) :: QueueRequest),
       testCase "an enqueue no queue could honour is refused before any write" $ do
-        let both = (enqueueNew "q") {deduplicationId = Just "key", partitionKey = Just "part"}
+        let both = (((queueRequestNew "q") {deduplicationId = Just "key", partitionKey = Just "part"}) :: QueueRequest)
         case (validateEnqueue both :: Either (Error EngineOnly) ()) of
           Left (InvalidArgument operation detail) -> do
             operation @?= "enqueue a workflow"
             assertBool "names the queue" ("queue `q`" `Text.isInfixOf` detail)
           other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
-        let noKey = (enqueueNew "q") {duplicationPolicy = ReturnExisting}
+        let noKey = (((queueRequestNew "q") {duplicationPolicy = ReturnExisting}) :: QueueRequest)
         case (validateEnqueue noKey :: Either (Error EngineOnly) ()) of
           Left (InvalidArgument _ _) -> pure ()
           other -> fail ("expected return-existing without a key to be refused, got: " <> show other)
-        let zero = (enqueueNew "q") {priority = Just 0}
+        let zero = (((queueRequestNew "q") {priority = Just 0}) :: QueueRequest)
         case (validateEnqueue zero :: Either (Error EngineOnly) ()) of
           Left (InvalidArgument _ _) -> pure ()
           other -> fail ("expected priority zero to be refused, got: " <> show other)
-        storedPriority (enqueueNew "q") @?= 0
-        storedPriority ((enqueueNew "q") {priority = Just 3}) @?= 3,
+        storedPriority (queueRequestNew "q") @?= 0
+        storedPriority (((queueRequestNew "q") {priority = Just 3}) :: QueueRequest) @?= 3,
       testCase "a start's durations are refused on the start's channel" $ do
         let huge = case durationFromSecs 1e18 of
               Nothing -> error "a storable-busting duration must build"
@@ -342,28 +414,33 @@ tests =
         -- Zero reads as zero at millisecond granularity on both layers,
         -- as the system database's own check does; one millisecond is
         -- the smallest valid duration.
-        case (validateEnqueue ((enqueueNew "q") {delay = Just (millisDuration 0)}) :: Either (Error EngineOnly) ()) of
+        case (validateEnqueue (((queueRequestNew "q") {delay = Just (millisDuration 0)}) :: QueueRequest) :: Either (Error EngineOnly) ()) of
           Left (InvalidArgument operation detail) -> do
             operation @?= "enqueue a workflow"
             detail @?= "queue `q`: `delay` must be a positive, non-zero duration"
           other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
-        case (validateEnqueue ((enqueueNew "q") {delay = Just huge}) :: Either (Error EngineOnly) ()) of
+        case (validateEnqueue (((queueRequestNew "q") {delay = Just huge}) :: QueueRequest) :: Either (Error EngineOnly) ()) of
           Left (InvalidArgument operation detail) -> do
             operation @?= "enqueue a workflow"
             detail @?= "queue `q`: `delay` must fit in milliseconds as a 64-bit integer"
           other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
-        case (validateStart (Just (enqueueNew "q")) (Just huge) :: Either (Error EngineOnly) ()) of
+        case (validateStart (Just (queueRequestNew "q")) (Just huge) Nothing WorkflowIdReturnExisting :: Either (Error EngineOnly) ()) of
           Left (InvalidArgument operation detail) -> do
             operation @?= "enqueue a workflow"
             detail @?= "queue `q`: `timeout` must fit in milliseconds as a 64-bit integer"
           other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
-        case (validateStart Nothing (Just huge) :: Either (Error EngineOnly) ()) of
+        case (validateStart Nothing (Just huge) Nothing WorkflowIdReturnExisting :: Either (Error EngineOnly) ()) of
           Left (InvalidArgument operation detail) -> do
             operation @?= "start a workflow"
             detail @?= "`timeout` must fit in milliseconds as a 64-bit integer"
           other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
-        validateStart (Just (enqueueNew "q")) (Just (millisDuration 1)) @?= (Right () :: Either (Error EngineOnly) ())
-        validateStart Nothing Nothing @?= (Right () :: Either (Error EngineOnly) ()),
+        validateStart (Just (queueRequestNew "q")) (Just (millisDuration 1)) Nothing WorkflowIdReturnExisting @?= (Right () :: Either (Error EngineOnly) ())
+        validateStart Nothing Nothing Nothing WorkflowIdReturnExisting @?= (Right () :: Either (Error EngineOnly) ()),
+      testCase "a reuse policy about no id is refused before any write" $
+        -- Mirrors Rust @validate_start@: the policy is about an id the
+        -- caller chose, so Reject without one is refused.
+        validateStart (Just (queueRequestNew "q")) Nothing Nothing WorkflowIdReject
+          @?= (Left (InvalidArgument "enqueue a workflow" "queue `q`: `WorkflowIdReusePolicy::Reject` needs a `workflow_id`: the policy is about an id the caller chose") :: Either (Error EngineOnly) ()),
       testCase "a start the database refuses reports as the start's own" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -372,7 +449,7 @@ tests =
         clientConfig0 <- clientConfigFromEnv
         let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
         bracket (connectOrFail clientConfig) closeClient $ \client -> do
-          let enqueued shape = clientEnqueueWorkflowWith client (newWorkflowKey "refused") shape Nothing
+          let enqueued shape = clientEnqueueWorkflowWith client (newQualifiedWorkflowName "refused") shape Nothing
               check shape expected = do
                 refused <- enqueued shape
                 case refused of
@@ -384,14 +461,32 @@ tests =
             (((enqueueOptionsNew queueName) {workflowId = Just ""}) :: EnqueueOptions)
             ("queue `" <> queueName <> "`: `workflow_id` must not be empty")
           check
-            ((enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {deduplicationId = Just ""}})
+            (((enqueueOptionsNew queueName) {deduplicationId = Just ""}) :: EnqueueOptions)
             ("queue `" <> queueName <> "`: `deduplication_id` must be absent rather than empty")
           check
-            (((enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {partitionKey = Just ""}}) :: EnqueueOptions)
+            (((enqueueOptionsNew queueName) {partitionKey = Just ""}) :: EnqueueOptions)
             ("queue `" <> queueName <> "`: `partition_key` must be absent rather than empty")
           check
             (((enqueueOptionsNew queueName) {appVersion = Just ""}) :: EnqueueOptions)
-            ("queue `" <> queueName <> "`: `app_version` must be absent rather than empty"),
+            ("queue `" <> queueName <> "`: `app_version` must be absent rather than empty")
+          -- An empty queue name is refused up front, naming the field the
+          -- caller wrote. Mirrors the oracle's new table row.
+          check
+            (enqueueOptionsNew "")
+            "`queue_name` must not be empty"
+          -- A workflow with no name, which nothing could dequeue, is
+          -- refused before anything is written. Mirrors Rust's nameless
+          -- client enqueue refusal.
+          nameless <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "") (enqueueOptionsNew queueName) Nothing
+          case nameless of
+            Left (InvalidArgument operation detail) -> do
+              operation @?= "enqueue a workflow"
+              detail @?= ("queue `" <> queueName <> "`: `workflow` must not be empty")
+            other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+          listed <- clientListWorkflows client (defaultWorkflowFilter {workflowFilterNames = [""]})
+          case listed of
+            Left err -> fail (show err)
+            Right records -> records @?= [],
       testCase "a second enqueue under a held key joins the holder" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -399,9 +494,10 @@ tests =
             appVersion = "hs-l2-client-dup-version-" <> suffix
             executorId = "hs-l2-client-dup-executor-" <> suffix
             queueName = "hs-l2-client-dup-q-" <> Text.take 12 suffix
-            key = newWorkflowKey "double"
-            shape = (enqueueNew queueName) {deduplicationId = Just ("dup-" <> suffix), duplicationPolicy = ReturnExisting}
-            options = (enqueueOptionsOn shape) {appVersion = Just appVersion}
+            key = newQualifiedWorkflowName "double"
+            options =
+              ((((enqueueOptionsNew queueName) {deduplicationId = Just ("dup-" <> suffix), duplicationPolicy = ReturnExisting}) :: EnqueueOptions)
+                {appVersion = Just appVersion} :: EnqueueOptions)
         config0 <- configFromEnv appName
         -- The driven dequeue and the background supervisor sweep this case's
         -- queue only, not every fixture queue on the shared database.
@@ -421,8 +517,8 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            first <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (21 :: Int)))
-            second <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (99 :: Int)))
+            first <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") options (Just (encodeWorkflowInput (21 :: Int)))
+            second <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") options (Just (encodeWorkflowInput (99 :: Int)))
             case (first, second) of
               (Right holder, Right joiner) -> do
                 joiner.workflowId @?= holder.workflowId
@@ -442,7 +538,7 @@ tests =
             appVersion = "hs-l2-client-ret-version-" <> suffix
             executorId = "hs-l2-client-ret-executor-" <> suffix
             workflowText = "hs-l2-client-ret-id-" <> suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just appVersion, configExecutorId = Just executorId}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -476,7 +572,7 @@ tests =
           enqueued <-
             clientEnqueueWorkflowWith
               client
-              (newWorkflowKey "no-such-function")
+              (newQualifiedWorkflowName "no-such-function")
               (enqueueOptionsNew queueName) {workflowId = Just workflowText}
               Nothing
           case enqueued of
@@ -492,17 +588,19 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             queueName = "hs-l2-client-opts-q-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-opts-id-" <> suffix
-            shape = (enqueueNew queueName) {deduplicationId = Just ("opts-" <> suffix), priority = Just 3, delay = Just (secondsDuration 60)}
             options =
-              (enqueueOptionsOn shape)
-                { workflowId = Just workflowText,
+              ((enqueueOptionsNew queueName)
+                { deduplicationId = Just ("opts-" <> suffix),
+                  priority = Just 3,
+                  delay = Just (secondsDuration 60),
+                  workflowId = Just workflowText,
                   appVersion = Just "v1",
                   timeout = Just (secondsDuration 30),
                   attributes = Just (Map.fromList [("k", String "v")])
-                }
+                } :: EnqueueOptions)
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          enqueued <- clientEnqueueWorkflowWith client (methodWorkflowKey "double" "cls") options Nothing
+          enqueued <- clientEnqueueWorkflowWith client (methodQualifiedWorkflowName "double" "cls") options Nothing
           case enqueued of
             Left err -> fail (show err)
             Right _ -> pure ()
@@ -519,6 +617,72 @@ tests =
               budget @?= Just (secondsDuration 30)
               assertBool "attributes are stored" (attributes /= Nothing)
               status @?= Delayed,
+      testCase "an enqueued name writes an empty class or config as null" $ do
+        -- Mirrors Rust @an_enqueued_key_writes_an_empty_class_or_config_as_null@:
+        -- absence has one spelling on the row.
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            queueName = "hs-l2-client-blank-q-" <> Text.take 12 suffix
+            workflowText = "hs-l2-client-blank-id-" <> suffix
+        clientConfig0 <- clientConfigFromEnv
+        bracket (connectOrFail clientConfig0) closeClient $ \client -> do
+          enqueued <-
+            clientEnqueueWorkflowWith
+              client
+              (instanceQualifiedWorkflowName "never_registered" "" "")
+              ((enqueueOptionsNew queueName) {workflowId = Just workflowText})
+              Nothing
+          case enqueued of
+            Left err -> fail (show err)
+            Right _ -> pure ()
+          row <- readRow getBackend (WorkflowId workflowText)
+          row.workflowRecordClassName @?= Nothing
+          row.workflowRecordConfigName @?= Nothing,
+      testCase "a rejecting client enqueue refuses a taken id" $ do
+        -- Mirrors Rust @a_rejecting_client_enqueue_refuses_a_taken_id@: a
+        -- Reject enqueue whose id is taken runs nothing and writes nothing;
+        -- the default joins the holder.
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            queueName = "hs-l2-client-reject-q-" <> Text.take 12 suffix
+            takenText = "hs-l2-client-taken-id-" <> suffix
+            options policy = (enqueueOptionsNew queueName) {workflowId = Just takenText, workflowIdReusePolicy = policy}
+        clientConfig0 <- clientConfigFromEnv
+        bracket (connectOrFail clientConfig0) closeClient $ \client -> do
+          first <-
+            clientEnqueueWorkflowWith
+              client
+              (newQualifiedWorkflowName "never_registered")
+              (options WorkflowIdReject)
+              (Just (encodeWorkflowInput (1 :: Int)))
+          case first of
+            Left err -> fail ("a fresh id is not in use, got: " <> show err)
+            Right _ -> pure ()
+          before <- readRow getBackend (WorkflowId takenText)
+          refused <-
+            clientEnqueueWorkflowWith
+              client
+              (newQualifiedWorkflowName "never_registered")
+              (options WorkflowIdReject)
+              (Just (encodeWorkflowInput (2 :: Int)))
+          case refused of
+            Left (SystemDatabase (SystemDBError.WorkflowIdInUse {workflowId = wid, status = st, existingName = name})) -> do
+              wid @?= takenText
+              st @?= "ENQUEUED"
+              name @?= Just "never_registered"
+            other -> fail ("expected WorkflowIdInUse, got: " <> show other)
+          joined <-
+            clientEnqueueWorkflowWith
+              client
+              (newQualifiedWorkflowName "never_registered")
+              (options WorkflowIdReturnExisting)
+              (Just (encodeWorkflowInput (3 :: Int)))
+          case joined of
+            Right handle -> handle.workflowId @?= takenText
+            other -> fail ("expected the default join, got: " <> show other)
+          after <- readRow getBackend (WorkflowId takenText)
+          after.workflowRecordInput @?= before.workflowRecordInput
+          after.workflowRecordUpdatedAt @?= before.workflowRecordUpdatedAt,
       testCase "a nameless client writes unclaimed rows, which the app claims when it runs them" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -529,7 +693,7 @@ tests =
             adoptedQueue = "hs-l2-client-adopt-q-" <> Text.take 12 suffix
             unpolledText = "hs-l2-client-nameless-id-" <> suffix
             adoptedText = "hs-l2-client-adopt-id-" <> suffix
-            key = newWorkflowKey "adopt"
+            key = newQualifiedWorkflowName "adopt"
         config0 <- configFromEnv appName
         -- The driven dequeue and the background supervisor sweep this case's
         -- queue only, not every fixture queue on the shared database.
@@ -552,7 +716,7 @@ tests =
             unpolled <-
               clientEnqueueWorkflowWith
                 client
-                (newWorkflowKey "adopt")
+                (newQualifiedWorkflowName "adopt")
                 (enqueueOptionsNew unpolledQueue) {workflowId = Just unpolledText}
                 (Just (encodeWorkflowInput (7 :: Int)))
             case unpolled of
@@ -568,7 +732,7 @@ tests =
             adopted <-
               clientEnqueueWorkflowWith
                 client
-                (newWorkflowKey "adopt")
+                (newQualifiedWorkflowName "adopt")
                 ((enqueueOptionsNew adoptedQueue) {workflowId = Just adoptedText, appVersion = Just appVersion})
                 (Just (encodeWorkflowInput (7 :: Int)))
             case adopted of
@@ -590,8 +754,8 @@ tests =
             workflowText = "hs-l2-client-idkey-id-" <> suffix
         clientConfig0 <- clientConfigFromEnv
         bracket (connectOrFail clientConfig0) closeClient $ \client -> do
-          first <- clientEnqueueWorkflowWith client (newWorkflowKey "double") (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
-          second <- clientEnqueueWorkflowWith client (newWorkflowKey "double") (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+          first <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+          second <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
           case (first, second) of
             (Right holder, Right joiner) -> joiner.workflowId @?= holder.workflowId
             (Left err, _) -> fail ("the first enqueue failed: " <> show err)
@@ -603,7 +767,7 @@ tests =
         -- without invalidating the client, so a later call reconnects.
         closeClient client
         closeClient client
-        enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") (enqueueOptionsNew "hs-l2-client-closed-q") Nothing
+        enqueued <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") (enqueueOptionsNew "hs-l2-client-closed-q") Nothing
         case enqueued of
           Left err -> fail ("expected the pool to reconnect, got: " <> show err)
           Right _ -> pure (),
@@ -621,7 +785,7 @@ tests =
             appVersion = "hs-l2-client-msg-version-" <> suffix
             executorId = "hs-l2-client-msg-executor-" <> suffix
             queueName = "hs-l2-client-msg-q-" <> Text.take 12 suffix
-            key = newWorkflowKey "receiver"
+            key = newQualifiedWorkflowName "receiver"
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             body () wctx = do
               received <- recv wctx (Just (Topic "ping")) (millisDuration 5000)
@@ -649,7 +813,7 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "receiver") options Nothing
+            enqueued <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "receiver") options Nothing
             handle <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -670,7 +834,7 @@ tests =
             appVersion = "hs-l2-client-batch-version-" <> suffix
             executorId = "hs-l2-client-batch-executor-" <> suffix
             queueName = "hs-l2-client-batch-q-" <> Text.take 12 suffix
-            key = newWorkflowKey "batcher"
+            key = newQualifiedWorkflowName "batcher"
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             body () wctx = do
               first <- recv wctx (Just (Topic "ping")) (millisDuration 5000)
@@ -705,7 +869,7 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "batcher") options Nothing
+            enqueued <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "batcher") options Nothing
             batch <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -733,7 +897,7 @@ tests =
             queueName = "hs-l2-client-tx-q-" <> Text.take 12 suffix
             table = "client_tx_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
             topic = Topic ("client-tx-" <> Text.take 12 suffix)
-            key = newWorkflowKey "txreceiver"
+            key = newQualifiedWorkflowName "txreceiver"
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             body () wctx = do
               found <- recv wctx (Just topic) (millisDuration 5000)
@@ -757,7 +921,7 @@ tests =
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
             let options = (enqueueOptionsNew queueName) {appVersion = Just appVersion}
-            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "txreceiver") options Nothing
+            enqueued <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "txreceiver") options Nothing
             receiver <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -850,7 +1014,7 @@ tests =
             table = "client_tx_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
             topicName = "client-txfork-" <> Text.take 12 suffix
             topic = Topic topicName
-            key = newWorkflowKey "forked"
+            key = newQualifiedWorkflowName "forked"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "noop" (const (pure (value * 2)))
         config0 <- configFromEnv appName
@@ -888,7 +1052,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-client-rewind-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-rewind-id-" <> suffix
-            key = newWorkflowKey "redoubled"
+            key = newQualifiedWorkflowName "redoubled"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         config0 <- configFromEnv appName
@@ -920,7 +1084,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-client-rewind-ds-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-rewind-ds-id-" <> suffix
-            key = newWorkflowKey "plain"
+            key = newQualifiedWorkflowName "plain"
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
             body () _ = pure (Right ())
         config0 <- configFromEnv appName
@@ -964,7 +1128,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-client-events-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-events-id-" <> suffix
-            key = newWorkflowKey "greeter"
+            key = newQualifiedWorkflowName "greeter"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -997,7 +1161,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-client-cancel-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-cancel-id-" <> suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -1027,7 +1191,7 @@ tests =
             appName = "hs-l2-client-resume-" <> Text.take 12 suffix
             queueName = "hs-l2-client-resume-q-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-resume-id-" <> suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -1041,7 +1205,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
+            enqueued <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") (enqueueOptionsNew queueName) {workflowId = Just workflowText} Nothing
             case enqueued of
               Left err -> fail (show err)
               Right _ -> pure ()
@@ -1054,7 +1218,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-client-fork-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-fork-id-" <> suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -1199,7 +1363,7 @@ tests =
             appName = "hs-l2-client-list-" <> Text.take 12 suffix
             firstText = "hs-l2-client-list-1-" <> suffix
             secondText = "hs-l2-client-list-2-" <> suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
         config0 <- configFromEnv appName
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
@@ -1226,7 +1390,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-client-plain-" <> Text.take 12 suffix
             queueName = "hs-l2-client-plain-q-" <> Text.take 12 suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         config0 <- configFromEnv appName
@@ -1239,7 +1403,7 @@ tests =
           clientConfig0 <- clientConfigFromEnv
           let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
           bracket (connectOrFail clientConfig) closeClient $ \client -> do
-            enqueued <- clientEnqueueWorkflow client (newWorkflowKey "double") queueName (Just (encodeWorkflowInput (21 :: Int)))
+            enqueued <- clientEnqueueWorkflow client (newQualifiedWorkflowName "double") queueName (Just (encodeWorkflowInput (21 :: Int)))
             handle <- case enqueued of
               Left err -> fail (show err)
               Right handle -> pure handle
@@ -1261,7 +1425,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-client-evt-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-evt-id-" <> suffix
-            key = newWorkflowKey "quiet"
+            key = newQualifiedWorkflowName "quiet"
             body :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
             body () _ = pure (Right ())
         config0 <- configFromEnv appName
@@ -1339,7 +1503,7 @@ tests =
             appName = "hs-l2-client-wait-" <> Text.take 12 suffix
             firstText = "hs-l2-client-wait-1-" <> suffix
             secondText = "hs-l2-client-wait-2-" <> suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         config0 <- configFromEnv appName
@@ -1387,7 +1551,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-client-attrs-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-attrs-id-" <> suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         config0 <- configFromEnv appName
@@ -1412,6 +1576,15 @@ tests =
               -- canonical form, not the literal sent.
               Right [record] -> record.workflowRecordAttributes @?= Just "{\"team\": \"red\"}"
               Right records -> fail ("expected one listed row, got: " <> show (length records))
+            merged <- clientMergeWorkflowAttributes client (WorkflowId workflowText) "{\"tier\":\"silver\"}"
+            merged @?= Right ()
+            mergedListed <- clientListWorkflows client filters
+            case mergedListed of
+              Left err -> fail (show err)
+              -- A merge keeps what is there: the team survives beside the
+              -- new tier.
+              Right [record] -> record.workflowRecordAttributes @?= Just "{\"team\": \"red\", \"tier\": \"silver\"}"
+              Right records -> fail ("expected one merged row, got: " <> show (length records))
             cleared <- clientUpdateWorkflowAttributes client (WorkflowId workflowText) Nothing
             cleared @?= Right ()
             relisted <- clientListWorkflows client filters
@@ -1425,7 +1598,7 @@ tests =
             appName = "hs-l2-client-delay-" <> Text.take 12 suffix
             queueName = "hs-l2-client-delay-q-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-delay-id-" <> suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         config0 <- configFromEnv appName
@@ -1444,8 +1617,8 @@ tests =
               Left err -> fail (show err)
               Right _ -> pure ()
             let options :: EnqueueOptions
-                options = (enqueueOptionsOn ((enqueueNew queueName) {delay = Just (secondsDuration 3600)})) {workflowId = Just workflowText}
-            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (1 :: Int)))
+                options = ((((enqueueOptionsNew queueName) {delay = Just (secondsDuration 3600)}) :: EnqueueOptions) {workflowId = Just workflowText} :: EnqueueOptions)
+            enqueued <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") options (Just (encodeWorkflowInput (1 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right _ -> pure ()
@@ -1461,7 +1634,7 @@ tests =
             appName = "hs-l2-client-enqtx-" <> Text.take 12 suffix
             queueName = "hs-l2-client-enqtx-q-" <> Text.take 12 suffix
             table = "client_enqtx_probe_" <> Text.filter (/= '-') (Text.take 12 suffix)
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         config0 <- configFromEnv appName
@@ -1479,7 +1652,7 @@ tests =
               (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
               (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
               (\_ -> do
-                enqueued <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-commit" (Tx.statement "row-1" (insertProbe table)) (enqueueOptionsNew queueName) (Just (encodeWorkflowInput (7 :: Int)))
+                enqueued <- clientEnqueueWorkflowInTx client (newQualifiedWorkflowName "double") "enq-commit" (Tx.statement "row-1" (insertProbe table)) (enqueueOptionsNew queueName) (Just (encodeWorkflowInput (7 :: Int)))
                 handle <- case enqueued of
                   Left err -> fail (show err)
                   Right handle -> pure handle
@@ -1504,11 +1677,11 @@ tests =
             (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
             (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
             (\_ -> do
-              first <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
+              first <- clientEnqueueWorkflowInTx client (newQualifiedWorkflowName "double") "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
               case first of
                 Left err -> fail (show err)
                 Right _ -> pure ()
-              second <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-repeat" (Tx.statement "row-2" (insertProbe table)) options Nothing
+              second <- clientEnqueueWorkflowInTx client (newQualifiedWorkflowName "double") "enq-repeat" (Tx.statement "row-2" (insertProbe table)) options Nothing
               case second of
                 Left err -> fail (show err)
                 Right _ -> pure ()
@@ -1533,11 +1706,11 @@ tests =
             (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
             (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
             (\_ -> do
-              first <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
+              first <- clientEnqueueWorkflowInTx client (newQualifiedWorkflowName "double") "enq-first" (Tx.statement "row-1" (insertProbe table)) options Nothing
               case first of
                 Left err -> fail (show err)
                 Right _ -> pure ()
-              conflicted <- clientEnqueueWorkflowInTx client (newWorkflowKey "rival") "enq-rival" (Tx.statement "row-2" (insertProbe table)) rival Nothing
+              conflicted <- clientEnqueueWorkflowInTx client (newQualifiedWorkflowName "rival") "enq-rival" (Tx.statement "row-2" (insertProbe table)) rival Nothing
               case conflicted of
                 Left (SystemDatabase (SystemDBError.ConflictingWorkflow {})) -> pure ()
                 other -> fail ("expected the rival enqueue condemned, got: " <> show other)
@@ -1552,14 +1725,14 @@ tests =
         clientConfig0 <- clientConfigFromEnv
         let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
             options :: EnqueueOptions
-            options = (enqueueOptionsNew queueName) {queue = (enqueueNew queueName) {duplicationPolicy = ReturnExisting, deduplicationId = Just "k"}}
+            options = ((enqueueOptionsNew queueName) {duplicationPolicy = ReturnExisting, deduplicationId = Just "k"} :: EnqueueOptions)
         bracket (connectOrFail clientConfig) closeClient $ \client -> do
           backend <- getBackend
           bracket
             (Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (createProbeTable table)) >>= either (fail . show) pure)
             (\_ -> Postgres.runSession backend "client-enqtx-ddl" (Session.statement () (dropProbeTable table)) >> pure ())
             (\_ -> do
-              refused <- clientEnqueueWorkflowInTx client (newWorkflowKey "double") "enq-join" (Tx.statement "row-1" (insertProbe table)) options Nothing
+              refused <- clientEnqueueWorkflowInTx client (newQualifiedWorkflowName "double") "enq-join" (Tx.statement "row-1" (insertProbe table)) options Nothing
               case refused of
                 Left (InvalidArgument operation _)
                   | operation == "enqueue in transaction" -> pure ()
@@ -1574,7 +1747,7 @@ tests =
             queueName = "hs-l2-client-qlist-q-" <> Text.take 12 suffix
             plainText = "hs-l2-client-qlist-plain-" <> suffix
             queuedText = "hs-l2-client-qlist-queued-" <> suffix
-            key = newWorkflowKey "double"
+            key = newQualifiedWorkflowName "double"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             body value wctx = runStep wctx "double" (const (pure (value * 2)))
         config0 <- configFromEnv appName
@@ -1595,7 +1768,7 @@ tests =
               Right _ -> pure ()
             let options :: EnqueueOptions
                 options = (enqueueOptionsNew queueName) {workflowId = Just queuedText}
-            enqueued <- clientEnqueueWorkflowWith client (newWorkflowKey "double") options (Just (encodeWorkflowInput (2 :: Int)))
+            enqueued <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") options (Just (encodeWorkflowInput (2 :: Int)))
             case enqueued of
               Left err -> fail (show err)
               Right handle -> handle.workflowId @?= queuedText
@@ -1611,7 +1784,7 @@ tests =
         let suffix = Text.pack (UUID.toString fresh)
             appName = "hs-l2-client-stream-" <> Text.take 12 suffix
             workflowText = "hs-l2-client-stream-id-" <> suffix
-            key = newWorkflowKey "streamer"
+            key = newQualifiedWorkflowName "streamer"
             body :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) ())
             body value wctx = writeStream wctx "out" (show value)
         config0 <- configFromEnv appName
@@ -1652,7 +1825,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 resultWf :: WorkflowHandle IO EngineOnly -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))

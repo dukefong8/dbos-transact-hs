@@ -21,10 +21,11 @@ module DBOS.Transact.Workflow
     registerWorkflowRef,
     registerTypedWorkflow,
     enqueueWorkflow,
-    Enqueue (..),
+    QueueRequest (..),
     DuplicationPolicy (..),
-    enqueueNew,
+    queueRequestNew,
     validateEnqueue,
+    checkStartDuration,
     validateStart,
     storedPriority,
     Timeout (..),
@@ -80,7 +81,7 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowStatus (..), databaseTimeRead, databaseTimeReaches, durationIsZero, durationToMs, isTerminal, newWorkflow, renderWorkflowKey, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (..), QualifiedWorkflowName, qualifiedName, qualifiedClassName, qualifiedConfigName, WorkflowOwner (..), WorkflowStatus (..), databaseTimeRead, databaseTimeReaches, durationIsZero, durationToMs, isTerminal, newWorkflow, renderQualifiedWorkflowName, timestampNow, timestampToEpochMs)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry, clearDatasourceCheckpoints)
@@ -104,8 +105,8 @@ maxRecoveryAttempts = 100
 -- The connection, resolved identity and task registry belong to the
 -- executor; the body takes the explicit context it runs in.
 runRegisteredWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
-                      => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runRegisteredWorkflow tasks conn identity snapshot key workflowId input datasources = runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId input (workflowNewWorkflow conn identity key workflowId input Nothing) datasources
+                      => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> QualifiedWorkflowName -> WorkflowId -> Maybe SerializedWorkflowValue -> WorkflowIdReusePolicy -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runRegisteredWorkflow tasks conn identity snapshot key workflowId input reusePolicy datasources = runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId input (workflowNewWorkflow conn identity key workflowId input Nothing) reusePolicy datasources
 
 -- | The execute-or-adopt core both runners share: one init decides whether
 -- this call owns the row. A fresh row (or a recovery/dequeue claim) runs
@@ -121,12 +122,12 @@ runRegisteredWorkflow tasks conn identity snapshot key workflowId input datasour
 -- rather than as a hang.
 
 runRegisteredWorkflowWithRow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
-                             => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId@(WorkflowId workflowText) input new datasources =
+                             => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> QualifiedWorkflowName -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> WorkflowIdReusePolicy -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId@(WorkflowId workflowText) input new reusePolicy datasources =
   case lookupSnapshotWorkflow key snapshot of
     Nothing -> pure (Left (TransactError.NotRegistered key))
     Just workflow -> do
-      initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new Nothing)
+      initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db new Nothing reusePolicy)
       case initialized of
         Left err -> pure (Left (TransactError.fromSystemDB err))
         Right result
@@ -393,18 +394,19 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
 -- | Create an enqueued workflow row without running its body. A queue worker
 -- later claims it and invokes the registered body with the claimed row.
 enqueueWorkflow :: Monad m
-                => Connection m -> Identity -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
+                => Connection m -> Identity -> QualifiedWorkflowName -> WorkflowId -> Maybe SerializedWorkflowValue -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
 enqueueWorkflow conn identity key workflowId input queueName = do
-  initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db (workflowNewWorkflow conn identity key workflowId input (Just queueName)) Nothing)
+  initialized <- runSystemDB conn.connSysdb (\db -> SystemDB.initWorkflow db (workflowNewWorkflow conn identity key workflowId input (Just queueName)) Nothing WorkflowIdReturnExisting)
   pure (either (Left . TransactError.fromSystemDB) Right initialized)
 
-workflowNewWorkflow :: Connection m -> Identity -> WorkflowKey -> WorkflowId -> Maybe SerializedWorkflowValue -> Maybe Text -> NewWorkflow
+workflowNewWorkflow :: Connection m -> Identity -> QualifiedWorkflowName -> WorkflowId -> Maybe SerializedWorkflowValue -> Maybe Text -> NewWorkflow
 workflowNewWorkflow conn identity key (WorkflowId workflowText) input queueName =
   let serialization = case input >>= (.serializedSerialization) of
         Just (Serialization name) -> name
         Nothing                   -> serializerName conn.connSerializer
-      (workflowName, className, configName) = case key of
-        WorkflowKey name class' config' -> (name, class', config')
+      workflowName = qualifiedName key
+      className = qualifiedClassName key
+      configName = qualifiedConfigName key
    in (newWorkflow workflowText)
         { newWorkflowName = Just workflowName,
           newWorkflowClassName = className,
@@ -420,14 +422,14 @@ workflowNewWorkflow conn identity key (WorkflowId workflowText) input queueName 
 
 -- | What an enqueue asks of its queue: deduplication, priority, partition,
 -- delay, and — only for the debouncer's fresh creation — the debounce
--- creation flags. Mirrors Rust @Enqueue@ in @workflow.rs@, which the client's
--- @EnqueueOptions@ and the runtime's start options both build on so the two
--- surfaces never spell the same four things differently; the two debounce
--- fields mirror TypeScript's @EnqueueOptions@ (@isDebounced@,
--- @debounceDeadlineEpochMS@), which only the debounce names — the oracle's
--- own comment says no other caller does — so a plain enqueue stays
--- non-debounced with no deadline.
-data Enqueue = Enqueue
+-- creation flags. Mirrors Rust @QueueRequest@ in @workflow.rs@, which the
+-- client's @EnqueueOptions@ builds internally and the runtime's start
+-- options hold, so the two surfaces never spell the same settings
+-- differently; the two debounce fields mirror TypeScript's
+-- @EnqueueOptions@ (@isDebounced@, @debounceDeadlineEpochMS@), which only
+-- the debounce names — the oracle's own comment says no other caller
+-- does — so a plain enqueue stays non-debounced with no deadline.
+data QueueRequest = QueueRequest
   { name              :: Text,
     deduplicationId   :: Maybe Text,
     priority          :: Maybe Word32,
@@ -449,9 +451,9 @@ data DuplicationPolicy
   deriving stock (Eq, Show)
 
 -- | A plain enqueue onto a name, asking for nothing else.
-enqueueNew :: Text -> Enqueue
-enqueueNew queueName =
-  Enqueue
+queueRequestNew :: Text -> QueueRequest
+queueRequestNew queueName =
+  QueueRequest
     { name = queueName,
       deduplicationId = Nothing,
       priority = Nothing,
@@ -467,9 +469,8 @@ enqueueNew queueName =
 -- rule out: nesting under the queue already makes a delay with no queue
 -- unbuildable, so what is left is the deduplication/partition pair, the
 -- policy without a key, the priority range, and the delay. Each is an
--- 'InvalidArgument' naming the queue, through 'startRefusal'. Mirrors
--- Rust @Enqueue::validate@.
-validateEnqueue :: Enqueue -> Either (TransactError.Error e) ()
+-- Rust @QueueRequest::validate@.
+validateEnqueue :: QueueRequest -> Either (TransactError.Error e) ()
 validateEnqueue queue
   | Just _ <- queue.deduplicationId,
     Just _ <- queue.partitionKey =
@@ -508,10 +509,21 @@ checkStartDuration queueName field duration
 
 -- | The enqueue's own checks plus the timeout, refused as the start's
 -- own: to 'enqueue a workflow' naming the queue when one is named, and
--- to 'start a workflow' otherwise. The checks run before the start takes
--- a step id. Mirrors Rust @validate_start@.
-validateStart :: Maybe Enqueue -> Maybe Duration -> Either (TransactError.Error e) ()
-validateStart queue budget = do
+-- to 'start a workflow' otherwise. A reuse policy is about an id the
+-- caller chose, so 'WorkflowIdReject' needs one: with none, a root start
+-- has a fresh id nothing can have taken, and a child's is derived from
+-- its parent's, an id the caller never asked to be new. The checks run
+-- before the start takes a step id. Mirrors Rust @validate_start@.
+validateStart :: Maybe QueueRequest -> Maybe Duration -> Maybe Text -> WorkflowIdReusePolicy -> Either (TransactError.Error e) ()
+validateStart queue budget workflowId reusePolicy = do
+  case (reusePolicy, workflowId) of
+    (WorkflowIdReject, Nothing) ->
+      Left
+        ( TransactError.startRefusal
+            ((.name) <$> queue)
+            "`WorkflowIdReusePolicy::Reject` needs a `workflow_id`: the policy is about an id the caller chose"
+        )
+    _ -> pure ()
   traverse_ validateEnqueue queue
   case budget of
     Nothing -> Right ()
@@ -519,7 +531,7 @@ validateStart queue budget = do
 
 -- | The stored priority: the sentinel @0@ when unprioritised. Infallible
 -- because 'validateEnqueue' has already ruled out what would not fit.
-storedPriority :: Enqueue -> Int
+storedPriority :: QueueRequest -> Int
 storedPriority queue = maybe 0 fromIntegral queue.priority
 
 -- | How long a workflow may take. A budget, counted from now when explicit;
@@ -568,6 +580,7 @@ resolveTimeoutDeadline timeout parentDeadline =
 -- 'StartOptions'.
 data RunOptions = RunOptions
   { runWorkflowId :: Maybe WorkflowId,
+    runWorkflowIdReusePolicy :: WorkflowIdReusePolicy,
     runTimeout    :: Timeout,
     runAttributes :: Maybe (Map Text Value)
   }
@@ -580,8 +593,9 @@ data RunOptions = RunOptions
 -- twice.
 data StartOptions = StartOptions
   { startWorkflowId :: Maybe WorkflowId,
+    startWorkflowIdReusePolicy :: WorkflowIdReusePolicy,
     startTimeout    :: Timeout,
-    startQueue      :: Maybe Enqueue,
+    startQueue      :: Maybe QueueRequest,
     startAttributes :: Maybe (Map Text Value)
   }
   deriving stock (Eq, Show)
@@ -592,6 +606,7 @@ runOptionsDefault :: RunOptions
 runOptionsDefault =
   RunOptions
     { runWorkflowId = Nothing,
+      runWorkflowIdReusePolicy = WorkflowIdReturnExisting,
       runTimeout = Inherit,
       runAttributes = Nothing
     }
@@ -602,6 +617,7 @@ startOptionsDefault :: StartOptions
 startOptionsDefault =
   StartOptions
     { startWorkflowId = Nothing,
+      startWorkflowIdReusePolicy = WorkflowIdReturnExisting,
       startTimeout = Inherit,
       startQueue = Nothing,
       startAttributes = Nothing
@@ -613,6 +629,7 @@ runOptionsToStartOptions :: RunOptions -> StartOptions
 runOptionsToStartOptions options =
   StartOptions
     { startWorkflowId = options.runWorkflowId,
+      startWorkflowIdReusePolicy = options.runWorkflowIdReusePolicy,
       startTimeout = options.runTimeout,
       startQueue = Nothing,
       startAttributes = options.runAttributes
@@ -646,16 +663,17 @@ data Submitted m e
 initOrJoin :: Monad m
            => Connection m
            -> NewWorkflow
-           -> Maybe Enqueue
+           -> Maybe QueueRequest
+           -> WorkflowIdReusePolicy
            -> Maybe InitWorkflowCaller
            -> m (Either Error (Submitted m e))
-initOrJoin conn new queue caller = go
+initOrJoin conn new queue reusePolicy caller = go
   where
     go = do
       initialized <-
         runSystemDB
           conn.connSysdb
-          (\db -> SystemDB.initWorkflow db new caller)
+          (\db -> SystemDB.initWorkflow db new caller reusePolicy)
       case initialized of
         Right result -> pure (Right (SubmittedCreated result))
         Left err -> case queue of
@@ -680,7 +698,7 @@ initOrJoin conn new queue caller = go
 -- row written by another step — or another SDK's step failure — stays
 -- 'UnexpectedStep' rather than being mistaken for a start refusal.
 recordedStartErrorNames :: [Text]
-recordedStartErrorNames = ["QueueDeduplicated", "ConflictingWorkflow"]
+recordedStartErrorNames = ["QueueDeduplicated", "ConflictingWorkflow", "WorkflowIdInUse"]
 
 -- | Whether a failed start is recorded at the parent's step: a refused
 -- enqueue (another run holds the deduplication key) and an id already
@@ -690,6 +708,7 @@ shouldRecordStartError :: Error -> Bool
 shouldRecordStartError err = case err of
   QueueDeduplicated {} -> True
   ConflictingWorkflow {} -> True
+  WorkflowIdInUse {} -> True
   _ -> False
 
 -- | Whether a recorded error value names one of the variants above, judged
@@ -784,7 +803,7 @@ recordStartError conn parentText stepId stepName startedAt token err = do
 -- at the debounce deadline), the debounced mark, the stamped deadline, and
 -- the acting application. A plain enqueue contributes nothing beyond its
 -- delay: no mark, no deadline, the identity's application.
-debounceCreation :: Maybe Enqueue -> (Maybe Duration, Bool, Maybe Duration, Maybe Text)
+debounceCreation :: Maybe QueueRequest -> (Maybe Duration, Bool, Maybe Duration, Maybe Text)
 debounceCreation queue = case queue of
   -- The release cap lives in the init statement, which resolves the delay
   -- and the timeout against one database-clock reading: a Haskell-side
@@ -808,12 +827,12 @@ debounceCreation queue = case queue of
 startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
               => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflow tasks conn identity snapshot ref options input datasources =
-  case validateStart options.startQueue (timeoutBudget options.startTimeout) of
+  case validateStart options.startQueue (timeoutBudget options.startTimeout) ((\(WorkflowId offered) -> offered) <$> options.startWorkflowId) options.startWorkflowIdReusePolicy of
     Left err -> pure (Left err)
     Right _ -> do
       now <- timestampNow
       generated <- generatedWorkflowId conn
-      let key = ref.refKey
+      let key = ref.refQualifiedName
           workflowText = maybe generated (\(WorkflowId offered) -> offered) options.startWorkflowId
           deadline' = resolveTimeoutDeadline options.startTimeout Nothing
           base = workflowNewWorkflow conn identity key (WorkflowId workflowText) input ((.name) <$> options.startQueue)
@@ -837,7 +856,7 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
                 newWorkflowDeadline = deadline',
                 newWorkflowAttributes = encodeAttributes options.startAttributes
               }
-      started <- initOrJoin conn new options.startQueue Nothing
+      started <- initOrJoin conn new options.startQueue options.startWorkflowIdReusePolicy Nothing
       case started of
         Left err -> pure (Left (TransactError.refusedStart ((.name) <$> options.startQueue) err))
         -- A held deduplication key: the handle belongs to its holder.
@@ -889,15 +908,15 @@ startWorkflow tasks conn identity snapshot ref options input datasources =
 -- exactly that refusal).
 data WorkflowRef m e = WorkflowRef
   { refRegistry :: Registry m (ErasedWorkflow m),
-    refKey :: WorkflowKey
+    refQualifiedName :: QualifiedWorkflowName
   }
 
 instance Show (WorkflowRef m e) where
-  show ref = "WorkflowRef " <> Text.unpack (renderWorkflowKey ref.refKey)
+  show ref = "WorkflowRef " <> Text.unpack (renderQualifiedWorkflowName ref.refQualifiedName)
 
 -- | The workflow's name: the bare name, not the full identity triple.
 refName :: WorkflowRef m e -> Text
-refName ref = case ref.refKey of WorkflowKey name _ _ -> name
+refName ref = qualifiedName ref.refQualifiedName
 
 -- | The type-erased workflow body the engine resolves from a stored key.
 -- Application values and the application error channel have already been
@@ -912,14 +931,32 @@ newtype ErasedWorkflow m = ErasedWorkflow
     runErasedWorkflow :: forall exec. Maybe SerializedWorkflowValue -> WorkflowCtx exec m -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
   }
 
+-- | The refusal a name nothing could be registered as gets: one that is
+-- empty, or one with a config but no class, since a configured instance
+-- belongs to a class. Either can be read from a row, which is why
+-- 'QualifiedWorkflowName' holds them at all. Mirrors Rust
+-- @refuse_unregistrable@.
+refuseUnregistrable :: QualifiedWorkflowName -> Maybe (TransactError.Error e)
+refuseUnregistrable name
+  | Text.null (qualifiedName name) = Just (refuse "a workflow needs a name")
+  | Just _ <- qualifiedConfigName name
+  , Nothing <- qualifiedClassName name = Just (refuse "a configured instance needs a class")
+  | otherwise = Nothing
+  where
+    refuse detail =
+      TransactError.InvalidArgument
+        "register a workflow"
+        (detail <> ", got `" <> renderQualifiedWorkflowName name <> "`")
+
 -- | Register a typed workflow and hand back a reference to it. Only before
--- launch snapshots the registry; a duplicate identity is refused.
+-- launch snapshots the registry; a duplicate identity, or a name nothing
+-- could be registered as, is refused.
 --
 -- Bodies take the scoped workflow view: the converted shape, where a body
 -- can only reach the scoped entries. The old context-level entry was
 -- deleted once every caller converted (C5b).
 registerWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
-                    => Registry m (ErasedWorkflow m) -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
+                    => Registry m (ErasedWorkflow m) -> QualifiedWorkflowName -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
 registerWorkflowRef registry key body = do
   registered <- registerTypedWorkflow registry key body
   pure ((\() -> WorkflowRef registry key) <$> registered)
@@ -933,18 +970,21 @@ registerWorkflowRef registry key body = do
 -- derived from it. The type-erased form is the same either way, so the
 -- registry seam is unchanged.
 registerTypedWorkflow :: forall argument result e m. (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
-                      => Registry m (ErasedWorkflow m) -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-registerTypedWorkflow registry key body = do
-  registered <-
-    Registry.registerErasedWorkflow registry key $ ErasedWorkflow $ \input wctx ->
-      case decodeWorkflowInput "argument" input of
-        Left err -> pure (Left (TransactError.FailureControl (TransactError.fromSerializationError (codecError "argument" err))))
-        Right argument -> do
-          result <- body argument wctx
-          pure $ case result of
-            Left err -> Left (TransactError.failureOf err)
-            Right value -> Right (Just (encodeWorkflowValue value))
-  pure (first TransactError.fromRegistryError registered)
+                      => Registry m (ErasedWorkflow m) -> QualifiedWorkflowName -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+registerTypedWorkflow registry key body =
+  case refuseUnregistrable key of
+    Just err -> pure (Left err)
+    Nothing -> do
+      registered <-
+        Registry.registerErasedWorkflow registry key $ ErasedWorkflow $ \input wctx ->
+          case decodeWorkflowInput "argument" input of
+            Left err -> pure (Left (TransactError.FailureControl (TransactError.fromSerializationError (codecError "argument" err))))
+            Right argument -> do
+              result <- body argument wctx
+              pure $ case result of
+                Left err -> Left (TransactError.failureOf err)
+                Right value -> Right (Just (encodeWorkflowValue value))
+      pure (first TransactError.fromRegistryError registered)
   where
     codecError :: Text -> CodecError -> SerializationError
     codecError what err =
@@ -966,7 +1006,7 @@ runWorkflowRef :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMon
 runWorkflowRef tasks conn identity snapshot ref options input datasources = do
   now <- timestampNow
   generated <- generatedWorkflowId conn
-  let key = ref.refKey
+  let key = ref.refQualifiedName
       workflowText = maybe generated (\(WorkflowId offered) -> offered) options.runWorkflowId
       new =
         (workflowNewWorkflow conn identity key (WorkflowId workflowText) input Nothing)
@@ -974,7 +1014,7 @@ runWorkflowRef tasks conn identity snapshot ref options input datasources = do
             newWorkflowDeadline = resolveTimeoutDeadline options.runTimeout Nothing,
             newWorkflowAttributes = encodeAttributes options.runAttributes
           }
-  runRegisteredWorkflowWithRow tasks conn identity snapshot key (WorkflowId workflowText) input new datasources
+  runRegisteredWorkflowWithRow tasks conn identity snapshot key (WorkflowId workflowText) input new options.runWorkflowIdReusePolicy datasources
 
 -- | Starts the referenced workflow as a child of the running one and
 -- returns a handle to it. The ambient context decides the parentage, so
@@ -1015,13 +1055,13 @@ startChildWorkflow wctx ref options input = do
         Just instanceId
           | instanceId /= conn.connInstanceId ->
               pure (Left (TransactError.WrongInstance {operation = "start a workflow"}))
-          | otherwise -> case validateStart options.startQueue (timeoutBudget options.startTimeout) of
+          | otherwise -> case validateStart options.startQueue (timeoutBudget options.startTimeout) ((\(WorkflowId offered) -> offered) <$> options.startWorkflowId) options.startWorkflowIdReusePolicy of
               Left err -> pure (Left err)
               Right _ -> do
                 parentStepId <- nextStepId wctx
                 startChild parentStepId
   where
-    key = ref.refKey
+    key = ref.refQualifiedName
     name = refName ref
     conn = wctx.wctxConn
     identity = wctx.wctxIdentity
@@ -1075,7 +1115,7 @@ startChildWorkflow wctx ref options input = do
                     initCallerStepName = name,
                     initCallerToken = ownerToken wctx
                   }
-          started <- initOrJoin conn new options.startQueue (Just caller)
+          started <- initOrJoin conn new options.startQueue options.startWorkflowIdReusePolicy (Just caller)
           case started of
             Right (SubmittedCreated result) -> do
               -- The oracle announces the enqueue at debug whether the start

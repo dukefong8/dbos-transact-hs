@@ -30,7 +30,7 @@ module DBOS.Transact.HandleCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (NewWorkflow (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowStatus (..), getResultStepName, initWorkflow, listSteps, newWorkflow)
+import DBOS.SystemDB (NewWorkflow (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowStatus (..), getResultStepName, initWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
@@ -43,13 +43,13 @@ import DBOS.Transact
     Serializer (..),
     WorkflowCtx,
     WorkflowHandle (workflowId),
-    WorkflowKey,
+    QualifiedWorkflowName,
     awaitChild,
     deleteWorkflows,
     handleResult,
     handleStatus,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerWorkflow,
     retrieveWorkflow,
     runWorkflow,
@@ -110,7 +110,7 @@ mkHandleFixture config identity connApp nameScheme genId genEntropy sysdb tracer
           let WorkflowId widText = wid
               row = (newWorkflow widText) {newWorkflowName = Just "L2HandleAwaiter"}
            in do
-                created <- runSystemDB sysdb (\db -> initWorkflow db row Nothing)
+                created <- runSystemDB sysdb (\db -> initWorkflow db row Nothing WorkflowIdReturnExisting)
                 case created of
                   Left err -> throwIO (userError (show err))
                   Right result -> pure (WorkflowOwner {ownerWorkflowId = wid, ownerToken = result.initResultCreatorXid}),
@@ -137,7 +137,7 @@ mkHandleFixture config identity connApp nameScheme genId genEntropy sysdb tracer
 -- | Register the doubling body both retrieval cases run.
 registerDouble :: forall m. (MonadMVar m, MonadSTM m, MonadCatch m, MonadTime m) => DBOS m -> m ()
 registerDouble dbos = do
-  let key = newWorkflowKey "double"
+  let key = newQualifiedWorkflowName "double"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body value wctx = runStep wctx "double" (const (pure (value * 2)))
   registered <- registerWorkflow dbos key body
@@ -149,7 +149,7 @@ registerDouble dbos = do
 -- error channel pins to 'EngineOnly' once instead of at each call site.
 -- Local copies are deliberate: this module carries only the aliases it uses.
 runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-      => Executor m -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+      => Executor m -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 retrieveWf :: forall m. (MonadMVar m)
@@ -175,7 +175,7 @@ scenarioRetrieveStatus fx = do
     exec <- fx.hfLaunch dbos
     wid <- fx.hfFreshId "handle-id"
     let WorkflowId widText = wid
-        key = newWorkflowKey "double"
+        key = newQualifiedWorkflowName "double"
     ran <- runWf exec key wid (Just (encodeWorkflowInput (21 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))
@@ -198,7 +198,7 @@ scenarioResultAdopts fx = do
     registerDouble dbos
     exec <- fx.hfLaunch dbos
     wid <- fx.hfFreshId "handle-res-id"
-    let key = newWorkflowKey "double"
+    let key = newQualifiedWorkflowName "double"
     ran <- runWf exec key wid (Just (encodeWorkflowInput (21 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))
@@ -222,7 +222,7 @@ scenarioFailError :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTime
                      m (Text, Text)
 scenarioFailError fx = do
   bracket fx.hfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "fails"
+    let key = newQualifiedWorkflowName "fails"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body _ _ = pure (Left (StepFailed "body" "boom"))
     registered <- registerWorkflow dbos key body
@@ -251,7 +251,7 @@ scenarioDeletedAbsent :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Monad
                          m (Word64, Maybe WorkflowStatus)
 scenarioDeletedAbsent fx = do
   bracket fx.hfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "delete-me"
+    let key = newQualifiedWorkflowName "delete-me"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body value _ = pure (Right (value + 1))
     registered <- registerWorkflow dbos key body
@@ -288,7 +288,7 @@ scenarioDropHandle fx = do
     registerDouble dbos
     exec <- fx.hfLaunch dbos
     wid <- fx.hfFreshId "handle-drop-id"
-    let key = newWorkflowKey "double"
+    let key = newQualifiedWorkflowName "double"
     worker <- async (runWf exec key wid (Just (encodeWorkflowInput (21 :: Int))))
     -- Retrieved and immediately dropped while the run is in flight.
     _ <- retrieveWf dbos wid
@@ -320,7 +320,7 @@ scenarioScopedAwait fx = do
   bracket fx.hfNewDBOS shutdown $ \dbos -> do
     registerDouble dbos
     exec <- fx.hfLaunch dbos
-    let key = newWorkflowKey "double"
+    let key = newQualifiedWorkflowName "double"
     ran <- runWf exec key childWid (Just (encodeWorkflowInput (21 :: Int)))
     case ran of
       Left err -> throwIO (userError (show err))

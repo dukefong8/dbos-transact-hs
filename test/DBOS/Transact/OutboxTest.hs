@@ -174,8 +174,8 @@ withOutboxFixture getBackend getTracer body = do
   sentVar <- newTVarIO (0 :: Int)
   backend <- getBackend
   tracer <- getTracer
-  let atomicKey = newWorkflowKey "place_order"
-      notifyKey = newWorkflowKey "send_notification_workflow"
+  let atomicKey = newQualifiedWorkflowName "place_order"
+      notifyKey = newQualifiedWorkflowName "send_notification_workflow"
       consumeTxFault = atomically $ do
         fault <- readTVar faultVar
         writeTVar faultVar TxOk

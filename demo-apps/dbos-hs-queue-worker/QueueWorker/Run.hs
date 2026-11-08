@@ -21,7 +21,7 @@ import DBOS.Transact
     defaultQueueOptions,
     launch,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerWorkflow,
     registerQueue,
     shutdown,
@@ -53,7 +53,7 @@ start = do
   dbos <- newDBOS config
   -- Registered before launch, because recovery starts inside it.
   _ <-
-    registerWorkflow dbos (newWorkflowKey workerWorkflowName) workerWorkflow
+    registerWorkflow dbos (newQualifiedWorkflowName workerWorkflowName) workerWorkflow
       >>= either (die . Text.pack . show) pure
   exec <- launch dbos >>= either (die . Text.pack . show) pure
   -- The queue the handlers submit workflows to. Registered after launch (it

@@ -6,7 +6,7 @@ module DBOS.SystemDB.ErrorTest
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (BackendError (..), BackendErrorKind (..), Error (..), renderBackendError, renderError, shouldRecord)
+import DBOS.SystemDB (BackendError (..), BackendErrorKind (..), Error (..), defaultRetryPolicy, renderBackendError, renderError, shouldRecord, shouldRetry)
 import DBOS.SystemDB.Error (decodePortableError, encodePortableError)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -35,6 +35,16 @@ tests =
       testCase "renders a reused workflow id" $
         renderError (ConflictingWorkflow {workflowId = "wf", detail = "different function"})
           @?= "workflow wf already exists: different function",
+      testCase "renders a workflow id that is already in use" $ do
+        renderError (WorkflowIdInUse {workflowId = "wf", status = "SUCCESS", existingName = Just "charge"})
+          @?= "workflow id wf is already in use, by workflow charge (SUCCESS)"
+        renderError (WorkflowIdInUse {workflowId = "wf", status = "ENQUEUED", existingName = Nothing})
+          @?= "workflow id wf is already in use, by a workflow (ENQUEUED)",
+      testCase "a workflow id in use is an answer, recorded and never retried" $ do
+        shouldRecord (WorkflowIdInUse {workflowId = "wf", status = "SUCCESS", existingName = Nothing}) @?= True
+        shouldRetry defaultRetryPolicy (WorkflowIdInUse {workflowId = "wf", status = "SUCCESS", existingName = Nothing}) @?= False
+        decodePortableError (encodePortableError (WorkflowIdInUse {workflowId = "wf", status = "SUCCESS", existingName = Just "charge"}))
+          @?= Right (WorkflowIdInUse {workflowId = "wf", status = "SUCCESS", existingName = Just "charge"}),
       testCase "renders a rejected input" $
         renderError (InvalidInput {field = "name", detail = "must not be empty"})
           @?= "invalid name: must not be empty",

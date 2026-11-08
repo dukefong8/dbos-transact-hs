@@ -30,7 +30,7 @@ convention is Haskell's.
 2. **Public surface first.** The fields reached through the facade
    (`DBOS.Transact` / `DBOS.SystemDB` re-exports) convert in this
    slice: `Queue`/`QueueOptions`/`QueueChange` (7 each), `StepOptions`
-   (4), `WorkflowKey` (2), `Enqueue` (3), `SendOptions` (1),
+   (4), `QualifiedWorkflowName` (2), `Enqueue` (3), `SendOptions` (1),
    `ClientConfig` (7), `EnqueueOptions` (5), `WorkflowHandle`
    (`workflow_id` → `workflowId`, landed with the seam refactor). The
    record-access rule applies after conversion: dot reads, dot

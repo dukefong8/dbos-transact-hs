@@ -110,6 +110,13 @@ library
 test-suite test
   import: commons
   type: exitcode-stdio-1.0
+  -- Parallel by design: tasty workers default to CPUs and the runtime gets
+  -- 4 capabilities, so cases run concurrently and in-case async work (pools,
+  -- dequeue loops) is never needlessly serialised; ~1000 tests in about a
+  -- minute. Never run two live suite binaries at once (shared-fixture 40P01
+  -- deadlock). The old serial pin (--num-threads 1) was dropped 2026-11-08
+  -- after consecutive green parallel gates with no freeze.
+  ghc-options: -rtsopts -with-rtsopts=-N4
   hs-source-dirs: test
   main-is: Main.hs
   other-modules:
@@ -129,6 +136,7 @@ test-suite test
     DBOS.Transact.CheckpointTest
     DBOS.Transact.CheckpointTestSim
     DBOS.Transact.ClientTest
+    DBOS.Transact.ClockTest
     DBOS.Transact.ConfigTest
     DBOS.Transact.ContextTest
     DBOS.Transact.ContextTestSim

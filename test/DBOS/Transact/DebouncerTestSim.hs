@@ -41,6 +41,7 @@ tests =
       simCase simDebouncerFixture "a pinned id names the fresh row" scenarioPinnedIdNamesFreshRow checkPinnedIdNamesFreshRow tracePinnedId,
       simCase simDebouncerFixture "a pinned id reused across cycles is a conflict" scenarioPinnedIdReusedAcrossCycles checkPinnedIdReusedAcrossCycles tracePinnedId,
       simCase simDebouncerFixture "a zero or unstorable debounce duration is refused" scenarioDebounceDurationsRefused checkDebounceDurationsRefused tracePinnedId,
+      simCase simDebouncerFixture "what a debouncer cannot act on is refused" scenarioDebouncerCannotAct checkDebouncerCannotAct tracePinnedId,
       simCase simDebouncerFixture "a cancelled debounce frees its key" scenarioCancelledDebounceFreesKey checkCancelledDebounceFreesKey traceCancelledFreesKey,
       simCase simDebouncerFixture "a debounce inside a step is refused" scenarioDebounceInsideStepRefused checkDebounceInsideStepRefused tracePinnedId,
       simCase simDebouncerFixture "a key collision between workflows is refused" scenarioKeyCollisionRefused checkKeyCollisionRefused tracePinnedId
@@ -68,8 +69,8 @@ simDebouncerFixture = do
           writeTVar tagCounter (k + 1)
           pure k
         pure (prefix <> "-sim-" <> Text.pack (show n))
-  targetRef <- registerWorkflowRef dbos (newWorkflowKey "echo") echoBody >>= either (fail . show) pure
-  otherRef <- registerWorkflowRef dbos (newWorkflowKey "other") otherBody >>= either (fail . show) pure
+  targetRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "echo") echoBody >>= either (fail . show) pure
+  otherRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "other") otherBody >>= either (fail . show) pure
   -- The in-workflow debounce's parent: registered before launch like every
   -- workflow, since recovery starts inside launch. Only the records-step
   -- case runs it, passing its tag as input.
@@ -79,7 +80,7 @@ simDebouncerFixture = do
         case debounced of
           Right joined -> pure (Right joined.workflowId)
           Left err -> pure (Left err)
-  _ <- registerWorkflow dbos (newWorkflowKey "debounce-parent") parentBody >>= either (fail . show) pure
+  _ <- registerWorkflow dbos (newQualifiedWorkflowName "debounce-parent") parentBody >>= either (fail . show) pure
   -- The in-step refusal's parent: its step calls the debounce, which the
   -- step boundary refuses. Only the refusal case runs it.
   let stepParentBody :: forall exec. Text -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
@@ -93,7 +94,7 @@ simDebouncerFixture = do
         case outcome of
           Right operation -> pure (Right operation)
           Left err -> pure (Left err)
-  _ <- registerWorkflow dbos (newWorkflowKey "debounce-in-step-parent") stepParentBody >>= either (fail . show) pure
+  _ <- registerWorkflow dbos (newQualifiedWorkflowName "debounce-in-step-parent") stepParentBody >>= either (fail . show) pure
   exec <- memLaunchOnWith mem simTracer dbos (Just [targetQueue])
   _ <- registerQueue dbos targetQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure
   _ <- registerQueue dbos foreignQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure

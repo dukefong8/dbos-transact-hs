@@ -106,7 +106,7 @@ import DBOS.SystemDB.Notify (Registry, Subscription, eventKey, eventsChannel, me
 import DBOS.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry)
-import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), AppScope (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Dequeued (..), DequeueStop (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdleTransactionTimeout (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowKey (..), WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getScheduleStepName, idleTimeoutMillis, idleTimeoutParameter, idleTimeoutValidate, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateAttributes, validateNewWorkflow, refuseSelfTarget, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead, saturateTimeout)
+import DBOS.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), AppScope (..), AttributeUpdate (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Dequeued (..), DequeueStop (..), Duration (..), EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdleTransactionTimeout (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), InitWorkflowCaller (..), WorkflowIdReusePolicy (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ResolvedLimits (..), ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WakeTime (..), QualifiedWorkflowName, qualifiedName, qualifiedClassName, qualifiedConfigName, WorkflowOwner (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getEventStepName, getScheduleStepName, idleTimeoutMillis, idleTimeoutParameter, idleTimeoutValidate, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, queueResolvedLimits, recvStepName, renameFromApplication, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, setEventStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, urlSetsIdleTimeout, databaseTimeNow, validateAttributeUpdate, validateAttributes, validateNewWorkflow, refuseSelfTarget, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead, saturateTimeout, wakeArrives, wakeRemaining)
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Logger (SomeTracer, runTracer)
 import DBOS.Transact.Serialization (codecErrorText, decodeWorkflowValue, encodeWorkflowValue)
@@ -963,12 +963,12 @@ configNew url =
       configSettings = defaultSettings
     }
 
--- | A configuration from the environment: @DBOS_DATABASE_URL@, falling back
+-- | A configuration from the environment: @DBOS_SYSTEM_DATABASE_URL@, falling back
 -- to the @PG*@ variables (the standard libpq variables — no credentials are
 -- invented when they are unset). What the tests and the starter app build on.
 configFromEnv :: IO Config
 configFromEnv = do
-  databaseURL <- lookupEnv "DBOS_DATABASE_URL"
+  databaseURL <- lookupEnv "DBOS_SYSTEM_DATABASE_URL"
   case databaseURL of
     Just url -> pure (configNew (Text.pack url))
     Nothing -> do
@@ -1375,10 +1375,15 @@ initConflict new row =
     [] -> Nothing
   where
     conflicts =
-      [ ("function name", row.name, new.newWorkflowName),
-        ("class name", row.class_name, new.newWorkflowClassName),
-        ("config name", row.config_name, new.newWorkflowConfigName)
+      [ ("function name", storedOnly row.name, new.newWorkflowName),
+        ("class name", storedOnly row.class_name, new.newWorkflowClassName),
+        ("config name", storedOnly row.config_name, new.newWorkflowConfigName)
       ]
+    -- A stored '' is absent, as NULL is: other SDKs write either for a free
+    -- function or an unconfigured one, and this layer never stores '' itself.
+    storedOnly value = case value of
+      Just text | Text.null text -> Nothing
+      other -> other
 
 -- | What the upsert's row says about whether this call may run the workflow.
 -- Mirrors the oracle's checks, in its order: an unreadable status is
@@ -1447,13 +1452,61 @@ debouncedRefusal new row shouldExecute
               }
   | otherwise = Nothing
 
+-- | Under 'WorkflowIdReject', a row another caller created is refused as
+-- 'WorkflowIdInUse' inside the init transaction: before anything else
+-- about the row is judged, so an id taken by a different function is in
+-- use too, and before the input, so a refused start writes nothing. A
+-- retry that finds its own row after a lost commit acknowledgement
+-- carries the same creator token and is not refused; nor is a parent's
+-- own child that a rewind left behind ('isRewoundChildTx'). An unreadable
+-- stored status falls through to the existing handling, which reports it
+-- as malformed. Mirrors the oracle's reuse arm in @init_workflow_as@.
+reuseRefusalTx :: WorkflowIdReusePolicy -> Maybe InitWorkflowCaller -> Text -> NewWorkflow -> Statements.WorkflowInitRaw -> Tx.Transaction (Maybe Error)
+reuseRefusalTx reusePolicy caller creatorXid new row
+  | reusePolicy /= WorkflowIdReject = pure Nothing
+  | row.creator_xid == Just creatorXid = pure Nothing
+  | otherwise = case row.status >>= either (const Nothing) Just . parseWorkflowStatus of
+      Nothing -> pure Nothing
+      Just status -> do
+        rewound <- case caller of
+          Nothing -> pure False
+          Just call -> isRewoundChildTx call new.newWorkflowId row
+        pure $
+          if rewound
+            then Nothing
+            else
+              Just
+                WorkflowIdInUse
+                  { workflowId = new.newWorkflowId,
+                    status = workflowStatusText status,
+                    existingName = case row.name of
+                      Just name | not (Text.null name) -> Just name
+                      _ -> Nothing
+                  }
+
+-- | Whether the row 'initWorkflow' met is a child the caller started at a
+-- step it no longer records: one a rewind left behind, which the replayed
+-- parent adopts. A record at the caller's own step is this start's,
+-- written by an adoption whose commit acknowledgement was lost, so it does
+-- not count: the retry adopts again, idempotently. Mirrors the oracle's
+-- @is_rewound_child@.
+isRewoundChildTx :: InitWorkflowCaller -> Text -> Statements.WorkflowInitRaw -> Tx.Transaction Bool
+isRewoundChildTx caller childId row = case row.parent_workflow_id of
+  Just parent | parent == unwrapWorkflowId caller.initCallerParentWorkflowId -> do
+    recorded <-
+      Tx.statement
+        (parent, childId, fromIntegral caller.initCallerStepId)
+        Statements.rewoundChildStatement
+    pure (not recorded)
+  _ -> pure False
+
 -- | The plain init body with the attempt's identity hoisted out, so a test
 -- can stage a retry after a lost acknowledgement under the same token:
 -- the second call finds its own row and must not rewrite an input a
 -- bounce replaced meanwhile. Mirrors the oracle's @init_workflow_as@
 -- seam, which exists for exactly that test.
-initWorkflowAs :: PostgresSystemDB -> NewWorkflow -> Text -> Timestamp -> IO (Either Error WorkflowInitResult)
-initWorkflowAs env new creatorXid now = case validateNewWorkflow new of
+initWorkflowAs :: PostgresSystemDB -> NewWorkflow -> Maybe InitWorkflowCaller -> WorkflowIdReusePolicy -> Text -> Timestamp -> IO (Either Error WorkflowInitResult)
+initWorkflowAs env new caller reusePolicy creatorXid now = case validateNewWorkflow new of
   Left err -> pure (Left err)
   Right () -> do
     let status = initialStatus new
@@ -1466,12 +1519,16 @@ initWorkflowAs env new creatorXid now = case validateNewWorkflow new of
         -- this statement created the row.
         result <- runTransaction env "init_workflow" $ do
           row <- Tx.statement () (Statements.initWorkflowStatement params)
-          when (row.creator_xid == Just creatorXid && fromMaybe False row.inserted) $
-            void $
-              Tx.statement
-                (new.newWorkflowId, new.newWorkflowInput)
-                Statements.initWorkflowInputStatement
-          pure row
+          refused <- reuseRefusalTx reusePolicy caller creatorXid new row
+          case refused of
+            Just err -> pure (Left err)
+            Nothing -> do
+              when (row.creator_xid == Just creatorXid && fromMaybe False row.inserted) $
+                void $
+                  Tx.statement
+                    (new.newWorkflowId, new.newWorkflowInput)
+                    Statements.initWorkflowInputStatement
+              pure (Right row)
         case result of
           Left err
             | queueDeduplicated new err ->
@@ -1484,7 +1541,8 @@ initWorkflowAs env new creatorXid now = case validateNewWorkflow new of
                         }
                   )
             | otherwise -> pure (Left err)
-          Right row -> finishInit env new creatorXid row
+          Right (Left refuse) -> pure (Left refuse)
+          Right (Right row) -> finishInit env new creatorXid row
 
 -- | Maps the row the step check returned: no status is malformed, a
 -- cancelled workflow is reported, an absent step is 'Nothing', a renamed
@@ -1542,24 +1600,41 @@ data SleepKind = DurableSleep | DeadlineSleep
 -- Composed from the step methods rather than a transaction, matching the
 -- oracle: the step record *is* the write, and the check-then-record race is
 -- caught by the insert's conflict handling. Mirrors @checkpoint_sleep@.
-checkpointSleep :: PostgresSystemDB -> SleepKind -> WorkflowId -> Int -> Duration -> Text -> IO (Either Error Timestamp)
+--
+-- The wake time is set on the database's clock, read here on the first
+-- attempt and kept across the check-then-record race: a recovery can replay
+-- the step on another executor, and the database's clock is the one both
+-- share. This path takes no row lock (unlike the oracle's owner-checked
+-- checkpoint, whose reading rides the lock), so the reading is a
+-- standalone one — exact, with no lock wait for it to fall behind.
+checkpointSleep :: PostgresSystemDB -> SleepKind -> WorkflowId -> Int -> Duration -> Text -> IO (Either Error WakeTime)
 checkpointSleep env kind wid stepId duration token = do
-  startedAt <- timestampNow
-  existing <- checkStep env wid stepId sleepStepName
-  case existing of
+  reading <- runSession env "database_time" databaseTimeSession >>= traverse databaseTimeRead
+  case reading of
     Left err -> pure (Left err)
-    -- A replay wakes at the original instant — or is refused as it was.
-    -- The refusal is held until the record has been looked for: whether
-    -- the sum fits depends on the clock, so a replay must not decide it
-    -- again. Mirrors the oracle's lookup-first order.
-    Right (Just step) -> pure (replaySleep wid stepId kind step)
-    Right Nothing -> case decidedWake kind startedAt duration of
-      Left refusal -> recordRefusal refusal startedAt
-      Right wakeAt -> do
-        let completedAt = case kind of
-              DurableSleep  -> wakeAt
-              DeadlineSleep -> startedAt
-        recordWake startedAt wakeAt completedAt
+    Right clock -> do
+      startedAt <- databaseTimeNow clock
+      existing <- checkStep env wid stepId sleepStepName
+      case existing of
+        Left err -> pure (Left err)
+        -- A replay wakes at the original instant — or is refused as it was.
+        -- The refusal is held until the record has been looked for: whether
+        -- the sum fits depends on the clock, so a replay must not decide it
+        -- again. The reading is taken fresh with the read-back, as the
+        -- oracle reads its clock in the transaction that reads the step.
+        -- Mirrors the oracle's lookup-first order.
+        Right (Just step) -> do
+          fresh <- runSession env "database_time" databaseTimeSession >>= traverse databaseTimeRead
+          case fresh of
+            Left err -> pure (Left err)
+            Right clock' -> pure (fmap (\wakeAt -> WakeTime wakeAt clock') (replaySleep wid stepId kind step))
+        Right Nothing -> case decidedWake kind startedAt duration of
+          Left refusal -> recordRefusal clock refusal startedAt
+          Right wakeAt -> do
+            let completedAt = case kind of
+                  DurableSleep  -> wakeAt
+                  DeadlineSleep -> startedAt
+            recordWake clock startedAt wakeAt completedAt
   where
     -- A durable sleep whose wake time cannot be stored is refused; a
     -- deadline too far out never elapses, so it saturates at the largest
@@ -1571,20 +1646,22 @@ checkpointSleep env kind wid stepId duration token = do
     -- Only a first run reaches here, so only a first run decides the
     -- refusal. It is recorded in the sleep's place, so a replay reads it
     -- back rather than deciding again against a later clock.
-    recordRefusal refusal started = do
+    recordRefusal clock refusal started = do
       let encoded = encodeWorkflowValue refusal
       recordOutcome
+        clock
         (OutcomeError encoded.serializedText)
         (Just portableJsonSerialization)
         (StepTiming started started)
         (Left refusal)
-    recordWake started wakeAt completedAt =
+    recordWake clock startedAt wakeAt completedAt =
       recordOutcome
+        clock
         (OutcomeOutput (Just (Text.pack (show (timestampToEpochMs wakeAt)))))
         (Just portableJsonSerialization)
-        (StepTiming started completedAt)
-        (Right wakeAt)
-    recordOutcome outcome serialization timing answer = do
+        (StepTiming startedAt completedAt)
+        (Right (WakeTime wakeAt clock))
+    recordOutcome clock outcome serialization timing answer = do
       recorded <-
         recordStep env
               wid
@@ -1600,7 +1677,7 @@ checkpointSleep env kind wid stepId duration token = do
           adopted <- checkStep env wid stepId sleepStepName
           pure $ case adopted of
             Left err          -> Left err
-            Right (Just step) -> replaySleep wid stepId kind step
+            Right (Just step) -> fmap (\wakeAt -> WakeTime wakeAt clock) (replaySleep wid stepId kind step)
             Right Nothing     -> Left (Malformed "sleep reported as recorded but cannot be read back")
         Left err -> pure (Left err)
 
@@ -1613,8 +1690,11 @@ getEventPollInterval = secondsDuration 1
 -- loop is what delivers; a wakeup only ever shortens the interval, which is
 -- why the subscription is taken before the first look. Absence at the
 -- deadline is 'Nothing', never an error, and a deadline already past answers
--- at once. Mirrors the oracle's subscribe-then-look-wait-look loop.
-pollEvent :: PostgresSystemDB -> Text -> Text -> Timestamp -> IO (Either Error (Maybe EncodedValue))
+-- at once. Waited for on the monotonic clock from the deadline's reading:
+-- a recorded deadline is an instant on the database's clock, and this
+-- host's wall clock need not agree with it. Mirrors the oracle's
+-- subscribe-then-look-wait-look loop.
+pollEvent :: PostgresSystemDB -> Text -> Text -> WakeTime -> IO (Either Error (Maybe EncodedValue))
 pollEvent env workflowId key deadline =
   bracket
     (subscribe env.psdbNotify (eventKey workflowId key))
@@ -1627,8 +1707,11 @@ pollEvent env workflowId key deadline =
         Left err -> pure (Left err)
         Right (Just raw) -> pure (Right (Just (EncodedValue raw.eventRawValue raw.eventRawSerialization)))
         Right Nothing -> do
-          now <- timestampNow
-          let remaining = fromMaybe (Duration 0) (durationSince deadline now)
+          -- Past the deadline and exactly on it are the same answer — no
+          -- time left — and leaving the zero case to the wait below would
+          -- spin, since a zero-length wait returns at once and the next
+          -- look is another query.
+          remaining <- wakeRemaining deadline
           if remaining <= Duration 0
             then pure (Right Nothing)
             else do
@@ -1697,7 +1780,9 @@ validateSweepLimits limits
 debounceBounceParams :: DebounceRequest -> Maybe Text -> Either Error Statements.DebounceBounceParams
 debounceBounceParams request app = do
   periodMs <- durationToMs "period" request.debounceRequestPeriod
-  let WorkflowKey workflowName className configName = request.debounceRequestWorkflow
+  let workflowName = qualifiedName request.debounceRequestWorkflow
+      className = qualifiedClassName request.debounceRequestWorkflow
+      configName = qualifiedConfigName request.debounceRequestWorkflow
   pure
     Statements.DebounceBounceParams
       { debounceBounceWorkflowName = workflowName,
@@ -2460,8 +2545,8 @@ sendBatchInTx messages serialization fallbacks sendToForks = do
 -- 'clientEnqueueWorkflowInTx', which validate up front and refuse
 -- @ReturnExisting@ there (attaching would retry the insert, which a
 -- caller-owned transaction cannot do — Python's rule). A stored rival row
--- condemns the whole transaction with the conflict; an identical row is a
--- no-op join and commits. A deduplication-index violation escapes like any
+-- condemns the whole transaction with the conflict, or with 'WorkflowIdInUse'
+-- under 'WorkflowIdReject'; an identical row is a no-op join and commits. A deduplication-index violation escapes like any
 -- statement failure and aborts the caller's commit. The queue-mismatch
 -- warning stays outside (it announces through a channel a caller
 -- transaction cannot host); a fresh row never needs it. Deliberately no
@@ -2469,25 +2554,27 @@ sendBatchInTx messages serialization fallbacks sendToForks = do
 -- enqueues through the plain path), so a debounced shape meeting a rival
 -- here answers with the name conflict, and a later sweep unifying the
 -- arms must preserve this path's condemn-on-conflict contract.
-enqueueInTx :: NewWorkflow -> Maybe Text -> Text -> Timestamp -> Tx.Transaction (Either Error ())
-enqueueInTx new applicationName creatorXid now = do
+enqueueInTx :: NewWorkflow -> Maybe Text -> WorkflowIdReusePolicy -> Text -> Timestamp -> Tx.Transaction (Either Error ())
+enqueueInTx new applicationName reusePolicy creatorXid now = do
   let status = initialStatus new
       queued = status == Enqueued || status == Delayed
   case initParams applicationName new status queued creatorXid now of
     Left err -> pure (Left err)
     Right params -> do
       row <- Tx.statement () (Statements.initWorkflowStatement params)
+      refused <- reuseRefusalTx reusePolicy Nothing creatorXid new row
       when (row.creator_xid == Just creatorXid && fromMaybe False row.inserted) $
         void $
           Tx.statement
             (new.newWorkflowId, new.newWorkflowInput)
             Statements.initWorkflowInputStatement
-      case initConflict new row of
-        Just err -> Tx.condemn >> pure (Left err)
+      case (refused, initConflict new row) of
+        (Just err, _) -> Tx.condemn >> pure (Left err)
+        (Nothing, Just err) -> Tx.condemn >> pure (Left err)
         -- An identical row is a no-op join: the input stays as recorded and
         -- the caller's writes commit, as Python's identical re-init raises
         -- nothing and hands back the existing id.
-        Nothing -> pure (Right ())
+        (Nothing, Nothing) -> pure (Right ())
 
 -- | The foreign key on the destination is what catches an address that does
 -- not exist, so a message can never be left pointing at nothing.
@@ -2499,20 +2586,24 @@ foreignKeyError _                 = False
 -- subscription the caller holds. Absence at the deadline is not an error:
 -- the caller's transaction records the timeout. Mirrors the oracle's
 -- look-wait-look loop.
-pollForMessage :: PostgresSystemDB -> Subscription -> Text -> Text -> Timestamp -> IO (Either Error ())
-pollForMessage env subscription workflowId topic deadline = do
+pollForMessage :: PostgresSystemDB -> Subscription -> Text -> Text -> WakeTime -> IO (Either Error ())
+pollForMessage env subscription workflowId topic wake = do
   probe <- runPolling env "recv" (Statements.recvProbeSession workflowId topic)
   case probe of
     Left err -> pure (Left err)
     Right True -> pure (Right ())
     Right False -> do
-      now <- timestampNow
-      let remaining = fromMaybe (Duration 0) (durationSince deadline now)
+      -- Measured from the deadline's reading on this process's monotonic
+      -- clock, never against its wall clock. Past the deadline and exactly
+      -- on it are the same answer — no time left — and leaving the zero
+      -- case to the wait below would spin, since a zero-length wait
+      -- returns at once and the next look is another query.
+      remaining <- wakeRemaining wake
       if remaining <= Duration 0
         then pure (Right ())
         else do
           waitForWakeup subscription (min remaining getEventPollInterval)
-          pollForMessage env subscription workflowId topic deadline
+          pollForMessage env subscription workflowId topic wake
 
 -- | The wake time a recorded sleep holds, which every execution must agree
 -- on. A sleep with no recorded output, or one that is not epoch
@@ -2624,7 +2715,7 @@ withPollingPermit env = bracket_ acquire release
 instance SystemDB PostgresSystemDB IO where
   databaseTime env =
     runSession env "database_time" databaseTimeSession >>= traverse databaseTimeRead
-  initWorkflow env new caller =
+  initWorkflow env new caller reusePolicy =
     case caller of
       -- The atomic child start: the row (with its back-pointer) and the
       -- parent record commit together, so a crash can never leave one
@@ -2671,21 +2762,30 @@ instance SystemDB PostgresSystemDB IO where
                     -- The input lands where readers look, in the same commit, and
                     -- only when this attempt created the row: a start that found an
                     -- existing row must not touch the input the workflow was
-                    -- recorded with.
+                    -- recorded with. The reuse refusal is computed first, so a
+                    -- refused child start writes nothing; the input write below
+                    -- cannot fire on a refusal anyway, since a refused row is
+                    -- always another caller's.
+                    refused <- reuseRefusalTx reusePolicy (Just caller) creatorXid new row
                     when (row.creator_xid == Just creatorXid && fromMaybe False row.inserted) $
                       void $
                         Tx.statement
                           (new.newWorkflowId, new.newWorkflowInput)
                           Statements.initWorkflowInputStatement
-                    case (initConflict new row, stored) of
-                      (Just err, _) -> do
+                    case (refused, initConflict new row, stored) of
+                      (Just err, _, _) -> do
+                        -- The id is taken by another caller, and this start
+                        -- asked for a new one: nothing this call wrote commits.
+                        Tx.condemn
+                        pure (Left err)
+                      (Nothing, Just err, _) -> do
                         -- The stored row is another workflow's: nothing this call
                         -- wrote commits. Mirrors Rust's commit-time conflict check.
                         Tx.condemn
                         pure (Left err)
-                      (Nothing, Just childId)
+                      (Nothing, Nothing, Just childId)
                         | childId == new.newWorkflowId -> pure (Right (row, stored))
-                      (Nothing, _) -> do
+                      (Nothing, Nothing, _) -> do
                         -- A rival execution owns this parent step: roll the child row
                         -- and the step back rather than leave them pointing at each
                         -- other. Mirrors record_child_workflow_on's conflict.
@@ -2710,7 +2810,7 @@ instance SystemDB PostgresSystemDB IO where
         Right () -> do
           creatorXid <- UUID.toText <$> UUID.V4.nextRandom
           now <- timestampNow
-          initWorkflowAs env new creatorXid now
+          initWorkflowAs env new Nothing reusePolicy creatorXid now
   getWorkflow env wid = do
     result <- runSession env "get_workflow" (Statements.getWorkflowSession widText)
     pure (result >>= traverse workflowRecordFromRow)
@@ -2812,12 +2912,23 @@ instance SystemDB PostgresSystemDB IO where
     pure (fmap (> 0) result)
     where
       unwrap (Types.WorkflowId widText) = widText
-  updateWorkflowAttributes env wid attributes _caller =
-    case validateAttributes attributes of
+  updateWorkflowAttributes env wid update _caller =
+    case validateAttributeUpdate update of
       Left err -> pure (Left err)
       Right () -> do
-        result <- runSession env "update_workflow_attributes" (Statements.updateWorkflowAttributesSession (unwrap wid) attributes)
-        pure (() <$ result)
+        result <- case update of
+          Replace attributes ->
+            runSession env "update_workflow_attributes" (Statements.updateWorkflowAttributesSession (unwrap wid) attributes)
+          Merge attributes ->
+            runSession env "merge_workflow_attributes" (Statements.mergeWorkflowAttributesSession (unwrap wid) attributes)
+        -- Counted as matched, not as changed: a workflow whose attributes
+        -- were absent, or already what is written, still counts. None
+        -- means no workflow has the id, refused as Go refuses it rather
+        -- than reported as done. Mirrors the oracle.
+        case result of
+          Left err -> pure (Left err)
+          Right 0 -> pure (Left (NonExistentWorkflow {workflowIds = [unwrap wid]}))
+          Right _ -> pure (Right ())
     where
       unwrap (Types.WorkflowId widText) = widText
   reenqueueForRecovery env executorIds applicationVersion recoveryQueue
@@ -3085,12 +3196,16 @@ instance SystemDB PostgresSystemDB IO where
         let storedTopic = fromMaybe nullTopicSentinel topic
             Types.WorkflowId widText = wid
         subscription <- subscribe env.psdbNotify (messageKey widText (Just storedTopic))
-        startedAt <- timestampNow
+        -- The deadline is an instant on the database's clock; the wait for
+        -- it is measured from the reading that comes with it, never
+        -- against this host's wall clock. Mirrors the oracle's recv.
         ( do
             deadline <- checkpointSleep env DeadlineSleep wid timeoutStepId timeout token
             case deadline of
               Left err -> pure (Left err)
-              Right wakeAt -> loop subscription startedAt wakeAt
+              Right wake -> do
+                startedAt <- databaseTimeNow wake.wakeClock
+                loop subscription wake startedAt
           )
             `finally` unsubscribe subscription
     where
@@ -3099,14 +3214,14 @@ instance SystemDB PostgresSystemDB IO where
       -- receive never becomes a recorded absence; only a take at or past
       -- the deadline records the empty step. Mirrors the oracle's
       -- take-inside-the-wait-loop.
-      loop subscription startedAt wakeAt = do
+      loop subscription wake startedAt = do
         let storedTopic = fromMaybe nullTopicSentinel topic
             Types.WorkflowId widText = wid
-        waited <- pollForMessage env subscription widText storedTopic wakeAt
+        waited <- pollForMessage env subscription widText storedTopic wake
         case waited of
           Left err -> pure (Left err)
           Right () -> do
-            completedAt <- timestampNow
+            completedAt <- databaseTimeNow wake.wakeClock
             taken <-
               runTransaction
                 env
@@ -3118,7 +3233,7 @@ instance SystemDB PostgresSystemDB IO where
                     owned <- Statements.checkOwnerTx widText token
                     case owned of
                       Left conflict -> Tx.condemn >> pure (Left conflict)
-                      Right () ->
+                      Right _ ->
                         Right
                           <$> Statements.recvTx
                             Statements.RecvParams
@@ -3136,10 +3251,14 @@ instance SystemDB PostgresSystemDB IO where
               Right (Statements.RecvTook message) ->
                 pure (Right (Just ((\raw -> EncodedValue raw.encodedRawValue raw.encodedRawSerialization) message)))
               Right Statements.RecvMissed -> do
-                now <- timestampNow
-                let remaining = fromMaybe (Duration 0) (durationSince wakeAt now)
+                -- Against the loop's own monotonic deadline, so the two
+                -- never disagree about whether time is up: a missed take
+                -- with no time left records the absence, else waits on.
+                -- Mirrors the oracle's take.
+                remaining <- wakeRemaining wake
                 if remaining <= Duration 0
                   then do
+                    completedAt <- databaseTimeNow wake.wakeClock
                     recorded <-
                       runTransaction env "recv" $ do
                         -- The record opens with the ownership check, as the
@@ -3150,13 +3269,13 @@ instance SystemDB PostgresSystemDB IO where
                         owned <- Statements.checkOwnerTx widText token
                         case owned of
                           Left conflict -> Tx.condemn >> pure (Left conflict)
-                          Right () -> do
-                            Tx.statement () (Statements.recordStepStatement (Statements.recvStepRecord (Statements.RecvParams widText stepId storedTopic (timestampToEpochMs startedAt) (timestampToEpochMs now)) Nothing))
+                          Right _ -> do
+                            _ <- Tx.statement () (Statements.recordStepStatement (Statements.recvStepRecord (Statements.RecvParams widText stepId storedTopic (timestampToEpochMs startedAt) (timestampToEpochMs completedAt)) Nothing))
                             pure (Right ())
                     case join recorded of
                       Left err -> pure (Left err)
                       Right () -> pure (Right Nothing)
-                  else loop subscription startedAt wakeAt
+                  else loop subscription wake startedAt
   writeStream env wid stepId key value serialization writtenBy token = do
     startedAt <- timestampNow
     completedAt <- timestampNow
@@ -3330,17 +3449,16 @@ instance SystemDB PostgresSystemDB IO where
         -- this (migration 44 removes it), so the writer must — after the
         -- commit, not inside it.
         signal env.psdbNotifier eventsChannel (unwrap wid) key
-        pure (() <$ traverse (stepCheckToRecord wid stepId "DBOS.set_event") row)
+        pure (() <$ traverse (stepCheckToRecord wid stepId setEventStepName) row)
     where
       unwrap (Types.WorkflowId widText) = widText
   getEvent env wid key timeout caller = do
-    startedAt <- timestampNow
     -- A replay returns what the first run saw and does not wait again —
     -- including the absence a timeout produced, which is a result too.
     replay <- case caller of
       Nothing -> pure (Right Nothing)
       Just c -> do
-        found <- checkStep env c.getEventCallerWorkflowId c.getEventCallerStepId "DBOS.get_event"
+        found <- checkStep env c.getEventCallerWorkflowId c.getEventCallerStepId getEventStepName
         pure (fmap (fmap stepEncodedValue) found)
     case replay of
       Left err -> pure (Left err)
@@ -3348,21 +3466,30 @@ instance SystemDB PostgresSystemDB IO where
       Right (Just value) -> pure (Right value)
       Right Nothing -> do
         deadlineOrError <- case caller of
-          Just c -> do
-            woke <- checkpointSleep env DeadlineSleep c.getEventCallerWorkflowId c.getEventCallerTimeoutStepId timeout c.getEventCallerToken
-            pure (either Left Right woke)
-          -- A timeout too large to represent is one that never elapses.
-          Nothing -> pure (Right (fromMaybe (Timestamp maxBound) (addTimeout startedAt timeout)))
+          Just c ->
+            checkpointSleep env DeadlineSleep c.getEventCallerWorkflowId c.getEventCallerTimeoutStepId timeout c.getEventCallerToken
+          -- Outside a workflow nothing is recorded, so the timeout is this
+          -- process's alone: the reading pairs its clock with its
+          -- monotonic now, as the oracle stands the local clock in where
+          -- nothing is recorded. A timeout too large to represent is one
+          -- that never elapses.
+          Nothing -> do
+            startedAt <- timestampNow
+            clock <- databaseTimeRead (timestampToEpochMs startedAt)
+            pure (Right (WakeTime (fromMaybe (Timestamp maxBound) (addTimeout startedAt timeout)) clock))
         case deadlineOrError of
           Left err -> pure (Left err)
           Right deadline -> do
+            -- When the step began, for the step it records at the end, on
+            -- the database's clock as the deadline's reading carries it.
+            startedAt <- databaseTimeNow deadline.wakeClock
             found <- pollEvent env (unwrap wid) key deadline
             case found of
               Left err -> pure (Left err)
               Right value -> case caller of
                 Nothing -> pure (Right value)
                 Just c -> do
-                  completedAt <- timestampNow
+                  completedAt <- databaseTimeNow deadline.wakeClock
                   let params =
                         Statements.GetEventRecordParams
                           { getEventRecordWorkflowId = unwrap c.getEventCallerWorkflowId,
@@ -3379,13 +3506,13 @@ instance SystemDB PostgresSystemDB IO where
                       owned <- Statements.checkOwnerTx (unwrap c.getEventCallerWorkflowId) c.getEventCallerToken
                       case owned of
                         Left conflict -> Tx.condemn >> pure (Left conflict)
-                        Right () -> Right <$> Statements.getEventRecordTx params
+                        Right _ -> Right <$> Statements.getEventRecordTx params
                   pure $ case join recorded of
                     Left err -> Left err
                     Right Nothing -> Right value
                     Right (Just row) ->
                       fmap (>>= stepEncodedValue)
-                        (stepCheckToRecord c.getEventCallerWorkflowId c.getEventCallerStepId "DBOS.get_event" row)
+                        (stepCheckToRecord c.getEventCallerWorkflowId c.getEventCallerStepId getEventStepName row)
     where
       unwrap (Types.WorkflowId widText) = widText
   getAllNotifications env wid = do
@@ -4246,7 +4373,7 @@ releaseWorkflowClaim pool executorId workflowId =
 
 getConnectionSettings :: IO Connection.Settings
 getConnectionSettings = do
-  databaseURL <- lookupEnv "DBOS_DATABASE_URL"
+  databaseURL <- lookupEnv "DBOS_SYSTEM_DATABASE_URL"
   case databaseURL of
     Just url -> pure (Connection.connectionString (toText url))
     Nothing  -> getConnectionSettingsFromPGEnv

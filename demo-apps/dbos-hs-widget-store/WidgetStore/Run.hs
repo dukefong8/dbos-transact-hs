@@ -14,7 +14,7 @@ import DBOS.Transact
     configFromEnv,
     launch,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerDataSource,
     registerWorkflowRef,
     releaseAppDataSource,
@@ -68,10 +68,10 @@ start = do
   -- the registry does not know by name is one the recovering executor
   -- cannot resume.
   dispatchRef <-
-    registerWorkflowRef dbos (newWorkflowKey "DispatchOrderWorkflow") (dispatchWorkflow ds pgDispatchSteps)
+    registerWorkflowRef dbos (newQualifiedWorkflowName "DispatchOrderWorkflow") (dispatchWorkflow ds pgDispatchSteps)
       >>= either (die . Text.pack . show) pure
   checkoutRef <-
-    registerWorkflowRef dbos (newWorkflowKey "CheckoutWorkflow") (\() -> checkoutWorkflow ds pgCheckoutSteps dispatchRef)
+    registerWorkflowRef dbos (newQualifiedWorkflowName "CheckoutWorkflow") (\() -> checkoutWorkflow ds pgCheckoutSteps dispatchRef)
       >>= either (die . Text.pack . show) pure
   exec <- launch dbos >>= either (die . Text.pack . show) pure
   let widget = WidgetApp {waDbos = dbos, waExec = exec, waApp = app, waCheckout = checkoutRef}

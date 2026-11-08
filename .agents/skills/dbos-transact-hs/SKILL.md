@@ -49,13 +49,13 @@ Reference these guidelines when:
 A DBOS application MUST build a `Config`, create `DBOS`, register workflows before `launch`, and `shutdown` on exit:
 
 ```haskell
-import DBOS.Transact (configFromEnv, launch, newDBOS, newWorkflowKey, registerWorkflowRef, shutdown)
+import DBOS.Transact (configFromEnv, launch, newDBOS, newQualifiedWorkflowName, registerWorkflowRef, shutdown)
 
 main :: IO ()
 main = do
   config <- configFromEnv "my-app"          -- DBOS_* environment variables
   dbos   <- newDBOS config
-  _ref   <- registerWorkflowRef dbos (newWorkflowKey "MyWorkflow") myBody
+  _ref   <- registerWorkflowRef dbos (newQualifiedWorkflowName "MyWorkflow") myBody
   exec   <- launch dbos
   -- run workflows via exec ...
   shutdown dbos

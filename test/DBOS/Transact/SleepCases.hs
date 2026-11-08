@@ -15,12 +15,14 @@ module DBOS.Transact.SleepCases
     scenarioSleepCheckpoint,
     scenarioSleepReplay,
     scenarioSleepPlain,
+    scenarioSleepTimed,
     scenarioSleepInStep,
     scenarioSleepRefused,
     scenarioSleepRefusedRecorded,
     checkSleepCheckpoint,
     checkSleepReplay,
     checkSleepPlain,
+    checkSleepTimed,
     checkSleepInStep,
     checkSleepRefused,
     checkSleepRefusedRecorded,
@@ -28,8 +30,9 @@ module DBOS.Transact.SleepCases
 where
 
 import DBOS.Prelude
+import Data.Word (Word64)
 import Data.Text qualified as Text
-import DBOS.SystemDB (Duration, StepRecord (..), WorkflowId, durationFromMs, millisDuration, sleepStepName)
+import DBOS.SystemDB (Duration, StepRecord (..), WorkflowId, durationFromMs, millisDuration, secondsDuration, sleepStepName)
 import DBOS.Transact (EngineOnly, Error (..))
 
 -- | What a stack must provide to run the shared sleep scenarios: fresh
@@ -83,6 +86,30 @@ scenarioSleepReplay wf = do
 -- | The free sleep outside a workflow waits plainly: no checkpoint, no id.
 scenarioSleepPlain :: SleepFixture m -> m (Either (Error EngineOnly) ())
 scenarioSleepPlain wf = wf.sfPlainSleep (millisDuration 1)
+
+-- | A sleep waits its duration on the monotonic clock from the database's
+-- reading, not its wall-clock distance from the recorded instant: on a
+-- database an hour off this process, a wall-clock wait would sleep an hour
+-- too long, or not at all. Returns the outcome with the nanoseconds the
+-- wait took on this process's monotonic clock. Mirrors the oracle's
+-- skewed-clock sleep waits.
+scenarioSleepTimed :: (MonadMonotonicTimeNSec m) => SleepFixture m -> m (Either (Error EngineOnly) (), Word64)
+scenarioSleepTimed wf = do
+  wid <- wf.sfFreshWorkflowId
+  before <- getMonotonicTimeNSec
+  outcome <- wf.sfRunSleep wid (secondsDuration 3)
+  after <- getMonotonicTimeNSec
+  pure (outcome, after - before)
+
+-- | The sleep succeeds and takes about its duration — seconds, never
+-- minutes — whatever the database's clock says.
+checkSleepTimed :: (Either (Error EngineOnly) (), Word64) -> Either String ()
+checkSleepTimed (outcome, elapsedNs) = do
+  case outcome of
+    Left err -> Left ("the sleep must succeed, got: " <> show err)
+    Right () -> pure ()
+  unless (elapsedNs >= 2000000000 && elapsedNs <= 60000000000) $
+    Left ("the sleep must take about its duration, took (ns): " <> show elapsedNs)
 
 -- | A sleep inside a step waits without consuming a step id.
 scenarioSleepInStep :: Monad m => SleepFixture m -> m (Either (Error EngineOnly) (), Int, Int)

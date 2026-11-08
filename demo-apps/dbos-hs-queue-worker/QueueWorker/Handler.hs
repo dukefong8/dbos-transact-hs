@@ -18,7 +18,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowId (..), encodeWorkflowInput, fetchWorkflowStatuses, getWorkflowEvent, listWorkflowIdsByName, millisDuration, newWorkflowKey)
+import DBOS.Transact (DBOS, EngineOnly, Error, WorkflowId (..), encodeWorkflowInput, fetchWorkflowStatuses, getWorkflowEvent, listWorkflowIdsByName, millisDuration, newQualifiedWorkflowName)
 import DBOS.Transact qualified as Transact
 import Demo.Http (RouteHandler)
 import QueueWorker.App (QueueWorkerApp (..))
@@ -55,7 +55,7 @@ enqueueOne app = do
   enqueued <-
     Transact.enqueueWorkflow
       app.qwDbos
-      (newWorkflowKey workerWorkflowName)
+      (newQualifiedWorkflowName workerWorkflowName)
       wid
       (Just (encodeWorkflowInput defaultNumSteps))
       workerQueueName

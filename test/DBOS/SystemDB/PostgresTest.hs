@@ -6,6 +6,8 @@ import DBOS.Prelude
 import DBOS.SystemDB.Error (decodePortableError)
 import DBOS.SystemDB
   ( AppScope (..),
+    AttributeUpdate (..),
+    WakeTime (..),
     AwaitedOutcome (..),
     BackendError (..),
     BackendErrorKind (..),
@@ -67,6 +69,7 @@ import DBOS.SystemDB
     WorkflowDelay (..),
     WorkflowFilter (..),
     WorkflowId (..),
+    WorkflowIdReusePolicy (..),
     WorkflowInitResult (..),
     WorkflowOwner (..),
     WorkflowRecord (..),
@@ -93,7 +96,7 @@ import DBOS.SystemDB
     messageTo,
     newSchedule,
     millisDuration,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     newWorkflow,
     parseApplicationName,
     secondsDuration,
@@ -103,6 +106,7 @@ import DBOS.SystemDB
     timestampFromEpochMs,
     timestampNow,
     timestampToEpochMs,
+    databaseTimeNow,
   )
 import DBOS.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.SystemDB.Postgres.Backend qualified as Backend
@@ -152,7 +156,7 @@ import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 -- | Backend tests for the @postgres.rs@ rewrite (Phase 7). Groups land
 -- here one at a time, red-first: pure oracle ports
 -- (@isTransportFailure@, @pollingLimit@) need no database; lifecycle and
--- method tests run against the live database from @DBOS_DATABASE_URL@.
+-- method tests run against the live database from @DBOS_SYSTEM_DATABASE_URL@.
 -- Every ported case mirrors its Rust test name so the mapping is visible,
 -- and step 3 of the loop re-checks each assertion against @postgres.rs@.
 tests :: TestTree
@@ -481,7 +485,7 @@ insertFixtureChecked env row = do
 -- fixture rows carry 'fixtureOwner' instead; never mix the two on one row.
 initOwnedRow :: PostgresSystemDB -> NewWorkflow -> Maybe InitWorkflowCaller -> IO Text
 initOwnedRow env new caller = do
-  created <- initWorkflow env new caller
+  created <- initWorkflow env new caller WorkflowIdReturnExisting
   case created of
     Left err -> fail ("fixture init failed: " <> show err)
     Right result -> pure result.initResultCreatorXid
@@ -1570,7 +1574,7 @@ outcomeTests getBackend =
       testCase "a refused outcome writes no payload" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing
+          _ <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing WorkflowIdReturnExisting
           _ <- cancelWorkflows env [WorkflowId unique] False Nothing Nothing
           refused <- recordWorkflowOutcome env (WorkflowId unique) (OutcomeOutput (Just "\"late\"")) (fixtureOwner unique)
           refused @?= Right AlreadyFinished
@@ -1983,7 +1987,7 @@ queueTests getBackend =
                 }
             request =
               DebounceRequest
-                { debounceRequestWorkflow = newWorkflowKey "bouncer",
+                { debounceRequestWorkflow = newQualifiedWorkflowName "bouncer",
                   debounceRequestQueueName = name,
                   debounceRequestDeduplicationId = key,
                   debounceRequestPeriod = secondsDuration 1,
@@ -1993,7 +1997,7 @@ queueTests getBackend =
                 }
         withBackend getBackend $ \env -> do
           now <- timestampNow
-          first <- Backend.initWorkflowAs env (new "{\"n\":1}") creator now
+          first <- Backend.initWorkflowAs env (new "{\"n\":1}") Nothing WorkflowIdReturnExisting creator now
           case first of
             Left err -> fail ("expected the first insert to create, got: " <> show err)
             Right created -> created.initResultShouldExecute @?= True
@@ -2005,7 +2009,7 @@ queueTests getBackend =
           -- the same-millisecond retry would read inserted and undo the
           -- bounce this test guards.
           later <- pure (timestampFromEpochMs (timestampToEpochMs now + 1000))
-          retried <- Backend.initWorkflowAs env (new "{\"n\":1}") creator later
+          retried <- Backend.initWorkflowAs env (new "{\"n\":1}") Nothing WorkflowIdReturnExisting creator later
           case retried of
             Left err -> fail ("expected the retry to join its own row, got: " <> show err)
             Right joined -> joined.initResultShouldExecute @?= True
@@ -2046,7 +2050,7 @@ queueTests getBackend =
           _ <- insertFixtureChecked env (defaultFixture parent)
           recorded <- recordChildResult env (WorkflowId parent) 2 (WorkflowId child) (OutcomeOutput (Just "done")) Nothing Nothing (fixtureOwner parent)
           recorded @?= Right ()
-          found <- checkStep env (WorkflowId parent) 2 "DBOS.get_result"
+          found <- checkStep env (WorkflowId parent) 2 "DBOS.getResult"
           case found of
             Right (Just _) -> pure ()
             other -> fail ("expected the recorded step, got: " <> show other),
@@ -2064,7 +2068,7 @@ queueTests getBackend =
                     initCallerStartedAt = startedAt,
                     initCallerToken = fixtureOwner parent
                   }
-          started <- initWorkflow env (newWorkflow child) (Just caller)
+          started <- initWorkflow env (newWorkflow child) (Just caller) WorkflowIdReturnExisting
           case started of
             Left err -> fail ("expected a child start, got: " <> show err)
             Right _ -> pure ()
@@ -2090,7 +2094,7 @@ queueTests getBackend =
                     initCallerStartedAt = startedAt,
                     initCallerToken = "someone-else"
                   }
-          refused <- initWorkflow env (newWorkflow child) (Just caller)
+          refused <- initWorkflow env (newWorkflow child) (Just caller) WorkflowIdReturnExisting
           case refused of
             Left (WorkflowConflict {}) -> pure ()
             other -> fail ("expected WorkflowConflict, got: " <> show other)
@@ -2133,7 +2137,7 @@ latestVersion env = do
 bounceRequest :: Text -> Text -> DebounceRequest
 bounceRequest queueName key =
   DebounceRequest
-    { debounceRequestWorkflow = newWorkflowKey "bouncer",
+    { debounceRequestWorkflow = newQualifiedWorkflowName "bouncer",
       debounceRequestQueueName = queueName,
       debounceRequestDeduplicationId = key,
       debounceRequestPeriod = millisDuration 2000,
@@ -2494,6 +2498,7 @@ lifecycleWriteTests getBackend =
                       }
                   )
                   Nothing
+                  WorkflowIdReturnExisting
           _ <- plant expired (timestampFromEpochMs 1000)
           _ <- plant live (timestampFromEpochMs 4102444800000)
           -- Scoped to this test's application: the guard test below plants
@@ -2523,7 +2528,7 @@ lifecycleWriteTests getBackend =
           -- takes no application filter, so the scope changes nothing it
           -- asserts.
           let scoped = (newWorkflow owned) {newWorkflowDeadline = Just (timestampFromEpochMs 1000), newWorkflowAppName = Just ("guard-app-" <> owned)}
-          _ <- initWorkflow env scoped Nothing
+          _ <- initWorkflow env scoped Nothing WorkflowIdReturnExisting
           refused <- cancelIfTimedOut env (WorkflowId owned) "someone-else"
           refused @?= Right False
           held <- getWorkflow env (WorkflowId owned)
@@ -2941,7 +2946,7 @@ eventTests getBackend =
           _ <- setEvent env (WorkflowId unique) 4 "progress" "second" Nothing (fixtureOwner unique)
           read2 <- getEvent env (WorkflowId unique) "progress" (millisDuration 0) (Just caller)
           read2 @?= Right (Just (EncodedValue "first" Nothing))
-          step <- checkStep env (WorkflowId unique) 2 "DBOS.get_event"
+          step <- checkStep env (WorkflowId unique) 2 "DBOS.getEvent"
           case step of
             Right (Just recorded) -> recorded.stepRecordOutput @?= Just "first"
             other -> fail ("expected the recorded read, got: " <> show other)
@@ -3009,11 +3014,16 @@ sleepTests getBackend =
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique)
+          -- The database's clock, which the wake time is set on, not this
+          -- host's.
+          before <- databaseTime env >>= either (fail . show) pure >>= databaseTimeNow
           woke <- recordSleep env (WorkflowId unique) 1 (millisDuration 60000) (fixtureOwner unique)
           case woke of
             Left err -> fail ("expected a wake time, got: " <> show err)
-            Right wakeAt -> do
+            Right wake -> do
+              let WakeTime wakeAt _ = wake
               assertBool "the wake time is in the future" (timestampToEpochMs wakeAt > 0)
+              assertBool "the wake time is a minute past the database's now" (abs (timestampToEpochMs wakeAt - timestampToEpochMs before - 60000) < 5000)
               found <- checkStep env (WorkflowId unique) 1 sleepStepName
               case found of
                 Right (Just step) -> do
@@ -3028,14 +3038,18 @@ sleepTests getBackend =
           _ <- insertFixtureChecked env (defaultFixture unique)
           first <- recordSleep env (WorkflowId unique) 1 (millisDuration 60000) (fixtureOwner unique)
           again <- recordSleep env (WorkflowId unique) 1 (millisDuration 5000) (fixtureOwner unique)
-          again @?= first,
+          case (first, again) of
+            (Right firstWake, Right againWake) -> firstWake.wakeAt @?= againWake.wakeAt
+            other -> fail ("expected two wake times, got: " <> show other),
       testCase "a rival's recorded sleep is adopted" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique)
           _ <- recordStep env (WorkflowId unique) 1 sleepStepName (OutcomeOutput (Just "12345")) (Just "portable_json") Nothing (fixtureOwner unique)
           woke <- recordSleep env (WorkflowId unique) 1 (millisDuration 60000) (fixtureOwner unique)
-          woke @?= Right (timestampFromEpochMs 12345)
+          case woke of
+            Right wake -> wake.wakeAt @?= timestampFromEpochMs 12345
+            other -> fail ("expected the adopted wake time, got: " <> show other)
     ]
 
 -- | The ported stream contract, run against the live backend as part of the
@@ -3311,9 +3325,9 @@ recoveryTests getBackend =
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique)
-          stored <- updateWorkflowAttributes env (WorkflowId unique) (Just "{\"k\": \"v\"}") Nothing
+          stored <- updateWorkflowAttributes env (WorkflowId unique) (Replace (Just "{\"k\": \"v\"}")) Nothing
           stored @?= Right ()
-          rejected <- updateWorkflowAttributes env (WorkflowId unique) (Just "[1,2]") Nothing
+          rejected <- updateWorkflowAttributes env (WorkflowId unique) (Replace (Just "[1,2]")) Nothing
           case rejected of
             Left (InvalidInput {}) -> pure ()
             other -> fail ("expected InvalidInput, got: " <> show other)
@@ -3321,6 +3335,61 @@ recoveryTests getBackend =
           case found of
             Right (Just record) -> assertBool "the attribute is stored" (maybe False (Text.isInfixOf "k") record.workflowRecordAttributes)
             other -> fail ("expected record, got: " <> show other),
+      testCase "a merge adds keys and keeps the rest" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture unique)
+          let merged :: Text -> IO (Maybe Text)
+              merged json = do
+                result <- updateWorkflowAttributes env (WorkflowId unique) (Merge json) Nothing
+                case result of
+                  Left err -> fail ("merge failed: " <> show err)
+                  Right () -> pure ()
+                found <- getWorkflow env (WorkflowId unique)
+                case found of
+                  Right (Just record) -> pure record.workflowRecordAttributes
+                  other -> fail ("expected record, got: " <> show other)
+          intoNone <- merged "{\"a\": 1}"
+          intoNone @?= Just "{\"a\": 1}"
+          addedKey <- merged "{\"b\": 2}"
+          addedKey @?= Just "{\"a\": 1, \"b\": 2}"
+          overwritten <- merged "{\"a\": 3, \"c\": null}"
+          overwritten @?= Just "{\"a\": 3, \"b\": 2, \"c\": null}"
+          -- Not an object, as another implementation might have left it.
+          planted <- runSession env "fixture" $ Session.statement unique $ Statement.preparable "update dbos.workflow_status set attributes = '[1, 2]' where workflow_uuid = $1" (Encoders.param (Encoders.nonNullable Encoders.text)) Decoders.noResult
+          case planted of
+            Left err -> fail ("plant failed: " <> show err)
+            Right () -> pure ()
+          intoArray <- merged "{\"d\": 4}"
+          intoArray @?= Just "{\"d\": 4}"
+          refused <- updateWorkflowAttributes env (WorkflowId unique) (Merge "[1]") Nothing
+          case refused of
+            Left (InvalidInput {}) -> pure ()
+            other -> fail ("expected InvalidInput, got: " <> show other),
+      testCase "an empty merge into none stores an empty object" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture unique)
+          result <- updateWorkflowAttributes env (WorkflowId unique) (Merge "{}") Nothing
+          case result of
+            Left err -> fail ("merge failed: " <> show err)
+            Right () -> pure ()
+          found <- getWorkflow env (WorkflowId unique)
+          case found of
+            Right (Just record) -> record.workflowRecordAttributes @?= Just "{}"
+            other -> fail ("expected record, got: " <> show other),
+      testCase "an attribute update on a missing id is refused" $ do
+        missing <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          let updates = [Replace (Just "{\"a\": 1}"), Replace Nothing, Merge "{\"a\": 1}"]
+          mapM_
+            ( \update -> do
+                refused <- updateWorkflowAttributes env (WorkflowId missing) update Nothing
+                case refused of
+                  Left (NonExistentWorkflow {workflowIds = [found]}) | found == missing -> pure ()
+                  other -> fail ("expected NonExistentWorkflow, got: " <> show other)
+            )
+            updates,
       testCase "a recovery sweep enqueues only the dead executor's own rows" $ do
         unique <- freshWorkflowId
         dead <- freshWorkflowId
@@ -3381,7 +3450,7 @@ initTests getBackend =
     [ testCase "a fresh start is pending, claimed and counted once" $ do
         unique <- freshWorkflowId
         withBackendSettings getBackend (defaultSettings {settingsExecutorId = Just "exec-1"}) $ \env -> do
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowExecutorId = Just "exec-1"} Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowExecutorId = Just "exec-1"} Nothing WorkflowIdReturnExisting
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -3403,7 +3472,7 @@ initTests getBackend =
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique) {fixtureStatus = "PENDING", fixtureOwnerXid = Nothing, fixtureCreatorXid = Just "creator-a", fixtureInput = Just "{\"positionalArgs\":[21],\"namedArgs\":{}}", fixtureSerialization = Just "portable_json"}
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowName = Just "fixture", newWorkflowInput = Just "{\"positionalArgs\":[99],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowName = Just "fixture", newWorkflowInput = Just "{\"positionalArgs\":[99],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Nothing WorkflowIdReturnExisting
           case started of
             Left err -> fail ("expected a join, got: " <> show err)
             Right startedResult -> do
@@ -3418,7 +3487,7 @@ initTests getBackend =
       testCase "a fresh insert runs with the offered input" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "{\"positionalArgs\":[1],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "{\"positionalArgs\":[1],\"namedArgs\":{}}", newWorkflowSerialization = Just "portable_json"} Nothing WorkflowIdReturnExisting
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -3431,7 +3500,7 @@ initTests getBackend =
       testCase "a queued start is enqueued and not counted" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowQueueName = Just "q"} Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowQueueName = Just "q"} Nothing WorkflowIdReturnExisting
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -3442,7 +3511,7 @@ initTests getBackend =
         unique <- freshWorkflowId
         withBackendSettings getBackend (defaultSettings {settingsExecutorId = Just "mine"}) $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique) {fixtureName = Nothing, fixtureExecutor = Just "other-exec", fixtureOwnerXid = Just "other-owner", fixtureRecoveryAttempts = Just 1}
-          started <- initWorkflow env (newWorkflow unique) Nothing
+          started <- initWorkflow env (newWorkflow unique) Nothing WorkflowIdReturnExisting
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -3456,7 +3525,7 @@ initTests getBackend =
         unique <- freshWorkflowId
         withBackendSettings getBackend (defaultSettings {settingsExecutorId = Just "mine"}) $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique) {fixtureName = Nothing, fixtureExecutor = Just "other-exec", fixtureOwnerXid = Just "other-owner", fixtureCreatorXid = Just "other-owner", fixtureRecoveryAttempts = Just 1}
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowExecutorId = Just "mine"} Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowExecutorId = Just "mine"} Nothing WorkflowIdReturnExisting
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right startedResult -> do
@@ -3473,17 +3542,165 @@ initTests getBackend =
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- runSession env "fixture" (insertFixture (defaultFixture unique) {fixtureName = Just "alpha"})
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowName = Just "beta"} Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowName = Just "beta"} Nothing WorkflowIdReturnExisting
           case started of
             Left (ConflictingWorkflow {}) -> pure ()
             _ -> fail "expected ConflictingWorkflow",
+      testCase "a stored empty class or config is absent when resubmitting" $ do
+        -- Mirrors Rust @a_stored_empty_class_or_config_is_absent_when_resubmitting@:
+        -- a row another SDK wrote with '' for an absent class or config is
+        -- the same workflow as one submitted with neither, not a conflict;
+        -- a real class still conflicts.
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          started <- initWorkflow env (newWorkflow unique) Nothing WorkflowIdReturnExisting
+          case started of
+            Left err -> fail ("expected a start, got: " <> show err)
+            Right _ -> pure ()
+          blanked <-
+            runSession env "fixture" $
+              Session.statement unique $
+                Statement.preparable
+                  "update dbos.workflow_status set class_name = '', config_name = '' where workflow_uuid = $1"
+                  (Encoders.param (Encoders.nonNullable Encoders.text))
+                  Decoders.noResult
+          case blanked of
+            Left err -> fail ("expected the blanking write, got: " <> show err)
+            Right () -> pure ()
+          resubmitted <- initWorkflow env (newWorkflow unique) Nothing WorkflowIdReturnExisting
+          case resubmitted of
+            Left err -> fail ("expected an empty class and config to read as absent, got: " <> show err)
+            Right _ -> pure ()
+          classed <- initWorkflow env (newWorkflow unique) {newWorkflowClassName = Just "Checkout"} Nothing WorkflowIdReturnExisting
+          case classed of
+            Left (ConflictingWorkflow {}) -> pure ()
+            other -> fail ("expected a real class to conflict, got: " <> show other),
+      testCase "a rejecting insert refuses another caller's workflow but not its own retry" $ do
+        -- Mirrors Rust @a_rejecting_insert_refuses_another_callers_workflow_but_not_its_own_retry@:
+        -- under Reject a row another caller created is refused whatever its
+        -- status, writing nothing; a retry staging a lost acknowledgement
+        -- under the same token finds its own row.
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          now <- timestampNow
+          let taken = "wf-taken-" <> unique
+              first = (newWorkflow taken) {newWorkflowName = Just "charge", newWorkflowInput = Just "\"first\"", newWorkflowSerialization = Just "rust_serde"}
+              second = first {newWorkflowInput = Just "\"second\""}
+              reject = WorkflowIdReject
+          created <- Backend.initWorkflowAs env first Nothing reject "creator" now
+          case created of
+            Right result -> result.initResultShouldExecute @?= True
+            Left err -> fail ("expected the insert to create, got: " <> show err)
+          retried <- Backend.initWorkflowAs env first Nothing reject "creator" now
+          case retried of
+            Right result -> result.initResultShouldExecute @?= True
+            Left err -> fail ("expected the retry to recognise its own row, got: " <> show err)
+          joined <- Backend.initWorkflowAs env second Nothing WorkflowIdReturnExisting "joiner" now
+          case joined of
+            Right result -> result.initResultShouldExecute @?= False
+            Left err -> fail ("expected the join, got: " <> show err)
+          before <- getWorkflow env (WorkflowId taken)
+          for_ ["PENDING", "SUCCESS", "ERROR"] $ \status -> do
+            marked <-
+              runSession env "fixture" $
+                Session.statement (taken, status) $
+                  Statement.preparable
+                    "update dbos.workflow_status set status = $2 where workflow_uuid = $1"
+                    (contramap fst (Encoders.param (Encoders.nonNullable Encoders.text)) <> contramap snd (Encoders.param (Encoders.nonNullable Encoders.text)))
+                    Decoders.noResult
+            case marked of
+              Left err -> fail ("expected the status write, got: " <> show err)
+              Right () -> pure ()
+            refused <- Backend.initWorkflowAs env second Nothing reject "rejecter" now
+            refused @?= Left (WorkflowIdInUse {workflowId = taken, status = status, existingName = Just "charge"})
+          after <- getWorkflow env (WorkflowId taken)
+          case (before, after) of
+            (Right (Just kept), Right (Just stored)) -> do
+              stored.workflowRecordInput @?= kept.workflowRecordInput
+              stored.workflowRecordInput @?= Just "\"first\""
+              stored.workflowRecordUpdatedAt @?= kept.workflowRecordUpdatedAt
+            other -> fail ("expected the row before and after, got: " <> show other)
+          blanked <-
+            runSession env "fixture" $
+              Session.statement taken $
+                Statement.preparable
+                  "update dbos.workflow_status set name = '' where workflow_uuid = $1"
+                  (Encoders.param (Encoders.nonNullable Encoders.text))
+                  Decoders.noResult
+          case blanked of
+            Left err -> fail ("expected the blanking write, got: " <> show err)
+            Right () -> pure ()
+          nameless <- Backend.initWorkflowAs env (second {newWorkflowName = Nothing}) Nothing reject "rejecter" now
+          case nameless of
+            Left (WorkflowIdInUse {existingName = Nothing}) -> pure ()
+            other -> fail ("expected a stored '' to read as absent, got: " <> show other),
+      testCase "a rejecting child start adopts only its parent's unrecorded child" $ do
+        -- Mirrors Rust @a_rejecting_child_start_adopts_only_its_parents_unrecorded_child@:
+        -- under Reject a parent's own child that the parent no longer
+        -- records is adopted; one it still records, started again at
+        -- another step, is a reuse, and so is any other parent's start.
+        -- A retried adoption adopts again: the record at the caller's own
+        -- step is this start's.
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          now <- timestampNow
+          let reject = WorkflowIdReject
+              parentA = "parent-a-" <> unique
+              parentB = "parent-b-" <> unique
+              childId = "the-child-" <> unique
+          tokenA <- initOwnedRow env (newWorkflow parentA) Nothing
+          tokenB <- initOwnedRow env (newWorkflow parentB) Nothing
+          let at parent token step =
+                Just
+                  ( InitWorkflowCaller
+                      { initCallerParentWorkflowId = WorkflowId parent,
+                        initCallerStepId = step,
+                        initCallerStepName = "child",
+                        initCallerStartedAt = now,
+                        initCallerToken = token
+                      }
+                  )
+              child = (newWorkflow childId) {newWorkflowName = Just "child"}
+              isInUse result = case result of
+                Left (WorkflowIdInUse {}) -> True
+                _ -> False
+          first <- initWorkflow env child (at parentA tokenA 1) reject
+          case first of
+            Right result -> result.initResultShouldExecute @?= True
+            Left err -> fail ("expected a fresh id to create, got: " <> show err)
+          again <- initWorkflow env child (at parentA tokenA 3) reject
+          assertBool "the parent still records the child, so another start of the id is a reuse" (isInUse again)
+          other <- initWorkflow env child (at parentB tokenB 1) reject
+          assertBool "another parent's start is a reuse" (isInUse other)
+          -- What a rewind of parent-a to before the start leaves: the
+          -- child, and no record of it.
+          cleared <-
+            runSession env "fixture" $
+              Session.statement parentA $
+                Statement.preparable
+                  "delete from dbos.operation_outputs where workflow_uuid = $1"
+                  (Encoders.param (Encoders.nonNullable Encoders.text))
+                  Decoders.noResult
+          case cleared of
+            Left err -> fail ("expected the record delete, got: " <> show err)
+            Right () -> pure ()
+          adopted <- initWorkflow env child (at parentA tokenA 1) reject
+          case adopted of
+            Right result -> result.initResultShouldExecute @?= False
+            Left err -> fail ("expected the replayed parent to adopt its own child, got: " <> show err)
+          retried <- initWorkflow env child (at parentA tokenA 1) reject
+          case retried of
+            Right result -> result.initResultShouldExecute @?= False
+            Left err -> fail ("expected a retried adoption to adopt again, got: " <> show err)
+          racing <- initWorkflow env child (at parentB tokenB 1) reject
+          assertBool "the adoption is the parent's alone" (isInUse racing),
       testCase "a start runs only the row it created" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           -- A row another attempt created, owned by its creator: this
           -- start's fresh token never matches, so it joins.
           _ <- insertFixtureChecked env ((defaultFixture unique) {fixtureName = Nothing, fixtureCreatorXid = Just "creator-a", fixtureOwnerXid = Just "creator-a"})
-          started <- initWorkflow env (newWorkflow unique) Nothing
+          started <- initWorkflow env (newWorkflow unique) Nothing WorkflowIdReturnExisting
           case started of
             Right result -> do
               result.initResultShouldExecute @?= False
@@ -3499,7 +3716,7 @@ initTests getBackend =
       testCase "a start that created the row runs it" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          first <- initWorkflow env (newWorkflow unique) Nothing
+          first <- initWorkflow env (newWorkflow unique) Nothing WorkflowIdReturnExisting
           creator <- case first of
             Right result -> do
               result.initResultShouldExecute @?= True
@@ -3518,7 +3735,7 @@ initTests getBackend =
           _ <- insertFixtureChecked env (defaultFixture unique) {fixtureName = Nothing, fixtureOwnerXid = Just "other-owner", fixtureRecoveryAttempts = Just 150, fixtureQueue = Just ("q-" <> unique), fixtureDeduplicationId = Just ("key-" <> unique)}
           -- Recovery past the budget used to park here; since the claim
           -- counts attempts, only its dispatch can judge a spent budget.
-          started <- initWorkflow env (newWorkflow unique) Nothing
+          started <- initWorkflow env (newWorkflow unique) Nothing WorkflowIdReturnExisting
           case started of
             Right result -> result.initResultStatus @?= Pending
             other -> fail ("expected the row back unparked, got: " <> show other)
@@ -3532,14 +3749,14 @@ initTests getBackend =
         second <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture first) {fixtureQueue = Just ("q-" <> unique), fixtureDeduplicationId = Just ("key-" <> unique)}
-          started <- initWorkflow env (newWorkflow second) {newWorkflowQueueName = Just ("q-" <> unique), newWorkflowDeduplicationId = Just ("key-" <> unique)} Nothing
+          started <- initWorkflow env (newWorkflow second) {newWorkflowQueueName = Just ("q-" <> unique), newWorkflowDeduplicationId = Just ("key-" <> unique)} Nothing WorkflowIdReturnExisting
           case started of
             Left (QueueDeduplicated {}) -> pure ()
             _ -> fail "expected QueueDeduplicated",
       testCase "writes the input to the payload table, not the status row" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"in\""} Nothing WorkflowIdReturnExisting
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right _ -> pure ()
@@ -3549,11 +3766,11 @@ initTests getBackend =
       testCase "a resubmission does not replace the input" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
-          first <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"first\""} Nothing
+          first <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"first\""} Nothing WorkflowIdReturnExisting
           case first of
             Left err -> fail ("expected a start, got: " <> show err)
             Right _ -> pure ()
-          again <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"second\""} Nothing
+          again <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"second\""} Nothing WorkflowIdReturnExisting
           case again of
             Left err -> fail ("expected a start, got: " <> show err)
             Right _ -> pure ()
@@ -3565,7 +3782,7 @@ initTests getBackend =
           _ <-
             runSession env "fixture" $
               Session.script ("insert into dbos.workflow_input (workflow_uuid, inputs) values ('" <> unique <> "', '\"stale\"')")
-          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"fresh\""} Nothing
+          started <- initWorkflow env (newWorkflow unique) {newWorkflowInput = Just "\"fresh\""} Nothing WorkflowIdReturnExisting
           case started of
             Left err -> fail ("expected a start, got: " <> show err)
             Right _ -> pure ()

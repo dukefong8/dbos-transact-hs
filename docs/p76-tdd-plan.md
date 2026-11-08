@@ -213,7 +213,7 @@ dispatch loop, stable identity) is future work.
 - **Loop**: AGENTS.md TDD loop verbatim — `make dev` owns `ghcid.txt`;
   read it after every reload; exactly one group enabled; one public test at
   a time; `cabal test` only when the watcher is idle; every test owns its
-  rows; psql against `$DBOS_DATABASE_URL` after every green `cabal test`.
+  rows; psql against `$DBOS_SYSTEM_DATABASE_URL` after every green `cabal test`.
 - **Fidelity**: HARD RULES verbatim. No `hasql-dynamic-statements`; static
   SQL with CASE/null-guards. No new dependency without the hoogle check.
   Glossary language from CONTEXT.md in test names. Plan deltas folded back
@@ -243,7 +243,7 @@ dispatch loop, stable identity) is future work.
 
 L2 is **in progress**, not complete. The current verified gate is
 `cabal test`: **271/271**, following `make db-migrate` (`108→108`), plus a
-read-only `psql` check against `$DBOS_DATABASE_URL`. The suite covers the
+read-only `psql` check against `$DBOS_SYSTEM_DATABASE_URL`. The suite covers the
 class-backed DBOS launch, typed workflow start + replay adoption, one-pass
 queue execution, durable step/sleep, events, and send/recv. L2 still has
 substantial work: concurrent task tracking/cancellation, `WorkflowRef` and
@@ -523,5 +523,5 @@ StarterTest mirror, and removal of the v1 pool/Store path have not landed.
 - Exactly one `-- $>` group is active per watcher reload; switch both sides
   of the toggle. Read `ghcid.txt` immediately after each reload.
 - `cabal test` only when the watcher is idle; after each successful full run,
-  query the rows it exercised on `$DBOS_DATABASE_URL`.
+  query the rows it exercised on `$DBOS_SYSTEM_DATABASE_URL`.
 - `make db-migrate` before build/test; keep ceiling 108.

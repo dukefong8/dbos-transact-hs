@@ -56,6 +56,7 @@ module DBOS.Transact.Instance
     rewindWorkflows,
     dequeueWorkflows,
     updateWorkflowAttributes,
+    mergeWorkflowAttributes,
     listWorkflowSteps,
     listWorkflowStepsWith,
     listWorkflowStepsSerialized,
@@ -72,7 +73,7 @@ import Data.Map.Strict qualified as Map
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AppScope, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult, WorkflowKey, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter, renderWorkflowKey)
+import DBOS.SystemDB.Types (AppScope, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult, QualifiedWorkflowName, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter, renderQualifiedWorkflowName)
 import DBOS.Transact.Serialization (CodecError (..), SerializationError, WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, unWorkflowInput)
 import DBOS.Transact.Serialization qualified as Serialization
 import DBOS.Transact.Config (Config (..))
@@ -145,12 +146,12 @@ newDBOS config' = do
 -- unconverted bodies share the registry, so conversion proceeds one body
 -- at a time.
 registerWorkflow :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
-                 => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+                 => DBOS m -> QualifiedWorkflowName -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 registerWorkflow dbos key body = Workflow.registerTypedWorkflow dbos.dbos_registry key body
 
 -- | 'registerWorkflowRef' for a reference-typed workflow body.
 registerWorkflowRef :: (FromJSON argument, ToJSON result, ToJSON e, MonadMVar m)
-                    => DBOS m -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
+                    => DBOS m -> QualifiedWorkflowName -> (forall exec. argument -> WorkflowCtx exec m -> m (Either (TransactError.Error e) result)) -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowRef m e))
 registerWorkflowRef dbos key body = Workflow.registerWorkflowRef dbos.dbos_registry key body
 
 isLaunched :: MonadMVar m => DBOS m -> m Bool
@@ -244,7 +245,7 @@ shutdown dbos =
         releaseConnection executor.conn
 
 runWorkflow :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
-            => Executor m -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+            => Executor m -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflow executor key workflowId input = do
   outcome <-
     runRegisteredWorkflow
@@ -255,6 +256,7 @@ runWorkflow executor key workflowId input = do
       key
       workflowId
       (unWorkflowInput <$> input)
+      WorkflowIdReturnExisting
       executor.datasources
   pure outcome
 
@@ -275,7 +277,7 @@ runWorkflowRef executor ref options input = do
   pure outcome
 
 enqueueWorkflow :: (MonadMVar m)
-                => DBOS m -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
+                => DBOS m -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowInitResult)
 enqueueWorkflow dbos key workflowId input queueName = do
   withExecutor dbos "enqueue a workflow" $ \executor ->
     case lookupSnapshotWorkflow key executor.workflows of
@@ -351,6 +353,13 @@ updateWorkflowAttributes :: (MonadMVar m)
                          => DBOS m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 updateWorkflowAttributes dbos workflowId attributes = do
   withExecutor dbos "update workflow attributes" $ \executor -> Management.updateWorkflowAttributes executor.conn workflowId attributes
+
+-- | Merges keys into a workflow's attributes, in one statement. The
+-- launched-instance guard first; the write itself lives in 'Management'.
+mergeWorkflowAttributes :: (MonadMVar m)
+                        => DBOS m -> WorkflowId -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+mergeWorkflowAttributes dbos workflowId attributes = do
+  withExecutor dbos "merge workflow attributes" $ \executor -> Management.mergeWorkflowAttributes executor.conn workflowId attributes
 
 -- | Reads the workflows matching a filter. The launched-instance guard
 -- first; the read itself lives in 'Management'.

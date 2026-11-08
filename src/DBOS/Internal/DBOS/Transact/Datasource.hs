@@ -70,7 +70,7 @@ import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderError)
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..), newWorkflowKey)
+import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..), newQualifiedWorkflowName)
 import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText, fromRegistryError, fromSerializationError)
 import DBOS.Transact.Identity (Identity (..))
@@ -509,7 +509,7 @@ registerDataSource registry source = do
     else
       modifyMVar registry.dsrSources $ \sources ->
         case find ((== source.dsName) . (.dsName)) sources of
-          Just _  -> pure (sources, Left (fromRegistryError (Registry.AlreadyRegistered (newWorkflowKey ("datasource " <> source.dsName)))))
+          Just _  -> pure (sources, Left (fromRegistryError (Registry.AlreadyRegistered (newQualifiedWorkflowName ("datasource " <> source.dsName)))))
           Nothing -> pure (source : sources, Right ())
 
 -- | The registered datasources, oldest first.

@@ -16,7 +16,7 @@ import DBOS.Transact
     defaultQueueOptions,
     launch,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerDataSource,
     registerWorkflow,
     registerWorkflowRef,
@@ -63,10 +63,10 @@ start = do
   _ <- registerDataSource dbos ds >>= either (die . Text.pack . show) pure
   -- Registered before launch, because recovery starts inside it.
   placeRef <-
-    registerWorkflowRef dbos (newWorkflowKey placeOrderWorkflowName) (placeOrderWorkflow ds)
+    registerWorkflowRef dbos (newQualifiedWorkflowName placeOrderWorkflowName) (placeOrderWorkflow ds)
       >>= either (die . Text.pack . show) pure
   _ <-
-    registerWorkflow dbos (newWorkflowKey sendNotificationWorkflowName) (sendNotificationWorkflow ds)
+    registerWorkflow dbos (newQualifiedWorkflowName sendNotificationWorkflowName) (sendNotificationWorkflow ds)
       >>= either (die . Text.pack . show) pure
   exec <- launch dbos >>= either (die . Text.pack . show) pure
   -- The queue the transactional-enqueue variant's notifications run on.

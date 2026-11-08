@@ -289,7 +289,7 @@ pendingBody calls _ = do
 
 -- | Durable sleep reuses its recorded wake time: the replay adopts the
 -- original wake instead of sleeping again. Returns both outcomes.
-scenarioDurableSleep :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioDurableSleep :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m, MonadMonotonicTimeNSec m)
                      => StepFixture m ->
                         m ((), ())
 scenarioDurableSleep fx = do

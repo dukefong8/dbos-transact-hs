@@ -16,6 +16,7 @@ module DBOS.SystemDB.IOSim
     memSetApplication,
     memConnectionOn,
     memLaunchOn,
+    memInitWorkflowAs,
     memLaunchOnWith,
     memDBOSOn,
     simConnectionWith,
@@ -60,6 +61,7 @@ import DBOS.SystemDB
     ForkOptions (..),
     ForkPoint (..),
     GetEventCaller (..),
+    AttributeUpdate (..),
     InitWorkflowCaller (..),
     NewQueue (..),
     NewSchedule (..),
@@ -91,8 +93,9 @@ import DBOS.SystemDB
     WorkflowDelay (..),
     WorkflowFilter (..),
     WorkflowId (..),
+    WorkflowIdReusePolicy (..),
     WorkflowInitResult (..),
-    WorkflowKey (..),
+    QualifiedWorkflowName,
     WorkflowOwner (..),
     WorkflowRecord (..),
     WorkflowStatus (..),
@@ -128,7 +131,7 @@ import DBOS.SystemDB
     sysRewindValidate,
     sendStepName,
     validateSendKeys,
-    workflowKeyFromRow,
+    qualifiedWorkflowNameFromRow,
     workflowStatusText,
     writeStreamStepName,
     closeStreamStepName,
@@ -139,6 +142,8 @@ import DBOS.SystemDB
     timestampFromEpochMs,
     timestampNow,
     timestampToEpochMs,
+    WakeTime (..),
+    validateAttributeUpdate,
     zeroRowCounts)
 import DBOS.SystemDB.Postgres.Statements (CallerStep (..))
 import DBOS.Transact
@@ -197,7 +202,7 @@ instance SystemDB MockSystemDB (IOSim s) where
   databaseTime _ = do
     clock <- databaseTimeRead (timestampToEpochMs mockTimestamp)
     pure (Right clock)
-  initWorkflow _ new _ = do
+  initWorkflow _ new _ _ = do
     clock <- databaseTimeRead (timestampToEpochMs mockTimestamp)
     pure (Right ((mockInitResult new) {initResultClock = clock}))
   getWorkflow = \cases
@@ -240,7 +245,9 @@ instance SystemDB MockSystemDB (IOSim s) where
   checkStep = \cases _ _ _ _ -> pure (Right Nothing)
   recordStep = \cases _ _ _ _ _ _ _ _ -> pure (Right ())
   listSteps = \cases _ wid _ _ _ _ -> pure (Right [mockStep wid 0 "mock-step"])
-  recordSleep = \cases _ _ _ _ _ -> pure (Right mockTimestamp)
+  recordSleep _ _ _ _ _ = do
+    clock <- databaseTimeRead (timestampToEpochMs mockTimestamp)
+    pure (Right (WakeTime mockTimestamp clock))
   setEvent = \cases _ _ _ _ _ _ _ -> pure (Right ())
   getEvent = \cases _ _ _ _ _ -> pure (Right (Just (EncodedValue mockEventBody (Just mockSerialization))))
   getAllNotifications = \cases _ _ -> pure (Right [mockNotification])
@@ -648,6 +655,207 @@ dropMemHolds oldRows moved held = foldr drop held (releasedHolds oldRows moved)
       Just holder | holder == wid -> Map.delete indexKey index
       _ -> index
 
+-- | The mock's test seam, mirroring the SQL @init_workflow_as@: the attempt's
+-- identity travels with the call, so a test can stage a retry after a lost
+-- acknowledgement under the same token.
+memInitWorkflowAs :: MemSystemDB s -> NewWorkflow -> Maybe InitWorkflowCaller -> WorkflowIdReusePolicy -> Text -> IOSim s (Either Error WorkflowInitResult)
+memInitWorkflowAs db new caller reusePolicy creator = do
+  -- The wake instant a delayed enqueue waits for, as the SQL init's
+  -- @delay_until@: without it a DELAYED row would never come due and the
+  -- transition would pass it by forever.
+  now <- memDbNow db
+  outcome <- atomically $ do
+    rows <- readTVar db.memRows
+    -- A stale parent starts nothing: the check opens the write, as the
+    -- SQL take-tx does, so the child row and the parent record never
+    -- commit behind a hand-off.
+    let owned = case caller of
+          Nothing -> Right ()
+          Just call ->
+            let WorkflowId parentText = call.initCallerParentWorkflowId
+             in case Map.lookup parentText rows of
+                  Just row | row.workflowRecordOwnerXid == Just call.initCallerToken -> Right ()
+                  _ -> Left (WorkflowConflict {workflowId = parentText})
+    case owned of
+      Left conflict -> pure (Left conflict)
+      Right () -> case Map.lookup new.newWorkflowId rows of
+        Just row -> do
+          steps <- readTVar db.memSteps
+          case memReuseRefusal reusePolicy caller creator new row steps of
+            Just refusal -> pure (Left refusal)
+            Nothing -> case initConflict row of
+              Just conflict -> pure (Left conflict)
+              Nothing
+                | new.newWorkflowIsDebounced && row.workflowRecordCreatorXid /= Just creator ->
+                    -- A debounced creation must be new: a reused pinned id
+                    -- joins nothing. The holder's own key races back to the
+                    -- bounce; anything else is a conflict. Mirrors the
+                    -- oracle's debounced conflict arm; the row keeps its
+                    -- deduplication id only while it waits, so a matching
+                    -- one is a holder of the key.
+                    case (new.newWorkflowDeduplicationId, new.newWorkflowQueueName) of
+                      (Just deduplicationId, Just queueName)
+                        | row.workflowRecordDeduplicationId == Just deduplicationId && row.workflowRecordQueueName == Just queueName ->
+                            pure (Left QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queueName, deduplicationId = deduplicationId})
+                      _ ->
+                        pure
+                          ( Left
+                              ConflictingWorkflow
+                                { workflowId = new.newWorkflowId,
+                                  detail = "a debounce enqueues a new workflow, but a workflow with this id already exists"
+                                }
+                          )
+                | otherwise -> do
+                    -- A start from inside a workflow records the parent's
+                    -- step, as the SQL take-tx does for a row it merely
+                    -- found as well as one it created — so a replay finds
+                    -- the child without starting one, and a later start of
+                    -- the same id at another step is a reuse. Written only
+                    -- when the step holds no record: a refusal below leaves
+                    -- nothing behind, as condemning the SQL transaction does.
+                    case caller of
+                      Just call ->
+                        let WorkflowId parentText = call.initCallerParentWorkflowId
+                            atStep = (parentText, call.initCallerStepId)
+                         in unless (Map.member atStep steps) $
+                              writeTVar db.memSteps $
+                                Map.insert atStep (memChildEntry call new.newWorkflowId) steps
+                      Nothing -> pure ()
+                    pure (Right row)
+        Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
+          (Just queue, Just key) -> do
+            held <- readTVar db.memDedup
+            case Map.lookup (queue, key) held of
+              Just _ ->
+                pure (Left (QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queue, deduplicationId = key}))
+              Nothing -> do
+                writeTVar db.memDedup (Map.insert (queue, key) new.newWorkflowId held)
+                inserted <- insertFresh rows now creator
+                pure (Right inserted)
+          _ -> do
+            inserted <- insertFresh rows now creator
+            pure (Right inserted)
+  clock <- databaseTimeRead (timestampToEpochMs now)
+  -- Should-execute compares the row's creator to this call's token, as
+  -- the SQL finish does: a fresh insert's stored creator always matches,
+  -- so no override is needed.
+  pure $ case outcome of
+    Left err -> Left err
+    Right row -> Right (memInitResult clock creator row)
+  where
+    -- The sim's row carries no class/config names, so the identity
+    -- conflict it can model is the function name: a start that names a
+    -- different function under an existing id is refused, as the SQL's
+    -- commit-time guard does. The detail keeps the oracle's debug
+    -- spelling so the live and sim answers read alike.
+    initConflict row = case (row.workflowRecordName, new.newWorkflowName) of
+      (stored, offered) | stored /= offered ->
+        Just
+          ConflictingWorkflow
+            { workflowId = new.newWorkflowId,
+              detail = "existing function name is " <> debugMaybe stored <> ", but " <> debugMaybe offered <> " was provided"
+            }
+      _ -> Nothing
+    debugMaybe Nothing = "None"
+    debugMaybe (Just value) = "Some(\"" <> value <> "\")"
+    -- A parent's record of one start: the child it names at the step that
+    -- named it. Shared by the insert and the found-row adopt paths, as the
+    -- SQL take-tx writes the record for a row it merely found as well as
+    -- one it created, so the two paths never diverge on what a replay finds.
+    memChildEntry call childId =
+      StepRecord
+        { stepRecordWorkflowId = call.initCallerParentWorkflowId,
+          stepRecordStepId = call.initCallerStepId,
+          stepRecordStepName = call.initCallerStepName,
+          stepRecordOutput = Nothing,
+          stepRecordError = Nothing,
+          stepRecordChildWorkflowId = Just (WorkflowId childId),
+          stepRecordSerialization = Nothing,
+          stepRecordStartedAt = Just call.initCallerStartedAt,
+          stepRecordCompletedAt = Nothing
+        }
+    -- Under 'WorkflowIdReject', a row another caller created is refused
+    -- as 'WorkflowIdInUse' before anything else about the row is judged.
+    -- A retry that finds its own row carries the same creator token and
+    -- is not refused; nor is a parent's own child that a rewind left
+    -- behind. Mirrors the oracle's reuse arm in @init_workflow_as@.
+    memReuseRefusal reusePolicy caller creator new row steps
+      | reusePolicy /= WorkflowIdReject = Nothing
+      | row.workflowRecordCreatorXid == Just creator = Nothing
+      | memRewound caller new.newWorkflowId row steps = Nothing
+      | otherwise =
+          Just
+            WorkflowIdInUse
+              { workflowId = new.newWorkflowId,
+                status = workflowStatusText row.workflowRecordStatus,
+                existingName = case row.workflowRecordName of
+                  Just name | not (Text.null name) -> Just name
+                  _ -> Nothing
+              }
+    -- The mock's half of 'isRewoundChildTx': the row's parent is this
+    -- caller's and no step but this one still records the child.
+    memRewound caller childId row steps = case (caller, row.workflowRecordParentWorkflowId) of
+      (Just call, Just parent)
+        | parent == call.initCallerParentWorkflowId ->
+            not (any namesChildAtAnotherStep (Map.toList steps))
+        where
+          WorkflowId parentText = call.initCallerParentWorkflowId
+          namesChildAtAnotherStep ((wid, step), record) =
+            wid == parentText
+              && step /= call.initCallerStepId
+              && record.stepRecordChildWorkflowId == Just (WorkflowId childId)
+      _ -> False
+    insertFresh rows now creator = do
+      -- The SQL insert turns a PENDING row's budget into a deadline
+      -- against the database's clock; a queued row keeps none until its
+      -- claim. A recovered or resumed row keeps whatever it already had.
+      let deadlineAt = case new.newWorkflowDeadline of
+            Just _ -> new.newWorkflowDeadline
+            Nothing
+              | initialStatus new == Pending -> new.newWorkflowTimeout >>= addTimeout now
+              | otherwise -> Nothing
+          -- The release is the delay from now, capped at the debounce
+          -- deadline, as the init statement resolves both: a delay
+          -- longer than the timeout lands on the deadline exactly.
+          cappedRelease = case (saturateTimeout now <$> new.newWorkflowDelay, saturateTimeout now <$> new.newWorkflowDebounceTimeout) of
+            (Just release, Just deadline) -> Just (min release deadline)
+            (release, _) -> release
+          row =
+            (memFreshRow new caller creator)
+              { workflowRecordDelayUntil = cappedRelease,
+                workflowRecordDebounceDeadline = saturateTimeout now <$> new.newWorkflowDebounceTimeout,
+                workflowRecordDeadline = deadlineAt
+              }
+      writeTVar db.memRows (Map.insert new.newWorkflowId row rows)
+      case caller of
+        -- The init caller records the parent's start step in the same
+        -- breath, so a replay finds the child without starting one.
+        Just call -> do
+          steps <- readTVar db.memSteps
+          let WorkflowId parentText = call.initCallerParentWorkflowId
+              entry = memChildEntry call new.newWorkflowId
+          writeTVar db.memSteps (Map.insert (parentText, call.initCallerStepId) entry steps)
+        Nothing -> pure ()
+      pure row
+
+-- | The merge as the one statement sees it: attributes that are
+-- absent, undecodable, or not an object count as an empty object; a named
+-- key takes the new value and @null@ is stored, not a deletion. Mirrors
+-- the oracle's merge arm of @update_workflow_attributes@.
+mergeAttributeObjects :: Maybe Text -> Text -> Text
+mergeAttributeObjects stored additions =
+  decodeUtf8 (LBS.toStrict (encode (Object (KeyMap.union new base))))
+  where
+    asObject raw = case eitherDecodeStrict (encodeUtf8 raw) :: Either String Value of
+      Right (Object object) -> Just object
+      _ -> Nothing
+    base = case stored >>= asObject of
+      Just object -> object
+      Nothing -> KeyMap.empty
+    new = case asObject additions of
+      Just object -> object
+      Nothing -> KeyMap.empty
+
 instance SystemDB (MemSystemDB s) (IOSim s) where
   databaseTime db = do
     -- The sim's clock, as every simulated write reads it: a test advances
@@ -655,132 +863,10 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     now <- memDbNow db
     clock <- databaseTimeRead (timestampToEpochMs now)
     pure (Right clock)
-  initWorkflow db new caller = do
-    -- The wake instant a delayed enqueue waits for, as the SQL init's
-    -- @delay_until@: without it a DELAYED row would never come due and the
-    -- transition would pass it by forever.
-    now <- memDbNow db
-    -- One creator token per call, like the SQL init's per-attempt UUID:
-    -- a retry presents the same token only if the caller kept it, so a
-    -- match is this attempt's own insert.
+  initWorkflow db new caller reusePolicy = do
+    -- One creator token per call, like the SQL init's per-attempt UUID.
     creator <- atomically (simOwnerText db)
-    outcome <- atomically $ do
-      rows <- readTVar db.memRows
-      -- A stale parent starts nothing: the check opens the write, as the
-      -- SQL take-tx does, so the child row and the parent record never
-      -- commit behind a hand-off.
-      let owned = case caller of
-            Nothing -> Right ()
-            Just call ->
-              let WorkflowId parentText = call.initCallerParentWorkflowId
-               in case Map.lookup parentText rows of
-                    Just row | row.workflowRecordOwnerXid == Just call.initCallerToken -> Right ()
-                    _ -> Left (WorkflowConflict {workflowId = parentText})
-      case owned of
-        Left conflict -> pure (Left conflict)
-        Right () -> case Map.lookup new.newWorkflowId rows of
-          Just row -> case initConflict row of
-            Just conflict -> pure (Left conflict)
-            Nothing
-              | new.newWorkflowIsDebounced && row.workflowRecordCreatorXid /= Just creator ->
-                  -- A debounced creation must be new: a reused pinned id
-                  -- joins nothing. The holder's own key races back to the
-                  -- bounce; anything else is a conflict. Mirrors the
-                  -- oracle's debounced conflict arm; the row keeps its
-                  -- deduplication id only while it waits, so a matching
-                  -- one is a holder of the key.
-                  case (new.newWorkflowDeduplicationId, new.newWorkflowQueueName) of
-                    (Just deduplicationId, Just queueName)
-                      | row.workflowRecordDeduplicationId == Just deduplicationId && row.workflowRecordQueueName == Just queueName ->
-                          pure (Left QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queueName, deduplicationId = deduplicationId})
-                    _ ->
-                      pure
-                        ( Left
-                            ConflictingWorkflow
-                              { workflowId = new.newWorkflowId,
-                                detail = "a debounce enqueues a new workflow, but a workflow with this id already exists"
-                              }
-                        )
-              | otherwise -> pure (Right row)
-          Nothing -> case (new.newWorkflowQueueName, new.newWorkflowDeduplicationId) of
-            (Just queue, Just key) -> do
-              held <- readTVar db.memDedup
-              case Map.lookup (queue, key) held of
-                Just _ ->
-                  pure (Left (QueueDeduplicated {workflowId = new.newWorkflowId, queueName = queue, deduplicationId = key}))
-                Nothing -> do
-                  writeTVar db.memDedup (Map.insert (queue, key) new.newWorkflowId held)
-                  inserted <- insertFresh rows now creator
-                  pure (Right inserted)
-            _ -> do
-              inserted <- insertFresh rows now creator
-              pure (Right inserted)
-    clock <- databaseTimeRead (timestampToEpochMs now)
-    -- Should-execute compares the row's creator to this call's token, as
-    -- the SQL finish does: a fresh insert's stored creator always matches,
-    -- so no override is needed.
-    pure $ case outcome of
-      Left err -> Left err
-      Right row -> Right (memInitResult clock creator row)
-    where
-      -- The sim's row carries no class/config names, so the identity
-      -- conflict it can model is the function name: a start that names a
-      -- different function under an existing id is refused, as the SQL's
-      -- commit-time guard does. The detail keeps the oracle's debug
-      -- spelling so the live and sim answers read alike.
-      initConflict row = case (row.workflowRecordName, new.newWorkflowName) of
-        (stored, offered) | stored /= offered ->
-          Just
-            ConflictingWorkflow
-              { workflowId = new.newWorkflowId,
-                detail = "existing function name is " <> debugMaybe stored <> ", but " <> debugMaybe offered <> " was provided"
-              }
-        _ -> Nothing
-      debugMaybe Nothing = "None"
-      debugMaybe (Just value) = "Some(\"" <> value <> "\")"
-      insertFresh rows now creator = do
-        -- The SQL insert turns a PENDING row's budget into a deadline
-        -- against the database's clock; a queued row keeps none until its
-        -- claim. A recovered or resumed row keeps whatever it already had.
-        let deadlineAt = case new.newWorkflowDeadline of
-              Just _ -> new.newWorkflowDeadline
-              Nothing
-                | initialStatus new == Pending -> new.newWorkflowTimeout >>= addTimeout now
-                | otherwise -> Nothing
-            -- The release is the delay from now, capped at the debounce
-            -- deadline, as the init statement resolves both: a delay
-            -- longer than the timeout lands on the deadline exactly.
-            cappedRelease = case (saturateTimeout now <$> new.newWorkflowDelay, saturateTimeout now <$> new.newWorkflowDebounceTimeout) of
-              (Just release, Just deadline) -> Just (min release deadline)
-              (release, _) -> release
-            row =
-              (memFreshRow new caller creator)
-                { workflowRecordDelayUntil = cappedRelease,
-                  workflowRecordDebounceDeadline = saturateTimeout now <$> new.newWorkflowDebounceTimeout,
-                  workflowRecordDeadline = deadlineAt
-                }
-        writeTVar db.memRows (Map.insert new.newWorkflowId row rows)
-        case caller of
-          -- The init caller records the parent's start step in the same
-          -- breath, so a replay finds the child without starting one.
-          Just call -> do
-            steps <- readTVar db.memSteps
-            let WorkflowId parentText = call.initCallerParentWorkflowId
-                entry =
-                  StepRecord
-                    { stepRecordWorkflowId = call.initCallerParentWorkflowId,
-                      stepRecordStepId = call.initCallerStepId,
-                      stepRecordStepName = call.initCallerStepName,
-                      stepRecordOutput = Nothing,
-                      stepRecordError = Nothing,
-                      stepRecordChildWorkflowId = Just (WorkflowId new.newWorkflowId),
-                      stepRecordSerialization = Nothing,
-                      stepRecordStartedAt = Just call.initCallerStartedAt,
-                      stepRecordCompletedAt = Nothing
-                    }
-            writeTVar db.memSteps (Map.insert (parentText, call.initCallerStepId) entry steps)
-          Nothing -> pure ()
-        pure row
+    memInitWorkflowAs db new caller reusePolicy creator
   getWorkflow db (WorkflowId wid) = Right . Map.lookup wid <$> readTVarIO db.memRows
   listWorkflows db filters _ = do
     rows <- readTVarIO db.memRows
@@ -849,9 +935,20 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       DelayUntil instant -> do
         atomically (modifyTVar db.memRows (Map.adjust (\row -> row {workflowRecordDelayUntil = Just instant}) wid))
         pure (Right ())
-  updateWorkflowAttributes db (WorkflowId wid) attributes _ =
-    atomically (modifyTVar db.memRows (Map.adjust (\row -> row {workflowRecordAttributes = attributes}) wid))
-      >> pure (Right ())
+  updateWorkflowAttributes db (WorkflowId wid) update _ = atomically $ do
+    case validateAttributeUpdate update of
+      Left err -> pure (Left err)
+      Right () -> do
+        rows <- readTVar db.memRows
+        case Map.lookup wid rows of
+          Nothing -> pure (Left (NonExistentWorkflow {workflowIds = [wid]}))
+          Just row -> do
+            writeTVar db.memRows (Map.insert wid (row {workflowRecordAttributes = merged row}) rows)
+            pure (Right ())
+    where
+      merged row = case update of
+        Replace attributes -> attributes
+        Merge additions -> Just (mergeAttributeObjects row.workflowRecordAttributes additions)
   cancelIfTimedOut db (WorkflowId wid) owner = do
     now <- memDbNow db
     atomically $ do
@@ -1212,12 +1309,13 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
         slept <- memCheckpointSleep MemDeadlineSleep db wid timeoutStepId duration token
         case slept of
           Left err -> pure (Left err)
-          Right wakeAt -> do
+          Right wake -> do
             now <- memDbNow db
             -- Past the deadline already (an adopted sleep step's old wake
             -- time, or a zero duration): record the absence at once, as a
-            -- pass at the deadline would.
-            case durationSince wakeAt now of
+            -- pass at the deadline would. Compared on the sim's database
+            -- clock, which is the one the wake time was set on.
+            case durationSince wake.wakeAt now of
               Nothing -> do
                 owned <- atomically (memCheckRecvOwner db wid token)
                 case owned of
@@ -1932,13 +2030,17 @@ data MemSleepKind = MemDurableSleep | MemDeadlineSleep
 -- durable wake that cannot be stored is recorded as the refusal, and a
 -- deadline too far out saturates instead of refusing. Mirrors the
 -- oracle's checkpoint order.
-memCheckpointSleep :: MemSleepKind -> MemSystemDB s -> WorkflowId -> Int -> Duration -> Text -> IOSim s (Either Error Timestamp)
+memCheckpointSleep :: MemSleepKind -> MemSystemDB s -> WorkflowId -> Int -> Duration -> Text -> IOSim s (Either Error WakeTime)
 memCheckpointSleep kind db wid stepId duration token = do
   now <- memDbNow db
+  -- The sim's database clock, skew included: every stamp, delay and
+  -- deadline comparison in the sim reads through it, so a skewed database
+  -- stays self-consistent. Mirrors the production reading.
+  clock <- databaseTimeRead (timestampToEpochMs now)
   existing <- checkStep db wid stepId sleepStepName
   case existing of
     Left err -> pure (Left err)
-    Right (Just step) -> pure (memReplaySleep kind wid stepId step)
+    Right (Just step) -> pure (fmap (\wakeAt -> WakeTime wakeAt clock) (memReplaySleep kind wid stepId step))
     Right Nothing -> case decidedWake kind now duration of
       Left refusal -> do
         let encoded = encodeWorkflowValue refusal
@@ -1947,6 +2049,7 @@ memCheckpointSleep kind db wid stepId duration token = do
           (Just portableJsonSerialization)
           (StepTiming now now)
           token
+          clock
           (Left refusal)
       Right wakeAt -> do
         let completedAt = case kind of
@@ -1957,7 +2060,8 @@ memCheckpointSleep kind db wid stepId duration token = do
           (Just portableJsonSerialization)
           (StepTiming now completedAt)
           token
-          (Right wakeAt)
+          clock
+          (Right (WakeTime wakeAt clock))
   where
     decidedWake MemDurableSleep started wait = case addTimeout started wait of
       Nothing -> Left (invalidInput "duration" "must not end past the latest instant 64-bit epoch milliseconds can hold")
@@ -1966,14 +2070,14 @@ memCheckpointSleep kind db wid stepId duration token = do
 
 -- | Records a sleep outcome and answers it, adopting a rival's record on
 -- a write race rather than disagreeing with what the workflow replays.
-memRecordSleepOutcome :: MemSleepKind -> MemSystemDB s -> WorkflowId -> Int -> Outcome -> Maybe Text -> StepTiming -> Text -> Either Error Timestamp -> IOSim s (Either Error Timestamp)
-memRecordSleepOutcome kind db wid stepId outcome serialization timing token answer = do
+memRecordSleepOutcome :: MemSleepKind -> MemSystemDB s -> WorkflowId -> Int -> Outcome -> Maybe Text -> StepTiming -> Text -> DatabaseTime -> Either Error WakeTime -> IOSim s (Either Error WakeTime)
+memRecordSleepOutcome kind db wid stepId outcome serialization timing token clock answer = do
   recorded <- recordStep db wid stepId sleepStepName outcome serialization (Just timing) token
   case recorded of
     Left (StepNondeterminism {}) -> do
       adopted <- checkStep db wid stepId sleepStepName
       case adopted of
-        Right (Just step) -> pure (memReplaySleep kind wid stepId step)
+        Right (Just step) -> pure (fmap (\wakeAt -> WakeTime wakeAt clock) (memReplaySleep kind wid stepId step))
         Left err -> pure (Left err)
         Right Nothing -> pure (Left (Malformed "sleep reported as recorded but cannot be read back"))
     Left err -> pure (Left err)
@@ -2084,7 +2188,7 @@ memBounce scope request now rows = case Map.lookupMin (Map.filter isBouncable ro
         && (scope == Nothing || row.workflowRecordAppName == scope || row.workflowRecordAppName == Nothing)
     holderKey row = case row.workflowRecordName of
       Nothing -> Nothing
-      Just name -> Just (workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName)
+      Just name -> Just (qualifiedWorkflowNameFromRow name row.workflowRecordClassName row.workflowRecordConfigName)
 
 -- | The holder as the domain describes it: what holds the key, not merely
 -- that something does, so the caller can tell a collision from a

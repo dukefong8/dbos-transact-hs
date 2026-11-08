@@ -455,7 +455,7 @@ Every case the simulator cannot run keeps its plain name with an `-- IO only:` r
 ## Gate run 2026-10-01 (all steps closed)
 
 `cabal test test` — **594 green**; psql fixture check against
-`$DBOS_DATABASE_URL` — the 7 expected rows present (workflow statuses
+`$DBOS_SYSTEM_DATABASE_URL` — the 7 expected rows present (workflow statuses
 SUCCESS/PENDING, both operation outputs, the notification); watcher pair
 live 51 / sim 51 green, leaf sequences order-identical. `src/` did not
 move, so no oracle leg was owed. (Re-run after slice 35: same result,

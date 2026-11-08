@@ -89,3 +89,4 @@ executable demo-apps
     uuid,
     wai,
     warp,
+  ghc-options: -rtsopts -with-rtsopts=-N4

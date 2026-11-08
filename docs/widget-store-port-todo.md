@@ -125,6 +125,6 @@ than the table.
 
 ## Environment
 
-- Haskell app: `$DBOS_DATABASE_URL`, schema `widget_store` in the shared DB.
+- Haskell app: `$DBOS_SYSTEM_DATABASE_URL`, schema `widget_store` in the shared DB.
 - Python app: `widget_store_py` database (own system schema), port 8000;
   seeded `public.products`/`public.orders`.

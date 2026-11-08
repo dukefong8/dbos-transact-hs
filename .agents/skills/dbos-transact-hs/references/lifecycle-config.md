@@ -20,13 +20,13 @@ myWorkflowBody () wctx = runStep wctx "fetch" (\_ -> fetchData)
 **Correct (configure and launch in main):**
 
 ```haskell
-import DBOS.Transact (configFromEnv, launch, newDBOS, registerWorkflowRef, newWorkflowKey, shutdown)
+import DBOS.Transact (configFromEnv, launch, newDBOS, registerWorkflowRef, newQualifiedWorkflowName, shutdown)
 
 main :: IO ()
 main = do
   config <- configFromEnv "my-app"
   dbos   <- newDBOS config
-  _ref   <- registerWorkflowRef dbos (newWorkflowKey "MyWorkflow") myWorkflowBody
+  _ref   <- registerWorkflowRef dbos (newQualifiedWorkflowName "MyWorkflow") myWorkflowBody
   exec   <- launch dbos
   -- run workflows via exec ...
   shutdown dbos

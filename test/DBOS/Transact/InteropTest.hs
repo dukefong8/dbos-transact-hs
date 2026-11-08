@@ -36,7 +36,8 @@ import DBOS.Transact
     StartOptions (..),
     WorkflowCtx,
     WorkflowHandle,
-    WorkflowKey (..),
+    QualifiedWorkflowName,
+    methodQualifiedWorkflowName,
     WorkflowRef,
     WorkflowFilter (..),
     WorkflowRecord (..),
@@ -314,14 +315,14 @@ withInteropInstance label action = do
             configListenQueues = Just [queueText]
           }
   bracket (newDBOS config) shutdown $ \dbos -> do
-    canonicalRef <- registerOrFail dbos (WorkflowKey "canonicalWorkflow" (Just "interop") Nothing) canonicalBody
-    kwargRef <- registerOrFail dbos (WorkflowKey "kwargWorkflow" (Just "interop") Nothing) kwargBody
+    canonicalRef <- registerOrFail dbos (methodQualifiedWorkflowName "canonicalWorkflow" "interop") canonicalBody
+    kwargRef <- registerOrFail dbos (methodQualifiedWorkflowName "kwargWorkflow" "interop") kwargBody
     exec <- launch dbos >>= either (fail . show) pure
     _ <- registerQueue dbos queueText defaultQueueOptions AlwaysUpdate >>= either (fail . show) pure
     action dbos exec suffix queueText canonicalRef kwargRef
 
 registerOrFail :: (FromJSON argument, ToJSON result)
-               => DBOS IO -> WorkflowKey -> (forall exec. argument -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) result)) -> IO (WorkflowRef IO EngineOnly)
+               => DBOS IO -> QualifiedWorkflowName -> (forall exec. argument -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) result)) -> IO (WorkflowRef IO EngineOnly)
 registerOrFail dbos key body = do
   registered <- registerWorkflowRef dbos key body
   either (fail . show) pure registered

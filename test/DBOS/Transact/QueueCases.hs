@@ -29,6 +29,8 @@ module DBOS.Transact.QueueCases
     checkUpdateCoherent,
     scenarioUnhonourable,
     checkUnhonourable,
+    scenarioPausedZero,
+    checkPausedZero,
     scenarioEqualLimits,
     checkEqualLimits,
     scenarioConcurrencySpellings,
@@ -108,7 +110,7 @@ import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.Prelude
-import DBOS.SystemDB (AwaitedOutcome (..), Change (..), Dequeued (..), Duration, NewQueue (..), NewWorkflow (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), RateLimit (..), Timestamp, WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter, internalQueueName, newQueue, newWorkflow, secondsDuration)
+import DBOS.SystemDB (AwaitedOutcome (..), Change (..), Dequeued (..), Duration, NewQueue (..), NewWorkflow (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), RateLimit (..), Timestamp, WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter, internalQueueName, newQueue, newWorkflow, secondsDuration)
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact.Connection (Connection (connSysdb), runSystemDB)
 import DBOS.Transact.Dequeue (Polled (..), newRunning, pollOnce)
@@ -120,7 +122,7 @@ import DBOS.Transact
     DBOS,
     DuplicationPolicy (..),
     EngineOnly,
-    Enqueue (..),
+    QueueRequest (..),
     Error (..),
     Executor,
     Queue (..),
@@ -137,13 +139,14 @@ import DBOS.Transact
     defaultQueueOptions,
     deleteQueue,
     enqueueWorkflow,
-    enqueueNew,
+    queueRequestNew,
     handleResult,
     handleStatus,
     isLaunched,
     listQueues,
     listWorkflows,
-    newWorkflowKey,
+    millisDuration,
+    newQualifiedWorkflowName,
     queue,
     registerWorkflow,
     registerWorkflowRef,
@@ -264,7 +267,19 @@ checkUnlaunched refused = case refused of
 -- refusal must carry.
 incoherentTable :: [(Text, QueueOptions, Text)]
 incoherentTable =
-  [ ( "a rate limit admitting nothing",
+  [ ( "a negative fleet-wide limit",
+      (defaultQueueOptions :: QueueOptions) {concurrency = Just (-1)},
+      "`concurrency` must not be negative"
+    ),
+    ( "a negative per-process limit",
+      (defaultQueueOptions :: QueueOptions) {workerConcurrency = Just (-1)},
+      "`worker_concurrency` must not be negative"
+    ),
+    ( "a paused queue with a per-partition limit",
+      (defaultQueueOptions :: QueueOptions) {concurrency = Just 0, partitionConcurrency = Just 1},
+      "must be greater than or equal to `partition_concurrency`"
+    ),
+    ( "a rate limit admitting nothing",
       defaultQueueOptions {rateLimit = Just (RateLimit {rateLimitLimit = 0, rateLimitPeriod = secondsDuration 1})},
       "rate_limit.limit"
     ),
@@ -278,15 +293,15 @@ incoherentTable =
     ),
     ( "a partition allowed more than the whole queue",
       (defaultQueueOptions :: QueueOptions) {concurrency = Just 2, partitionConcurrency = Just 4},
-      "must not exceed"
+      "must be greater than or equal to `partition_concurrency`"
     ),
     ( "a partition allowed more than the whole queue, explicit spelling",
       (defaultQueueOptions :: QueueOptions) {globalConcurrency = Just 2, partitionConcurrency = Just 4},
-      "must not exceed"
+      "must be greater than or equal to `partition_concurrency`"
     ),
     ( "a partition worker allowed more than the whole queue",
       (defaultQueueOptions :: QueueOptions) {concurrency = Just 2, partitionWorkerConcurrency = Just 4},
-      "must not exceed `concurrency`"
+      "must be greater than or equal to `partition_worker_concurrency`"
     )
   ]
 
@@ -347,7 +362,7 @@ checkUpdateCoherent :: (Either (Error EngineOnly) Queue, Maybe Queue, Either (Er
 checkUpdateCoherent (refused, stored, raised) = do
   case refused of
     Left (ErrorConfig message) ->
-      unless ("must not exceed" `Text.isInfixOf` message) $ Left ("the pair refusal names no bound, got: " <> show message)
+      unless ("must be greater than or equal to" `Text.isInfixOf` message) $ Left ("the pair refusal names no bound, got: " <> show message)
     other -> Left ("expected a pair refusal, got: " <> show other)
   case stored of
     Just receipt -> unless (receipt.workerConcurrency == Just 2) $ Left ("the refused update touched the row: " <> show receipt.workerConcurrency)
@@ -369,11 +384,11 @@ unhonourableTable =
     ),
     ( "a partition's worker limit above the partition's own",
       defaultQueueOptions {partitionConcurrency = Just 2, partitionWorkerConcurrency = Just 4},
-      "must not exceed `partition_concurrency`"
+      "must be greater than or equal to `partition_worker_concurrency`"
     ),
     ( "a partition's worker limit above this process's own",
       (defaultQueueOptions :: QueueOptions) {workerConcurrency = Just 2, partitionWorkerConcurrency = Just 4},
-      "must not exceed `worker_concurrency`"
+      "must be greater than or equal to `partition_worker_concurrency`"
     )
   ]
 
@@ -416,6 +431,111 @@ checkUnhonourable (refused, stored, accepted, acceptedFast) = do
   case acceptedFast of
     Right _ -> Right ()
     other -> Left ("a faster per-partition rate is never binding and should be honoured: " <> show other)
+
+-- | A queue-wide limit of 0 pauses the queue until an update raises it,
+-- for the fleet-wide limit and the per-process one alike, on an
+-- unpartitioned queue and on a partitioned one. Mirrors the oracle's
+-- @a_limit_of_zero_pauses_a_queue_until_it_is_raised@: registration and
+-- an update take 0 and refuse -1; while the limit is 0 the workflows stay
+-- ENQUEUED; once it is raised they run. A control queue with no limits is
+-- registered beside each paused one and must finish a workflow before the
+-- paused pair is checked: the sweep that starts the control queue's
+-- worker starts the paused queue's too, so the paused queue has been
+-- polled by then.
+scenarioPausedZero :: forall m. (MonadMVar m, MonadSTM m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+                   => QueueFixture m -> m [(Text, Text, Maybe WorkflowStatus, Maybe WorkflowStatus, Maybe Int, Either String Int, Either String Int)]
+scenarioPausedZero fx = do
+  let key = newQualifiedWorkflowName "paused"
+      body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+      body () _ = pure (Right 1)
+      setConcurrency limit = (defaultQueueChange :: QueueChange) {concurrency = Set limit}
+      setWorkerConcurrency limit = (defaultQueueChange :: QueueChange) {workerConcurrency = Set limit}
+      readConcurrency receipt = receipt.concurrency
+      readWorkerConcurrency receipt = receipt.workerConcurrency
+      perPartitionRate = RateLimit {rateLimitLimit = 100, rateLimitPeriod = secondsDuration 60}
+      cases :: [(Text, Text, QueueOptions, Maybe Int -> QueueChange, Queue -> Maybe Int, Maybe Text)]
+      cases =
+        [ ( "concurrency",
+            "unpartitioned",
+            (defaultQueueOptions :: QueueOptions) {concurrency = Just 0},
+            setConcurrency,
+            readConcurrency,
+            Nothing
+          ),
+          ( "worker_concurrency",
+            "unpartitioned",
+            (defaultQueueOptions :: QueueOptions) {workerConcurrency = Just 0},
+            setWorkerConcurrency,
+            readWorkerConcurrency,
+            Nothing
+          ),
+          ( "concurrency",
+            "partitioned",
+            (defaultQueueOptions :: QueueOptions) {concurrency = Just 0, partitionRateLimit = Just perPartitionRate},
+            setConcurrency,
+            readConcurrency,
+            Just "key"
+          ),
+          ( "worker_concurrency",
+            "partitioned",
+            (defaultQueueOptions :: QueueOptions) {workerConcurrency = Just 0, partitionConcurrency = Just 1},
+            setWorkerConcurrency,
+            readWorkerConcurrency,
+            Just "key"
+          )
+        ]
+  ref <- registerWorkflowRef fx.qfDBOS key body >>= orCrash
+  exec <- fx.qfLaunch
+  results <- mapM (runCase exec ref) cases
+  fx.qfShutdown
+  pure results
+  where
+    runCase exec ref (field, shape, options, change, readLimit, partitionKey) = do
+      let queueName = "hs-l2-paused-" <> field <> "-" <> shape <> "-" <> Text.take 12 fx.qfSuffix
+          control = queueName <> "-control"
+          fast = (defaultQueueOptions :: QueueOptions) {pollingInterval = millisDuration 100}
+          limited = (options :: QueueOptions) {pollingInterval = millisDuration 100}
+          wid n = WorkflowId (queueName <> "-" <> Text.pack (show (n :: Int)))
+          startOn queue wid' pk =
+            startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just wid', startQueue = Just ((queueRequestNew queue) {partitionKey = pk})}) Nothing >>= orCrash
+      _ <- registerQueue fx.qfDBOS queueName limited AlwaysUpdate >>= orCrash
+      _ <- registerQueue fx.qfDBOS control fast AlwaysUpdate >>= orCrash
+      refused <- updateQueue fx.qfDBOS queueName (change (Just (-1)))
+      refusal <- case refused of
+        Left (ErrorConfig message) -> pure message
+        other -> error (Text.unpack queueName <> ": a negative limit was accepted: " <> show other)
+      _ <- updateQueue fx.qfDBOS queueName (change (Just 0)) >>= orCrash
+      first <- startOn queueName (wid 0) partitionKey
+      second <- startOn queueName (wid 1) partitionKey
+      controlled <- startOn control (WorkflowId (control <> "-0")) Nothing
+      controlledOut <- timeout 15000000 (handleResult controlled) >>= maybe (error (Text.unpack queueName <> ": the control workflow never finished")) pure >>= orCrash
+      case decodedInt (Right controlledOut) of
+        Right 1 -> pure ()
+        other -> error (Text.unpack queueName <> ": the control workflow did not return 1: " <> show other)
+      -- The control finished, so the sweep has polled the paused queue;
+      -- settle before asserting nothing moved.
+      threadDelay 500000
+      slow0 <- retrieveWorkflow fx.qfDBOS (wid 0) >>= orCrash >>= handleStatus >>= orCrash
+      slow1 <- retrieveWorkflow fx.qfDBOS (wid 1) >>= orCrash >>= handleStatus >>= orCrash
+      raised <- updateQueue fx.qfDBOS queueName (change (Just 2)) >>= orCrash
+      out0raw <- timeout 15000000 (handleResult first) >>= maybe (error (Text.unpack queueName <> ": the raised queue never ran its workflows")) pure >>= orCrash
+      out1raw <- timeout 15000000 (handleResult second) >>= maybe (error (Text.unpack queueName <> ": the raised queue never ran its workflows")) pure >>= orCrash
+      let out0 = decodedInt (Right out0raw)
+          out1 = decodedInt (Right out1raw)
+      pure (field <> "-" <> shape, refusal, slow0, slow1, readLimit raised, out0, out1)
+
+checkPausedZero :: [(Text, Text, Maybe WorkflowStatus, Maybe WorkflowStatus, Maybe Int, Either String Int, Either String Int)] -> Either String ()
+checkPausedZero cases = mapM_ judge cases
+  where
+    judge (name, refusal, slow0, slow1, raised, out0, out1) = do
+      let field = Text.takeWhile (/= '-') name
+      unless (("`" <> field <> "` must not be negative") `Text.isInfixOf` refusal) $
+        Left (Text.unpack name <> ": expected a refusal of the negative limit, got: " <> Text.unpack refusal)
+      unless (slow0 == Just Enqueued && slow1 == Just Enqueued) $
+        Left (Text.unpack name <> ": a queue paused at 0 dequeued a workflow: " <> show (slow0, slow1))
+      unless (raised == Just 2) $ Left (Text.unpack name <> ": the raised limit was not stored: " <> show raised)
+      unless (out0 == Right 1 && out1 == Right 1) $
+        Left (Text.unpack name <> ": the raised queue did not run its workflows: " <> show (out0, out1))
 
 -- | A per-process limit may equal the fleet limit it serves.
 scenarioEqualLimits :: forall m. (MonadSTM m, MonadMVar m)
@@ -656,7 +776,7 @@ decodedText outcome = case outcome of
 scenarioCrud :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
              => QueueFixture m -> m (Either (Error EngineOnly) Queue, WorkflowStatus, Either String Int, Either String Int, Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue, Bool, Maybe Queue, Either (Error EngineOnly) (), Bool)
 scenarioCrud fx = do
-  let key = newWorkflowKey "queued"
+  let key = newQualifiedWorkflowName "queued"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body input _ = pure (Right input)
   _ <- registerWorkflow fx.qfDBOS key body >>= either (error . show) pure
@@ -731,7 +851,7 @@ checkCrud (registered, enqueued, awaited, replayed, leftAlone, updated, listed, 
 scenarioDeadlineStamped :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                         => QueueFixture m -> m (Either String Int, Maybe Duration, Maybe Timestamp)
 scenarioDeadlineStamped fx = do
-  let key = newWorkflowKey "budgeted"
+  let key = newQualifiedWorkflowName "budgeted"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
@@ -742,7 +862,7 @@ scenarioDeadlineStamped fx = do
   let options =
         startOptionsDefault
           { startWorkflowId = Just (WorkflowId workflowText),
-            startQueue = Just (enqueueNew queueName),
+            startQueue = Just (queueRequestNew queueName),
             startTimeout = Explicit (secondsDuration 300)
           }
   started <- startWorkflow exec ref options Nothing >>= orCrash
@@ -763,7 +883,7 @@ checkDeadlineStamped (result, stamped, deadline) = do
 scenarioNoDeadlineYet :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                       => QueueFixture m -> m (Maybe Duration, Maybe Timestamp)
 scenarioNoDeadlineYet fx = do
-  let key = newWorkflowKey "queued"
+  let key = newQualifiedWorkflowName "queued"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
@@ -773,7 +893,7 @@ scenarioNoDeadlineYet fx = do
       options =
         startOptionsDefault
           { startWorkflowId = Just (WorkflowId workflowText),
-            startQueue = Just (enqueueNew queueName),
+            startQueue = Just (queueRequestNew queueName),
             startTimeout = Explicit (secondsDuration 300)
           }
   -- No register_queue anywhere: the row must stay as the enqueue left
@@ -793,7 +913,7 @@ checkNoDeadlineYet (stamped, deadline) = do
 scenarioPartitionRow :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                      => QueueFixture m -> m (Maybe WorkflowRecord)
 scenarioPartitionRow fx = do
-  let key = newWorkflowKey "partitioned"
+  let key = newQualifiedWorkflowName "partitioned"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
@@ -804,7 +924,7 @@ scenarioPartitionRow fx = do
   let options =
         startOptionsDefault
           { startWorkflowId = Just (WorkflowId workflowText),
-            startQueue = Just ((enqueueNew queueName) {partitionKey = Just "tenant-7", priority = Just 4})
+            startQueue = Just ((queueRequestNew queueName) {partitionKey = Just "tenant-7", priority = Just 4})
           }
   _ <- startWorkflow exec ref options Nothing >>= orCrash
   found <- fx.qfReadWorkflowRow (WorkflowId workflowText)
@@ -825,7 +945,7 @@ checkPartitionRow found = case found of
 scenarioSentinel :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                  => QueueFixture m -> m (Maybe WorkflowRecord)
 scenarioSentinel fx = do
-  let key = newWorkflowKey "plain"
+  let key = newQualifiedWorkflowName "plain"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
@@ -836,7 +956,7 @@ scenarioSentinel fx = do
   let options =
         startOptionsDefault
           { startWorkflowId = Just (WorkflowId workflowText),
-            startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 30)})
+            startQueue = Just ((queueRequestNew queueName) {delay = Just (secondsDuration 30)})
           }
   _ <- startWorkflow exec ref options Nothing >>= orCrash
   found <- fx.qfReadWorkflowRow (WorkflowId workflowText)
@@ -856,7 +976,7 @@ checkSentinel found = case found of
 scenarioBadEnqueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                    => QueueFixture m -> m (Either (Error EngineOnly) Text, [WorkflowRecord])
 scenarioBadEnqueue fx = do
-  let key = newWorkflowKey "checked"
+  let key = newQualifiedWorkflowName "checked"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
@@ -864,7 +984,7 @@ scenarioBadEnqueue fx = do
   let queueName = "hs-l2-validation-q-" <> Text.take 12 fx.qfSuffix
   _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
   -- Past what the priority column holds: i32 max plus one.
-  let bad = (enqueueNew queueName) {priority = Just 2147483648}
+  let bad = (queueRequestNew queueName) {priority = Just 2147483648}
   started <- fmap (fmap (.workflowId)) (startWorkflow exec ref (startOptionsDefault {startQueue = Just bad}) Nothing)
   listed <- listWorkflows fx.qfDBOS (defaultWorkflowFilter {workflowFilterQueueNames = [queueName]}) >>= either (error . show) pure
   fx.qfShutdown
@@ -887,7 +1007,7 @@ checkBadEnqueue (started, listed) = do
 scenarioInternalRow :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                     => QueueFixture m -> m (Either String Int)
 scenarioInternalRow fx = do
-  let key = newWorkflowKey "internal"
+  let key = newQualifiedWorkflowName "internal"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (9 :: Int))
       QueueName internalName = internalQueueName
@@ -899,7 +1019,7 @@ scenarioInternalRow fx = do
   _ <- fx.qfUpsertQueue ((newQueue internalName) {newQueuePollingInterval = secondsDuration 300, newQueueWorkerConcurrency = Just 1, newQueueAppName = Nothing}) UpdateExisting >>= either (error . show) pure
   exec <- fx.qfLaunch
   let workflowText = "on-the-internal-queue-" <> fx.qfSuffix
-  started <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew internalName)}) Nothing >>= orCrash
+  started <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (queueRequestNew internalName)}) Nothing >>= orCrash
   ran <- handleResult started
   fx.qfShutdown
   pure (decodedInt ran)
@@ -912,7 +1032,7 @@ checkInternalRow result = unless (result == Right 9) $ Left ("expected the inter
 scenarioLateQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                   => QueueFixture m -> m (Either String Int)
 scenarioLateQueue fx = do
-  let key = newWorkflowKey "late"
+  let key = newQualifiedWorkflowName "late"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (1 :: Int))
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
@@ -920,7 +1040,7 @@ scenarioLateQueue fx = do
   let queueName = "hs-l2-late-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "late-run-" <> fx.qfSuffix
   _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
-  started <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
+  started <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (queueRequestNew queueName)}) Nothing >>= orCrash
   ran <- handleResult started
   fx.qfShutdown
   pure (decodedInt ran)
@@ -934,7 +1054,7 @@ checkLateQueue result = unless (result == Right 1) $ Left ("expected the late qu
 scenarioGhostQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                    => QueueFixture m -> m (Either String Int)
 scenarioGhostQueue fx = do
-  let key = newWorkflowKey "ghost"
+  let key = newQualifiedWorkflowName "ghost"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (2 :: Int))
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
@@ -944,7 +1064,7 @@ scenarioGhostQueue fx = do
   exec <- fx.qfLaunch
   let queueName = "hs-l2-ghost-q-" <> Text.take 12 fx.qfSuffix
       workflowText = "ghost-run-" <> fx.qfSuffix
-  started <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
+  started <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (queueRequestNew queueName)}) Nothing >>= orCrash
   ran <- handleResult started
   fx.qfShutdown
   pure (decodedInt ran)
@@ -959,8 +1079,8 @@ checkGhostQueue result = unless (result == Right 2) $ Left ("expected the ghost 
 scenarioInheritedDeadline :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                           => QueueFixture m -> m (Maybe Timestamp, Maybe Timestamp, Maybe Duration)
 scenarioInheritedDeadline fx = do
-  let childKey = newWorkflowKey "child"
-      parentKey = newWorkflowKey "parent"
+  let childKey = newQualifiedWorkflowName "child"
+      parentKey = newQualifiedWorkflowName "parent"
       queueName = "hs-l2-inherited-q-" <> Text.take 12 fx.qfSuffix
       parentText = "hs-l2-inherited-parent-" <> fx.qfSuffix
       childText = "hs-l2-inherited-child-" <> fx.qfSuffix
@@ -973,7 +1093,7 @@ scenarioInheritedDeadline fx = do
           startChildWorkflow
             wctx
             childRef
-            (startOptionsDefault {startWorkflowId = Just (WorkflowId childText), startQueue = Just (enqueueNew queueName)})
+            (startOptionsDefault {startWorkflowId = Just (WorkflowId childText), startQueue = Just (queueRequestNew queueName)})
             Nothing
         case startedChild of
           Left err -> pure (Left err)
@@ -1019,7 +1139,7 @@ scenarioWorkerConcurrency fx = do
   gate <- newTVarIO False
   active <- newTVarIO (0 :: Int)
   peak <- newTVarIO (0 :: Int)
-  let key = newWorkflowKey "blocking"
+  let key = newQualifiedWorkflowName "blocking"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body input _ = do
         atomically $ do
@@ -1070,7 +1190,7 @@ checkWorkerConcurrency (reachedTwo, high) = do
 scenarioListenNarrow :: forall m. (MonadMVar m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                      => QueueFixture m -> m (Either String Int, Maybe WorkflowStatus)
 scenarioListenNarrow fx = do
-  let key = newWorkflowKey "either"
+  let key = newQualifiedWorkflowName "either"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body input _ = pure (Right input)
       fastQueue = "hs-l2-listen-fast-" <> Text.take 12 fx.qfSuffix
@@ -1110,7 +1230,7 @@ checkListenNarrow (fast, slow) = do
 scenarioListenNone :: forall m. (MonadMVar m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                    => QueueFixture m -> m (Either String Int, Maybe WorkflowStatus)
 scenarioListenNone fx = do
-  let key = newWorkflowKey "nothing"
+  let key = newQualifiedWorkflowName "nothing"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body input _ = pure (Right input)
       ignoredQueue = "hs-l2-listen-ignored-" <> Text.take 12 fx.qfSuffix
@@ -1146,7 +1266,7 @@ checkListenNone (internal, ignored) = do
 scenarioListenInternal :: forall m. (MonadMVar m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                        => QueueFixture m -> m (Either String Int)
 scenarioListenInternal fx = do
-  let key = newWorkflowKey "internal"
+  let key = newQualifiedWorkflowName "internal"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body input _ = pure (Right input)
       internalText = "hs-l2-listen-int-wf-" <> fx.qfSuffix
@@ -1170,7 +1290,7 @@ scenarioDelayed :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m
                 => QueueFixture m -> m (Maybe WorkflowStatus, Int, Either String Int)
 scenarioDelayed fx = do
   ran <- newTVarIO (0 :: Int)
-  let key = newWorkflowKey "delayed"
+  let key = newQualifiedWorkflowName "delayed"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = do
         atomically (modifyTVar ran (+ 1))
@@ -1183,7 +1303,7 @@ scenarioDelayed fx = do
   let options =
         startOptionsDefault
           { startWorkflowId = Just (WorkflowId workflowText),
-            startQueue = Just ((enqueueNew queueName) {delay = Just (secondsDuration 3)})
+            startQueue = Just ((queueRequestNew queueName) {delay = Just (secondsDuration 3)})
           }
   started <- startWorkflow exec ref options Nothing >>= orCrash
   status <- handleStatus started >>= orCrash
@@ -1204,7 +1324,7 @@ checkDelayed (status, early, finished) = do
 scenarioDedup :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
               => QueueFixture m -> m (Text, Either String Int, Bool)
 scenarioDedup fx = do
-  let key = newWorkflowKey "deduped"
+  let key = newQualifiedWorkflowName "deduped"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (3 :: Int))
       queueName = "hs-l2-dedup-q-" <> Text.take 12 fx.qfSuffix
@@ -1216,7 +1336,7 @@ scenarioDedup fx = do
   _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
   -- Delayed, so the first workflow is still holding the key when the
   -- second arrives.
-  let held = (enqueueNew queueName) {deduplicationId = Just "order-42", delay = Just (secondsDuration 3)}
+  let held = (queueRequestNew queueName) {deduplicationId = Just "order-42", delay = Just (secondsDuration 3)}
   first <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just held}) Nothing >>= orCrash
   secondRun <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just held}) Nothing
   refusal <- case secondRun of
@@ -1224,7 +1344,7 @@ scenarioDedup fx = do
     Right _ -> pure "a second workflow took a held deduplication key"
   firstResult <- handleResult first
   -- Finishing released the key, so the same one is enqueueable again.
-  third <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42"})}) Nothing
+  third <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((queueRequestNew queueName) {deduplicationId = Just "order-42"})}) Nothing
   fx.qfShutdown
   pure (refusal, decodedInt firstResult, either (const False) (const True) third)
 
@@ -1240,7 +1360,7 @@ checkDedup (refusal, first, third) = do
 scenarioJoin :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
              => QueueFixture m -> m (Text, Text, Maybe WorkflowRecord, Either String Int, Either String Int, Text, Text)
 scenarioJoin fx = do
-  let key = newWorkflowKey "deduped"
+  let key = newQualifiedWorkflowName "deduped"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = pure (Right (7 :: Int))
       queueName = "hs-l2-join-q-" <> Text.take 12 fx.qfSuffix
@@ -1252,7 +1372,7 @@ scenarioJoin fx = do
   _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
   -- Delayed, so the holder is still waiting when the second caller
   -- arrives.
-  let joining = (enqueueNew queueName) {deduplicationId = Just "order-42", delay = Just (secondsDuration 3), duplicationPolicy = ReturnExisting}
+  let joining = (queueRequestNew queueName) {deduplicationId = Just "order-42", delay = Just (secondsDuration 3), duplicationPolicy = ReturnExisting}
   first <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just joining}) Nothing >>= orCrash
   second <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just joining}) Nothing >>= orCrash
   loser <- fx.qfReadWorkflowRow (WorkflowId secondText)
@@ -1260,7 +1380,7 @@ scenarioJoin fx = do
   secondResult <- handleResult second
   -- The holder has finished, so the key is free and the same policy
   -- claims it rather than joining.
-  third <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((enqueueNew queueName) {deduplicationId = Just "order-42", duplicationPolicy = ReturnExisting})}) Nothing >>= orCrash
+  third <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((queueRequestNew queueName) {deduplicationId = Just "order-42", duplicationPolicy = ReturnExisting})}) Nothing >>= orCrash
   fx.qfShutdown
   pure (second.workflowId, firstText, loser, decodedInt firstResult, decodedInt secondResult, third.workflowId, thirdText)
 
@@ -1278,7 +1398,7 @@ scenarioPriority :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime 
                  => QueueFixture m -> m [Text]
 scenarioPriority fx = do
   order <- newTVarIO []
-  let key = newWorkflowKey "ordered"
+  let key = newQualifiedWorkflowName "ordered"
       body :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
       body name _ = do
         atomically (modifyTVar order (++ [name]))
@@ -1291,7 +1411,7 @@ scenarioPriority fx = do
   -- backlog back: no worker exists for a queue with no row.
   handles <- flip mapM submitted $ \(name, priority) -> do
     let workflowText = name <> "-" <> fx.qfSuffix
-    startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {priority = priority})}) (Just (encodeWorkflowInput name)) >>= orCrash
+    startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((queueRequestNew queueName) {priority = priority})}) (Just (encodeWorkflowInput name)) >>= orCrash
   -- The backlog is complete, so registering the queue is what starts its
   -- worker.
   _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {workerConcurrency = Just 1}) UpdateIfLatestVersion >>= either (error . show) pure
@@ -1310,7 +1430,7 @@ scenarioUpdateHonoured :: forall m. (MonadMVar m, MonadFork m, MonadMask m, Mona
 scenarioUpdateHonoured fx = do
   active <- newTVarIO (0 :: Int)
   peak <- newTVarIO (0 :: Int)
-  let key = newWorkflowKey "held"
+  let key = newQualifiedWorkflowName "held"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = do
         _ <- atomically $ do
@@ -1329,7 +1449,7 @@ scenarioUpdateHonoured fx = do
   _ <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {workerConcurrency = Just 1}) UpdateIfLatestVersion >>= either (error . show) pure
   handles <- flip mapM [0 .. 5 :: Int] $ \n -> do
     let workflowText = "fanned-" <> Text.pack (show n) <> "-" <> fx.qfSuffix
-    startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
+    startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (queueRequestNew queueName)}) Nothing >>= orCrash
   -- One at a time to begin with.
   threadDelay 1200000
   firstPeak <- readTVarIO peak
@@ -1353,7 +1473,7 @@ scenarioPartitioned fx = do
   live <- newTVarIO Map.empty
   perKeyPeak <- newTVarIO (0 :: Int)
   overlapPeak <- newTVarIO (0 :: Int)
-  let key = newWorkflowKey "sharded"
+  let key = newQualifiedWorkflowName "sharded"
       body :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
       body partition _ = do
         atomically $ do
@@ -1380,7 +1500,7 @@ scenarioPartitioned fx = do
   handles <- flip mapM ["tenant-a", "tenant-b"] $ \partition ->
     flip mapM [0 .. 1 :: Int] $ \n -> do
       let workflowText = partition <> "-" <> Text.pack (show n) <> "-" <> fx.qfSuffix
-      startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})}) (Just (encodeWorkflowInput partition)) >>= orCrash
+      startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((queueRequestNew queueName) {partitionKey = Just partition})}) (Just (encodeWorkflowInput partition)) >>= orCrash
   results <- mapM (mapM handleResult) handles
   mapM_ (mapM_ (either (error . show) pure . decodedText)) results
   keyPeak <- readTVarIO perKeyPeak
@@ -1399,7 +1519,7 @@ scenarioCountedPartitioned :: forall m. (MonadMVar m, MonadFork m, MonadMask m, 
 scenarioCountedPartitioned fx = do
   live <- newTVarIO Map.empty
   perKeyPeak <- newTVarIO (0 :: Int)
-  let key = newWorkflowKey "sharded"
+  let key = newQualifiedWorkflowName "sharded"
       body :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
       body partition _ = do
         atomically $ do
@@ -1423,7 +1543,7 @@ scenarioCountedPartitioned fx = do
   handles <- flip mapM ["tenant-a", "tenant-b"] $ \partition ->
     flip mapM [0 .. 2 :: Int] $ \n -> do
       let workflowText = partition <> "-" <> Text.pack (show n) <> "-" <> fx.qfSuffix
-      startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((enqueueNew queueName) {partitionKey = Just partition})}) (Just (encodeWorkflowInput partition)) >>= orCrash
+      startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just ((queueRequestNew queueName) {partitionKey = Just partition})}) (Just (encodeWorkflowInput partition)) >>= orCrash
   results <- mapM (mapM handleResult) handles
   mapM_ (mapM_ (either (error . show) pure)) results
   keyPeak <- readTVarIO perKeyPeak
@@ -1448,7 +1568,7 @@ stageWalkBacklog conn suffix new count = do
     ( \n -> do
         let wid = "walk-" <> Text.pack (show n) <> "-" <> suffix
             key = "p-" <> Text.pack (show n)
-        runSystemDB conn.connSysdb (\db -> SysDB.initWorkflow db ((newWorkflow wid) {newWorkflowQueueName = Just name, newWorkflowQueuePartitionKey = Just key}) Nothing) >>= either (error . show) pure
+        runSystemDB conn.connSysdb (\db -> SysDB.initWorkflow db ((newWorkflow wid) {newWorkflowQueueName = Just name, newWorkflowQueuePartitionKey = Just key}) Nothing WorkflowIdReturnExisting) >>= either (error . show) pure
     )
     [0 .. count - 1]
   found <- runSystemDB conn.connSysdb (\db -> SysDB.getQueue db name) >>= either (error . show) pure
@@ -1461,7 +1581,7 @@ claimWalkRow :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, 
              => Connection m -> Identity -> Text -> Text -> Text -> m Dequeued
 claimWalkRow conn identity queueName key suffix = do
   let wid = "walk-started-" <> key <> "-" <> suffix
-  runSystemDB conn.connSysdb (\db -> SysDB.initWorkflow db ((newWorkflow wid) {newWorkflowQueueName = Just queueName, newWorkflowQueuePartitionKey = Just key}) Nothing) >>= either (error . show) pure
+  runSystemDB conn.connSysdb (\db -> SysDB.initWorkflow db ((newWorkflow wid) {newWorkflowQueueName = Just queueName, newWorkflowQueuePartitionKey = Just key}) Nothing WorkflowIdReturnExisting) >>= either (error . show) pure
   found <- runSystemDB conn.connSysdb (\db -> SysDB.getQueue db queueName) >>= either (error . show) pure
   record <- maybe (error "walk queue missing for the elsewhere start") pure found
   dequeued <- runSystemDB conn.connSysdb (\db -> SysDB.startQueuedWorkflows db record "exec" identity.identityAppVersion (Just key) 0 0 ("tok-" <> key)) >>= either (error . show) pure
@@ -1569,7 +1689,7 @@ scenarioPeerQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime
                   => QueueFixture m -> m (Int, Maybe WorkflowStatus)
 scenarioPeerQueue fx = do
   ran <- newTVarIO (0 :: Int)
-  let key = newWorkflowKey "scoped"
+  let key = newQualifiedWorkflowName "scoped"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body () _ = do
         atomically (modifyTVar ran (+ 1))
@@ -1580,7 +1700,7 @@ scenarioPeerQueue fx = do
   ref <- registerWorkflowRef fx.qfDBOS key body >>= either (error . show) pure
   _ <- fx.qfUpsertQueue ((newQueue queueName) {newQueueAppName = Just peerName}) UpdateExisting >>= either (error . show) pure
   exec <- fx.qfLaunch
-  _ <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (enqueueNew queueName)}) Nothing >>= orCrash
+  _ <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId workflowText), startQueue = Just (queueRequestNew queueName)}) Nothing >>= orCrash
   -- Several reconciles' worth: if this queue were going to enter the set,
   -- it would have.
   threadDelay 3000000
@@ -1605,7 +1725,7 @@ scenarioWorkerBudgetExhausted fx = do
   gate <- newTVarIO False
   active <- newTVarIO (0 :: Int)
   peak <- newTVarIO (0 :: Int)
-  let key = newWorkflowKey "capped"
+  let key = newQualifiedWorkflowName "capped"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
       body input _ = do
         atomically $ do
@@ -1655,7 +1775,7 @@ scenarioDispatchPark :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadT
                      => QueueFixture m -> m (Int, Maybe WorkflowStatus, Int64)
 scenarioDispatchPark fx = do
   runs <- newTVarIO (0 :: Int)
-  let key = newWorkflowKey "never-runs"
+  let key = newQualifiedWorkflowName "never-runs"
       body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
       body () _ = atomically (modifyTVar runs (+ 1)) >> pure (Right ())
       queueName = "hs-l2-park-q-" <> Text.take 12 fx.qfSuffix

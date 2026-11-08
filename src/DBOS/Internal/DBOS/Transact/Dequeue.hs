@@ -39,7 +39,7 @@ import DBOS.SystemDB.Types
     timestampNow,
     timestampToEpochMs,
     databaseTimeRead,
-    workflowRecordKey,
+    workflowRecordQualifiedName,
     workflowStatusText)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry)
@@ -500,7 +500,7 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed ow
                     Right (_ : _) -> runTracer conn.connTracer (DequeuedBudgetSpent workflowText row.workflowRecordRecoveryAttempts maxRecoveryAttempts)
                     Right [] -> pure ()
                 Run -> do
-                  case workflowRecordKey row of
+                  case workflowRecordQualifiedName row of
                     Nothing -> do
                       releaseSlot slot
                       runTracer conn.connTracer (DequeuedRowSkipped workflowText)
@@ -510,8 +510,8 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed ow
                       -- init re-submits the row. The claim's token travels
                       -- with the execution, which presents it on every
                       -- write it makes. A row without a name skips like a
-                      -- nameless one: the oracle's @WorkflowRecord::key@
-                      -- treats an empty name as no key either. Mirrors
+                      -- nameless one: the oracle's @WorkflowRecord::qualified_name@
+                      -- treats an empty name as no name either. Mirrors
                       -- @dequeue.rs@ @dispatch@.
                       let input = (\raw -> SerializedWorkflowValue raw (Serialization <$> row.workflowRecordSerialization)) <$> row.workflowRecordInput
                       case lookupSnapshotWorkflow key workflows of

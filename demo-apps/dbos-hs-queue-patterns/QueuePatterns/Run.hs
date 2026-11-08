@@ -18,7 +18,7 @@ import DBOS.Transact
     defaultQueueOptions,
     launch,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerWorkflow,
     registerWorkflowRef,
     registerQueue,
@@ -52,16 +52,16 @@ start = do
   dbos <- newDBOS config
   -- Registered before launch, because recovery starts inside it.
   fairRef <-
-    registerWorkflowRef dbos (newWorkflowKey fairWorkflowName) (\() -> fairQueueWorkflow)
+    registerWorkflowRef dbos (newQualifiedWorkflowName fairWorkflowName) (\() -> fairQueueWorkflow)
       >>= either (die . Text.pack . show) pure
   managerRef <-
-    registerWorkflowRef dbos (newWorkflowKey fairManagerWorkflowName) (fairQueueConcurrencyManager fairRef)
+    registerWorkflowRef dbos (newQualifiedWorkflowName fairManagerWorkflowName) (fairQueueConcurrencyManager fairRef)
       >>= either (die . Text.pack . show) pure
   _ <-
-    registerWorkflow dbos (newWorkflowKey rateLimitedWorkflowName) (\() -> rateLimitedQueueWorkflow)
+    registerWorkflow dbos (newQualifiedWorkflowName rateLimitedWorkflowName) (\() -> rateLimitedQueueWorkflow)
       >>= either (die . Text.pack . show) pure
   debouncedRef <-
-    registerWorkflowRef dbos (newWorkflowKey debouncerWorkflowName) debouncerWorkflow
+    registerWorkflowRef dbos (newQualifiedWorkflowName debouncerWorkflowName) debouncerWorkflow
       >>= either (die . Text.pack . show) pure
   exec <- launch dbos >>= either (die . Text.pack . show) pure
   -- The three queues, mirroring the Python @DBOS.register_queue@ calls.

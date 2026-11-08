@@ -32,6 +32,8 @@ module DBOS.Transact.DebouncerCases
     checkPinnedIdReusedAcrossCycles,
     scenarioDebounceDurationsRefused,
     checkDebounceDurationsRefused,
+    scenarioDebouncerCannotAct,
+    checkDebouncerCannotAct,
     scenarioCancelledDebounceFreesKey,
     checkCancelledDebounceFreesKey,
     scenarioDebounceInsideStepRefused,
@@ -42,6 +44,7 @@ module DBOS.Transact.DebouncerCases
 where
 
 import DBOS.Prelude
+import Data.Text qualified as Text
 import DBOS.SystemDB (Timestamp (..), WorkflowRecord (..), debounceStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
@@ -127,7 +130,7 @@ scenarioDebouncedCapAtCreation :: forall m. (MonadFork m, MonadMask m, MonadMVar
                                   m (Maybe Timestamp, Maybe Timestamp)
 scenarioDebouncedCapAtCreation fx = do
   tag <- fx.dbFreshTag "debounce-capped"
-  let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue, debouncerTimeout = Just (secondsDuration 60)}
+  let def = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue, debouncerDebounceTimeout = Just (secondsDuration 60)}
   created <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 3600) (Just (encodeWorkflowInput ("one" :: Text)))
   userWid <- case created of
     Right joined -> pure (WorkflowId joined.workflowId)
@@ -220,7 +223,7 @@ scenarioDebounceDurationsRefused fx = do
       input = Just (encodeWorkflowInput ("one" :: Text))
   zeroPeriod <- debounce fx.dbDBOS fx.dbTargetRef def tag (millisDuration 0) input
   hugePeriod <- debounce fx.dbDBOS fx.dbTargetRef def tag huge input
-  zeroTimeout <- debounce fx.dbDBOS fx.dbTargetRef (def {debouncerTimeout = Just (millisDuration 0)}) tag (secondsDuration 1) input
+  zeroTimeout <- debounce fx.dbDBOS fx.dbTargetRef (def {debouncerDebounceTimeout = Just (millisDuration 0)}) tag (secondsDuration 1) input
   pure (void zeroPeriod, void hugePeriod, void zeroTimeout)
 
 -- | Each refusal names the operation and the offending field.
@@ -243,6 +246,48 @@ checkDebounceDurationsRefused (zeroPeriod, hugePeriod, zeroTimeout) = do
     Left (InvalidArgument operation detail) -> do
       unless (operation == "debounce a workflow") $ Left ("expected the debounce operation, got: " <> show operation)
       unless (detail == "`debounce_timeout` must be a positive, non-zero duration") $ Left ("expected the timeout refusal, got: " <> show detail)
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+
+-- | What a debouncer cannot act on is refused, and nothing is written: a
+-- zero budget, an empty queue and an empty app name. Mirrors the app half
+-- of Rust @what_a_debouncer_cannot_act_on_is_refused@. Returns the three
+-- verdicts.
+scenarioDebouncerCannotAct :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                           => DebouncerFixture m ->
+                              m ( Either (Error EngineOnly) (),
+                                  Either (Error EngineOnly) (),
+                                  Either (Error EngineOnly) ()
+                                )
+scenarioDebouncerCannotAct fx = do
+  tag <- fx.dbFreshTag "debounce-cannot"
+  let base = debouncerNew {debouncerQueueName = Just fx.dbTargetQueue}
+      input = Just (encodeWorkflowInput ("one" :: Text))
+  zeroBudget <- debounce fx.dbDBOS fx.dbTargetRef (base {debouncerTimeout = Just (millisDuration 0)}) tag (secondsDuration 1) input
+  emptyQueue <- debounce fx.dbDBOS fx.dbTargetRef (base {debouncerQueueName = Just ""}) tag (secondsDuration 1) input
+  badApp <- debounce fx.dbDBOS fx.dbTargetRef (base {debouncerAppName = Just ""}) tag (secondsDuration 1) input
+  pure (void zeroBudget, void emptyQueue, void badApp)
+
+-- | Each refusal names its field: the budget on the enqueue's channel,
+-- the queue and the app on the debounce's.
+checkDebouncerCannotAct :: ( Either (Error EngineOnly) (),
+                             Either (Error EngineOnly) (),
+                             Either (Error EngineOnly) ()
+                           ) -> Either String ()
+checkDebouncerCannotAct (zeroBudget, emptyQueue, badApp) = do
+  case zeroBudget of
+    Left (InvalidArgument operation detail) -> do
+      unless (operation == "enqueue a workflow") $ Left ("expected the enqueue operation, got: " <> show operation)
+      unless ("`timeout`" `Text.isInfixOf` detail) $ Left ("expected the budget refusal, got: " <> show detail)
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case emptyQueue of
+    Left (InvalidArgument operation detail) -> do
+      unless (operation == "debounce a workflow") $ Left ("expected the debounce operation, got: " <> show operation)
+      unless ("queue_name" `Text.isInfixOf` detail) $ Left ("expected the queue refusal, got: " <> show detail)
+    other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
+  case badApp of
+    Left (InvalidArgument operation detail) -> do
+      unless (operation == "debounce a workflow") $ Left ("expected the debounce operation, got: " <> show operation)
+      unless ("`app_name`" `Text.isInfixOf` detail) $ Left ("expected the app refusal, got: " <> show detail)
     other -> Left ("expected an InvalidArgument refusal, got: " <> show other)
 
 -- | A cancelled debounced row frees its key: cancelling the holder
@@ -300,7 +345,7 @@ scenarioDebounceInsideStepRefused :: forall m. (MonadFork m, MonadMask m, MonadM
 scenarioDebounceInsideStepRefused fx = do
   tag <- fx.dbFreshTag "debounce-in-step"
   parentWid <- fx.dbFreshWid "debounce-in-step"
-  (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow fx.dbExecutor (newWorkflowKey "debounce-in-step-parent") parentWid (Just (encodeWorkflowInput tag))
+  (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow fx.dbExecutor (newQualifiedWorkflowName "debounce-in-step-parent") parentWid (Just (encodeWorkflowInput tag))
   case ran of
     Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
       Right operation -> pure operation
@@ -332,7 +377,7 @@ scenarioKeyCollisionRefused fx = do
     startWorkflow
       fx.dbExecutor
       fx.dbOtherRef
-      (startOptionsDefault {startQueue = Just ((enqueueNew fx.dbTargetQueue) {deduplicationId = Just ("echo-" <> key)})})
+      (startOptionsDefault {startQueue = Just (((queueRequestNew fx.dbTargetQueue) {deduplicationId = Just ("echo-" <> key)}) :: QueueRequest)})
       Nothing
   case (planted :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) of
     Left err -> throwIO (userError ("expected the colliding row planted, got: " <> show err))
@@ -400,7 +445,7 @@ scenarioForeignHolderRefused fx = do
   tag <- fx.dbFreshTag "debounce-foreign"
   let def = debouncerNew {debouncerQueueName = Just fx.dbForeignQueue}
       key = "echo-" <> tag
-  planted <- startWorkflow fx.dbExecutor fx.dbOtherRef (startOptionsDefault {startQueue = Just ((enqueueNew fx.dbForeignQueue) {deduplicationId = Just key})}) Nothing
+  planted <- startWorkflow fx.dbExecutor fx.dbOtherRef (startOptionsDefault {startQueue = Just (((queueRequestNew fx.dbForeignQueue) {deduplicationId = Just key}) :: QueueRequest)}) Nothing
   holderWid <- case (planted :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) of
     Right joined -> pure joined.workflowId
     Left err -> throwIO (userError ("expected the foreign row planted, got: " <> show err))
@@ -430,7 +475,7 @@ scenarioInWorkflowDebounceRecordsStep :: forall m. (MonadFork m, MonadMask m, Mo
 scenarioInWorkflowDebounceRecordsStep fx = do
   tag <- fx.dbFreshTag "debounce-in-workflow"
   parentWid <- fx.dbFreshWid "debounce-in-workflow"
-  (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow fx.dbExecutor (newWorkflowKey "debounce-parent") parentWid (Just (encodeWorkflowInput tag))
+  (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow fx.dbExecutor (newQualifiedWorkflowName "debounce-parent") parentWid (Just (encodeWorkflowInput tag))
   userText <- case ran of
     Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
       Right text -> pure text
@@ -467,7 +512,7 @@ scenarioTimeoutCapsExtension :: forall m. (MonadFork m, MonadMask m, MonadMVar m
                                 m (Maybe Timestamp, Maybe Timestamp)
 scenarioTimeoutCapsExtension fx = do
   tag <- fx.dbFreshTag "debounce-timeout"
-  let def = debouncerNew {debouncerQueueName = Just fx.dbForeignQueue, debouncerTimeout = Just (secondsDuration 2)}
+  let def = debouncerNew {debouncerQueueName = Just fx.dbForeignQueue, debouncerDebounceTimeout = Just (secondsDuration 2)}
   firstBounce <- debounce fx.dbDBOS fx.dbTargetRef def tag (secondsDuration 5) (Just (encodeWorkflowInput ("one" :: Text)))
   wid <- case firstBounce of
     Right joined -> pure (WorkflowId joined.workflowId)

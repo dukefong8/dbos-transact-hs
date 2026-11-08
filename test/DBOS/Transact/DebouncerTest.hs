@@ -37,6 +37,7 @@ tests =
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a pinned id names the fresh row" scenarioPinnedIdNamesFreshRow checkPinnedIdNamesFreshRow,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a pinned id reused across cycles is a conflict" scenarioPinnedIdReusedAcrossCycles checkPinnedIdReusedAcrossCycles,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a zero or unstorable debounce duration is refused" scenarioDebounceDurationsRefused checkDebounceDurationsRefused,
+          liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "what a debouncer cannot act on is refused" scenarioDebouncerCannotAct checkDebouncerCannotAct,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a cancelled debounce frees its key" scenarioCancelledDebounceFreesKey checkCancelledDebounceFreesKey,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a debounce inside a step is refused" scenarioDebounceInsideStepRefused checkDebounceInsideStepRefused,
           liveCaseWith (withDebouncerFixture getBackend (ioTracer . fst <$> getLogger)) "a key collision between workflows is refused" scenarioKeyCollisionRefused checkKeyCollisionRefused
@@ -76,8 +77,8 @@ withDebouncerFixture getBackend getTracer body = do
         pure (Right input)
       otherBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
       otherBody _ _ = pure (Right "parked")
-  targetRef <- registerWorkflowRef dbos (newWorkflowKey "echo") echoBody >>= either (fail . show) pure
-  otherRef <- registerWorkflowRef dbos (newWorkflowKey "other") otherBody >>= either (fail . show) pure
+  targetRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "echo") echoBody >>= either (fail . show) pure
+  otherRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "other") otherBody >>= either (fail . show) pure
   -- The in-workflow debounce's parent: registered before launch like every
   -- workflow, since recovery starts inside launch. Only the records-step
   -- case runs it, passing its tag as input.
@@ -87,7 +88,7 @@ withDebouncerFixture getBackend getTracer body = do
         case debounced of
           Right joined -> pure (Right joined.workflowId)
           Left err -> pure (Left err)
-  _ <- registerWorkflow dbos (newWorkflowKey "debounce-parent") parentBody >>= either (fail . show) pure
+  _ <- registerWorkflow dbos (newQualifiedWorkflowName "debounce-parent") parentBody >>= either (fail . show) pure
   -- The in-step refusal's parent: its step calls the debounce, which the
   -- step boundary refuses. Only the refusal case runs it.
   let stepParentBody :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
@@ -101,7 +102,7 @@ withDebouncerFixture getBackend getTracer body = do
         case outcome of
           Right operation -> pure (Right operation)
           Left err -> pure (Left err)
-  _ <- registerWorkflow dbos (newWorkflowKey "debounce-in-step-parent") stepParentBody >>= either (fail . show) pure
+  _ <- registerWorkflow dbos (newQualifiedWorkflowName "debounce-in-step-parent") stepParentBody >>= either (fail . show) pure
   exec <- launch dbos >>= either (fail . show) pure
   _ <- registerQueue dbos targetQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure
   _ <- registerQueue dbos foreignQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure

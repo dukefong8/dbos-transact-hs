@@ -75,7 +75,7 @@ db-migrate:
 # The demo app also creates it at startup; this is only what the compile-time
 # describe needs.
 widget-db:
-	psql "$${DATABASE_URL:-$${DBOS_DATABASE_URL}}" -v ON_ERROR_STOP=1 -f demo-apps/dbos-hs-widget-store/schema.sql
+	psql "$${DATABASE_URL:-$${DBOS_SYSTEM_DATABASE_URL}}" -v ON_ERROR_STOP=1 -f demo-apps/dbos-hs-widget-store/schema.sql
 
 env:
 	rm .ghc.environment.*$(GHC)* || true

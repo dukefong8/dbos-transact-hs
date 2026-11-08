@@ -29,14 +29,14 @@ import DBOS.Transact
     SerializedWorkflowValue (..),
     WorkflowCtx,
     WorkflowId (..),
-    WorkflowKey,
+    QualifiedWorkflowName,
     cancelWorkflows,
     configFromEnv,
     enqueueWorkflow,
     isLaunched,
     launchWithEnvironment,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerWorkflow,
     runWorkflow,
     shutdown,
@@ -141,7 +141,7 @@ tests =
         case started of
           Left _ -> pure ()
           Right _ -> fail "expected a short application name to be refused"
-        reopened <- registerWorkflow dbos (newWorkflowKey "late") echoWorkflow
+        reopened <- registerWorkflow dbos (newQualifiedWorkflowName "late") echoWorkflow
         case reopened of
           Left err -> fail (displayException err)
           Right () -> pure (),
@@ -206,12 +206,12 @@ tests =
             echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         dbos <- newDBOS configured
-        registered <- registerWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
+        registered <- registerWorkflow dbos (newQualifiedWorkflowName "greeting") echoWorkflow
         case registered of
           Left err -> fail (displayException err)
           Right () -> pure ()
         exec <- launchInstanceExec dbos isolatedEnvironment
-        ran <- runWf exec (newWorkflowKey "greeting") workflowId (Just (encodeWorkflowInput ("hi" :: Text)))
+        ran <- runWf exec (newQualifiedWorkflowName "greeting") workflowId (Just (encodeWorkflowInput ("hi" :: Text)))
         case ran of
           Left err -> fail (displayException err)
           Right _ -> pure ()
@@ -255,7 +255,7 @@ tests =
         dbos <- newDBOS configured
         let echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
-        beforeLaunch <- registerWorkflow dbos (newWorkflowKey "greeting") echoWorkflow
+        beforeLaunch <- registerWorkflow dbos (newQualifiedWorkflowName "greeting") echoWorkflow
         case beforeLaunch of
           Left err -> fail (displayException err)
           Right () -> pure ()
@@ -269,7 +269,7 @@ tests =
         case missing of
           Left err -> assertBool "reports the missing workflow" ("no such workflow" `Text.isInfixOf` Text.pack (displayException err))
           Right _ -> fail "expected waiting for a missing workflow to fail"
-        afterLaunch <- registerWorkflow dbos (newWorkflowKey "late") echoWorkflow
+        afterLaunch <- registerWorkflow dbos (newQualifiedWorkflowName "late") echoWorkflow
         case afterLaunch of
           Left err -> assertBool "names the lifecycle boundary" ("after DBOS is launched" `Text.isInfixOf` Text.pack (displayException err))
           Right () -> fail "expected registration after launch to be refused"
@@ -288,7 +288,7 @@ tests =
             echoWorkflow :: forall exec. Text -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
             echoWorkflow message _ = pure (Right message)
         bracket (newDBOS configured) shutdown $ \dbos -> do
-          registered <- registerWorkflow dbos (newWorkflowKey "queued") echoWorkflow
+          registered <- registerWorkflow dbos (newQualifiedWorkflowName "queued") echoWorkflow
           case registered of
             Left err -> fail (displayException err)
             Right () -> pure ()
@@ -299,7 +299,7 @@ tests =
           enqueued <-
             enqueueWorkflow
               dbos
-              (newWorkflowKey "queued")
+              (newQualifiedWorkflowName "queued")
               workflowId
               (Just (encodeWorkflowInput ("hello" :: Text)))
               ("cancel-" <> suffix)
@@ -374,7 +374,7 @@ tests =
 
 -- | The engine-only driver aliases the tree above reads through. Local
 -- copies are deliberate: this module carries only the aliases it uses.
-runWf :: Executor IO -> WorkflowKey -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
+runWf :: Executor IO -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
 -- | One backend for the whole group: pools are per-backend, so sharing

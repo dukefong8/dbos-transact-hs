@@ -36,6 +36,10 @@ module DBOS.SystemDB.Types
     DatabaseTime (..),
     databaseTimeRead,
     databaseTimeReaches,
+    databaseTimeNow,
+    WakeTime (..),
+    wakeArrives,
+    wakeRemaining,
     timestampToSystemTime,
     timestampFromSystemTime,
     durationFromMs,
@@ -47,18 +51,22 @@ module DBOS.SystemDB.Types
     durationSince,
     timestampToIso8601,
     timestampFromIso8601,
-    WorkflowKey (..),
-    newWorkflowKey,
-    methodWorkflowKey,
-    instanceWorkflowKey,
-    workflowKeyFromRow,
-    renderWorkflowKey,
-    workflowRecordKey,
+    QualifiedWorkflowName,
+    newQualifiedWorkflowName,
+    methodQualifiedWorkflowName,
+    instanceQualifiedWorkflowName,
+    qualifiedWorkflowNameFromRow,
+    qualifiedName,
+    qualifiedClassName,
+    qualifiedConfigName,
+    renderQualifiedWorkflowName,
+    workflowRecordQualifiedName,
     NewWorkflow (..),
     WorkflowRecord (..),
     Change (..),
     OutcomeWrite (..),
     WorkflowDelay (..),
+    WorkflowIdReusePolicy (..),
     StepTiming (..),
     RateLimit (..),
     RenameFrom (..),
@@ -107,6 +115,8 @@ module DBOS.SystemDB.Types
     newWorkflow,
     validateNewWorkflow,
     validateAttributes,
+    AttributeUpdate (..),
+    validateAttributeUpdate,
     initialStatus,
     sleepStepName,
     recvStepName,
@@ -380,10 +390,12 @@ newWorkflow workflowId =
 
 -- | Rejects values the system database will not store. Mirrors
 -- @NewWorkflow::validate@: an empty string is not a missing value ('Nothing'
--- is), and a zero delay or timeout is a caller that meant 'Nothing'.
+-- is), and a zero delay or timeout is a caller that meant 'Nothing'. A name
+-- is required, so empty is refused as a bad value rather than as absence.
 validateNewWorkflow :: NewWorkflow -> Either Error ()
 validateNewWorkflow new
   | Text.null new.newWorkflowId = Left (invalidInput "workflow_id" "must not be empty")
+  | Just "" <- new.newWorkflowName = Left (invalidInput "name" "must not be empty")
   | otherwise = case findEmpty optionalFields of
       Just field -> Left (invalidInput field "must be absent rather than empty")
       Nothing -> case findBadDuration [("delay", new.newWorkflowDelay), ("timeout", new.newWorkflowTimeout), ("debounce_timeout", new.newWorkflowDebounceTimeout)] of
@@ -391,9 +403,7 @@ validateNewWorkflow new
         Nothing    -> validateAttributes new.newWorkflowAttributes
   where
     optionalFields =
-      [ ("name", new.newWorkflowName),
-        ("class_name", new.newWorkflowClassName),
-        ("config_name", new.newWorkflowConfigName),
+      [ ("class_name", new.newWorkflowClassName),
         ("queue_name", new.newWorkflowQueueName),
         ("deduplication_id", new.newWorkflowDeduplicationId),
         ("queue_partition_key", new.newWorkflowQueuePartitionKey),
@@ -430,6 +440,30 @@ validateAttributes (Just raw) =
     Right _          -> Left (invalidInput "attributes" "must be a JSON object")
     Left err         -> Left (invalidInput "attributes" ("must be a JSON object: " <> Text.pack err))
 
+-- | What an attribute update does to a workflow's attributes. Each
+-- carries encoded JSON, which the system database checks is an object
+-- before writing. Mirrors @AttributeUpdate@: a bare JSON parameter
+-- cannot say whether to replace or merge.
+data AttributeUpdate
+  = -- | Replace them with this object, or clear them with 'Nothing'.
+    Replace (Maybe Text)
+  | -- | Merge this object's top-level keys into them, in one statement,
+    -- so two merges of different keys never lose each other's. A key
+    -- already there takes the new value; a key set to @null@ is stored
+    -- as @null@ rather than removed. Attributes that are absent, or are
+    -- not an object, count as an empty one.
+    Merge Text
+  deriving stock (Eq, Show)
+
+-- | Rejects an update whose attributes are not a JSON object, as
+-- 'validateAttributes' does. A merge takes the map itself rather than an
+-- option, so a merge of nothing cannot be written. Mirrors
+-- @AttributeUpdate::validate@.
+validateAttributeUpdate :: AttributeUpdate -> Either Error ()
+validateAttributeUpdate = \case
+  Replace attributes -> validateAttributes attributes
+  Merge attributes -> validateAttributes (Just attributes)
+
 -- | The status a workflow starts in, which follows from the queue and the
 -- delay — never a caller's choice. Mirrors @NewWorkflow::initial_status@.
 initialStatus :: NewWorkflow -> WorkflowStatus
@@ -441,55 +475,96 @@ initialStatus new = case (new.newWorkflowQueueName, new.newWorkflowDelay) of
 -- | What identifies a workflow, as the @workflow_status@ row stores it.
 -- Three columns rather than one name, because that is what Conductor and
 -- Console resolve against and what a configured instance needs. Mirrors
--- @WorkflowKey@ in Rust @sysdb/types.rs@ (moved there from @registry.rs@
--- in #135, and here from @DBOS.Transact.Registry@ for the same reason:
--- the system-database layer names keys without depending on the engine).
-data WorkflowKey = WorkflowKey
-  { name :: Text,
-    className :: Maybe Text,
-    configName :: Maybe Text
-  }
-  deriving stock (Eq, Ord, Show)
+-- @QualifiedWorkflowName@ in Rust @sysdb/types.rs@ (formerly @WorkflowKey@,
+-- renamed upstream in #136).
+--
+-- *One spelling of absence.* The columns spell an absent class or config both
+-- as @NULL@ and as @''@, so every constructor stores an empty class or config
+-- as 'Nothing'. Two names for the same workflow are therefore equal however
+-- they were built, and the constructor is not exported so that holds.
+--
+-- A config with no class is a valid name, because a row can hold one, but
+-- nothing registers under it: a configured instance belongs to a class. An
+-- empty name likewise names nothing. Registration refuses both.
+data QualifiedWorkflowName = QualifiedWorkflowName Text (Maybe Text) (Maybe Text)
+  deriving stock (Eq, Ord)
 
--- | A free function's workflow identity.
-newWorkflowKey :: Text -> WorkflowKey
-newWorkflowKey workflowName = WorkflowKey workflowName Nothing Nothing
+-- | The derived shape, spelled by hand because the constructor is private.
+instance Show QualifiedWorkflowName where
+  show name =
+    "QualifiedWorkflowName "
+      <> show (qualifiedName name)
+      <> " "
+      <> show (qualifiedClassName name)
+      <> " "
+      <> show (qualifiedConfigName name)
 
--- | A class-bound workflow's identity, with no configured instance.
-methodWorkflowKey :: Text -> Text -> WorkflowKey
-methodWorkflowKey workflowName className = WorkflowKey workflowName (Just className) Nothing
+-- | A free function's workflow name.
+newQualifiedWorkflowName :: Text -> QualifiedWorkflowName
+newQualifiedWorkflowName workflowName = QualifiedWorkflowName workflowName Nothing Nothing
 
--- | A method workflow's configured identity.
-instanceWorkflowKey :: Text -> Text -> Text -> WorkflowKey
-instanceWorkflowKey workflowName className configName =
-  WorkflowKey workflowName (Just className) (Just configName)
+-- | A class-bound workflow's name, with no configured instance. An empty class
+-- is a free function's name.
+methodQualifiedWorkflowName :: Text -> Text -> QualifiedWorkflowName
+methodQualifiedWorkflowName workflowName className =
+  QualifiedWorkflowName workflowName (present className) Nothing
 
--- | Rebuild an identity from a status row. Rust normalizes empty class and
--- config names to absence so rows written by Java and Python resolve alike.
-workflowKeyFromRow :: Text -> Maybe Text -> Maybe Text -> WorkflowKey
-workflowKeyFromRow name className configName =
-  WorkflowKey name (nonEmpty className) (nonEmpty configName)
-  where
-    nonEmpty = (>>= \value -> if value == "" then Nothing else Just value)
+-- | A configured instance's name. An empty config is a method's name.
+instanceQualifiedWorkflowName :: Text -> Text -> Text -> QualifiedWorkflowName
+instanceQualifiedWorkflowName workflowName className configName =
+  QualifiedWorkflowName workflowName (present className) (present configName)
 
--- | The identity's stable external spelling.
-renderWorkflowKey :: WorkflowKey -> Text
-renderWorkflowKey (WorkflowKey name className configName) =
-  case (className, configName) of
-    (Just className', Just configName') -> name <> "/" <> className' <> "/" <> configName'
-    (Just className', Nothing) -> name <> "/" <> className'
-    _ -> name
+-- | Rebuild a name from a status row's columns, treating @NULL@ and @''@ alike.
+qualifiedWorkflowNameFromRow :: Text -> Maybe Text -> Maybe Text -> QualifiedWorkflowName
+qualifiedWorkflowNameFromRow workflowName className configName =
+  QualifiedWorkflowName workflowName (className >>= present) (configName >>= present)
+
+-- | @Some@ unless empty, the one spelling of absence a name holds.
+present :: Text -> Maybe Text
+present value = if Text.null value then Nothing else Just value
+
+-- | The workflow's bare name, without its class or config.
+qualifiedName :: QualifiedWorkflowName -> Text
+qualifiedName (QualifiedWorkflowName workflowName _ _) = workflowName
+
+-- | The class a method workflow belongs to; 'Nothing' for a free function.
+qualifiedClassName :: QualifiedWorkflowName -> Maybe Text
+qualifiedClassName (QualifiedWorkflowName _ className _) = className
+
+-- | The configured instance this name is bound to; 'Nothing' unless
+-- instance-bound.
+qualifiedConfigName :: QualifiedWorkflowName -> Maybe Text
+qualifiedConfigName (QualifiedWorkflowName _ _ configName) = configName
+
+-- | The name's stable external spelling, for people to read: @name@,
+-- @name/class@ or @name/class/config@. A config with no class keeps its place
+-- as @name//config@, so it is never mistaken for a class.
+renderQualifiedWorkflowName :: QualifiedWorkflowName -> Text
+renderQualifiedWorkflowName name =
+  case (qualifiedClassName name, qualifiedConfigName name) of
+    (Just className, Just configName) ->
+      qualifiedName name <> "/" <> className <> "/" <> configName
+    (Just className, Nothing) -> qualifiedName name <> "/" <> className
+    (Nothing, Just configName) -> qualifiedName name <> "//" <> configName
+    (Nothing, Nothing) -> qualifiedName name
 
 -- | Rust's derived serde shape (@name@/@class_name@/@config_name@), so a
--- recorded error carrying a key decodes back to the key on any SDK.
--- Optional fields accept absence like Rust's derived @Deserialize@ does.
-instance ToJSON WorkflowKey where
-  toJSON (WorkflowKey name className configName) =
-    object ["name" .= name, "class_name" .= className, "config_name" .= configName]
+-- recorded error carrying a name decodes back to the name on any SDK. A
+-- missing or empty class or config reads as absent.
+instance ToJSON QualifiedWorkflowName where
+  toJSON name =
+    object
+      [ "name" .= qualifiedName name,
+        "class_name" .= qualifiedClassName name,
+        "config_name" .= qualifiedConfigName name
+      ]
 
-instance FromJSON WorkflowKey where
-  parseJSON = withObject "WorkflowKey" $ \fields ->
-    WorkflowKey <$> fields .: "name" <*> fields .:? "class_name" .!= Nothing <*> fields .:? "config_name" .!= Nothing
+instance FromJSON QualifiedWorkflowName where
+  parseJSON = withObject "QualifiedWorkflowName" $ \fields ->
+    QualifiedWorkflowName
+      <$> fields .: "name"
+      <*> fmap (>>= present) (fields .:? "class_name" .!= Nothing)
+      <*> fmap (>>= present) (fields .:? "config_name" .!= Nothing)
 
 -- | A row of @workflow_status@. Mirrors Rust @WorkflowRecord@: shaped like
 -- the row, not like the domain — fields mirror columns one for one,
@@ -538,14 +613,14 @@ data WorkflowRecord = WorkflowRecord
   }
   deriving stock (Eq, Show)
 
--- | The identity the row belongs to, if it names one: an absent or empty
--- name is no key, as empty spells absence on rows written elsewhere.
--- Mirrors Rust @WorkflowRecord::key@.
-workflowRecordKey :: WorkflowRecord -> Maybe WorkflowKey
-workflowRecordKey row = case row.workflowRecordName of
+-- | The name the row's workflow runs under, if it names one: an absent or
+-- empty name is no name, as empty spells absence on rows written elsewhere.
+-- Mirrors Rust @WorkflowRecord::qualified_name@.
+workflowRecordQualifiedName :: WorkflowRecord -> Maybe QualifiedWorkflowName
+workflowRecordQualifiedName row = case row.workflowRecordName of
   Nothing -> Nothing
   Just "" -> Nothing
-  Just name -> Just (workflowKeyFromRow name row.workflowRecordClassName row.workflowRecordConfigName)
+  Just name -> Just (qualifiedWorkflowNameFromRow name row.workflowRecordClassName row.workflowRecordConfigName)
 
 -- | The step names the engine records for its own operations. Stored
 -- contract: each lands in @operation_outputs.function_name@, where a replay
@@ -606,6 +681,28 @@ changeIsLeave change =
 data OutcomeWrite
   = Recorded
   | AlreadyFinished
+  deriving stock (Eq, Show)
+
+-- | What a start or an enqueue does when its workflow id already names a
+-- workflow. The id is an idempotency key, so the default joins: the caller
+-- gets a handle to the workflow already there and its own input is
+-- discarded. 'Reject' is for an id that must be new, such as one derived
+-- from a payment that may only be processed once. Only another caller's
+-- workflow counts: a start that retries after its first attempt's commit
+-- was lost finds its own row, and is neither joined nor refused. Mirrors
+-- Rust @WorkflowIdReusePolicy@ (no serde there, so none here either).
+data WorkflowIdReusePolicy
+  = -- | Hand back a handle to the workflow that already has the id.
+    WorkflowIdReturnExisting
+  | -- | Refuse the start with 'WorkflowIdInUse', whatever the existing
+    -- workflow's status, writing nothing. Only for an id the caller chose:
+    -- a start or an enqueue that names none is refused.
+    --
+    -- The constructors carry the documented collision deviation: the queue
+    -- deduplication policy ('DuplicationPolicy') already owns 'Reject' and
+    -- 'ReturnExisting', so these spell the domain out rather than
+    -- colliding with it.
+    WorkflowIdReject
   deriving stock (Eq, Show)
 
 -- | When a delayed workflow should become eligible to run. A sum type
@@ -744,88 +841,88 @@ sendStepName :: Text
 sendStepName = "DBOS.send"
 
 sendBulkStepName :: Text
-sendBulkStepName = "DBOS.send_bulk"
+sendBulkStepName = "DBOS.sendBulk"
 
 writeStreamStepName :: Text
-writeStreamStepName = "DBOS.write_stream"
+writeStreamStepName = "DBOS.writeStream"
 
 closeStreamStepName :: Text
-closeStreamStepName = "DBOS.close_stream"
+closeStreamStepName = "DBOS.closeStream"
 
 -- | The step name a workflow's stream read records, one step per value it
--- delivers. The oracle's single-value read (@DBOS.read_stream_value@) is
+-- delivers. The oracle's single-value read (@DBOS.readStreamValue@) is
 -- deliberately not ported; see ADR-0034.
 readStreamStepName :: Text
-readStreamStepName = "DBOS.read_stream"
+readStreamStepName = "DBOS.readStream"
 
 setEventStepName :: Text
-setEventStepName = "DBOS.set_event"
+setEventStepName = "DBOS.setEvent"
 
 getEventStepName :: Text
-getEventStepName = "DBOS.get_event"
+getEventStepName = "DBOS.getEvent"
 
 getResultStepName :: Text
-getResultStepName = "DBOS.get_result"
+getResultStepName = "DBOS.getResult"
 
 selectStepName :: Text
-selectStepName = "DBOS.select_workflow"
+selectStepName = "DBOS.selectWorkflow"
 
 selectStepStepName :: Text
-selectStepStepName = "DBOS.select_step"
+selectStepStepName = "DBOS.selectStep"
 
 debounceStepName :: Text
-debounceStepName = "DBOS.debounce_delayed_workflow"
+debounceStepName = "DBOS.debounceDelayedWorkflow"
 
 cancelStepName :: Text
-cancelStepName = "DBOS.cancel_workflow"
+cancelStepName = "DBOS.cancelWorkflow"
 
 resumeStepName :: Text
-resumeStepName = "DBOS.resume_workflow"
+resumeStepName = "DBOS.resumeWorkflow"
 
 deleteStepName :: Text
-deleteStepName = "DBOS.delete_workflow"
+deleteStepName = "DBOS.deleteWorkflow"
 
 forkStepName :: Text
-forkStepName = "DBOS.fork_workflow"
+forkStepName = "DBOS.forkWorkflow"
 
 rewindStepName :: Text
-rewindStepName = "DBOS.rewind_workflow"
+rewindStepName = "DBOS.rewindWorkflow"
 
 setWorkflowDelayStepName :: Text
-setWorkflowDelayStepName = "DBOS.set_workflow_delay"
+setWorkflowDelayStepName = "DBOS.setWorkflowDelay"
 
 updateWorkflowAttributesStepName :: Text
-updateWorkflowAttributesStepName = "DBOS.update_workflow_attributes"
+updateWorkflowAttributesStepName = "DBOS.updateWorkflowAttributes"
 
 listWorkflowsStepName :: Text
-listWorkflowsStepName = "DBOS.list_workflows"
+listWorkflowsStepName = "DBOS.listWorkflows"
 
 listStepsStepName :: Text
-listStepsStepName = "DBOS.list_workflow_steps"
+listStepsStepName = "DBOS.listWorkflowSteps"
 
 createScheduleStepName :: Text
-createScheduleStepName = "DBOS.create_schedule"
+createScheduleStepName = "DBOS.createSchedule"
 
 upsertScheduleStepName :: Text
-upsertScheduleStepName = "DBOS.upsert_schedule"
+upsertScheduleStepName = "DBOS.upsertSchedule"
 
 getScheduleStepName :: Text
-getScheduleStepName = "DBOS.get_schedule"
+getScheduleStepName = "DBOS.getSchedule"
 
 listSchedulesStepName :: Text
-listSchedulesStepName = "DBOS.list_schedules"
+listSchedulesStepName = "DBOS.listSchedules"
 
 updateScheduleStepName :: Text
-updateScheduleStepName = "DBOS.update_schedule"
+updateScheduleStepName = "DBOS.updateSchedule"
 
 pauseScheduleStepName :: Text
-pauseScheduleStepName = "DBOS.pause_schedule"
+pauseScheduleStepName = "DBOS.pauseSchedule"
 
 resumeScheduleStepName :: Text
-resumeScheduleStepName = "DBOS.resume_schedule"
+resumeScheduleStepName = "DBOS.resumeSchedule"
 
 deleteScheduleStepName :: Text
-deleteScheduleStepName = "DBOS.delete_schedule"
+deleteScheduleStepName = "DBOS.deleteSchedule"
 
 -- | The closing sentinel of a stream, stored JSON-encoded like every value
 -- so the column holds one format and other implementations read our closes.
@@ -1463,7 +1560,7 @@ data VersionInfo = VersionInfo
 -- transposing two would compile. No smart constructor, for the same reason.
 -- Mirrors Rust @DebounceRequest@.
 data DebounceRequest = DebounceRequest
-  { debounceRequestWorkflow        :: WorkflowKey,
+  { debounceRequestWorkflow        :: QualifiedWorkflowName,
     debounceRequestQueueName       :: Text,
     debounceRequestDeduplicationId :: Text,
     debounceRequestPeriod          :: Duration,
@@ -1476,9 +1573,9 @@ data DebounceRequest = DebounceRequest
 -- | Rejects the values no writer could have stored, so a bounce cannot
 -- silently match nothing. The period is held to the rule @delay@ is: a
 -- positive duration that fits in milliseconds. The key is matched on all
--- three parts, so a bounce extends only the same workflow; an empty class
--- or instance is absent rather than a value, and matching one would find
--- no row. Mirrors @DebounceRequest::validate@.
+-- three parts, so a bounce extends only the same workflow; a
+-- 'QualifiedWorkflowName' never holds an empty class or config, so only the
+-- bare name can be empty here. Mirrors @DebounceRequest::validate@.
 debounceValidate :: DebounceRequest -> Either Error ()
 debounceValidate request
   | durationIsZero request.debounceRequestPeriod =
@@ -1491,16 +1588,13 @@ debounceValidate request
           Just field -> Left (invalidInput field "must be absent rather than empty")
           Nothing -> Right ()
   where
-    WorkflowKey workflowName className configName = request.debounceRequestWorkflow
     required =
-      [ ("workflow.name", workflowName),
+      [ ("workflow.name", qualifiedName request.debounceRequestWorkflow),
         ("queue_name", request.debounceRequestQueueName),
         ("deduplication_id", request.debounceRequestDeduplicationId)
       ]
     optionals =
-      [ ("workflow.class_name", className),
-        ("workflow.config_name", configName),
-        ("inputs", request.debounceRequestInputs),
+      [ ("inputs", request.debounceRequestInputs),
         ("serialization", request.debounceRequestSerialization),
         ("application_name", request.debounceRequestAppName)
       ]
@@ -2039,6 +2133,45 @@ databaseTimeRead epochMs = DatabaseTime epochMs <$> getMonotonicTimeNSec
 databaseTimeReaches :: DatabaseTime -> Timestamp -> Word64
 databaseTimeReaches clock instant =
   clock.databaseTimeReadAt + fromIntegral (max 0 (timestampToEpochMs instant - clock.databaseTimeEpochMs)) * 1000000
+
+-- | The database's clock now, as a reading carries it forward: the reading
+-- plus however long this process's monotonic clock has run since. Behind
+-- the database's own by the trip back, as a wait measured from the reading
+-- is. Mirrors Rust @DatabaseTime::now@.
+databaseTimeNow :: MonadMonotonicTimeNSec m => DatabaseTime -> m Timestamp
+databaseTimeNow clock = do
+  now <- getMonotonicTimeNSec
+  let elapsedMs = fromIntegral ((now - clock.databaseTimeReadAt) `div` 1000000) :: Int64
+  pure (timestampFromEpochMs (clock.databaseTimeEpochMs + elapsedMs))
+
+-- | A recorded wake time, with the reading of the database's clock taken
+-- as it was recorded or read back. What @record_sleep@ answers with, on a
+-- first run and on a replay alike. The wake time is an instant on the
+-- database's clock, which is the one clock every executor that may replay
+-- the step shares; the reading is what lets this process wait for it on
+-- its own monotonic clock, so a host whose wall clock is off the
+-- database's wakes on time. Mirrors Rust @WakeTime@.
+data WakeTime = WakeTime
+  { wakeAt    :: Timestamp,
+    wakeClock :: DatabaseTime
+  }
+  deriving stock (Eq, Show)
+
+-- | When, on this process's monotonic clock (nanoseconds), the wake time
+-- arrives: at once for one already past. Mirrors Rust @WakeTime::arrives@.
+wakeArrives :: WakeTime -> Word64
+wakeArrives wake = databaseTimeReaches wake.wakeClock wake.wakeAt
+
+-- | How long until the wake time arrives on this process's monotonic
+-- clock: zero for one already past. Past the deadline and exactly on it
+-- are the same answer — no time left — and a zero wait returns at once, so
+-- callers poll once more rather than spinning on it.
+wakeRemaining :: MonadMonotonicTimeNSec m => WakeTime -> m Duration
+wakeRemaining wake = do
+  now <- getMonotonicTimeNSec
+  let arrives = wakeArrives wake
+      remainingNs = if arrives > now then arrives - now else 0
+  pure (Duration (fromIntegral remainingNs / 1000000000))
 
 -- | The current time, truncated to milliseconds. A clock set before 1970
 -- gives the epoch rather than panicking, mirroring @Timestamp::now@.

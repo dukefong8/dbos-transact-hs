@@ -14,7 +14,7 @@ import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
 import Data.Int (Int64)
-import DBOS.SystemDB (WorkflowId (..), WorkflowRecord (..))
+import DBOS.SystemDB (WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, newMemDBSkewed, simInstance)
 import DBOS.Transact.Step (WorkflowEvent (..))
@@ -78,14 +78,14 @@ simDeadlinesFixtureSkewed skewMs = do
         dfPlantExpired = \wid -> do
           let WorkflowId widText = wid
               expired = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowDeadline = Just (SystemDB.timestampFromEpochMs 1000)}
-          planted <- SystemDB.initWorkflow mem expired Nothing
+          planted <- SystemDB.initWorkflow mem expired Nothing WorkflowIdReturnExisting
           case planted of
             Left err -> error (show err)
             Right _ -> pure (),
         dfPlantDelayed = \wid delay -> do
           let WorkflowId widText = wid
               delayed = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowQueueName = Just "sweep-test-q", SystemDB.newWorkflowDelay = Just delay}
-          planted <- SystemDB.initWorkflow mem delayed Nothing
+          planted <- SystemDB.initWorkflow mem delayed Nothing WorkflowIdReturnExisting
           case planted of
             Left err -> error (show err)
             Right _ -> pure (),

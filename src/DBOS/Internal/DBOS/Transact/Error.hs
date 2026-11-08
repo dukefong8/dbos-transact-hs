@@ -46,8 +46,8 @@ import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Void (Void, absurd)
 import DBOS.Prelude
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, Fork (Fork, forkSourceId, forkStartStep), WorkflowKey (..), durationAsMillis, renderWorkflowKey)
-import DBOS.Transact.Registry (RegistryError, decodeRegistryErrorPayload, encodeRegistryErrorPayload, renderRegistryError)
+import DBOS.SystemDB.Types (Duration, Fork (Fork, forkSourceId, forkStartStep), QualifiedWorkflowName, durationAsMillis, renderQualifiedWorkflowName)
+import DBOS.Transact.Registry (RegistryError, decodeRegistryErrorPayload, encodeRegistryErrorPayload, renderRegistryError, workflowField)
 import DBOS.Transact.Registry qualified as Registry
 import DBOS.Transact.Serialization (SerializationError, decodeSerializationError, encodeSerializationError, renderSerializationError)
 import DBOS.Transact.Serialization qualified as Serialization
@@ -91,8 +91,8 @@ data Error e
     InsideStep {operation :: Text}
   | -- | Registration happened after the launch snapshot was taken.
     AlreadyLaunched {operation :: Text}
-  | -- | A workflow identity was registered more than once.
-    AlreadyRegistered {key :: WorkflowKey}
+  | -- | A workflow name was registered more than once.
+    AlreadyRegistered {workflow :: QualifiedWorkflowName}
   | -- | A workflow input, result, or failure could not be encoded.
     ErrorSerialization {what :: Text, message :: Text}
   | -- | A serialized workflow input, result, or failure could not be decoded.
@@ -107,8 +107,8 @@ data Error e
     SystemDatabase SystemDBError.Error
   | -- | A previously recorded operation failed with an untyped message.
     StepFailed {step :: Text, message :: Text}
-  | -- | A workflow key did not exist in the executor's immutable snapshot.
-    NotRegistered {key :: WorkflowKey}
+  | -- | A workflow name did not exist in the executor's immutable snapshot.
+    NotRegistered {workflow :: QualifiedWorkflowName}
   | -- | The SystemDB did not grant this attempt the workflow execution claim.
     WorkflowClaimLost {workflowId :: Text}
   | -- | Shutdown cancelled the workflow while this caller waited for it. Its
@@ -181,13 +181,13 @@ renderErrorWithoutApplication = \case
   NotLaunched operation -> "cannot " <> operation <> " before DBOS is launched"
   InsideStep operation -> operation <> " cannot be called from within a step"
   AlreadyLaunched operation -> renderRegistryError (Registry.AlreadyLaunched operation)
-  AlreadyRegistered key -> renderRegistryError (Registry.AlreadyRegistered key)
+  AlreadyRegistered workflow -> renderRegistryError (Registry.AlreadyRegistered workflow)
   ErrorSerialization what message -> renderSerializationError (Serialization.ErrorSerialization {what = what, message = message})
   Deserialization what message -> renderSerializationError (Serialization.Deserialization {what = what, message = message})
   UnknownSerialization {name} -> renderSerializationError (Serialization.UnknownSerialization {name = name})
   SystemDatabase err -> SystemDBError.renderError err
   StepFailed step message -> "the step " <> step <> " failed: " <> message
-  NotRegistered key -> "no workflow is registered as " <> renderWorkflowKey key
+  NotRegistered workflow -> "no workflow is registered as " <> renderQualifiedWorkflowName workflow
   WorkflowClaimLost workflowId -> "the workflow " <> workflowId <> " is already being run elsewhere"
   Interrupted workflowId -> "the workflow " <> workflowId <> " was interrupted by shutdown and left PENDING"
   WorkflowFailed workflowId message -> "the workflow " <> workflowId <> " failed: " <> message
@@ -223,13 +223,13 @@ instance ToJSON e => ToJSON (Error e) where
     NotLaunched operation -> tagged "NotLaunched" (object ["operation" .= operation])
     InsideStep operation -> tagged "InsideStep" (object ["operation" .= operation])
     AlreadyLaunched operation -> tagged "AlreadyLaunched" (encodeRegistryErrorPayload (Registry.AlreadyLaunched operation))
-    AlreadyRegistered key -> tagged "AlreadyRegistered" (encodeRegistryErrorPayload (Registry.AlreadyRegistered key))
+    AlreadyRegistered workflow -> tagged "AlreadyRegistered" (encodeRegistryErrorPayload (Registry.AlreadyRegistered workflow))
     ErrorSerialization what message -> tagged "ErrorSerialization" (encodeSerializationError (Serialization.ErrorSerialization {what = what, message = message}))
     Deserialization what message -> tagged "Deserialization" (encodeSerializationError (Serialization.Deserialization {what = what, message = message}))
     UnknownSerialization {name} -> tagged "UnknownSerialization" (encodeSerializationError (Serialization.UnknownSerialization {name = name}))
     SystemDatabase err -> tagged "SystemDatabase" (toJSON err)
     StepFailed step message -> tagged "StepFailed" (object ["step" .= step, "message" .= message])
-    NotRegistered key -> tagged "NotRegistered" (object ["key" .= key])
+    NotRegistered workflow -> tagged "NotRegistered" (object ["workflow" .= workflow])
     WorkflowClaimLost workflowId -> tagged "WorkflowClaimLost" (object ["workflowId" .= workflowId])
     Interrupted workflowId -> tagged "Interrupted" (object ["workflowId" .= workflowId])
     WorkflowFailed workflowId message -> tagged "WorkflowFailed" (object ["workflowId" .= workflowId, "message" .= message])
@@ -266,7 +266,7 @@ instance FromJSON e => FromJSON (Error e) where
       "UnknownSerialization"        -> fromSerializationError <$> decodeSerializationError "UnknownSerialization" payload
       "SystemDatabase"              -> SystemDatabase <$> parseJSON payload
       "StepFailed"                  -> withObject "StepFailed" (\o -> StepFailed <$> o .: "step" <*> o .: "message") payload
-      "NotRegistered"               -> withObject "NotRegistered" (\o -> NotRegistered <$> o .: "key") payload
+      "NotRegistered"               -> withObject "NotRegistered" (\o -> NotRegistered <$> workflowField o) payload
       "WorkflowClaimLost"           -> withObject "WorkflowClaimLost" (\o -> WorkflowClaimLost <$> o .: "workflowId") payload
       "Interrupted"                 -> withObject "Interrupted" (\o -> Interrupted <$> o .: "workflowId") payload
       "WorkflowFailed"              -> withObject "WorkflowFailed" (\o -> WorkflowFailed <$> o .: "workflowId" <*> o .: "message") payload
@@ -418,7 +418,7 @@ refusedForkOptions field detail = "ForkOptions." <> api <> ": " <> detail
 -- freeze refusal is the same vocabulary, not a workflow registration.
 fromRegistryError :: RegistryError -> Error e
 fromRegistryError = \case
-  Registry.AlreadyRegistered key -> AlreadyRegistered key
+  Registry.AlreadyRegistered workflow -> AlreadyRegistered workflow
   Registry.AlreadyLaunched operation -> AlreadyLaunched operation
 
 -- | Lift a codec outcome into a caller's channel. Codec construction sites

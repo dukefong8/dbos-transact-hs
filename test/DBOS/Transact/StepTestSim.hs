@@ -46,6 +46,7 @@ import DBOS.Transact
     Error (..),
     WorkflowCtx,
     WorkflowId (..),
+    WorkflowIdReusePolicy (..),
     runStep,
   )
 import DBOS.Transact.Identity (Identity (..))
@@ -80,7 +81,7 @@ mkStepFixture = do
       sfFreshId = \base -> pure (WorkflowId ("sim-step-" <> base)),
       sfIdentity = simIdentity,
       sfInitRow = \wid@(WorkflowId widText) -> do
-        created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "L2StepSim"}) Nothing
+        created <- SystemDB.initWorkflow mem ((newWorkflow widText) {newWorkflowName = Just "L2StepSim"}) Nothing WorkflowIdReturnExisting
         case created of
           Left err -> error (show err)
           Right result -> pure (WorkflowOwner {ownerWorkflowId = wid, ownerToken = result.initResultCreatorXid}),

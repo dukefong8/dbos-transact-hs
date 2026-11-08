@@ -15,7 +15,7 @@ import DBOS.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
-import DBOS.SystemDB (WorkflowId (..), WorkflowRecord (..))
+import DBOS.SystemDB (WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
@@ -115,14 +115,14 @@ mkDeadlinesFixture backend run = do
           dfPlantExpired = \wid -> do
             let WorkflowId widText = wid
                 expired = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowDeadline = Just (SystemDB.timestampFromEpochMs 1000)}
-            planted <- SystemDB.initWorkflow backend expired Nothing
+            planted <- SystemDB.initWorkflow backend expired Nothing WorkflowIdReturnExisting
             case planted of
               Left err -> fail (show err)
               Right _ -> pure (),
           dfPlantDelayed = \wid delay -> do
             let WorkflowId widText = wid
                 delayed = (SystemDB.newWorkflow widText) {SystemDB.newWorkflowQueueName = Just "sweep-test-q", SystemDB.newWorkflowDelay = Just delay}
-            planted <- SystemDB.initWorkflow backend delayed Nothing
+            planted <- SystemDB.initWorkflow backend delayed Nothing WorkflowIdReturnExisting
             case planted of
               Left err -> fail (show err)
               Right _ -> pure (),

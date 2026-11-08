@@ -10,7 +10,7 @@ module DBOS.Transact.Sleep (sleepStep, pendingSleep, sleepPlain, SleepEvent (..)
 import Data.Int (Int64)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, durationToMs, sleepStepName, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, durationToMs, sleepStepName, wakeArrives)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Context (WorkflowCtx (wctxTracer), ownerToken, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Transact.Error qualified as TransactError
@@ -38,7 +38,7 @@ instance LogEvent SleepEvent where
 instance ToLogStr SleepEvent where
   toLogStr = toLogStr . renderLine
 
-sleepStep :: (MonadSTM m, MonadTime m, MonadDelay m)
+sleepStep :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMonotonicTimeNSec m)
           => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sleepStep wctx duration =
   -- The duration is checked first, so a refusal claims no id — and only
@@ -51,7 +51,7 @@ sleepStep wctx duration =
 -- the call so a replay rebuilds the same slot, and the wait runs when the
 -- pending value is awaited or raced. The pre-check runs first for the
 -- same reason as 'sleepStep': a refused sleep moves no counter.
-pendingSleep :: (MonadSTM m, MonadTime m, MonadDelay m)
+pendingSleep :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMonotonicTimeNSec m)
              => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ())))
 pendingSleep wctx duration =
   TransactError.refusing (TransactError.refusedArgument "sleep") (durationToMs "duration" duration) $ \_ -> do
@@ -60,7 +60,7 @@ pendingSleep wctx duration =
 
 -- | Drives a placed sleep: a plain wait inside a step or outside a
 -- workflow, otherwise the recorded wake-time wait under the claimed id.
-driveSleep :: (MonadSTM m, MonadTime m, MonadDelay m)
+driveSleep :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMonotonicTimeNSec m)
            => WorkflowCtx exec m -> Duration -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 driveSleep wctx duration placement =
   case checkHere placement sleepStepName (Just (stepCtxBoundary wctx)) of
@@ -74,12 +74,17 @@ driveSleep wctx duration placement =
     Right (DurabilityRecorded wctx' stepId') -> do
       let workflowId' = WorkflowId (workflowId wctx')
       recordedWake <- withSystemDB wctx' (\db -> SystemDB.recordSleep db workflowId' stepId' duration (ownerToken wctx'))
-      TransactError.refusing (TransactError.refusedArgument "sleep") recordedWake $ \wakeAt -> do
+      TransactError.refusing (TransactError.refusedArgument "sleep") recordedWake $ \wake -> do
         -- A recorded refusal surfaces on the same channel as a fresh
         -- one: 'recordSleep' hands back the stored refusal, whatever
         -- run recorded it.
-          now <- timestampNow
-          let remainingMillis = max 0 (timestampToEpochMs wakeAt - timestampToEpochMs now)
+        -- The wait is measured on the monotonic clock from the database's
+        -- reading, never against this host's wall clock, which need not
+        -- agree with the clock the wake time was set on; a replay that
+        -- woke long ago waits not at all. Mirrors the oracle's sleep wait.
+          now <- getMonotonicTimeNSec
+          let arrives = wakeArrives wake
+              remainingMillis = fromIntegral ((if arrives > now then arrives - now else 0) `div` 1000000) :: Int64
           runTracer wctx'.wctxTracer (SleepUntilWake stepId' remainingMillis)
           threadDelay (millisToMicros remainingMillis)
           pure (Right ())

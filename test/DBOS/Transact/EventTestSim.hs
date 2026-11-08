@@ -14,8 +14,9 @@ import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
+import Data.Int (Int64)
 import DBOS.SystemDB (WorkflowId (..))
-import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
+import DBOS.SystemDB.IOSim (MemSystemDB, newMemDB, newMemDBSkewed, simEntropy, simGeneratedId, simIdentity)
 import DBOS.Transact
   (
   configNew,
@@ -30,6 +31,7 @@ import DBOS.Transact.EventCases
     checkCheckpointedRead,
     checkOutOfOrderIds,
     checkPublishReplay,
+    checkGetEventTimed,
     checkRecoveryKeepsFirst,
     checkRefusedSet,
     checkReplayNoRepublish,
@@ -39,6 +41,7 @@ import DBOS.Transact.EventCases
     scenarioCheckpointedRead,
     scenarioOutOfOrderIds,
     scenarioPublishReplay,
+    scenarioGetEventTimed,
     scenarioRecoveryKeepsFirst,
     scenarioRefusedSet,
     scenarioReplayNoRepublish,
@@ -52,8 +55,13 @@ import Test.Tasty.HUnit ((@?=))
 -- carrier as 'SomeTracer', over the same 'mkEventFixture' builder live
 -- uses. Only the atoms differ.
 simEventFixture :: forall s. IOSim s (EventFixture (IOSim s))
-simEventFixture = do
-  mem <- newMemDB
+simEventFixture = newMemDB >>= simEventFixtureOn
+
+simEventFixtureSkewed :: forall s. Int64 -> IOSim s (EventFixture (IOSim s))
+simEventFixtureSkewed skewMs = newMemDBSkewed skewMs >>= simEventFixtureOn
+
+simEventFixtureOn :: forall s. MemSystemDB s -> IOSim s (EventFixture (IOSim s))
+simEventFixtureOn mem = do
   ids <- newTVarIO 0
   entropy <- newTVarIO 0
   mkEventFixture
@@ -73,6 +81,8 @@ tests =
   testGroup
     "Workflow events (Sim)"
     [ simCase simEventFixture "a workflow can publish and replay an event" scenarioPublishReplay checkPublishReplay traceEventSilent,
+      simCase (simEventFixtureSkewed 3600000) "a get_event timeout waits its duration with the database clock an hour ahead" scenarioGetEventTimed checkGetEventTimed traceEventSilent,
+      simCase (simEventFixtureSkewed (-3600000)) "a get_event timeout waits its duration with the database clock an hour behind" scenarioGetEventTimed checkGetEventTimed traceEventSilent,
       simCase simEventFixture "a reading workflow is checkpointed and a reading step is not" scenarioCheckpointedRead checkCheckpointedRead traceCheckpointedRead,
       simCase simEventFixture "a refused set event spends no step id" scenarioRefusedSet checkRefusedSet traceEventSilent,
       simCase simEventFixture "a getEvent through a captured parent is plain and moves no ids" scenarioCapturedRead checkCapturedRead traceEventSilent,

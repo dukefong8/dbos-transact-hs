@@ -64,6 +64,7 @@ module DBOS.Transact.WorkflowCases
     scenarioQueuedStartClaimedByNextPass,
     ConflictStartOutcome (..),
     scenarioConflictStartRecorded,
+    scenarioRejectStartRecorded,
     waitForRowShared,
     checkRegisteredResult,
     checkJoinTakesId,
@@ -112,6 +113,7 @@ module DBOS.Transact.WorkflowCases
     checkDedupStartRecorded,
     checkQueuedStartClaimedByNextPass,
     checkConflictStartRecorded,
+    checkRejectStartRecorded,
     TaskCase,
     taskAbortAllWaits,
     taskFinishedNotRegistered,
@@ -132,7 +134,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.SystemDB (AwaitedOutcome (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), WorkflowId (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
+import DBOS.SystemDB (AwaitedOutcome (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SysErr
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
@@ -152,21 +154,21 @@ import DBOS.Transact
     WorkflowCtx,
     stepCtxCancellationToken,
     Executor,
-    Enqueue (..),
+    QueueRequest (..),
     DuplicationPolicy (..),
     QueueConflict (..),
     WorkflowStatus (..),
     awaitChild,
     defaultQueueOptions,
     deleteWorkflow,
-    enqueueNew,
+    queueRequestNew,
     forkWorkflow,
     forkWorkflows,
     handleResult,
     handleStatus,
     deleteQueue,
     newDBOS,
-    newWorkflowKey,
+    newQualifiedWorkflowName,
     registerWorkflowRef,
     registerWorkflow,
     registerQueue,
@@ -232,27 +234,29 @@ timeoutOptionsCase = do
   resolveTimeoutDeadline None (Just now) @?= Nothing
   resolveTimeoutDeadline Inherit (Just now) @?= Just now
   resolveTimeoutDeadline Inherit Nothing @?= Nothing
-  runOptionsDefault @?= RunOptions Nothing Inherit Nothing
-  startOptionsDefault @?= StartOptions Nothing Inherit Nothing Nothing
+  runOptionsDefault @?= RunOptions Nothing WorkflowIdReturnExisting Inherit Nothing
+  startOptionsDefault @?= StartOptions Nothing WorkflowIdReturnExisting Inherit Nothing Nothing
   runOptionsToStartOptions runOptionsDefault @?= startOptionsDefault
   childWorkflowId (Just (WorkflowId "chosen")) (Just ("parent", 3)) "generated" @?= "chosen"
   childWorkflowId Nothing (Just ("parent", 0)) "generated" @?= "parent-0"
   childWorkflowId Nothing (Just ("parent", 2)) "generated" @?= "parent-2"
   childWorkflowId Nothing Nothing "generated" @?= "generated"
 
--- | The recorded start-error surface without a database: only the two
+-- | The recorded start-error surface without a database: only the three
 -- refusal variants are recorded, the names are the recorded ones, and a
 -- value is judged by its single-key shape before the typed read — so a
 -- plain step's error is never mistaken for a refusal.
 startErrorCase :: IO ()
 startErrorCase = do
-  recordedStartErrorNames @?= ["QueueDeduplicated", "ConflictingWorkflow"]
+  recordedStartErrorNames @?= ["QueueDeduplicated", "ConflictingWorkflow", "WorkflowIdInUse"]
   shouldRecordStartError (SysErr.QueueDeduplicated {workflowId = "w", queueName = "q", deduplicationId = "d"}) @?= True
   shouldRecordStartError (SysErr.ConflictingWorkflow {workflowId = "w", detail = "taken"}) @?= True
+  shouldRecordStartError (SysErr.WorkflowIdInUse {workflowId = "w", status = "SUCCESS", existingName = Just "charge"}) @?= True
   shouldRecordStartError (SysErr.WorkflowCancelled {workflowId = "w"}) @?= False
   shouldRecordStartError (SysErr.UnexpectedStep {workflowId = "w", stepId = 0, expected = "a child start", recorded = "a plain step"}) @?= False
   isRecordedStartError (object ["QueueDeduplicated" .= True]) @?= True
   isRecordedStartError (object ["ConflictingWorkflow" .= True]) @?= True
+  isRecordedStartError (object ["WorkflowIdInUse" .= True]) @?= True
   isRecordedStartError (object ["WorkflowCancelled" .= True]) @?= False
   isRecordedStartError (object ["QueueDeduplicated" .= True, "extra" .= True]) @?= False
   isRecordedStartError (String "not an object") @?= False
@@ -300,7 +304,7 @@ scenarioRegisteredRecordsResult :: forall m. (MonadFork m, MonadMask m, MonadMVa
                                    m (Int, WorkflowRecord)
 scenarioRegisteredRecordsResult fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "double"
+    let key = newQualifiedWorkflowName "double"
         -- Converted body: registered through the scoped entry and using the
         -- scoped step runner. The body takes WorkflowCtx and every call
         -- it makes takes that view or one derived from it.
@@ -421,7 +425,7 @@ scenarioJoinTakesId fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     entered <- newTVarIO (0 :: Int)
     release <- newEmptyMVar
-    let key = newWorkflowKey "slow"
+    let key = newQualifiedWorkflowName "slow"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body () _ = do
           atomically (modifyTVar entered (+ 1))
@@ -493,7 +497,7 @@ scenarioFreshJoinPolls :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mona
 scenarioFreshJoinPolls fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     release <- newEmptyMVar
-    let key = newWorkflowKey "quick"
+    let key = newQualifiedWorkflowName "quick"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body () _ = takeMVar release >> pure (Right 7)
     refE <- registerWorkflowRef dbos key body
@@ -539,7 +543,7 @@ scenarioQueuedStartPolls :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mo
                             m (Text, WorkflowStatus, [StepRecord])
 scenarioQueuedStartPolls fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "queued-start"
+    let key = newQualifiedWorkflowName "queued-start"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body () wctx = do
           stepped <- runStep wctx "ran" (const (pure ()))
@@ -556,7 +560,7 @@ scenarioQueuedStartPolls fx = do
     wid <- fx.wfFreshId "queued-start"
     let WorkflowId widText = wid
         queueName = "queued-start-q-" <> widText
-        enqueueOpts = startOptionsDefault {startWorkflowId = Just (WorkflowId widText), startQueue = Just (enqueueNew queueName)}
+        enqueueOpts = startOptionsDefault {startWorkflowId = Just (WorkflowId widText), startQueue = Just (queueRequestNew queueName)}
         joinOpts = startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}
         label :: WorkflowHandle m EngineOnly -> Text
         label (WorkflowHandle _ _ provenance') = case provenance' of
@@ -582,7 +586,7 @@ scenarioNonFinite :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTime
                      m ((Double, Double, Double), Maybe Text, Maybe Text)
 scenarioNonFinite fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "extremes"
+    let key = newQualifiedWorkflowName "extremes"
         body :: forall exec. Double -> WorkflowCtx exec m -> m (Either (Error EngineOnly) (Double, Double, Double))
         body low _ = pure (Right (low, 1 / 0, 0 / 0))
     registered <- registerWorkflowRef dbos key body
@@ -614,8 +618,8 @@ scenarioAwaitRecorded :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Monad
                          m (Int, [StepRecord], Text)
 scenarioAwaitRecorded fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 99)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -663,8 +667,8 @@ scenarioChildIdsInBuildOrder :: forall m. (MonadFork m, MonadMask m, MonadMVar m
                                 m (Int, [StepRecord], Text, Maybe Text)
 scenarioChildIdsInBuildOrder fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody n _ = pure (Right n)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -718,8 +722,8 @@ scenarioWrongInstance :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Monad
 scenarioWrongInstance fx =
   bracket fx.wfNewDBOS shutdown $ \owner -> do
     (other, launchOther) <- fx.wfSecondInstance
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 1)
     childRefE <- registerWorkflowRef other childKey childBody
@@ -780,7 +784,7 @@ scenarioStepsTaken :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTim
                       m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioStepsTaken fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "two-steps"
+    let key = newQualifiedWorkflowName "two-steps"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body value wctx = do
           first <- runStep wctx "one" (const (pure (value + 1)))
@@ -808,7 +812,7 @@ scenarioShutdownCancels :: forall m. (MonadAsync m, MonadFork m, MonadMask m, Mo
 scenarioShutdownCancels fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     gate <- newEmptyMVar
-    let key = newWorkflowKey "gated"
+    let key = newQualifiedWorkflowName "gated"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body () _ = takeMVar gate >> pure (Right 7)
     refE <- registerWorkflowRef dbos key body
@@ -839,7 +843,7 @@ scenarioDropFuture :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMV
 scenarioDropFuture fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     gate <- newEmptyMVar
-    let key = newWorkflowKey "gated"
+    let key = newQualifiedWorkflowName "gated"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body () _ = takeMVar gate >> pure (Right 7)
     refE <- registerWorkflowRef dbos key body
@@ -871,8 +875,8 @@ scenarioAttributes :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTim
                       m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord, Text)
 scenarioAttributes fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "attributed"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "attributed"
         tenant = "acme-tenant"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody _ _ = pure (Right 9)
@@ -916,7 +920,7 @@ scenarioStepErrorRecorded :: forall m. (MonadAsync m, MonadFork m, MonadMask m, 
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioStepErrorRecorded fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "charger"
+    let key = newQualifiedWorkflowName "charger"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body () wctx = runStepWith stepOptionsDefault wctx "charge" (const (pure (Left (StepFailed "charge" "short by 12"))))
     registered <- registerWorkflow dbos key body
@@ -936,7 +940,7 @@ scenarioAppErrorRoundtrip :: forall m. (MonadFork m, MonadMask m, MonadMVar m, M
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioAppErrorRoundtrip fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "flaky"
+    let key = newQualifiedWorkflowName "flaky"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body _ _ = pure (Left (StepFailed "flaky" "boom"))
     registered <- registerWorkflow dbos key body
@@ -957,7 +961,7 @@ scenarioDbFailureNotOutcome :: forall m. (MonadFork m, MonadMask m, MonadMVar m,
                                m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioDbFailureNotOutcome fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "blips"
+    let key = newQualifiedWorkflowName "blips"
         backendErr =
           SystemDB.Backend
             ( SystemDB.BackendError
@@ -986,7 +990,7 @@ scenarioPanic :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m,
                  m (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)), Maybe WorkflowRecord)
 scenarioPanic fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "explodes"
+    let key = newQualifiedWorkflowName "explodes"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
         body () _ = throwIO (userError "boom")
     registered <- registerWorkflow dbos key body
@@ -1022,7 +1026,7 @@ scenarioZeroNoInput :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTi
                        m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioZeroNoInput fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "zero"
+    let key = newQualifiedWorkflowName "zero"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
         body () _ = pure (Right ())
     registered <- registerWorkflow dbos key body
@@ -1042,7 +1046,7 @@ scenarioRowBeforeBody :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Monad
                          m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioRowBeforeBody fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "sees-itself"
+    let key = newQualifiedWorkflowName "sees-itself"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Bool)
         body () wctx = do
           row <- withSystemDB wctx (\db -> SystemDB.getWorkflow db (WorkflowId (workflowId wctx)))
@@ -1066,8 +1070,8 @@ scenarioPlainStepAtStart :: forall m. (MonadAsync m, MonadFork m, MonadMask m, M
                             m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioPlainStepAtStart fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "waiter"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "waiter"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody _ _ = pure (Right 1)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1134,8 +1138,8 @@ scenarioDerivedChildAdopted :: forall m. (MonadFork m, MonadMask m, MonadMVar m,
                                m (Text, [WorkflowId], Either (Error EngineOnly) [WorkflowId], Either (Error EngineOnly) AwaitedOutcome, Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioDerivedChildAdopted fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "double"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "double"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody value wctx = runStep wctx "double" (const (pure (value * 2)))
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1176,8 +1180,8 @@ scenarioAssignedChildAdopted :: forall m. (MonadFork m, MonadMask m, MonadMVar m
                                 m (Text, [WorkflowId], Either (Error EngineOnly) [WorkflowId], Either (Error EngineOnly) AwaitedOutcome, Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioAssignedChildAdopted fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "namer"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "namer"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody _ _ = pure (Right 7)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1217,7 +1221,7 @@ scenarioRootNoParent :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadT
                         m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioRootNoParent fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "root"
+    let key = newQualifiedWorkflowName "root"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body () _ = pure (Right 1)
     registered <- registerWorkflow dbos key body
@@ -1241,8 +1245,8 @@ scenarioFanout :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m
                   m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [WorkflowId], Int64)
 scenarioFanout fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "fan"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "fan"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody n _ = threadDelay 400000 >> pure (Right n)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1287,8 +1291,8 @@ scenarioUnawaitedChild :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mona
                           m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord], Either (Error EngineOnly) AwaitedOutcome, Maybe WorkflowRecord, [WorkflowId], Text)
 scenarioUnawaitedChild fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "forgetful"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "forgetful"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody value wctx = runStep wctx "double" (const (pure (value * 2)))
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1327,8 +1331,8 @@ scenarioLiftChildError :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mona
                           m (Either (Error GaveUp) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioLiftChildError fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let shipKey = newWorkflowKey "ship"
-        billKey = newWorkflowKey "bill"
+    let shipKey = newQualifiedWorkflowName "ship"
+        billKey = newQualifiedWorkflowName "bill"
         shipBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error Refused) ())
         shipBody () _ = pure (Left (ErrorApplication Refused))
     shipRefE <- registerWorkflowRef dbos shipKey shipBody
@@ -1379,8 +1383,8 @@ scenarioCaptureChildRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m,
                                m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioCaptureChildRefused fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "double"
-        parentKey = newWorkflowKey "badparent"
+    let childKey = newQualifiedWorkflowName "double"
+        parentKey = newQualifiedWorkflowName "badparent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody value wctx = runStep wctx "double" (const (pure (value * 2)))
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1417,8 +1421,8 @@ scenarioChildInsideStepRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar
                                   m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioChildInsideStepRefused fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "double"
-        parentKey = newWorkflowKey "badparent"
+    let childKey = newQualifiedWorkflowName "double"
+        parentKey = newQualifiedWorkflowName "badparent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody value wctx = runStep wctx "double" (const (pure (value * 2)))
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1453,8 +1457,8 @@ scenarioCascadeDeadline :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mon
                            m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Either (Error EngineOnly) AwaitedOutcome, [StepRecord])
 scenarioCascadeDeadline fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = threadDelay 30000000 >> pure (Right 1)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1499,8 +1503,8 @@ scenarioDeclinedDeadline :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mo
                             m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioDeclinedDeadline fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 1)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1550,8 +1554,8 @@ scenarioChildBudgetWins :: forall m. (MonadFork m, MonadMask m, MonadMVar m, Mon
                            m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioChildBudgetWins fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 1)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1596,8 +1600,8 @@ scenarioDeadlineInherited :: forall m. (MonadFork m, MonadMask m, MonadMVar m, M
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioDeadlineInherited fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 1)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1643,8 +1647,8 @@ scenarioCancelledChildAwaited :: forall m. (MonadFork m, MonadMask m, MonadMVar 
                                  m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord], Maybe WorkflowStatus, Maybe WorkflowStatus, Text)
 scenarioCancelledChildAwaited fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = threadDelay 30000000 >> pure (Right 1)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1696,7 +1700,7 @@ scenarioScopedBody :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTim
                       m (Either (Error EngineOnly) Int, [(Int, Text)])
 scenarioScopedBody fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "scoped-body"
+    let key = newQualifiedWorkflowName "scoped-body"
         body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body value wctx = do
           stepped <- runStep wctx "double" (\_ -> pure (value * 2))
@@ -1743,7 +1747,7 @@ scenarioScopedSelect fx = do
     let WorkflowId widText = wid
     created <-
       runSystemDB fx.wfSystemDB $ \db ->
-        SystemDB.initWorkflow db ((newWorkflow widText) {newWorkflowName = Just "L2ScopedSelect"}) Nothing
+        SystemDB.initWorkflow db ((newWorkflow widText) {newWorkflowName = Just "L2ScopedSelect"}) Nothing WorkflowIdReturnExisting
     creator <- case created of
       Left err -> throwIO (userError (show err))
       Right result -> pure result.initResultCreatorXid
@@ -1765,7 +1769,7 @@ scenarioScopedSelect fx = do
 checkScopedSelect :: (Either (Error EngineOnly) Int, [(Int, Text)]) -> Either String ()
 checkScopedSelect (outcome, steps)
   | outcome /= Right 1 = Left ("expected the fast arm's value, got: " <> show outcome)
-  | steps /= [(1, "fast"), (2, "DBOS.select_step")] = Left ("unexpected rows: " <> show steps)
+  | steps /= [(1, "fast"), (2, "DBOS.selectStep")] = Left ("unexpected rows: " <> show steps)
   | otherwise = Right ()
 
 -- | A losing step has its cancellation token fired: the loser registers
@@ -1780,7 +1784,7 @@ scenarioLosingTokenFired fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
     released <- newEmptyMVar
     watching <- newEmptyMVar
-    let parentKey = newWorkflowKey "parent"
+    let parentKey = newQualifiedWorkflowName "parent"
         parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
           slow <- pendingStep wctx "slow" $ \inner -> do
@@ -1824,7 +1828,7 @@ scenarioControlSelect :: forall m. (MonadAsync m, MonadFork m, MonadMask m, Mona
                          m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord], Maybe WorkflowStatus, Text)
 scenarioControlSelect fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let parentKey = newWorkflowKey "parent"
+    let parentKey = newQualifiedWorkflowName "parent"
     wid <- fx.wfFreshId "race-control-parent"
     let WorkflowId parentText = wid
         parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -1856,8 +1860,8 @@ scenarioSelectStepRaces :: forall m. (MonadAsync m, MonadFork m, MonadMask m, Mo
                            m (Int, [StepRecord], Text)
 scenarioSelectStepRaces fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 7)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1878,7 +1882,7 @@ scenarioSelectStepRaces fx = do
               selectStep
                 wctx
                 [ SelectArm "slow" slow (\outcome -> pure (outcome >>= \value -> Right value)),
-                  SelectArm "DBOS.get_result" awaited $ \outcome ->
+                  SelectArm "DBOS.getResult" awaited $ \outcome ->
                     pure $ case outcome of
                       Left err -> Left err
                       Right (Just stored) ->
@@ -1913,8 +1917,8 @@ scenarioStepIdPairs :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTi
                        m (Int, [StepRecord], Text)
 scenarioStepIdPairs fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody n _ = pure (Right n)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -1969,8 +1973,8 @@ scenarioAwaitInsideStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, Mo
                            m (Int, [StepRecord], Text)
 scenarioAwaitInsideStep fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 41)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -2022,8 +2026,8 @@ scenarioStaleAwaitRefused :: forall m. (MonadAsync m, MonadFork m, MonadMask m, 
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Text)
 scenarioStaleAwaitRefused fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "parent"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 1)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -2111,8 +2115,8 @@ scenarioJoinHeldKey fx = do
         derivedWid = WorkflowId (parentText <> "-0")
         queueName = "join-q-" <> holderText
         dedupKey = "order-42-" <> holderText
-        childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "joiner"
+        childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "joiner"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 9)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -2121,7 +2125,7 @@ scenarioJoinHeldKey fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          started <- startChildWorkflow wctx childRef (startOptionsDefault {startQueue = Just ((enqueueNew queueName) {deduplicationId = Just dedupKey, duplicationPolicy = ReturnExisting})}) Nothing
+          started <- startChildWorkflow wctx childRef (startOptionsDefault {startQueue = Just ((queueRequestNew queueName) {deduplicationId = Just dedupKey, duplicationPolicy = ReturnExisting})}) Nothing
           case started of
             Left err -> pure (Left err)
             Right child -> do
@@ -2142,7 +2146,7 @@ scenarioJoinHeldKey fx = do
       Right _ -> pure ()
     -- The holder, enqueued before the parent runs and still waiting when
     -- the child starts: a delay holds the key without running.
-    let holderQueue = (enqueueNew queueName) {deduplicationId = Just dedupKey, delay = Just (secondsDuration 3)}
+    let holderQueue = (queueRequestNew queueName) {deduplicationId = Just dedupKey, delay = Just (secondsDuration 3)}
     holderStarted <- startWorkflow exec childRef (startOptionsDefault {startWorkflowId = Just holderWid, startQueue = Just holderQueue}) Nothing
     case holderStarted of
       Left err -> throwIO (userError (show (err :: Error EngineOnly)))
@@ -2193,8 +2197,8 @@ scenarioEnqueuedChildReplays :: forall m. (MonadFork m, MonadMask m, MonadMVar m
                                 m (Text, Text, [StepRecord], [WorkflowId], Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioEnqueuedChildReplays fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "enqueuer"
+    let childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "enqueuer"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 7)
     childRefE <- registerWorkflowRef dbos childKey childBody
@@ -2210,7 +2214,7 @@ scenarioEnqueuedChildReplays fx = do
         parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
         parentBody () wctx = do
           (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <-
-            startChildWorkflow wctx childRef (startOptionsDefault {startQueue = Just (enqueueNew queueName)}) Nothing
+            startChildWorkflow wctx childRef (startOptionsDefault {startQueue = Just (queueRequestNew queueName)}) Nothing
           pure ((.workflowId) <$> started)
     parentReg <- registerWorkflow dbos parentKey parentBody
     case parentReg of
@@ -2261,7 +2265,7 @@ scenarioQueuedStartClaimedByNextPass fx =
     wid <- fx.wfFreshId "claim-window"
     let WorkflowId text = wid
         queueName = "claim-window-q-" <> text
-        key = newWorkflowKey "claim-window"
+        key = newQualifiedWorkflowName "claim-window"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body () _ = do
           gate <- newEmptyMVar
@@ -2274,7 +2278,7 @@ scenarioQueuedStartClaimedByNextPass fx =
       startWorkflow
         exec
         ref
-        (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just (enqueueNew queueName)})
+        (startOptionsDefault {startWorkflowId = Just wid, startQueue = Just (queueRequestNew queueName)})
         Nothing
     _ <- case _started of
       Left err -> throwIO (userError (show err))
@@ -2308,11 +2312,11 @@ scenarioDedupStartRecorded fx =
         WorkflowId parentText = parentWid
         queueName = "dedup-error-q-" <> holderText
         dedupKey = "order-7-" <> holderText
-        childKey = newWorkflowKey "child"
-        parentKey = newWorkflowKey "dedup-error-parent"
+        childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "dedup-error-parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 9)
-        dedupShape = (enqueueNew queueName) {deduplicationId = Just dedupKey, duplicationPolicy = Reject}
+        dedupShape = (queueRequestNew queueName) {deduplicationId = Just dedupKey, duplicationPolicy = Reject}
     childRefE <- registerWorkflowRef dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
@@ -2356,7 +2360,7 @@ scenarioDedupStartRecorded fx =
         childRef
         ( startOptionsDefault
             { startWorkflowId = Just holderWid,
-              startQueue = Just ((enqueueNew queueName) {deduplicationId = Just dedupKey})
+              startQueue = Just ((queueRequestNew queueName) {deduplicationId = Just dedupKey})
             }
         )
         Nothing
@@ -2434,9 +2438,9 @@ scenarioConflictStartRecorded fx =
     takenWid <- fx.wfFreshId "taken-child"
     parentWid <- fx.wfFreshId "conflict-parent"
     let WorkflowId takenText = takenWid
-        childKey = newWorkflowKey "child"
-        squatterKey = newWorkflowKey "squatter"
-        parentKey = newWorkflowKey "conflict-parent"
+        childKey = newQualifiedWorkflowName "child"
+        squatterKey = newQualifiedWorkflowName "squatter"
+        parentKey = newQualifiedWorkflowName "conflict-parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 9)
         squatterBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -2512,7 +2516,7 @@ scenarioBudgetCancels :: forall m. (MonadMVar m, MonadFork m, MonadMask m, Monad
                       => WfFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
 scenarioBudgetCancels fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
-    let key = newWorkflowKey "slow"
+    let key = newQualifiedWorkflowName "slow"
         body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         body () _ = threadDelay 1000000 >> pure (Right 7)
     refE <- registerWorkflowRef dbos key body
@@ -2615,7 +2619,7 @@ checkAwaitRecorded (n, steps, childText)
         ]
         | startName /= "child" -> Left ("expected the start step, got: " <> show startName)
         | startedChild /= childText -> Left ("expected the start to name the child, got: " <> show startedChild)
-        | awaitName /= "DBOS.get_result" -> Left ("expected the recorded await, got: " <> show awaitName)
+        | awaitName /= "DBOS.getResult" -> Left ("expected the recorded await, got: " <> show awaitName)
         | awaitOutput /= "99" -> Left ("expected the awaited output 99, got: " <> show awaitOutput)
         | awaitedChild /= childText -> Left ("expected the await to name the child, got: " <> show awaitedChild)
         | otherwise -> Right ()
@@ -2666,9 +2670,9 @@ checkChildIdsInBuildOrder (n, steps, parentText, firstChildOutput)
       [ (0, "child", Just (child 0)),
         (1, "child", Just (child 1)),
         (2, "child", Just (child 2)),
-        (3, "DBOS.get_result", Just (child 0)),
-        (4, "DBOS.get_result", Just (child 1)),
-        (5, "DBOS.get_result", Just (child 2))
+        (3, "DBOS.getResult", Just (child 0)),
+        (4, "DBOS.getResult", Just (child 1)),
+        (5, "DBOS.getResult", Just (child 2))
       ]
 
 -- | The refusal names the call; nothing was written for the refused
@@ -2700,7 +2704,7 @@ checkJoinHeldKey (ran, holderText, derived, listed, children) = case ran of
           ] -> do
             unless (startName == "child") $ Left ("expected the joining start, got: " <> show startName)
             unless (startedChild == holderText) $ Left ("expected the start to name the holder, got: " <> show startedChild)
-            unless (awaitName == "DBOS.get_result") $ Left ("expected the recorded await, got: " <> show awaitName)
+            unless (awaitName == "DBOS.getResult") $ Left ("expected the recorded await, got: " <> show awaitName)
             unless (awaitOutput == "9") $ Left ("expected the joined output recorded, got: " <> show awaitOutput)
             unless (awaitedChild == holderText) $ Left ("expected the await to name the holder, got: " <> show awaitedChild)
             unless (children == []) $ Left ("expected the holder among no children, got: " <> show children)
@@ -2763,6 +2767,83 @@ checkDedupStartRecorded out
 -- | The conflicting start is recorded with no child: the parent ends
 -- @ERROR@ with it, and the replay after the squatter's row is deleted ends
 -- with the same rendered error instead of starting the child.
+-- | A child start that refuses a taken id is recorded at the parent's step
+-- too: the parent returns the error with @?@ and ends @ERROR@; once the
+-- row holding the id is deleted the same start would go ahead, so only
+-- the record keeps the replay failing. Mirrors Rust's
+-- @a_rejected_child_start_replays_its_error_after_the_row_is_deleted@.
+scenarioRejectStartRecorded :: forall m. (MonadMVar m, MonadFork m, MonadAsync m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+                            => WfFixture m -> m ConflictStartOutcome
+scenarioRejectStartRecorded fx =
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    takenWid <- fx.wfFreshId "reused-child"
+    parentWid <- fx.wfFreshId "reject-parent"
+    let WorkflowId takenText = takenWid
+        childKey = newQualifiedWorkflowName "child"
+        parentKey = newQualifiedWorkflowName "reject-parent"
+        childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        childBody () _ = pure (Right 9)
+    childRefE <- registerWorkflowRef dbos childKey childBody
+    childRef <- case childRefE of
+      Left err -> throwIO (userError (show err))
+      Right r -> pure r
+    let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        parentBody () wctx = do
+          started <-
+            startChildWorkflow
+              wctx
+              childRef
+              (startOptionsDefault {startWorkflowId = Just takenWid, startWorkflowIdReusePolicy = WorkflowIdReject})
+              Nothing
+          pure $ case started of
+            Left err -> Left err
+            Right _ -> Right "started"
+    parentReg <- registerWorkflow dbos parentKey parentBody
+    case parentReg of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.wfLaunch dbos
+    -- The same function holds the id: a reuse even so.
+    firstChild <- runWorkflow exec childKey takenWid Nothing
+    case (firstChild :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) of
+      Right _ -> pure ()
+      other -> throwIO (userError ("the first child was supposed to run, got: " <> show other))
+    first <- runWorkflow exec parentKey parentWid Nothing
+    firstShown <- case (first :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) of
+      Left err -> pure (Text.pack (show err))
+      Right _ -> throwIO (userError "expected the refusing start to fail the parent")
+    steps <- fx.wfListSteps parentWid
+    parentRow <- fx.wfReadRow parentWid
+    -- With the first child gone the id is free, so only the record keeps
+    -- the replay failing.
+    _ <- deleteWorkflow dbos takenWid >>= \r -> case r of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    forked <- forkWorkflow dbos parentWid (Just (ForkStep 1)) defaultForkOptions
+    handle <- case forked of
+      Left err -> throwIO (userError (show (err :: Error EngineOnly)))
+      Right h -> pure (h :: WorkflowHandle m EngineOnly)
+    _ <- dequeueWorkflows dbos >>= \r -> case r of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    replayed <- handleResult handle
+    replayedShown <- case replayed of
+      Left err -> pure (Text.pack (show err))
+      Right _ -> throwIO (userError "expected the replay to end with the error")
+    childRow <- do
+      found <- runSystemDB fx.wfSystemDB (\db -> SystemDB.getWorkflow db takenWid)
+      case found of
+        Left err -> throwIO (userError (show err))
+        Right row -> pure row
+    pure
+      ConflictStartOutcome
+        { conflictFirst = firstShown,
+          conflictReplayed = replayedShown,
+          conflictSteps = steps,
+          conflictStatus = fmap (.workflowRecordStatus) parentRow,
+          conflictChildRow = childRow
+        }
+
 checkConflictStartRecorded :: ConflictStartOutcome -> Either String ()
 checkConflictStartRecorded out
   | out.conflictFirst /= out.conflictReplayed =
@@ -2783,6 +2864,29 @@ checkConflictStartRecorded out
             Left ("expected the refusal under the portable tag, got: " <> show step.stepRecordSerialization)
         | not (maybe False ("ConflictingWorkflow" `Text.isInfixOf`) step.stepRecordError) ->
             Left ("expected the recorded ConflictingWorkflow, got: " <> show step.stepRecordError)
+        | otherwise -> Right ()
+      other -> Left ("expected the one recorded refusal, got: " <> show other)
+
+checkRejectStartRecorded :: ConflictStartOutcome -> Either String ()
+checkRejectStartRecorded out
+  | out.conflictFirst /= out.conflictReplayed =
+      Left ("the replay ended differently: " <> show (out.conflictFirst, out.conflictReplayed))
+  | not ("WorkflowIdInUse" `Text.isInfixOf` out.conflictFirst) =
+      Left ("expected the refusing start's error, got: " <> show out.conflictFirst)
+  | out.conflictStatus /= Just Error =
+      Left ("expected the parent ERROR, got: " <> show out.conflictStatus)
+  | Just _ <- out.conflictChildRow =
+      Left ("the replay started the child: " <> show out.conflictChildRow)
+  | otherwise = case out.conflictSteps of
+      [step]
+        | step.stepRecordStepName /= "child" ->
+            Left ("expected the child start's step, got: " <> show step.stepRecordStepName)
+        | step.stepRecordChildWorkflowId /= Nothing ->
+            Left ("the refusal recorded a child id: " <> show step.stepRecordChildWorkflowId)
+        | step.stepRecordSerialization /= Just "portable_json" ->
+            Left ("expected the refusal under the portable tag, got: " <> show step.stepRecordSerialization)
+        | not (maybe False ("WorkflowIdInUse" `Text.isInfixOf`) step.stepRecordError) ->
+            Left ("expected the recorded WorkflowIdInUse, got: " <> show step.stepRecordError)
         | otherwise -> Right ()
       other -> Left ("expected the one recorded refusal, got: " <> show other)
 
@@ -3143,7 +3247,7 @@ checkCancelledChildAwaited (ran, steps, parentStatus, childStatus, childText)
     namesChild result = case result of
       Left (AwaitedWorkflowCancelled {workflowId}) -> workflowId == childText
       _ -> False
-    recordsChild rows = case [row | row <- rows, row.stepRecordStepName == "DBOS.get_result"] of
+    recordsChild rows = case [row | row <- rows, row.stepRecordStepName == "DBOS.getResult"] of
       [awaitRow] -> case awaitRow.stepRecordError of
         Just recorded -> case decodeErrorText recorded :: Either Text (Error EngineOnly) of
           Right (AwaitedWorkflowCancelled {workflowId}) -> workflowId == childText
@@ -3181,8 +3285,8 @@ checkSelectStepRaces (n, steps, childText)
     expected =
       [ (0, "child", Just (WorkflowId childText)),
         -- Id 1 is the losing step, built and dropped without a row.
-        (2, "DBOS.get_result", Just (WorkflowId childText)),
-        (3, "DBOS.select_step", Nothing)
+        (2, "DBOS.getResult", Just (WorkflowId childText)),
+        (3, "DBOS.selectStep", Nothing)
       ]
 
 -- | Each await sits immediately behind its own start: the pairs are
@@ -3198,11 +3302,11 @@ checkStepIdPairs (n, steps, parentText)
     child k = WorkflowId (parentText <> "-" <> Text.pack (show k))
     expected =
       [ (0, "child", Just (child 0)),
-        (1, "DBOS.get_result", Just (child 0)),
+        (1, "DBOS.getResult", Just (child 0)),
         (2, "child", Just (child 2)),
-        (3, "DBOS.get_result", Just (child 2)),
+        (3, "DBOS.getResult", Just (child 2)),
         (4, "child", Just (child 4)),
-        (5, "DBOS.get_result", Just (child 4))
+        (5, "DBOS.getResult", Just (child 4))
       ]
 
 -- | What every shared task case needs from io-classes: a constraint

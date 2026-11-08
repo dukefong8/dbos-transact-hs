@@ -50,7 +50,7 @@ Standing gates, every slice:
   is idle (`cabal build all` does not compile tests).
 - Oracle leg: `cargo test -p dbos --test <suite>` read-only from the Rust
   checkout; never copy code, never chase main.
-- psql against `$DBOS_DATABASE_URL` for the rows the slice writes and reads
+- psql against `$DBOS_SYSTEM_DATABASE_URL` for the rows the slice writes and reads
   (a green `cabal test` is not the final gate).
 - Facade discipline: every client-facing name lands in `DBOS.Transact`; every
   name the facade imports stays exported.
@@ -350,9 +350,9 @@ Ported in one slice (adopted an uncommitted #110 draft, then #109 on top):
 - Slice 6 (#106 `739f985`, version-index lookups, done): vendor migrations 124/125 + `highest_version(SOURCES)` (ported the oracle's computed ceiling, not a bump — listing a file raises it), `make db-migrate` 123→125, ceiling probe 123→125, `latestVersionNameStatement` retired for split `latestVersionNamedStatement`/`latestVersionUnnamedStatement` (UNION ALL owned+unclaimed probes / single timestamp probe) with `latestVersionNameTx` for the two dequeue checks and rewritten `latestApplicationVersionSession`; factored `versionRowDecoder`. Mem untouched (same verdicts, no indexes). Twins: live "each application sees its own and unclaimed versions" (30k planted rows in oracle thirds, app-membership assertions — exact names are unassertable on a shared DB — plus EXPLAIN pins for both index names, rows deleted after).
 - Slice 6 gates (2026-10-28): watcher sims green (89/89); new test green in isolation; versions+client groups 5/5 ×5; full binary 904/904 once, then 903/904 + 902/904 with the client-latest far-future flake (see below); psql recency proof 3481 `workflow_status` rows (1720 SUCCESS / 997 PENDING / 430 ENQUEUED / 189 ERROR / 134 CANCELLED / 7 MAX_RECOVERY / 4 DELAYED) + 338 notifications; oracle `cargo test -p dbos --test migrations` 30/30 read-only.
 - Slice-6 fallout, both exonerated: (1) first version of the new test asserted exact latest names and failed on concurrent rows — redesigned to app-membership + EXPLAIN pins with ancient stamps and end-delete (zero blast radius: rows never win newest-reads); red proof for the EXPLAIN discriminator via psql (old shape walks 9973 rows past peers, never touches the owner index). (2) client-latest (`a client reads the latest version of its own application`) failed 2/4 full runs on the far-future window of the neighbouring versions test — stash A/B (baseline binary, no slice-6 tree) fails identically, so pre-existing, not slice fallout. Isolation-green 4/4.
-- Slice 7 (#133 `99677cc`, WorkflowKey naming, done): `WorkflowKey` leaf module (`DBOS.Transact.WorkflowKey`: type, `new`/`method`/`instance` constructors, `workflowKeyFromRow`, render, Rust-shaped JSON) under ADR-0040 — `Registry` re-exports it, `Transact.Error` imports the leaf (direct import would cycle: Registry uses Error broadly, Rust tolerates the cycle, GHC does not); facade gains `methodWorkflowKey` beside `newWorkflowKey`, surface otherwise unchanged. `EnqueueOptions` loses `className`/`configName`; `clientEnqueueWorkflow*` take `WorkflowKey` (19 bare-name sites wrapped in `newWorkflowKey`, opts test rides `methodWorkflowKey` and now pins class/config columns on the row); engine `AlreadyRegistered`/`NotRegistered` carry the key (render via `renderWorkflowKey` — prose unchanged; datasource duplicate-registration keeps its exact message through a free-function key). Already present, untouched: key-taking registration, no `registerWorkflowAs`, no `ScheduleSpec`, dequeue via `workflowKeyFromRow`. Twins: shared `scenarioMethodDistinct` (live+sim) + converted opts/error round-trips.
+- Slice 7 (#133 `99677cc`, QualifiedWorkflowName naming, done): `QualifiedWorkflowName` leaf module (`DBOS.Transact.QualifiedWorkflowName`: type, `new`/`method`/`instance` constructors, `qualifiedWorkflowNameFromRow`, render, Rust-shaped JSON) under ADR-0040 — `Registry` re-exports it, `Transact.Error` imports the leaf (direct import would cycle: Registry uses Error broadly, Rust tolerates the cycle, GHC does not); facade gains `methodQualifiedWorkflowName` beside `newQualifiedWorkflowName`, surface otherwise unchanged. `EnqueueOptions` loses `className`/`configName`; `clientEnqueueWorkflow*` take `QualifiedWorkflowName` (19 bare-name sites wrapped in `newQualifiedWorkflowName`, opts test rides `methodQualifiedWorkflowName` and now pins class/config columns on the row); engine `AlreadyRegistered`/`NotRegistered` carry the key (render via `renderQualifiedWorkflowName` — prose unchanged; datasource duplicate-registration keeps its exact message through a free-function key). Already present, untouched: key-taking registration, no `registerWorkflowAs`, no `ScheduleSpec`, dequeue via `qualifiedWorkflowNameFromRow`. Twins: shared `scenarioMethodDistinct` (live+sim) + converted opts/error round-trips.
 - Slice 7 gates (2026-10-28): watcher sims green (123 modules, new twin OK); targeted lives green (opts row, error round-trip); Client group 46/46; oracle `cargo test -p dbos --test client` 33/33 read-only; full binary 904/905 in ~20s (sole failure the known client-latest far-future flake, isolation-green 3/3); psql recency proof 508 `workflow_status` rows (251 SUCCESS / 143 PENDING / 65 ENQUEUED / 27 ERROR / 18 CANCELLED / 3 DELAYED / 1 MAX_RECOVERY) + 50 notifications; demos untouched (no enqueue/error call sites).
-- Slice 7 review findings (open): (1) `WorkflowKey` FromJSON uses `.:` for optional fields, rejects key objects with missing keys that Rust accepts — fix is `.:?` + `.!= Nothing`; (2) ADR-0040 line 19 fixed ("facade gains only `methodWorkflowKey`").
+- Slice 7 review findings (open): (1) `QualifiedWorkflowName` FromJSON uses `.:` for optional fields, rejects key objects with missing keys that Rust accepts — fix is `.:?` + `.!= Nothing`; (2) ADR-0040 line 19 fixed ("facade gains only `methodQualifiedWorkflowName`").
 - Error modularization (ADR-0041 proposed, option B: no new files): `Registry` owns key + `RegistryError` (render + payload owned, central delegates), erasure boundary homed in `Workflow`, codec trio to `Serialization` (render + payload owned, central delegates); Setup/Step/Lifecycle stay central with logic central (per-owner partial functions deferred as negative-value; `shouldRecordStartError` precedent stands); `Functor` + `Void` inside central; facade re-exports both owned types opaque with renderers. S1+S2 gated (watcher + targeted + full binaries 904-905/906 + psql sane mixes + oracle 33/33 + cabal build all); failures only the known flake and the A/B-exonerated child-start race.
 - Slice 8 (#132 `3abe8a5`, patch/deprecate_patch, done): new `Patch` module (approved new module mirroring oracle `patch.rs`; PendingStep-compatible build/drive with peeked ids, `claimStepId` CAS, per-drive `checkHere`, `PatchNondeterminism` central ctor, `PATCH_PREFIX` const, `Mem.checkStep` name comparison mirroring Postgres); twins: 9 shared live+sim (in-step, both out-of-order, two-markers+shape, last-call, old-meets-marker both halves, recovered old path, deprecated-on-old, full v1-v5 progression) + round-trip; fork tail skipped (both backends copy rows name-blind, behaviors composed). Gates (2026-10-28): watcher 126 modules sims 9/9; live Patch 9/9; full binary 916/916 green with 1011 durable rows sane mix; oracle `patch` 10/10 read-only; cabal build all links demos.
 
@@ -665,7 +665,7 @@ stacks, and the live row's stored text is `{"positionalArgs":["-inf"],
 ### P — Haskell↔Python interop validation (after S2; repeat after S7)
 
 Harness lives **outside the repo** (e.g. `~/.local/share/dbos-interop/`),
-Python from `~/dev/dbos-transact-py`, one `DBOS_DATABASE_URL` for both sides;
+Python from `~/dev/dbos-transact-py`, one `DBOS_SYSTEM_DATABASE_URL` for both sides;
 Python's `DBOSClient` never migrates (`_client.py:157`), so the port's ceiling
 stays authoritative.
 
@@ -697,7 +697,7 @@ stays authoritative.
 
 Port status (2026-10-19): P2's in-repo half is `InteropTest`; P1/P3 ran
 out-of-process with Python's `.venv` and `DBOSClient` against the same
-`DBOS_DATABASE_URL`: the Haskell canonical row read back its result dict,
+`DBOS_SYSTEM_DATABASE_URL`: the Haskell canonical row read back its result dict,
 `interop_status` event, `interop_stream` value, and a two-step workflow's
 portable outputs (`one`=22, `two`=44). The non-finite row read back as
 `["-inf","+inf",null]` with both infinities as Python `str` (P3). The harness
@@ -915,7 +915,7 @@ holds the wrong behavior:
       moved to the gitignored `.tmp/` (2026-10-17) — nothing in the tree
       referenced either, and `.gitignore` now carries `.tmp/`.
 - [x] Close-out: full `cabal test all` + direct psql mirror against
-      `$DBOS_DATABASE_URL` with the watcher idle, `make db-migrate` 121->121 —
+      `$DBOS_SYSTEM_DATABASE_URL` with the watcher idle, `make db-migrate` 121->121 —
       green 2026-10-17 and landed as `d33f436` (committed directly at the
       user's request; `/review` not run on that slice).
 
@@ -1183,7 +1183,7 @@ the last module flips.
 2. Watcher: sim-only eval; read `ghcid.txt` after reload.
 3. Full suite via the standalone binary, freely alongside the watcher (the
    sim eval holds no fixture rows).
-4. psql mirror against `$DBOS_DATABASE_URL` (NOT the default `dbos` DB
+4. psql mirror against `$DBOS_SYSTEM_DATABASE_URL` (NOT the default `dbos` DB
    unless the env says so).
 5. Read-only Rust oracle spot-checks (`~/dev/dbos-transact-rust`).
 6. Slices land on `/review`, possibly batched, with gate numbers in the message.

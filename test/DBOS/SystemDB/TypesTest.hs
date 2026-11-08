@@ -6,10 +6,11 @@ module DBOS.SystemDB.TypesTest
 where
 
 import DBOS.Prelude
+import Data.Aeson qualified as Aeson
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
-import DBOS.SystemDB (ApplicationRowCounts (..), AppScope (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkCallRefusal (..), ForkOptions (..), IdleTransactionTimeout (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, idleTimeoutDefault, idleTimeoutMax, idleTimeoutMillis, idleTimeoutOptionNames, idleTimeoutValidate, initialStatus, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodWorkflowKey, millisDuration, newQueue, newSchedule, newWorkflow, newWorkflowKey, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, portableJsonSerialization, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, refuseInvalidForks, renameFromApplication, renderApplicationName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
+import DBOS.SystemDB (ApplicationRowCounts (..), AppScope (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkCallRefusal (..), ForkOptions (..), IdleTransactionTimeout (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QualifiedWorkflowName, QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, idleTimeoutDefault, idleTimeoutMax, idleTimeoutMillis, idleTimeoutOptionNames, idleTimeoutValidate, initialStatus, instanceQualifiedWorkflowName, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodQualifiedWorkflowName, millisDuration, newQueue, newSchedule, newWorkflow, newQualifiedWorkflowName, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, patchMarkerPrefix, portableJsonSerialization, qualifiedClassName, qualifiedConfigName, qualifiedName, qualifiedWorkflowNameFromRow, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, refuseInvalidForks, renameFromApplication, renderApplicationName, renderQualifiedWorkflowName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, rewindStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
 import DBOS.Transact
   (
   IdempotencyKey (..),
@@ -21,6 +22,7 @@ import DBOS.Transact
   WorkflowStatus (..),
   )
 import DBOS.SystemDB.Types (MessageUUID (..), NotificationRow (..), notificationRowForMessage, nullTopicSentinel)
+import DBOS.Transact.Debouncer (debounceDedupKey)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -32,6 +34,7 @@ tests =
       durationTests,
       iso8601Tests,
       newWorkflowTests,
+      qualifiedNameTests,
       workflowRecordTests,
       engineTests,
       queueTests,
@@ -52,6 +55,39 @@ ownerTests =
     [ testCase "an owner carries its row and token" $
         let owner = WorkflowOwner {ownerWorkflowId = WorkflowId "wf", ownerToken = "tok"}
          in (owner.ownerWorkflowId, owner.ownerToken) @?= (WorkflowId "wf", "tok")
+    ]
+
+-- | A workflow's qualified name holds one spelling of absence, displays
+-- each part in its place, and reads a stored spelling back. Mirrors Rust
+-- @a_name_holds_one_spelling_of_absence@,
+-- @a_name_displays_each_part_in_its_place@ and
+-- @a_deserialized_name_holds_one_spelling_of_absence@.
+qualifiedNameTests :: TestTree
+qualifiedNameTests =
+  testGroup
+    "QualifiedName"
+    [ testCase "every way of building a name holds one spelling of absence" $ do
+        let free = newQualifiedWorkflowName "f"
+        methodQualifiedWorkflowName "f" "" @?= free
+        instanceQualifiedWorkflowName "f" "" "" @?= free
+        qualifiedWorkflowNameFromRow "f" (Just "") (Just "") @?= free
+        instanceQualifiedWorkflowName "f" "C" "" @?= methodQualifiedWorkflowName "f" "C"
+        let unclassed = instanceQualifiedWorkflowName "f" "" "eu"
+        unclassed @?= qualifiedWorkflowNameFromRow "f" Nothing (Just "eu")
+        qualifiedClassName unclassed @?= Nothing
+        qualifiedConfigName unclassed @?= Just "eu",
+      testCase "a name displays each part in its place" $ do
+        renderQualifiedWorkflowName (newQualifiedWorkflowName "f") @?= "f"
+        renderQualifiedWorkflowName (methodQualifiedWorkflowName "f" "C") @?= "f/C"
+        renderQualifiedWorkflowName (instanceQualifiedWorkflowName "f" "C" "eu") @?= "f/C/eu"
+        renderQualifiedWorkflowName (instanceQualifiedWorkflowName "f" "" "eu") @?= "f//eu",
+      testCase "a deserialized name holds one spelling of absence" $ do
+        (Aeson.fromJSON (Aeson.object ["name" Aeson..= ("f" :: Text), "class_name" Aeson..= ("" :: Text), "config_name" Aeson..= (Nothing :: Maybe Text)]) :: Aeson.Result QualifiedWorkflowName)
+          @?= Aeson.Success (newQualifiedWorkflowName "f")
+        (Aeson.fromJSON (Aeson.object ["name" Aeson..= ("f" :: Text)]) :: Aeson.Result QualifiedWorkflowName)
+          @?= Aeson.Success (newQualifiedWorkflowName "f")
+        (Aeson.fromJSON (Aeson.toJSON (instanceQualifiedWorkflowName "f" "C" "eu")) :: Aeson.Result QualifiedWorkflowName)
+          @?= Aeson.Success (instanceQualifiedWorkflowName "f" "C" "eu")
     ]
 
 idleTimeoutTests :: TestTree
@@ -213,9 +249,12 @@ newWorkflowTests =
       testCase "rejects an empty workflow id" $
         validateNewWorkflow (newWorkflow "")
           @?= Left (invalidInput "workflow_id" "must not be empty"),
-      testCase "rejects option fields that are empty rather than absent" $
+      testCase "rejects an empty workflow name" $
         validateNewWorkflow ((newWorkflow "wf") {newWorkflowName = Just ""})
-          @?= Left (invalidInput "name" "must be absent rather than empty"),
+          @?= Left (invalidInput "name" "must not be empty"),
+      testCase "rejects option fields that are empty rather than absent" $
+        validateNewWorkflow ((newWorkflow "wf") {newWorkflowClassName = Just ""})
+          @?= Left (invalidInput "class_name" "must be absent rather than empty"),
       testCase "rejects a zero delay and a zero timeout" $ do
         noWait <- expectJust "durationFromMs 0" (durationFromMs 0)
         validateNewWorkflow ((newWorkflow "wf") {newWorkflowDelay = Just noWait})
@@ -302,66 +341,44 @@ engineTests =
   testGroup
     "Engine"
     [ testCase "pins cross-SDK step names" $
-        [ sleepStepName,
-          sendStepName,
-          sendBulkStepName,
-          writeStreamStepName,
-          closeStreamStepName,
-          readStreamStepName,
-          setEventStepName,
-          getEventStepName,
-          getResultStepName,
-          selectStepName,
-          selectStepStepName,
-          recvStepName,
-          debounceStepName,
-          cancelStepName,
-          resumeStepName,
-          deleteStepName,
-          forkStepName,
-          setWorkflowDelayStepName,
-          updateWorkflowAttributesStepName,
-          listWorkflowsStepName,
-          listStepsStepName,
-          createScheduleStepName,
-          upsertScheduleStepName,
-          getScheduleStepName,
-          listSchedulesStepName,
-          updateScheduleStepName,
-          pauseScheduleStepName,
-          resumeScheduleStepName,
-          deleteScheduleStepName
-        ]
-          @?= [ "DBOS.sleep",
-                "DBOS.send",
-                "DBOS.send_bulk",
-                "DBOS.write_stream",
-                "DBOS.close_stream",
-                "DBOS.read_stream",
-                "DBOS.set_event",
-                "DBOS.get_event",
-                "DBOS.get_result",
-                "DBOS.select_workflow",
-                "DBOS.select_step",
-                "DBOS.recv",
-                "DBOS.debounce_delayed_workflow",
-                "DBOS.cancel_workflow",
-                "DBOS.resume_workflow",
-                "DBOS.delete_workflow",
-                "DBOS.fork_workflow",
-                "DBOS.set_workflow_delay",
-                "DBOS.update_workflow_attributes",
-                "DBOS.list_workflows",
-                "DBOS.list_workflow_steps",
-                "DBOS.create_schedule",
-                "DBOS.upsert_schedule",
-                "DBOS.get_schedule",
-                "DBOS.list_schedules",
-                "DBOS.update_schedule",
-                "DBOS.pause_schedule",
-                "DBOS.resume_schedule",
-                "DBOS.delete_schedule"
-              ],
+        -- Mirrors Rust @the_step_names_are_pinned@: every recorded step
+        -- name, spelled out. A replay compares these exactly, so renaming
+        -- one strands every workflow recorded under the old name; this test
+        -- is where such a rename has to be made on purpose.
+        mapM_
+          (\(constant, literal) -> constant @?= literal)
+          [ (sleepStepName, "DBOS.sleep"),
+            (patchMarkerPrefix, "DBOS.patch-"),
+            (sendStepName, "DBOS.send"),
+            (sendBulkStepName, "DBOS.sendBulk"),
+            (writeStreamStepName, "DBOS.writeStream"),
+            (closeStreamStepName, "DBOS.closeStream"),
+            (readStreamStepName, "DBOS.readStream"),
+            (setEventStepName, "DBOS.setEvent"),
+            (getEventStepName, "DBOS.getEvent"),
+            (getResultStepName, "DBOS.getResult"),
+            (selectStepName, "DBOS.selectWorkflow"),
+            (selectStepStepName, "DBOS.selectStep"),
+            (recvStepName, "DBOS.recv"),
+            (debounceStepName, "DBOS.debounceDelayedWorkflow"),
+            (cancelStepName, "DBOS.cancelWorkflow"),
+            (resumeStepName, "DBOS.resumeWorkflow"),
+            (deleteStepName, "DBOS.deleteWorkflow"),
+            (forkStepName, "DBOS.forkWorkflow"),
+            (rewindStepName, "DBOS.rewindWorkflow"),
+            (setWorkflowDelayStepName, "DBOS.setWorkflowDelay"),
+            (updateWorkflowAttributesStepName, "DBOS.updateWorkflowAttributes"),
+            (listWorkflowsStepName, "DBOS.listWorkflows"),
+            (listStepsStepName, "DBOS.listWorkflowSteps"),
+            (createScheduleStepName, "DBOS.createSchedule"),
+            (upsertScheduleStepName, "DBOS.upsertSchedule"),
+            (getScheduleStepName, "DBOS.getSchedule"),
+            (listSchedulesStepName, "DBOS.listSchedules"),
+            (updateScheduleStepName, "DBOS.updateSchedule"),
+            (pauseScheduleStepName, "DBOS.pauseSchedule"),
+            (resumeScheduleStepName, "DBOS.resumeSchedule"),
+            (deleteScheduleStepName, "DBOS.deleteSchedule")
+          ],
       testCase "pins the stream sentinel and sweep cap" $ do
         -- Quoted: the stored form is the JSON encoding, as Rust stores it.
         streamClosedSentinel @?= "\"__DBOS_STREAM_CLOSED__\""
@@ -621,7 +638,7 @@ debounceTests =
         wait <- expectJust "durationFromMs 1000" (durationFromMs 1000)
         let request =
               DebounceRequest
-                { debounceRequestWorkflow = newWorkflowKey "wf",
+                { debounceRequestWorkflow = newQualifiedWorkflowName "wf",
                   debounceRequestQueueName = "q",
                   debounceRequestDeduplicationId = "k",
                   debounceRequestPeriod = wait,
@@ -631,10 +648,12 @@ debounceTests =
                 }
         debounceValidate request
           @?= Right ()
-        debounceValidate (request {debounceRequestWorkflow = newWorkflowKey ""})
+        debounceValidate (request {debounceRequestWorkflow = newQualifiedWorkflowName ""})
           @?= Left (invalidInput "workflow.name" "must not be empty")
-        debounceValidate (request {debounceRequestWorkflow = methodWorkflowKey "wf" ""})
-          @?= Left (invalidInput "workflow.class_name" "must be absent rather than empty"),
+        -- An empty class is absence, so it names the same workflow rather
+        -- than a bounce that would match no row.
+        debounceValidate (request {debounceRequestWorkflow = methodQualifiedWorkflowName "wf" ""})
+          @?= Right (),
       testCase "rejects a bounce period that is zero or too long to store" $ do
         -- Mirrors Rust a_bounce_refuses_a_zero_or_unstorable_period: the
         -- period is held to the rule delay is.
@@ -643,7 +662,7 @@ debounceTests =
         huge <- expectJust "durationFromSecs 1e16" (durationFromSecs 1e16)
         let base =
               DebounceRequest
-                { debounceRequestWorkflow = newWorkflowKey "wf",
+                { debounceRequestWorkflow = newQualifiedWorkflowName "wf",
                   debounceRequestQueueName = "q",
                   debounceRequestDeduplicationId = "k",
                   debounceRequestPeriod = wait,
@@ -654,7 +673,16 @@ debounceTests =
         debounceValidate (base {debounceRequestPeriod = noWait})
           @?= Left (invalidInput "period" "must be a positive, non-zero duration")
         debounceValidate (base {debounceRequestPeriod = huge})
-          @?= Left (invalidInput "period" "must fit in milliseconds as a 64-bit integer")
+          @?= Left (invalidInput "period" "must fit in milliseconds as a 64-bit integer"),
+      testCase "each shape of name spells its own deduplication id" $
+        -- Mirrors Rust @each_key_spells_its_deduplication_id@: the stored
+        -- form a later debounce of the name must reproduce.
+        [ debounceDedupKey (newQualifiedWorkflowName "f") "k",
+          debounceDedupKey (methodQualifiedWorkflowName "f" "C") "k",
+          debounceDedupKey (instanceQualifiedWorkflowName "f" "C" "eu") "k",
+          debounceDedupKey (instanceQualifiedWorkflowName "f" "" "eu") "k"
+        ]
+          @?= ["f-k", "f/C-k", "f/C/eu-k", "f//eu-k"]
     ]
 
 outcomeTests :: TestTree

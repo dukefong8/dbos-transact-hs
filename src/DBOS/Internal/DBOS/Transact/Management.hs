@@ -16,6 +16,7 @@ module DBOS.Transact.Management
     forkWorkflows,
     forkWorkflowsInWorkflow,
     updateWorkflowAttributesInWorkflow,
+    mergeWorkflowAttributesInWorkflow,
     forkFrom,
     forkFromInWorkflow,
     setWorkflowDelay,
@@ -26,6 +27,7 @@ module DBOS.Transact.Management
     rewindWorkflows,
     rewindWorkflowsInWorkflow,
     updateWorkflowAttributes,
+    mergeWorkflowAttributes,
     listWorkflows,
     ListWorkflowStepsOptions (..),
     defaultListWorkflowStepsOptions,
@@ -53,7 +55,7 @@ import Data.Int (Int64)
 import Data.Text.Encoding (encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Fork (..), ForkCallRefusal (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes)
+import DBOS.SystemDB.Types (AttributeUpdate (..), Fork (..), ForkCallRefusal (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes, validateAttributeUpdate)
 import DBOS.Transact.Connection (Connection (..), runSystemDB, withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, workflowId, workflowOwner)
 import DBOS.Transact.Error qualified as TransactError
@@ -77,6 +79,7 @@ data ManagementEvent
   | WorkflowsDeleted { managementDeleted :: Word64 }
   | WorkflowDelayMoveAsked { managementWorkflowId :: Text }
   | WorkflowAttributesReplaceAsked { managementWorkflowId :: Text }
+  | WorkflowAttributesMergeAsked { managementWorkflowId :: Text }
   deriving stock (Eq, Show)
 
 instance LogEvent ManagementEvent where
@@ -88,6 +91,7 @@ instance LogEvent ManagementEvent where
   eventSeverity WorkflowsDeleted {}               = SeverityInfo
   eventSeverity WorkflowDelayMoveAsked {}         = SeverityInfo
   eventSeverity WorkflowAttributesReplaceAsked {} = SeverityInfo
+  eventSeverity WorkflowAttributesMergeAsked {} = SeverityInfo
   renderEvent (WorkflowsCancelled cancelled) =
     "cancelled workflows cancelled=" <> showText cancelled
   renderEvent (WorkflowsResumed requested resumed) =
@@ -104,6 +108,8 @@ instance LogEvent ManagementEvent where
     "asked to move the workflow's release time workflow_id=" <> workflowId
   renderEvent (WorkflowAttributesReplaceAsked workflowId) =
     "asked to replace the workflow's attributes workflow_id=" <> workflowId
+  renderEvent (WorkflowAttributesMergeAsked workflowId) =
+    "asked to merge into the workflow's attributes workflow_id=" <> workflowId
 
 instance ToLogStr ManagementEvent where
   toLogStr = toLogStr . renderLine
@@ -404,18 +410,40 @@ setWorkflowDelayInWorkflow wctx workflowId delay =
 -- | Replaces the attributes attached to a workflow, or clears them when
 -- given 'Nothing'. Mirrors Rust @DBOS::update_workflow_attributes@ outside
 -- a workflow, where the call is plain: the encoding happens before any id
--- could be taken, and the backend replaces rather than merges.
+-- could be taken, and the backend replaces rather than merges. An id no
+-- workflow has is refused with 'NonExistentWorkflow', rather than reported
+-- as done with nothing written.
 updateWorkflowAttributes :: Monad m
                          => Connection m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-updateWorkflowAttributes conn workflowId attributes = do
-  result <- withConnection conn (\db -> SystemDB.updateWorkflowAttributes db workflowId attributes Nothing)
+updateWorkflowAttributes conn workflowId attributes =
+  updateWorkflowAttributesAs conn workflowId (Replace attributes) WorkflowAttributesReplaceAsked
+
+-- | Merges keys into a workflow's attributes, in one statement. A key
+-- already there takes the new value and the others stay as they are; a key
+-- set to @null@ is stored as @null@, not removed. Attributes that are
+-- absent, or are not an object, count as an empty object, so an empty map
+-- leaves @{}@ where there were none. Atomic, so two merges of different
+-- keys both land. Mirrors Rust @DBOS::merge_workflow_attributes@ outside
+-- a workflow. An id no workflow has is refused, as by
+-- 'updateWorkflowAttributes'.
+mergeWorkflowAttributes :: Monad m
+                        => Connection m -> WorkflowId -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+mergeWorkflowAttributes conn workflowId attributes =
+  updateWorkflowAttributesAs conn workflowId (Merge attributes) WorkflowAttributesMergeAsked
+
+-- | The shared write behind the replace and the merge: the backend judges
+-- the update and refuses a missing id, and the announcement is phrased as
+-- the request, not the effect — a replay reads back the recorded outcome
+-- and writes nothing, so it announces "asked to" again from the one call.
+updateWorkflowAttributesAs :: Monad m
+                           => Connection m -> WorkflowId -> AttributeUpdate -> (Text -> ManagementEvent) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+updateWorkflowAttributesAs conn workflowId update asked = do
+  result <- withConnection conn (\db -> SystemDB.updateWorkflowAttributes db workflowId update Nothing)
   case result of
     Left err -> pure (Left err)
-    -- Mirrors @update_workflow_attributes@: phrased as the request, not the
-    -- effect — no count comes back, so this announces unconditionally.
     Right () -> do
       let WorkflowId workflowText = workflowId
-      runTracer conn.connTracer (WorkflowAttributesReplaceAsked workflowText)
+      runTracer conn.connTracer (asked workflowText)
       pure (Right ())
 
 -- | Replaces a workflow's attributes as a step of the calling workflow, or
@@ -434,6 +462,24 @@ updateWorkflowAttributesInWorkflow wctx workflowId attributes =
         wctx
         updateWorkflowAttributesStepName
         (\_ -> updateWorkflowAttributes conn workflowId attributes)
+  where
+    conn = wctx.wctxConn
+
+-- | Merges keys into a workflow's attributes as a step of the calling
+-- workflow. Recorded under the same step name as a replacement, as the
+-- oracle records both under one. The encoding happens before the step id
+-- is taken, as above.
+mergeWorkflowAttributesInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                                  => WorkflowCtx exec m -> WorkflowId -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+mergeWorkflowAttributesInWorkflow wctx workflowId attributes =
+  case validateAttributeUpdate (Merge attributes) of
+    Left err -> pure (Left (TransactError.fromSystemDB err))
+    Right () ->
+      runStepWith
+        stepOptionsDefault
+        wctx
+        updateWorkflowAttributesStepName
+        (\_ -> mergeWorkflowAttributes conn workflowId attributes)
   where
     conn = wctx.wctxConn
 
