@@ -166,7 +166,7 @@ statusWf = handleStatus
 
 -- | A retrieved handle names its workflow and reads its status. Returns the
 -- requested id, the handle's id, and the status it reports.
-scenarioRetrieveStatus :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRetrieveStatus :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => HandleFixture m ->
                           m (Text, Text, Maybe WorkflowStatus)
 scenarioRetrieveStatus fx = do
@@ -190,7 +190,7 @@ scenarioRetrieveStatus fx = do
           Right mStatus -> pure (widText, handle.workflowId, mStatus)
 
 -- | A handle result adopts the recorded output. Returns the decoded value.
-scenarioResultAdopts :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioResultAdopts :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                      => HandleFixture m ->
                         m Int
 scenarioResultAdopts fx = do
@@ -217,7 +217,7 @@ scenarioResultAdopts fx = do
 
 -- | A handle result reports the error a failed run recorded. Returns the
 -- failure's step and message fields.
-scenarioFailError :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioFailError :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                   => HandleFixture m ->
                      m (Text, Text)
 scenarioFailError fx = do
@@ -246,7 +246,7 @@ scenarioFailError fx = do
 
 -- | A handle over a deleted row reports its absence. Returns the deleted
 -- count and the status the fresh handle reads.
-scenarioDeletedAbsent :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDeletedAbsent :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => HandleFixture m ->
                          m (Word64, Maybe WorkflowStatus)
 scenarioDeletedAbsent fx = do
@@ -310,7 +310,7 @@ scenarioDropHandle fx = do
 
 -- | A scoped await records the child's result under the parent. Returns the
 -- decoded value and the parent's recorded step names.
-scenarioScopedAwait :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioScopedAwait :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                     => HandleFixture m ->
                        m (Int, [Text])
 scenarioScopedAwait fx = do

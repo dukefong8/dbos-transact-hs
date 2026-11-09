@@ -447,7 +447,7 @@ checkTimeoutAllTimeout outcome = case outcome of
 checkPlainNotPreemptible :: (Either (Error EngineOnly) Int, [StepRecord]) -> Either String ()
 checkPlainNotPreemptible (outcome, steps) = do
   case outcome of
-    Left (SystemDatabase SystemDB.WorkflowConflict {}) -> pure ()
+    Left (WorkflowCancelled {}) -> pure ()
     other -> Left ("expected the post-cancel record to be refused, got: " <> show other)
   unless (null steps) $ Left ("expected no recorded step, got: " <> show steps)
 
@@ -474,6 +474,6 @@ checkTokenDrop fired =
 checkPreemptible :: (Either (Error EngineOnly) Int, [StepRecord]) -> Either String ()
 checkPreemptible (outcome, steps) = do
   case outcome of
-    Left (SystemDatabase SystemDB.WorkflowCancelled {}) -> pure ()
+    Left (WorkflowCancelled {}) -> pure ()
     other -> Left ("expected WorkflowCancelled, got: " <> show other)
   unless (null steps) $ Left ("expected no recorded outcome, got: " <> show steps)

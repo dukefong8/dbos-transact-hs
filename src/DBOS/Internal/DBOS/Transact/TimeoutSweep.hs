@@ -47,11 +47,13 @@ sweepBatch = 1000
 sweepIntervalMicros :: Int
 sweepIntervalMicros = 1000000
 
--- | Starts the sweep as a task shutdown aborts with every other one: its
--- own task rather than a step of the dequeue supervisor's tick, so
--- back-to-back full batches never hold up queue reconciliation.
+-- | Starts the sweep as a monitor: shutdown aborts it once the workflows
+-- have drained, because a workflow still running may wait on it to record
+-- its timeout. Its own task rather than a step of the dequeue
+-- supervisor's tick, so back-to-back full batches never hold up queue
+-- reconciliation.
 spawnTimeoutSweep :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m) => Tasks m -> Connection m -> m ()
-spawnTimeoutSweep tasks conn = void (spawnTracked tasks (sweepForever conn))
+spawnTimeoutSweep tasks conn = void (spawnTracked tasks "timeout sweep" (sweepForever conn))
 
 -- | Runs passes until the task is aborted.
 sweepForever :: (MonadTimer m) => Connection m -> m ()

@@ -92,13 +92,13 @@ import DBOS.Transact.Config (Serializer (..), systemDatabaseUrlEnv, defaultOutco
 import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, withConnection)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, WorkflowHandle (workflowId), pollingHandle)
-import DBOS.Transact.Identity (validateAppName)
+import DBOS.Transact.Identity (refuseAppName, validateAppName)
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, latestAppVersion, listAppVersions, mergeWorkflowAttributes, promoteAppVersion, promoteAppVersionFor, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
 import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
 import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
 import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), QueueRequest (..), Submitted (..), queueRequestNew, initOrJoin, storedPriority, validateStart)
+import DBOS.Transact.Workflow (DuplicationPolicy (..), EnqueueOptions (..), QueueRequest (..), Submitted (..), Timeout (..), enqueueOptionsNew, queueRequest, queueRequestNew, initOrJoin, refuseEmptyQueueName, refuseNamelessWorkflow, storedPriority, timeoutBudget, validateEnqueueOptions, validateStart)
 import Hasql.Transaction qualified as Tx
 import System.Environment (lookupEnv)
 
@@ -290,86 +290,6 @@ clientSendMessageInTx :: Client IO -> Text -> Tx.Transaction () -> EncodedSendMe
 clientSendMessageInTx client operation callerWrites message serialization fallback sendToForks =
   clientSendMessagesInTx client operation callerWrites [message] serialization [fallback] sendToForks
 
--- | What a client may say about an enqueue, beyond the input. Flat, as
--- Python's and Java's @EnqueueOptions@ are: what to ask of the queue sits
--- beside everything else, so an enqueue by name is one type. A start says
--- the same queue-shaped things in a 'QueueRequest', under
--- 'StartOptions' 'startQueue', because there the queue is optional and
--- those settings exist only with one. Apart from the queue's own name,
--- the two spell each setting the same way, and are checked by the same
--- rules. Mirrors Rust @EnqueueOptions@.
-data EnqueueOptions = EnqueueOptions
-  { queueName :: Text,
-    deduplicationId :: Maybe Text,
-    duplicationPolicy :: DuplicationPolicy,
-    priority :: Maybe Word32,
-    partitionKey :: Maybe Text,
-    delay :: Maybe Duration,
-    workflowId :: Maybe Text,
-    workflowIdReusePolicy :: WorkflowIdReusePolicy,
-    appName :: Maybe Text,
-    appVersion :: Maybe Text,
-    timeout :: Maybe Duration,
-    attributes :: Maybe (Map Text Value)
-  }
-  deriving stock (Eq, Show)
-
--- | The refusal a client enqueue of a nameless workflow gets: nothing could
--- ever dequeue the row. A client takes the name from its caller; an
--- executor's starts take theirs from a registration, which refuses it.
--- Mirrors Rust @EnqueueOptions::validate@.
-refuseNamelessWorkflow :: QualifiedWorkflowName -> Text -> Maybe (TransactError.Error e)
-refuseNamelessWorkflow workflow queueName
-  | Text.null (qualifiedName workflow) =
-      Just
-        ( TransactError.InvalidArgument
-            "enqueue a workflow"
-            ("queue `" <> queueName <> "`: `workflow` must not be empty")
-        )
-  | otherwise = Nothing
-
--- | Refuses an empty queue name up front, naming the field the caller
--- wrote — rather than leaving the insert to refuse the column under the
--- name a start's request gives it. Mirrors the @queue_name@ arm of Rust
--- @EnqueueOptions::validate@.
-refuseEmptyQueueName :: Text -> Maybe (TransactError.Error e)
-refuseEmptyQueueName queueName
-  | Text.null queueName =
-      Just (TransactError.InvalidArgument "enqueue a workflow" "`queue_name` must not be empty")
-  | otherwise = Nothing
-
--- | A plain enqueue onto a queue, asking for nothing else.
-enqueueOptionsNew :: Text -> EnqueueOptions
-enqueueOptionsNew queueName =
-  let request = queueRequestNew queueName
-   in EnqueueOptions
-        { queueName = request.name,
-          deduplicationId = request.deduplicationId,
-          duplicationPolicy = request.duplicationPolicy,
-          priority = request.priority,
-          partitionKey = request.partitionKey,
-          delay = request.delay,
-          workflowId = Nothing,
-          workflowIdReusePolicy = WorkflowIdReturnExisting,
-          appName = Nothing,
-          appVersion = Nothing,
-          timeout = Nothing,
-          attributes = Nothing
-        }
-
--- | The queue-shaped half, as a start would say it, which is what the row
--- and the shared checks are written against. Mirrors Rust
--- @EnqueueOptions::queue_request@.
-queueRequest :: EnqueueOptions -> QueueRequest
-queueRequest options =
-  (queueRequestNew options.queueName)
-    { deduplicationId = options.deduplicationId,
-      duplicationPolicy = options.duplicationPolicy,
-      priority = options.priority,
-      partitionKey = options.partitionKey,
-      delay = options.delay
-    }
-
 -- | Enqueues a workflow, onto a queue, and hands back a polling
 -- handle to it. The workflow is the name it was registered under; a free
 -- function's name alone converts into one. Mirrors @Client::enqueue@.
@@ -379,6 +299,12 @@ clientEnqueueWorkflow client workflow queueName input =
   clientEnqueueWorkflowWith client workflow (enqueueOptionsNew queueName) input
 
 -- | 'clientEnqueueWorkflow', with something to say about how. A call that
+-- names no version records none — which the dequeue admits only from the
+-- latest registered version — while a named version pins the row to
+-- executors running exactly that code. A deduplication collision is refused,
+-- unless the policy asks to join the holder instead. A workflow body
+-- enqueues through 'enqueueWorkflowByNameInWorkflow' instead: this call
+-- is not a checkpoint, so a replayed body would enqueue again.
 -- names no version records none — which the dequeue admits only from the
 -- latest registered version — while a named version pins the row to
 -- executors running exactly that code. A deduplication collision is refused,
@@ -398,13 +324,9 @@ clientEnqueueWorkflowWith client workflow options input =
 clientEnqueueWorkflowWithDebounce :: MonadSTM m
                                    => Client m -> QualifiedWorkflowName -> EnqueueOptions -> Maybe (Maybe Duration) -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 clientEnqueueWorkflowWithDebounce client workflow options debounceCreation input =
-  case refuseNamelessWorkflow workflow options.queueName of
-    Just err -> pure (Left err)
-    Nothing -> case refuseEmptyQueueName options.queueName of
-      Just err -> pure (Left err)
-      Nothing -> case validateStart (Just (queueRequest options)) options.timeout options.workflowId options.workflowIdReusePolicy of
-        Left err -> pure (Left err)
-        Right () -> do
+  case validateEnqueueOptions workflow options of
+    Left err -> pure (Left err)
+    Right () -> do
           generated <- generatedWorkflowId client.conn
           let request = queueRequest options
               workflowText = fromMaybe generated options.workflowId
@@ -428,7 +350,7 @@ clientEnqueueWorkflowWithDebounce client workflow options debounceCreation input
                   newWorkflowDelay = options.delay,
                   newWorkflowIsDebounced = isJust debounceCreation,
                   newWorkflowDebounceTimeout = fromMaybe Nothing debounceCreation,
-                  newWorkflowTimeout = options.timeout,
+                  newWorkflowTimeout = timeoutBudget options.timeout,
                   newWorkflowDeadline = Nothing,
                   newWorkflowAttributes = encodeAttributes options.attributes,
                   newWorkflowExecutorId = Nothing,
@@ -456,13 +378,9 @@ clientEnqueueWorkflowWithDebounce client workflow options debounceCreation input
 -- commits.
 clientEnqueueWorkflowInTx :: Client IO -> QualifiedWorkflowName -> Text -> Tx.Transaction () -> EnqueueOptions -> Maybe WorkflowInput -> IO (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle IO e))
 clientEnqueueWorkflowInTx client workflow operation callerWrites options input =
-  case refuseNamelessWorkflow workflow options.queueName of
-    Just err -> pure (Left err)
-    Nothing -> case refuseEmptyQueueName options.queueName of
-      Just err -> pure (Left err)
-      Nothing -> case validateStart (Just (queueRequest options)) options.timeout options.workflowId options.workflowIdReusePolicy of
-        Left err -> pure (Left err)
-        Right () -> case options.duplicationPolicy of
+  case validateEnqueueOptions workflow options of
+    Left err -> pure (Left err)
+    Right () -> case options.duplicationPolicy of
           ReturnExisting ->
             pure (Left (TransactError.InvalidArgument "enqueue in transaction" "duplication_policy 'return-existing' is not supported by enqueue_in_transaction. Use enqueue instead."))
           _ -> do
@@ -488,7 +406,7 @@ clientEnqueueWorkflowInTx client workflow operation callerWrites options input =
                       newWorkflowPriority = storedPriority request,
                       newWorkflowQueuePartitionKey = options.partitionKey,
                       newWorkflowDelay = options.delay,
-                      newWorkflowTimeout = options.timeout,
+                      newWorkflowTimeout = timeoutBudget options.timeout,
                       newWorkflowDeadline = Nothing,
                       newWorkflowAttributes = encodeAttributes options.attributes,
                       newWorkflowExecutorId = Nothing,

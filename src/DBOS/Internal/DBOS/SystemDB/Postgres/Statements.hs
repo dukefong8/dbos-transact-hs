@@ -168,7 +168,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Error (Error (..), decodePortableError, encodePortableError, shouldRecord)
-import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..), WorkflowStatus (Cancelled), getEventStepName, isActiveStatus, parseWorkflowStatus, portableJsonSerialization, recvStepName, rewindStepName, setEventStepName, streamClosedSentinel)
+import DBOS.SystemDB.Types (OnExistingQueue (..), RenameFrom (..), WorkflowStatus (Cancelled), getEventStepName, isActiveStatus, parseWorkflowStatus, portableJsonSerialization, recvStepName, rewindStepName, setEventStepName, streamClosedSentinel, workflowStatusText)
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
@@ -1356,8 +1356,11 @@ checkCallerStep stepName (Just (callerWid, callerStep)) = do
           Left _ -> Left (Malformed "unreadable recorded step error")
 
 -- | Refuses the write unless @token@ still owns its workflow, and locks the
--- row until the transaction ends. A missing row, a cleared owner, and a
--- token that is not the row's all refuse the same way: the write that found
+-- row until the transaction ends. A cancelled row is refused as
+-- 'WorkflowCancelled' whoever asks — the status is read in the same
+-- statement and tested before the token, since cancellation does not
+-- clear the owner. A missing row, a cleared owner, and a token that is
+-- not the row's all refuse as 'WorkflowConflict': the write that found
 -- out rolled back, and the execution holding the token must stop and wait
 -- for the owner's outcome. The sim judges the same verdicts with an inline
 -- mirror, so skipping work, recording outcomes, and refusing calls cannot
@@ -1366,15 +1369,16 @@ checkOwnerTx :: Text -> Text -> Tx.Transaction (Either Error ())
 checkOwnerTx workflowId token = do
   held <- Tx.statement workflowId checkOwnerStatement
   pure $ case held of
-    Just (Just kept) | kept == token -> Right ()
+    Just (_, status) | status == workflowStatusText Cancelled -> Left (WorkflowCancelled {workflowId = workflowId})
+    Just (Just kept, _) | kept == token -> Right ()
     _ -> Left (WorkflowConflict {workflowId = workflowId})
 
-checkOwnerStatement :: Statement.Statement Text (Maybe (Maybe Text))
+checkOwnerStatement :: Statement.Statement Text (Maybe (Maybe Text, Text))
 checkOwnerStatement =
   Statement.preparable
-    "select owner_xid from dbos.workflow_status where workflow_uuid = $1 for no key update"
+    "select owner_xid, status from dbos.workflow_status where workflow_uuid = $1 for no key update"
     (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe (Decoders.column (Decoders.nullable Decoders.text)))
+    (Decoders.rowMaybe ((,) <$> Decoders.column (Decoders.nullable Decoders.text) <*> Decoders.column (Decoders.nonNullable Decoders.text)))
 
 -- | How a caller step's recorded bytes are tagged. One codec writes portable
 -- JSON; NULL, the empty string and legacy @rust_serde@ read as native. An

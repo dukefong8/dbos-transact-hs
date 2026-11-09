@@ -124,15 +124,17 @@ data LocalTaskOutcome a
 -- module: the type is the seam, the implementation that fills it is the
 -- engine's.
 data TaskSpawner m = TaskSpawner
-  { spawnLocalTask :: forall a. (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
+  { spawnLocalTask :: forall a. Text -> (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
   , spawnerClearCheckpoints :: Text -> m ()
   }
 
 -- | Spawns an action detached on the spawner's registry and hands back the
 -- box its outcome lands in, filled while the task unwinds. The one call
 -- site for the record's field, so callers never touch record-dot on a
--- function-typed field.
-spawnLocal :: TaskSpawner m -> (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
+-- function-typed field. The label is what shutdown calls the task when it
+-- reports one it is waiting on or cancelled: the workflow id for an
+-- execution, @"start {id}"@ for a detached child start.
+spawnLocal :: TaskSpawner m -> Text -> (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
 spawnLocal (TaskSpawner spawn _) = spawn
 
 -- | Drops one finished workflow's datasource checkpoints through the

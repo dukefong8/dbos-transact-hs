@@ -28,7 +28,7 @@ import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Checkpoint (StepPlacement (..), placeCall)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx, ownerToken, stepId, withSystemDB, workflowId)
-import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText, fromSerializationError)
+import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText, fromExecution, fromSerializationError)
 import DBOS.Transact.Serialization (SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Transact.Serialization qualified as Serialization
 
@@ -133,9 +133,9 @@ readStreamWith place runDb caller wid key initialOffset options = do
                     Just callerId -> do
                       found <- runDb (\db -> SystemDB.getWorkflow db callerId)
                       pure $ case found of
-                        Left err -> Just (SystemDatabase err)
+                        Left err -> Just (fromExecution err)
                         Right (Just WorkflowRecord {workflowRecordStatus = Cancelled}) ->
-                          Just (SystemDatabase (SystemDBError.WorkflowCancelled {workflowId = unwrapId callerId}))
+                          Just (WorkflowCancelled {workflowId = unwrapId callerId})
                         _ -> Nothing
                   case cancelled of
                     Just err -> pure (live {readerEnded = True}, Left err)
@@ -156,9 +156,9 @@ readStreamWith place runDb caller wid key initialOffset options = do
                       awaited <- runDb (\db -> SystemDB.awaitStreamValues db streamWorkflow streamKey live.readerOffset streamPageSize deadline polling)
                       case awaited of
                         Left err -> do
-                          let readError = SystemDatabase err
+                          let readError = fromExecution err
                           recorded <- recordRead placement startedAt (OutcomeError (encodeErrorText readError)) (Just portableJsonSerialization)
-                          pure (live {readerEnded = True}, either (Left . SystemDatabase) (const (Left readError)) recorded)
+                          pure (live {readerEnded = True}, either (Left . fromExecution) (const (Left readError)) recorded)
                         Right Types.TimedOut | isNothing options'.timeout -> drivePull placement startedAt live
                         Right Types.TimedOut -> do
                           -- The reader's own workflow names the timeout: a
@@ -169,10 +169,10 @@ readStreamWith place runDb caller wid key initialOffset options = do
                                 Nothing -> case streamWorkflow of WorkflowId streamView -> streamView
                               timedOut = StreamTimeout readerText streamKey options'.timeout
                           recorded <- recordRead placement startedAt (OutcomeError (encodeErrorText timedOut)) (Just portableJsonSerialization)
-                          pure (live {readerEnded = True}, either (Left . SystemDatabase) (const (Left timedOut)) recorded)
+                          pure (live {readerEnded = True}, either (Left . fromExecution) (const (Left timedOut)) recorded)
                         Right Types.Ended -> do
                           recorded <- recordRead placement startedAt (OutcomeOutput (Just streamClosedSentinel)) (Just portableJsonSerialization)
-                          pure (live {readerEnded = True}, either (Left . SystemDatabase) (const (Right Nothing)) recorded)
+                          pure (live {readerEnded = True}, either (Left . fromExecution) (const (Right Nothing)) recorded)
                         Right (Types.Values entries) -> deliverBuffered placement startedAt live (fillBuffer entries)
         -- Deliver the buffered head under the pull's id: recorded before it
         -- is handed over, so a read dropped mid-record loses nothing and a
@@ -185,11 +185,11 @@ readStreamWith place runDb caller wid key initialOffset options = do
           entry : rest
             | isClose entry -> do
                 recorded <- recordRead pullPlacement pullStartedAt (OutcomeOutput (Just entry.encodedValue)) entry.encodedSerialization
-                pure (st {readerEnded = True, readerBuffer = []}, either (Left . SystemDatabase) (const (Right Nothing)) recorded)
+                pure (st {readerEnded = True, readerBuffer = []}, either (Left . fromExecution) (const (Right Nothing)) recorded)
             | otherwise -> do
                 recorded <- recordRead pullPlacement pullStartedAt (OutcomeOutput (Just entry.encodedValue)) entry.encodedSerialization
                 case recorded of
-                  Left err -> pure (st {readerEnded = True}, Left (SystemDatabase err))
+                  Left err -> pure (st {readerEnded = True}, Left (fromExecution err))
                   Right () ->
                     case decodeWorkflowValue "stream value" (Just (SerializedWorkflowValue entry.encodedValue (Serialization <$> entry.encodedSerialization))) of
                       Left codecError -> pure (st {readerBuffer = rest, readerOffset = st.readerOffset + 1}, Left (decodeFailure codecError))
@@ -206,7 +206,7 @@ readStreamWith place runDb caller wid key initialOffset options = do
           Recorded readerWctx stepNo | currentState.readerReplaying -> do
             found <- withSystemDB readerWctx (\db -> SystemDB.checkStep db (WorkflowId (workflowId readerWctx)) stepNo readStreamStepName)
             case found of
-              Left err -> pure (Just (currentState {readerEnded = True}, Left (SystemDatabase err)))
+              Left err -> pure (Just (currentState {readerEnded = True}, Left (fromExecution err)))
               Right Nothing -> pure Nothing
               Right (Just record) -> case record.stepRecordError of
                 Just errorText -> case decodeErrorText errorText of
@@ -238,14 +238,14 @@ writeStream wctx key value = do
   let (stepNo, writtenBy) = writePosition placement
   written <- withSystemDB wctx $ \db ->
     SystemDB.writeStream db (WorkflowId (workflowId wctx)) stepNo key encoded.serializedText (unSerialization <$> encoded.serializedSerialization) writtenBy (ownerToken wctx)
-  pure (either (Left . SystemDatabase) Right written)
+  pure (either (Left . fromExecution) Right written)
 
 closeStream :: MonadSTM m => WorkflowCtx exec m -> Text -> m (Either (Error EngineOnly) ())
 closeStream wctx key = do
   placement <- placeCall wctx
   let (stepNo, writtenBy) = writePosition placement
   closed <- withSystemDB wctx $ \db -> SystemDB.closeStream db (WorkflowId (workflowId wctx)) stepNo key writtenBy (ownerToken wctx)
-  pure (either (Left . SystemDatabase) Right closed)
+  pure (either (Left . fromExecution) Right closed)
 
 -- | The row a stream write lands on: a workflow-level write carries its step
 -- id and is replay-suppressed; a step-level write carries the enclosing

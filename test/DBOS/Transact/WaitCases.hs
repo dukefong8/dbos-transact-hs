@@ -181,10 +181,14 @@ scenarioRepeated :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
                  => WaitFixture m -> m (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) ())
 scenarioRepeated fx = do
   wid <- fx.wfFreshWorkflowId "repeated"
-  fx.wfSettle wid
-  first <- wfRun fx wid $ \ctx -> selectWorkflow ctx [wid, wid]
-  outcome <- wfRun fx wid $ \ctx -> joinWorkflows ctx [wid, wid]
-  pure (wid, first, outcome)
+  other <- fx.wfFreshWorkflowId "repeated-other"
+  fx.wfSettle other
+  -- The select runs under the pending row, so its checkpoint lands: a
+  -- select over a settled row has no owner to record with, and the write
+  -- is refused rather than silently dropped.
+  first <- wfRun fx wid $ \ctx -> selectWorkflow ctx [wid, other, wid]
+  outcome <- wfRun fx wid $ \ctx -> joinWorkflows ctx [other, other]
+  pure (other, first, outcome)
 
 -- * Checks
 
@@ -267,8 +271,8 @@ checkEmptyAll (outcome, checkpoint) = do
 
 -- | A repeated id is accepted by both waits.
 checkRepeated :: (WorkflowId, Either (Error EngineOnly) WorkflowId, Either (Error EngineOnly) ()) -> Either String ()
-checkRepeated (wid, first, outcome) = do
-  unless (first == Right wid) $ Left ("expected the repeated id to win, got: " <> show first)
+checkRepeated (other, first, outcome) = do
+  unless (first == Right other) $ Left ("expected the settled id to win, got: " <> show first)
   unless (outcome == Right ()) $ Left ("expected the repeated join to complete, got: " <> show outcome)
 
 -- * Executor-level waits

@@ -184,7 +184,7 @@ runStep wctx name body = do
       startedAt <- timestampNow
       checked <- withSystemDB wctx (\db -> SystemDB.checkStep db workflowId' stepId' name)
       case checked of
-        Left err -> pure (Left (TransactError.fromSystemDB err))
+        Left err -> pure (Left (TransactError.fromExecution err))
         Right (Just recorded) -> do
           runTracer wctx.wctxTracer (StepReplaying name stepId')
           pure (replayStep name stepId' recorded)
@@ -212,7 +212,7 @@ runStep wctx name body = do
                     (ownerToken wctx)
               )
           case written of
-            Left err -> pure (Left (TransactError.fromSystemDB err))
+            Left err -> pure (Left (TransactError.fromExecution err))
             Right () -> do
               runTracer wctx.wctxTracer (StepOutputRecorded name stepId')
               pure (Right value)
@@ -396,7 +396,7 @@ driveStepWith options wctx name placement body =
       startedAt <- timestampNow
       checked <- withSystemDB wctx' (\db -> SystemDB.checkStep db workflowId' stepId' name)
       case checked of
-        Left err -> pure (Left (TransactError.fromSystemDB err))
+        Left err -> pure (Left (TransactError.fromExecution err))
         Right (Just recorded) -> do
           runTracer wctx'.wctxTracer (StepReplaying name stepId')
           pure (replayStep name stepId' recorded)
@@ -446,7 +446,7 @@ driveStepWith options wctx name placement body =
                           (ownerToken wctx')
                     )
               case written of
-                Left err -> pure (Left (TransactError.fromSystemDB err))
+                Left err -> pure (Left (TransactError.fromExecution err))
                 Right () -> case outcome of
                   Right _ -> do
                     runTracer wctx'.wctxTracer (StepOutputRecorded name stepId')

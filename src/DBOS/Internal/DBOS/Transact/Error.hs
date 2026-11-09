@@ -17,6 +17,7 @@ module DBOS.Transact.Error
     renderTransactError,
     controlOf,
     fromSystemDB,
+    fromExecution,
     refusedArgument,
     refusing,
     forkOperation,
@@ -116,6 +117,12 @@ data Error e
     -- lost, this caller simply stopped being the one waiting. Mirrors Rust
     -- @Error::Interrupted@.
     Interrupted {workflowId :: Text}
+  | -- | The workflow was cancelled. Inside a running workflow, this is
+    -- what the call that notices the cancel returns: a step in progress
+    -- when its result cannot be recorded, a later call that checkpoints,
+    -- and a preemptible step at once. Return it after any clean-up the
+    -- workflow wants to do. Mirrors Rust @Error::WorkflowCancelled@.
+    WorkflowCancelled {workflowId :: Text}
   | -- | A prior execution recorded a workflow failure.
     WorkflowFailed {workflowId :: Text, message :: Text}
   | -- | The workflow this caller was awaiting was cancelled — the child,
@@ -190,6 +197,7 @@ renderErrorWithoutApplication = \case
   NotRegistered workflow -> "no workflow is registered as " <> renderQualifiedWorkflowName workflow
   WorkflowClaimLost workflowId -> "the workflow " <> workflowId <> " is already being run elsewhere"
   Interrupted workflowId -> "the workflow " <> workflowId <> " was interrupted by shutdown and left PENDING"
+  WorkflowCancelled workflowId -> "the workflow " <> workflowId <> " was cancelled"
   WorkflowFailed workflowId message -> "the workflow " <> workflowId <> " failed: " <> message
   AwaitedWorkflowCancelled workflowId -> "the workflow " <> workflowId <> " this one was awaiting was cancelled"
   ErrorMaxRecoveryAttemptsExceeded workflowId recoveryAttempts -> "the workflow " <> workflowId <> " exceeded " <> pack (show recoveryAttempts) <> " recovery attempts"
@@ -232,6 +240,7 @@ instance ToJSON e => ToJSON (Error e) where
     NotRegistered workflow -> tagged "NotRegistered" (object ["workflow" .= workflow])
     WorkflowClaimLost workflowId -> tagged "WorkflowClaimLost" (object ["workflowId" .= workflowId])
     Interrupted workflowId -> tagged "Interrupted" (object ["workflowId" .= workflowId])
+    WorkflowCancelled workflowId -> tagged "WorkflowCancelled" (object ["workflowId" .= workflowId])
     WorkflowFailed workflowId message -> tagged "WorkflowFailed" (object ["workflowId" .= workflowId, "message" .= message])
     AwaitedWorkflowCancelled workflowId -> tagged "AwaitedWorkflowCancelled" (object ["workflowId" .= workflowId])
     -- Tag keeps the Rust spelling; the constructor carries the documented
@@ -269,6 +278,7 @@ instance FromJSON e => FromJSON (Error e) where
       "NotRegistered"               -> withObject "NotRegistered" (\o -> NotRegistered <$> workflowField o) payload
       "WorkflowClaimLost"           -> withObject "WorkflowClaimLost" (\o -> WorkflowClaimLost <$> o .: "workflowId") payload
       "Interrupted"                 -> withObject "Interrupted" (\o -> Interrupted <$> o .: "workflowId") payload
+      "WorkflowCancelled"           -> withObject "WorkflowCancelled" (\o -> WorkflowCancelled <$> o .: "workflowId") payload
       "WorkflowFailed"              -> withObject "WorkflowFailed" (\o -> WorkflowFailed <$> o .: "workflowId" <*> o .: "message") payload
       "AwaitedWorkflowCancelled"    -> withObject "AwaitedWorkflowCancelled" (\o -> AwaitedWorkflowCancelled <$> o .: "workflowId") payload
       "MaxRecoveryAttemptsExceeded" -> withObject "MaxRecoveryAttemptsExceeded" (\o -> ErrorMaxRecoveryAttemptsExceeded <$> o .: "workflowId" <*> o .: "recoveryAttempts") payload
@@ -297,15 +307,27 @@ controlOf :: Error e -> Maybe (Error EngineOnly)
 controlOf = \case
   SystemDatabase err | not (SystemDBError.shouldRecord err) -> Just (SystemDatabase err)
   Interrupted workflowId -> Just (Interrupted workflowId)
+  WorkflowCancelled workflowId -> Just (WorkflowCancelled workflowId)
   _ -> Nothing
 
 -- | Lift a system-database failure into a caller's channel. An unknown tag is
 -- the same variant on both sides, so a caller matching on it sees one shape
--- wherever the row was read; everything else stays 'SystemDatabase'. Mirrors
--- Rust @Error::from_sysdb@.
+-- wherever the row was read; a cancellation reaches the top level, so code
+-- in a workflow matches one variant whichever call noticed the cancel;
+-- everything else stays 'SystemDatabase'. Mirrors Rust @Error::from_sysdb@.
 fromSystemDB :: SystemDBError.Error -> Error e
 fromSystemDB = \case
   SystemDBError.UnknownSerialization {name} -> UnknownSerialization {name}
+  err -> fromExecution err
+
+-- | A system-database failure met by a workflow's own execution.
+-- Cancellation is 'WorkflowCancelled', so code in a workflow matches one
+-- variant whichever call noticed the cancel, and cannot mistake it for the
+-- 'SystemDatabase' failures it would otherwise sit among. Everything else
+-- stays 'SystemDatabase'. Mirrors Rust @Error::from_execution@.
+fromExecution :: SystemDBError.Error -> Error e
+fromExecution = \case
+  SystemDBError.WorkflowCancelled {workflowId} -> WorkflowCancelled {workflowId}
   err -> SystemDatabase err
 
 -- | Lift a system-database refusal of a call's argument into the engine

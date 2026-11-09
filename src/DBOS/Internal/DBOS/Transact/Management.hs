@@ -3,17 +3,26 @@
 
 -- | Workflow management operations on the launched instance. Transactional
 -- validation and writes remain in the SystemDB class; this layer owns only
--- the launched-instance guard and engine error channel.
+-- the launched-instance guard and engine error channel. A workflow body
+-- reaches these through the @...InWorkflow@ free forms, which take their
+-- connection from the body's own context: capturing a DBOS handle in a
+-- registered closure is unnecessary, and the free forms record under the
+-- same step names, so a workflow that switches from one to the other
+-- replays the history it recorded.
 module DBOS.Transact.Management
   ( ManagementEvent (..),
     cancelWorkflows,
+    cancelWorkflowInWorkflow,
     cancelWorkflowsInWorkflow,
     resumeWorkflows,
+    resumeWorkflowInWorkflow,
     resumeWorkflowsInWorkflow,
     deleteWorkflows,
     deleteWorkflowsWithCaller,
+    deleteWorkflowInWorkflow,
     deleteWorkflowsInWorkflow,
     forkWorkflows,
+    forkWorkflowInWorkflow,
     forkWorkflowsInWorkflow,
     updateWorkflowAttributesInWorkflow,
     mergeWorkflowAttributesInWorkflow,
@@ -25,7 +34,9 @@ module DBOS.Transact.Management
     checkForkArgs,
     checkForkFromArgs,
     rewindWorkflows,
+    rewindWorkflowInWorkflow,
     rewindWorkflowsInWorkflow,
+    retrieveWorkflowInWorkflow,
     updateWorkflowAttributes,
     mergeWorkflowAttributes,
     listAppVersions,
@@ -59,10 +70,11 @@ import Data.Int (Int64)
 import Data.Text.Encoding (encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (AttributeUpdate (..), Fork (..), ForkCallRefusal (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, VersionInfo (..), cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes, validateAttributeUpdate)
+import DBOS.SystemDB.Types (AttributeUpdate (..), Fork (..), ForkCallRefusal (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, VersionInfo (..), cancelStepName, deleteStepName, forkNew, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes, validateAttributeUpdate)
 import DBOS.Transact.Connection (Connection (..), runSystemDB, withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, workflowId, workflowOwner)
 import DBOS.Transact.Error qualified as TransactError
+import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue)
 import DBOS.Transact.Step (runStepWith, stepOptionsDefault)
@@ -146,6 +158,13 @@ cancelWorkflowsInWorkflow wctx workflowIds cancelChildren =
   where
     conn = wctx.wctxConn
 
+-- | Cancels one workflow as a step of the calling workflow: the singular
+-- of 'cancelWorkflowsInWorkflow', for a body that manages one row.
+-- Mirrors Rust @cancel_workflow@.
+cancelWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                         => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+cancelWorkflowInWorkflow wctx workflowId = void <$> cancelWorkflowsInWorkflow wctx [workflowId] False
+
 resumeWorkflows :: Monad m
                 => Connection m -> [WorkflowId] -> Maybe Text -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflows conn workflowIds queueName fromWorkflow = do
@@ -171,6 +190,17 @@ resumeWorkflowsInWorkflow wctx workflowIds queueName =
     (\_ -> resumeWorkflows conn workflowIds queueName (Just (workflowId wctx)))
   where
     conn = wctx.wctxConn
+
+-- | Resumes one workflow as a step of the calling workflow and hands back
+-- its handle: the singular of 'resumeWorkflowsInWorkflow'. Mirrors Rust
+-- @resume_workflow@.
+resumeWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                         => WorkflowCtx exec m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+resumeWorkflowInWorkflow wctx workflowId queue = do
+  resumed <- resumeWorkflowsInWorkflow wctx [workflowId] queue
+  case resumed of
+    Left err -> pure (Left err)
+    Right _  -> pure (Right (retrieveWorkflowInWorkflow wctx workflowId))
 
 deleteWorkflows :: Monad m
                 => Connection m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
@@ -218,6 +248,13 @@ deleteWorkflowsInWorkflow wctx workflowIds deleteChildren =
     )
   where
     conn = wctx.wctxConn
+
+-- | Deletes one workflow as a step of the calling workflow, children
+-- skipped: the singular of 'deleteWorkflowsInWorkflow'. Mirrors Rust
+-- @delete_workflow@.
+deleteWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                         => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+deleteWorkflowInWorkflow wctx workflowId = void <$> deleteWorkflowsInWorkflow wctx [workflowId] False
 
 forkWorkflows :: Monad m
               => Connection m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
@@ -289,6 +326,25 @@ forkWorkflowsInWorkflow wctx forks options =
   where
     conn = wctx.wctxConn
 
+-- | Forks one workflow as a step of the calling workflow and hands back
+-- the new workflow's handle. @Nothing@ forks from the top, @Just point@
+-- from a chosen step. The singular of the fork bulk forms. Mirrors Rust
+-- @fork_workflow@.
+forkWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                       => WorkflowCtx exec m -> WorkflowId -> Maybe ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+forkWorkflowInWorkflow wctx workflowId from options = do
+  forked <- case from of
+    Nothing -> do
+      let WorkflowId workflowText = workflowId
+      forkWorkflowsInWorkflow wctx [forkNew workflowText] options
+    Just point -> forkFromInWorkflow wctx [workflowId] point options
+  case forked of
+    Left err -> pure (Left err)
+    -- One fork in, one id out: the empty arm is an invariant guard, not a
+    -- refusal the database or the oracle can produce.
+    Right [] -> pure (Left (TransactError.InvalidArgument "fork a workflow" "the fork produced no workflow"))
+    Right (newId : _) -> pure (Right (retrieveWorkflowInWorkflow wctx newId))
+
 forkFrom :: Monad m
          => Connection m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFrom conn workflowIds point options = case checkForkFromArgs workflowIds point options of
@@ -358,6 +414,25 @@ rewindWorkflowsInWorkflow wctx target options =
         (\_ -> rewindWorkflows conn target options)
   where
     conn = wctx.wctxConn
+
+-- | A handle to a workflow by id, from inside a running workflow: a
+-- supervisor holding an id needs a handle to await it, and the only other
+-- way to one was a captured DBOS handle. Records no step, as the method
+-- does not. Mirrors Rust @retrieve_workflow@.
+retrieveWorkflowInWorkflow :: WorkflowCtx exec m -> WorkflowId -> WorkflowHandle m e
+retrieveWorkflowInWorkflow wctx (WorkflowId workflowText) =
+  pollingHandle wctx.wctxConn workflowText False
+
+-- | Rewinds one workflow as a step of the calling workflow and hands back
+-- its handle: the singular of 'rewindWorkflowsInWorkflow'. Mirrors Rust
+-- @rewind_workflow@.
+rewindWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+                         => WorkflowCtx exec m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+rewindWorkflowInWorkflow wctx workflowId options = do
+  rewound <- rewindWorkflowsInWorkflow wctx workflowId options
+  case rewound of
+    Left err -> pure (Left err)
+    Right () -> pure (Right (retrieveWorkflowInWorkflow wctx workflowId))
 
 -- | Forks from a point as a step of the calling workflow. Arguments are
 -- refused before the step id is taken. Same leaf rule as every

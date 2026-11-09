@@ -65,6 +65,11 @@ module DBOS.Transact.WorkflowCases
     ConflictStartOutcome (..),
     scenarioConflictStartRecorded,
     scenarioRejectStartRecorded,
+    scenarioEnqueueByNameIsChild,
+    scenarioEnqueueByNameWritesRow,
+    scenarioEnqueueByNameDedupReplays,
+    scenarioEnqueueByNameDeadlines,
+    scenarioEnqueueByNameRefusedNoStep,
     waitForRowShared,
     checkRegisteredResult,
     checkJoinTakesId,
@@ -114,12 +119,19 @@ module DBOS.Transact.WorkflowCases
     checkQueuedStartClaimedByNextPass,
     checkConflictStartRecorded,
     checkRejectStartRecorded,
+    checkEnqueueByNameIsChild,
+    checkEnqueueByNameWritesRow,
+    checkEnqueueByNameDedupReplays,
+    checkEnqueueByNameDeadlines,
+    checkEnqueueByNameRefusedNoStep,
     TaskCase,
     taskAbortAllWaits,
     taskFinishedNotRegistered,
     taskRefusedAfterSweep,
     taskEmptySweep,
     taskEarlyFinishNotSwept,
+    taskWaitAllUntilDeadline,
+    taskRunningNamesTasks,
     checkNoMiscounts,
     mkWfFixture,
     Refused (..),
@@ -130,11 +142,12 @@ where
 import DBOS.Prelude
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, toJSON, (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
+import Data.List (sort)
 import Data.Text.Encoding (encodeUtf8)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.SystemDB (AwaitedOutcome (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
+import DBOS.SystemDB (AppScope (..), AwaitedOutcome (..), Duration (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SysErr
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
@@ -160,6 +173,15 @@ import DBOS.Transact
     WorkflowStatus (..),
     awaitChild,
     defaultQueueOptions,
+    defaultWorkflowFilter,
+    WorkflowFilter (..),
+    deleteWorkflows,
+    EnqueueOptions (..),
+    enqueueOptionsNew,
+    enqueueWorkflowByName,
+    enqueueWorkflowByNameInWorkflow,
+    forkFrom,
+    listWorkflows,
     deleteWorkflow,
     queueRequestNew,
     forkWorkflow,
@@ -209,7 +231,7 @@ import DBOS.Transact.Context
     tokenCancelled,
     workflowId
   )
-import DBOS.Transact.Workflow (abortAll, childWorkflowId, isRecordedStartError, newTasks, recordedStartErrorNames, shouldRecordStartError, spawnTracked)
+import DBOS.Transact.Workflow (abortAll, childWorkflowId, isRecordedStartError, newTasks, recordedStartErrorNames, runningTasks, shouldRecordStartError, spawnTracked, waitAllUntil)
 import DBOS.Transact.Connection
   ( Connection,
     Owner (..),
@@ -299,7 +321,7 @@ data WfFixture m = WfFixture
 -- proof of the 'WfFixture' plumbing. Returns the decoded result and the
 -- stored row. Engine errors throw (via 'MonadThrow'), so both trees
 -- assert on plain values.
-scenarioRegisteredRecordsResult :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRegisteredRecordsResult :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                 => WfFixture m ->
                                    m (Int, WorkflowRecord)
 scenarioRegisteredRecordsResult fx = do
@@ -418,7 +440,7 @@ data JoinOutcome = JoinOutcome
 -- run still owns the id; the gate release lets both handles resolve.
 -- Result waits are bounded (virtual time in sim, fifteen seconds live),
 -- so a lost wakeup fails the case instead of hanging the suite.
-scenarioJoinTakesId :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioJoinTakesId :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                     => WfFixture m ->
                        m JoinOutcome
 scenarioJoinTakesId fx = do
@@ -491,7 +513,7 @@ awaitSettled handle = do
 -- in-process, while a second start of the same id and a retrieve observe
 -- it through polling handles. Returns the three provenance labels and the
 -- decoded result.
-scenarioFreshJoinPolls :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioFreshJoinPolls :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => WfFixture m ->
                           m (Text, Text, Text, Int)
 scenarioFreshJoinPolls fx = do
@@ -538,7 +560,7 @@ scenarioFreshJoinPolls fx = do
 -- dequeue claim can move the row out of ENQUEUED and record an outcome.
 -- Returns the second handle's provenance, the row's status, and the steps the
 -- body would have taken.
-scenarioQueuedStartPolls :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioQueuedStartPolls :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                          => WfFixture m ->
                             m (Text, WorkflowStatus, [StepRecord])
 scenarioQueuedStartPolls fx = do
@@ -581,7 +603,7 @@ scenarioQueuedStartPolls fx = do
 -- | Non-finite floats through the engine: a @-Infinity@ argument, a step-like
 -- result holding @+Infinity@ and @NaN@. Returns the decoded tuple plus the
 -- stored input/output text so the caller can pin aeson's spelling.
-scenarioNonFinite :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioNonFinite :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                   => WfFixture m ->
                      m ((Double, Double, Double), Maybe Text, Maybe Text)
 scenarioNonFinite fx = do
@@ -613,7 +635,7 @@ scenarioNonFinite fx = do
 -- and awaits it, so the parent's history holds the start and a
 -- @DBOS.get_result@ checkpoint naming the child. Returns the decoded
 -- result, the parent's steps, and the derived child id.
-scenarioAwaitRecorded :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioAwaitRecorded :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => WfFixture m ->
                          m (Int, [StepRecord], Text)
 scenarioAwaitRecorded fx = do
@@ -662,7 +684,7 @@ scenarioAwaitRecorded fx = do
 -- build order and the awaits follow in the same order, so the history is
 -- starts 0-2 then awaits 3-5. Returns the summed result, the parent's
 -- steps, the parent id, and the first-built child's recorded output.
-scenarioChildIdsInBuildOrder :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioChildIdsInBuildOrder :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => WfFixture m ->
                                 m (Int, [StepRecord], Text, Maybe Text)
 scenarioChildIdsInBuildOrder fx = do
@@ -716,7 +738,7 @@ rowStatus = fmap (.workflowRecordStatus)
 -- was registered on a second instance, so the running instance refuses
 -- to start it before anything is written. Returns the run, the derived
 -- row, and the parent's steps.
-scenarioWrongInstance :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioWrongInstance :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => WfFixture m ->
                          m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, [StepRecord], Text)
 scenarioWrongInstance fx =
@@ -779,7 +801,7 @@ waitForRowShared readRow wid = go (200 :: Int)
 
 -- | A workflow records the steps it took: two steps compose and list in
 -- order. Returns the run and the steps.
-scenarioStepsTaken :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioStepsTaken :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => WfFixture m ->
                       m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioStepsTaken fx = do
@@ -870,7 +892,7 @@ scenarioDropFuture fx = do
 -- | A started workflow carries the attributes it was given: the run's
 -- attributes land on the parent's row, and the child, naming nothing of
 -- its own, inherits nothing. Returns the run, both rows, and the tenant.
-scenarioAttributes :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioAttributes :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => WfFixture m ->
                       m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord, Text)
 scenarioAttributes fx = do
@@ -935,7 +957,7 @@ scenarioStepErrorRecorded fx = do
 
 -- | An application error round-trips as itself: the body's own failure
 -- comes back unchanged through the engine. Returns the run.
-scenarioAppErrorRoundtrip :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioAppErrorRoundtrip :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => WfFixture m ->
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioAppErrorRoundtrip fx = do
@@ -956,7 +978,7 @@ scenarioAppErrorRoundtrip fx = do
 -- | A database failure is not the workflow outcome: the backend error
 -- comes back as itself and the row is left pending with no error
 -- column, so a later recovery can retry. Returns the run and the row.
-scenarioDbFailureNotOutcome :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDbFailureNotOutcome :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                             => WfFixture m ->
                                m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioDbFailureNotOutcome fx = do
@@ -985,7 +1007,7 @@ scenarioDbFailureNotOutcome fx = do
 -- | A panicking workflow leaves its row pending: the body's exception
 -- escapes the run as itself, and the row stays @PENDING@ with no error
 -- column. Returns the escaped outcome and the row.
-scenarioPanic :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioPanic :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
               => WfFixture m ->
                  m (Either SomeException (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)), Maybe WorkflowRecord)
 scenarioPanic fx = do
@@ -1021,7 +1043,7 @@ scenarioRetrieveBeforeLaunch fx = do
 
 -- | A zero-argument workflow records no input: the row's input column
 -- stays null however the workflow ran. Returns the run and its row.
-scenarioZeroNoInput :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioZeroNoInput :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                     => WfFixture m ->
                        m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioZeroNoInput fx = do
@@ -1041,7 +1063,7 @@ scenarioZeroNoInput fx = do
 
 -- | The row exists before the body starts: the body reads its own row
 -- through the context's database and finds it. Returns the run.
-scenarioRowBeforeBody :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRowBeforeBody :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => WfFixture m ->
                          m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioRowBeforeBody fx = do
@@ -1133,7 +1155,7 @@ scenarioPlainStepAtStart fx = do
 -- second run of the parent adopts the recorded child id instead of
 -- starting another. Returns the child id, the (empty) recovery and
 -- dequeue results, the settled child, and the replayed parent's run.
-scenarioDerivedChildAdopted :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDerivedChildAdopted :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                             => WfFixture m ->
                                m (Text, [WorkflowId], Either (Error EngineOnly) [WorkflowId], Either (Error EngineOnly) AwaitedOutcome, Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioDerivedChildAdopted fx = do
@@ -1175,7 +1197,7 @@ scenarioDerivedChildAdopted fx = do
 -- it runs under that id and no derived row ever exists. Returns the
 -- chosen id, the (empty) recovery and dequeue results, the settled
 -- child, the replayed parent's run, and both rows.
-scenarioAssignedChildAdopted :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioAssignedChildAdopted :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => WfFixture m ->
                                 m (Text, [WorkflowId], Either (Error EngineOnly) [WorkflowId], Either (Error EngineOnly) AwaitedOutcome, Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioAssignedChildAdopted fx = do
@@ -1216,7 +1238,7 @@ scenarioAssignedChildAdopted fx = do
 
 -- | A workflow started outside a workflow has no parent: a root run
 -- records no parent link. Returns the run and its row.
-scenarioRootNoParent :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRootNoParent :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                      => WfFixture m ->
                         m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioRootNoParent fx = do
@@ -1240,7 +1262,7 @@ scenarioRootNoParent fx = do
 -- children, and the elapsed milliseconds — measured on the wall clock
 -- live, on the virtual clock in sim, where a serialized run would still
 -- show three delays.
-scenarioFanout :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioFanout :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                => WfFixture m ->
                   m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [WorkflowId], Int64)
 scenarioFanout fx = do
@@ -1286,7 +1308,7 @@ scenarioFanout fx = do
 -- detached child outlives the parent's interest and records its result.
 -- Returns the parent's run, its steps, the child's awaited outcome, the
 -- child row, the parent's children, and the parent id.
-scenarioUnawaitedChild :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioUnawaitedChild :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => WfFixture m ->
                           m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord], Either (Error EngineOnly) AwaitedOutcome, Maybe WorkflowRecord, [WorkflowId], Text)
 scenarioUnawaitedChild fx = do
@@ -1326,7 +1348,7 @@ scenarioUnawaitedChild fx = do
 -- own error channel crosses the boundary as itself on its row, and the
 -- parent reports the refused child through its own channel. Returns the
 -- parent's run and the child's row.
-scenarioLiftChildError :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioLiftChildError :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => WfFixture m ->
                           m (Either (Error GaveUp) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord)
 scenarioLiftChildError fx = do
@@ -1378,7 +1400,7 @@ scenarioLiftChildError fx = do
 -- refused, not recorded: the depth says what the context cannot, so the
 -- engine refuses it with @InsideStep@ before anything is written and no
 -- start row appears. Returns the run and the parent's steps.
-scenarioCaptureChildRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioCaptureChildRefused :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                             => WfFixture m ->
                                m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioCaptureChildRefused fx = do
@@ -1416,7 +1438,7 @@ scenarioCaptureChildRefused fx = do
 -- start is attempted inside a step scope, so the engine refuses it with
 -- @InsideStep@ and no start row appears. Returns the run and the
 -- parent's steps.
-scenarioChildInsideStepRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioChildInsideStepRefused :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                => WfFixture m ->
                                   m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord])
 scenarioChildInsideStepRefused fx = do
@@ -1452,7 +1474,7 @@ scenarioChildInsideStepRefused fx = do
 -- checkpointed nothing — nobody answered it — so a resumed parent asks
 -- the child's then-settled row again. Returns the parent's run, the
 -- child's awaited outcome, and the parent's steps.
-scenarioCascadeDeadline :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioCascadeDeadline :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => WfFixture m ->
                            m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Either (Error EngineOnly) AwaitedOutcome, [StepRecord])
 scenarioCascadeDeadline fx = do
@@ -1498,7 +1520,7 @@ scenarioCascadeDeadline fx = do
 -- bounded parent — the first says nothing, the second declines — are
 -- together the difference the timeout sum exists for. Returns the
 -- parent's run and all three rows.
-scenarioDeclinedDeadline :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDeclinedDeadline :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                          => WfFixture m ->
                             m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioDeclinedDeadline fx = do
@@ -1549,7 +1571,7 @@ scenarioDeclinedDeadline fx = do
 -- | A child's own timeout replaces the inherited deadline: given its own
 -- budget, the child records that timeout and a deadline that outlives its
 -- parent's instead of copying the parent's instant.
-scenarioChildBudgetWins :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioChildBudgetWins :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => WfFixture m ->
                            m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioChildBudgetWins fx = do
@@ -1595,7 +1617,7 @@ scenarioChildBudgetWins fx = do
 -- a wall-clock deadline stored on its row, and the child copies the same
 -- instant instead of deriving a fresh budget. Returns the parent's run
 -- and both rows.
-scenarioDeadlineInherited :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDeadlineInherited :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => WfFixture m ->
                              m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowRecord, Maybe WorkflowRecord)
 scenarioDeadlineInherited fx = do
@@ -1642,7 +1664,7 @@ scenarioDeadlineInherited fx = do
 -- waits — that is the awaited workflow's outcome, not the parent's own
 -- cancellation. Returns the parent's run, its steps, both rows' statuses,
 -- and the child id.
-scenarioCancelledChildAwaited :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioCancelledChildAwaited :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                               => WfFixture m ->
                                  m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), [StepRecord], Maybe WorkflowStatus, Maybe WorkflowStatus, Text)
 scenarioCancelledChildAwaited fx = do
@@ -1695,7 +1717,7 @@ scenarioCancelledChildAwaited fx = do
 -- the scoped step runner and the scoped sleep through the real run path —
 -- the erased transition hands the body a WorkflowCtx. Returns the decoded
 -- result and the recorded step names.
-scenarioScopedBody :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioScopedBody :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => WfFixture m ->
                       m (Either (Error EngineOnly) Int, [(Int, Text)])
 scenarioScopedBody fx = do
@@ -1738,7 +1760,7 @@ checkScopedBody (outcome, steps)
 -- raced by 'selectStep' over the same view. The fast arm wins, the
 -- select records its own position after both branch ids, and the loser
 -- leaves no row. Returns the winner's value and the recorded steps.
-scenarioScopedSelect :: forall m. (MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadTime m)
+scenarioScopedSelect :: forall m. (MonadMonotonicTimeNSec m, MonadAsync m, MonadDelay m, MonadFork m, MonadMask m, MonadMVar m, MonadTime m)
                      => WfFixture m ->
                         m (Either (Error EngineOnly) Int, [(Int, Text)])
 scenarioScopedSelect fx = do
@@ -1912,7 +1934,7 @@ scenarioSelectStepRaces fx = do
 -- immediately behind its own start and a replay rebuilds the same pairs
 -- however the children interleave. Returns the summed result, the
 -- parent's steps, and the parent id.
-scenarioStepIdPairs :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioStepIdPairs :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                     => WfFixture m ->
                        m (Int, [StepRecord], Text)
 scenarioStepIdPairs fx = do
@@ -2125,7 +2147,7 @@ scenarioJoinHeldKey fx = do
       Right r -> pure r
     let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         parentBody () wctx = do
-          started <- startChildWorkflow wctx childRef (startOptionsDefault {startQueue = Just ((queueRequestNew queueName) {deduplicationId = Just dedupKey, duplicationPolicy = ReturnExisting})}) Nothing
+          started <- startChildWorkflow wctx childRef (startOptionsDefault {startQueue = Just (((queueRequestNew queueName) {deduplicationId = Just dedupKey, duplicationPolicy = ReturnExisting}) :: QueueRequest)}) Nothing
           case started of
             Left err -> pure (Left err)
             Right child -> do
@@ -2146,7 +2168,7 @@ scenarioJoinHeldKey fx = do
       Right _ -> pure ()
     -- The holder, enqueued before the parent runs and still waiting when
     -- the child starts: a delay holds the key without running.
-    let holderQueue = (queueRequestNew queueName) {deduplicationId = Just dedupKey, delay = Just (secondsDuration 3)}
+    let holderQueue = ((queueRequestNew queueName) {deduplicationId = Just dedupKey, delay = Just (secondsDuration 3)} :: QueueRequest)
     holderStarted <- startWorkflow exec childRef (startOptionsDefault {startWorkflowId = Just holderWid, startQueue = Just holderQueue}) Nothing
     case holderStarted of
       Left err -> throwIO (userError (show (err :: Error EngineOnly)))
@@ -2192,7 +2214,7 @@ scenarioJoinHeldKey fx = do
 -- enqueues a child onto a queue nothing drives, the start step names the
 -- child and links it, and a second run under the same id adopts the recorded
 -- child instead of enqueuing another.
-scenarioEnqueuedChildReplays :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioEnqueuedChildReplays :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => WfFixture m ->
                                 m (Text, Text, [StepRecord], [WorkflowId], Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 scenarioEnqueuedChildReplays fx = do
@@ -2258,7 +2280,7 @@ data DedupStartOutcome = DedupStartOutcome
 -- a gate it never opens before the assertion, so the claimed status is
 -- @PENDING@ on every run rather than @SUCCESS@ or @PENDING@ by luck.
 scenarioQueuedStartClaimedByNextPass
-  :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+  :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
   => WfFixture m -> m (Maybe WorkflowStatus, Maybe WorkflowStatus)
 scenarioQueuedStartClaimedByNextPass fx =
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -2316,7 +2338,7 @@ scenarioDedupStartRecorded fx =
         parentKey = newQualifiedWorkflowName "dedup-error-parent"
         childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
         childBody () _ = pure (Right 9)
-        dedupShape = (queueRequestNew queueName) {deduplicationId = Just dedupKey, duplicationPolicy = Reject}
+        dedupShape = ((queueRequestNew queueName) {deduplicationId = Just dedupKey, duplicationPolicy = Reject} :: QueueRequest)
     childRefE <- registerWorkflowRef dbos childKey childBody
     childRef <- case childRefE of
       Left err -> throwIO (userError (show err))
@@ -2360,7 +2382,7 @@ scenarioDedupStartRecorded fx =
         childRef
         ( startOptionsDefault
             { startWorkflowId = Just holderWid,
-              startQueue = Just ((queueRequestNew queueName) {deduplicationId = Just dedupKey})
+              startQueue = Just (((queueRequestNew queueName) {deduplicationId = Just dedupKey}) :: QueueRequest)
             }
         )
         Nothing
@@ -2512,7 +2534,7 @@ scenarioConflictStartRecorded fx =
 -- | A millisecond budget against a second-long body: the run reports the
 -- durable cancellation naming the workflow and the row reads CANCELLED.
 -- Virtual time makes the second instant under IOSim.
-scenarioBudgetCancels :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioBudgetCancels :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                       => WfFixture m -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus)
 scenarioBudgetCancels fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -2953,7 +2975,7 @@ checkStepErrorRecorded (ran, steps) = case ran of
 -- CANCELLED.
 checkBudgetCancels :: (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus) -> Either String ()
 checkBudgetCancels (ran, status) = case ran of
-  Left (SystemDatabase (SystemDB.WorkflowCancelled {})) ->
+  Left (WorkflowCancelled {}) ->
     unless (status == Just Cancelled) $ Left ("expected the row CANCELLED, got: " <> show status)
   other -> Left ("expected the durable cancellation, got: " <> show other)
 
@@ -3179,7 +3201,7 @@ checkCascadeDeadline (ran, childOutcome, steps)
   | otherwise = Right ()
   where
     parentCancelled result = case result of
-      Left (SystemDatabase (SystemDB.WorkflowCancelled {})) -> True
+      Left (WorkflowCancelled {}) -> True
       _ -> False
 
 -- | Both children ran; the silent one inherited the parent's exact
@@ -3313,7 +3335,7 @@ checkStepIdPairs (n, steps, parentText)
 -- synonym, not a class — the bodies stay ordinary functions, and the one
 -- stack-specific operation arrives as an argument.
 type TaskCase m =
-  (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m, MonadDelay m)
+  (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m, MonadDelay m, MonadAsync m, MonadTimer m, MonadMonotonicTimeNSec m)
 
 -- | No swept task may be miscounted as aborted: any nonzero sweep count
 -- fails the case. Shared with the sim tree, which judges its leaves by
@@ -3331,9 +3353,9 @@ checkNoMiscounts counts = case [count | count <- counts, count /= 0] of
 taskAbortAllWaits :: TaskCase m => m Int
 taskAbortAllWaits = do
   tasks <- newTasks
-  _ <- spawnTracked tasks (threadDelay 10000000)
-  _ <- spawnTracked tasks (threadDelay 10000000)
-  abortAll tasks
+  _ <- spawnTracked tasks "first" (threadDelay 10000000)
+  _ <- spawnTracked tasks "second" (threadDelay 10000000)
+  length <$> abortAll tasks
 
 -- | A trivial body, awaited past its departure, leaves the sweep nothing
 -- to kill.
@@ -3342,9 +3364,9 @@ taskFinishedNotRegistered :: (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m)
                              m Int
 taskFinishedNotRegistered awaitDeparture = do
   tasks <- newTasks
-  spawned <- spawnTracked tasks (pure ())
+  spawned <- spawnTracked tasks "brief" (pure ())
   mapM_ awaitDeparture spawned
-  abortAll tasks
+  length <$> abortAll tasks
 
 -- | The sweep closes the registry; the arrival that follows is refused and
 -- must never run.
@@ -3353,12 +3375,12 @@ taskRefusedAfterSweep = do
   tasks <- newTasks
   _ <- abortAll tasks
   ran <- newTVarIO False
-  _ <- spawnTracked tasks (threadDelay 1000 >> atomically (writeTVar ran True))
+  _ <- spawnTracked tasks "refused" (threadDelay 1000 >> atomically (writeTVar ran True))
   threadDelay 5000
   readTVarIO ran
 
 taskEmptySweep :: (MonadFork m, MonadSTM m, MonadMVar m) => m Int
-taskEmptySweep = newTasks >>= abortAll
+taskEmptySweep = length <$> (newTasks >>= abortAll)
 
 -- | A trivial body can depart between the fork and the parent's
 -- registration on a preemptive scheduler; the registration must consume
@@ -3374,11 +3396,39 @@ taskEarlyFinishNotSwept awaitDeparture =
   mapM
     ( \_ -> do
         tasks <- newTasks
-        spawned <- spawnTracked tasks (pure ())
+        spawned <- spawnTracked tasks "brief" (pure ())
         mapM_ awaitDeparture spawned
-        abortAll tasks
+        length <$> abortAll tasks
     )
     [1 .. 200 :: Int]
+
+-- | The bounded wait reports a set that empties in time as ended, and one
+-- still held at the deadline as not — without cancelling anything either
+-- way. The held task is parked on an MVar, so the deadline arm is
+-- deterministic rather than a race with a sleeper.
+taskWaitAllUntilDeadline :: TaskCase m => m (Bool, Bool)
+taskWaitAllUntilDeadline = do
+  tasks <- newTasks
+  gate <- newEmptyMVar
+  _ <- spawnTracked tasks "held" (takeMVar gate)
+  now <- getMonotonicTimeNSec
+  beforeRelease <- waitAllUntil tasks (now + 100000000)
+  putMVar gate ()
+  afterRelease <- waitAllUntil tasks (now + 5000000000)
+  _ <- abortAll tasks
+  pure (beforeRelease, afterRelease)
+
+-- | The registry reports the labels spawns were tracked under. Sorted in
+-- the body: registration prepends, so the raw order is an implementation
+-- detail the trees must not pin.
+taskRunningNamesTasks :: TaskCase m => m [Text]
+taskRunningNamesTasks = do
+  tasks <- newTasks
+  _ <- spawnTracked tasks "alpha" (threadDelay 10000000)
+  _ <- spawnTracked tasks "beta" (threadDelay 10000000)
+  names <- sort <$> runningTasks tasks
+  _ <- abortAll tasks
+  pure names
 
 -- | The test-local JSON channels the scenarios cross columns with: the
 -- child's nullary refusal and the parent's own channel in the lift case.
@@ -3399,3 +3449,368 @@ instance ToJSON GaveUp where
 
 instance FromJSON GaveUp where
   parseJSON _ = pure GaveUp
+-- | A workflow enqueued by name is the parent's child, and a replay
+-- does not enqueue it again: the child's id joins the parent and the
+-- step, the launch is recorded under the workflow's name, and forking
+-- the parent past its step hands back the same handle while the
+-- name-filtered listing still names one row. Mirrors Rust's by-name
+-- child test; the worker name is scenario-unique, as listings are
+-- global over the shared database.
+-- | A workflow enqueued by name is the parent's child, and a replay
+-- does not enqueue it again: the child's id joins the parent and the
+-- step, the launch is recorded under the workflow's name, and forking
+-- the parent past its step hands back the same handle while the
+-- name-filtered listing still names one row. Mirrors Rust's by-name
+-- child test, except the parent hands back the child's id and the
+-- scenario awaits it outside: a queued child needs a driven pass, and
+-- bare launches never fork a supervisor tick. The worker name is
+-- scenario-unique, as listings are global over the shared database.
+scenarioEnqueueByNameIsChild :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                             => WfFixture m -> m (Int, WorkflowStatus, Maybe Text, Text, Int, Text, Text, Int)
+scenarioEnqueueByNameIsChild fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    fresh <- fx.wfFreshId "byname"
+    let WorkflowId base = fresh
+        workerName = "byname-worker"
+        queueName = "byname-queue-" <> base
+        parentWid = WorkflowId ("hs-l2-wf-byname-parent-" <> base)
+        WorkflowId parentText = parentWid
+        childWid = WorkflowId (parentText <> "-0")
+        WorkflowId childText = childWid
+        QueueName internal = internalQueueName
+        workerBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        workerBody n _ = pure (Right (n * 2))
+        parentBody :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        parentBody n wctx = do
+          -- The fixture version is named so the shared database's sweep
+          -- can claim the child: an unnamed row waits for the global
+          -- latest, which another application's row always holds here.
+          -- The unnamed shape is pinned by the row test instead.
+          started <- enqueueWorkflowByNameInWorkflow wctx (newQualifiedWorkflowName workerName) (((enqueueOptionsNew queueName) {appVersion = Just fx.wfIdentity.identityAppVersion}) :: EnqueueOptions) (Just (encodeWorkflowInput n))
+          pure $ case started of
+            Left err -> Left err
+            Right handle -> Right handle.workflowId
+    _ <- registerWorkflowRef dbos (newQualifiedWorkflowName workerName) workerBody >>= either (throwIO . userError . show) pure
+    parentReg <- registerWorkflow dbos (newQualifiedWorkflowName "byname-parent") parentBody
+    case parentReg of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.wfLaunchWithQueues (Just [queueName, internal]) dbos
+    _ <- registerQueue dbos queueName defaultQueueOptions AlwaysUpdate >>= either (throwIO . userError . show) pure
+    ran <- (runWorkflow exec (newQualifiedWorkflowName "byname-parent") parentWid (Just (encodeWorkflowInput (21 :: Int))) :: m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+    firstChild <- case ran of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+        Right childId -> pure childId
+        Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the child's id, got: " <> show other))
+    unless (firstChild == childText) $
+      throwIO (userError ("the child id joins parent and step: " <> show firstChild))
+    -- The queued child runs on a driven pass, here and under the sim.
+    _ <- dequeueWorkflows dbos >>= either (throwIO . userError . show) pure
+    childHandle <- (retrieveWorkflow dbos childWid :: m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))) >>= either (throwIO . userError . show) pure
+    childOutcome <- (handleResult childHandle :: m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+    out <- case childOutcome of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+        Right n -> pure n
+        Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the doubled output, got: " <> show other))
+    child <- fx.wfReadRow childWid >>= maybe (throwIO (userError "expected the child row")) pure
+    unless (child.workflowRecordParentWorkflowId == Just parentWid) $
+      throwIO (userError ("the child names the wrong parent: " <> show child.workflowRecordParentWorkflowId))
+    steps <- fx.wfListSteps parentWid
+    (step0name, stepCount) <- case steps of
+      first : _ -> pure (first.stepRecordStepName, length steps)
+      [] -> throwIO (userError "expected the parent's steps")
+    unless (step0name == workerName) $
+      throwIO (userError ("the launch recorded under the wrong name: " <> show step0name))
+    replayedIds <- forkFrom dbos [parentWid] (ForkStep 1) defaultForkOptions >>= either (throwIO . userError . show) pure
+    replayId <- case replayedIds of
+      [rid] -> pure rid
+      _ -> throwIO (userError ("expected one replayed parent, got: " <> show replayedIds))
+    _ <- dequeueWorkflows dbos >>= either (throwIO . userError . show) pure
+    replayHandle <- (retrieveWorkflow dbos replayId :: m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))) >>= either (throwIO . userError . show) pure
+    replayOutcome <- (handleResult replayHandle :: m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+    replayedChild <- case replayOutcome of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+        Right childId -> pure childId
+        Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the replayed child id, got: " <> show other))
+    -- Scoped to this fixture's app: names are global over the shared
+    -- database, and other runs' rows would count otherwise.
+    workers <- listWorkflows dbos (defaultWorkflowFilter {workflowFilterAppScope = Named [fx.wfIdentity.identityAppName], workflowFilterNames = [workerName]}) >>= either (throwIO . userError . show) pure
+    pure (out, child.workflowRecordStatus, child.workflowRecordName, step0name, stepCount, firstChild, replayedChild, length workers)
+
+-- | The doubled output, the child's row and the parent's step, the same
+-- child id on replay, and the single worker row: no second enqueue.
+checkEnqueueByNameIsChild :: (Int, WorkflowStatus, Maybe Text, Text, Int, Text, Text, Int) -> Either String ()
+checkEnqueueByNameIsChild (out, status, name, step0name, stepCount, firstChild, replayedChild, workerCount)
+  | out /= 42 = Left ("expected the doubled output, got: " <> show out)
+  | status /= Success = Left ("expected the child SUCCESS, got: " <> show status)
+  | name /= Just "byname-worker" = Left ("expected the worker name, got: " <> show name)
+  | step0name /= "byname-worker" = Left ("expected the launch under the worker name, got: " <> show step0name)
+  | stepCount /= 1 = Left ("expected the launch alone, got: " <> show stepCount)
+  | replayedChild /= firstChild = Left ("expected the replay to hand back the same child, got: " <> show (firstChild, replayedChild))
+  | workerCount /= 1 = Left ("expected one worker row, got: " <> show workerCount)
+  | otherwise = Right ()
+
+-- | An enqueue by name outside a workflow writes a client's row: the
+-- executor's own, belonging to this application unless another is named,
+-- and carrying no version unless one is named. Inside a step body it is
+-- refused, as a start is, and an empty name is refused up front. Returns
+-- the own row's status, name, version and parent, the other row's app
+-- and version, the in-step refusal's operation, the empty refusal's
+-- operation, and the operator's recorded steps. Mirrors Rust's row test.
+scenarioEnqueueByNameWritesRow :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                               => WfFixture m -> m (WorkflowStatus, Maybe Text, Maybe Text, Maybe WorkflowId, Maybe Text, Maybe Text, Text, Text, [(Int, Text)])
+scenarioEnqueueByNameWritesRow fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    fresh <- fx.wfFreshId "byname-row"
+    let WorkflowId base = fresh
+        queueName = "idle-queue-" <> base
+        ownWid = WorkflowId ("hs-l2-wf-byname-own-" <> base)
+        otherWid = WorkflowId ("hs-l2-wf-byname-other-" <> base)
+        operatorWid = WorkflowId ("hs-l2-wf-byname-instep-" <> base)
+        WorkflowId ownText = ownWid
+        WorkflowId otherText = otherWid
+        operatorBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        operatorBody () wctx = do
+          refused <- runStep wctx "enqueues" $ \_ -> do
+            outcome <- (enqueueWorkflowByNameInWorkflow wctx (newQualifiedWorkflowName "remote-row") (enqueueOptionsNew queueName) Nothing :: m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly)))
+            case outcome of
+              Left (InsideStep operation) -> pure operation
+              Left err -> throwIO (userError (show err))
+              Right _ -> throwIO (userError "the in-step enqueue was not refused")
+          case refused of
+            Left err -> pure (Left err)
+            Right operation -> pure (Right operation)
+    operatorReg <- registerWorkflow dbos (newQualifiedWorkflowName "instep") operatorBody
+    case operatorReg of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.wfLaunch dbos
+    _ <- enqueueWorkflowByName dbos (newQualifiedWorkflowName "remote-row") ((enqueueOptionsNew queueName) {workflowId = Just ownText}) Nothing >>= either (throwIO . userError . show) pure
+    _ <- enqueueWorkflowByName dbos (newQualifiedWorkflowName "remote-row") (((enqueueOptionsNew queueName) {workflowId = Just otherText, appName = Just "by-name-other-app", appVersion = Just "v9"}) :: EnqueueOptions) Nothing >>= either (throwIO . userError . show) pure
+    own <- fx.wfReadRow ownWid >>= maybe (throwIO (userError "expected the own row")) pure
+    unless (own.workflowRecordAppName == Just fx.wfIdentity.identityAppName) $
+      throwIO (userError ("the own row names the wrong app: " <> show own.workflowRecordAppName))
+    other <- fx.wfReadRow otherWid >>= maybe (throwIO (userError "expected the other row")) pure
+    ran <- (runWorkflow exec (newQualifiedWorkflowName "instep") operatorWid Nothing :: m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+    inStepOp <- case ran of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+        Right operation -> pure operation
+        Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the refusal's operation, got: " <> show other))
+    emptyOutcome <- enqueueWorkflowByName dbos (newQualifiedWorkflowName "") (enqueueOptionsNew queueName) Nothing
+    emptyOp <- case emptyOutcome of
+      Left (InvalidArgument operation _) -> pure operation
+      other -> throwIO (userError ("expected the empty refusal, got: " <> show other))
+    steps <- fx.wfListSteps operatorWid
+    pure (own.workflowRecordStatus, own.workflowRecordName, own.workflowRecordAppVersion, own.workflowRecordParentWorkflowId, other.workflowRecordAppName, other.workflowRecordAppVersion, inStepOp, emptyOp, [(record.stepRecordStepId, record.stepRecordStepName) | record <- steps])
+
+-- | The client's row, the named app and version, the two refusals, and
+-- the single managing step.
+checkEnqueueByNameWritesRow :: (WorkflowStatus, Maybe Text, Maybe Text, Maybe WorkflowId, Maybe Text, Maybe Text, Text, Text, [(Int, Text)]) -> Either String ()
+checkEnqueueByNameWritesRow (status, name, version, parent, otherApp, otherVersion, inStepOp, emptyOp, steps)
+  | status /= Enqueued = Left ("expected the row ENQUEUED, got: " <> show status)
+  | name /= Just "remote-row" = Left ("expected the remote name, got: " <> show name)
+  | version /= Nothing = Left ("expected no version unless named, got: " <> show version)
+  | parent /= Nothing = Left ("expected no parent outside a workflow, got: " <> show parent)
+  | otherApp /= Just "by-name-other-app" = Left ("expected the named app, got: " <> show otherApp)
+  | otherVersion /= Just "v9" = Left ("expected the named version, got: " <> show otherVersion)
+  | inStepOp /= "enqueueing a workflow" = Left ("expected the in-step refusal, got: " <> show inStepOp)
+  | emptyOp /= "enqueue a workflow" = Left ("expected the empty refusal, got: " <> show emptyOp)
+  | steps /= [(0, "enqueues")] = Left ("expected the managing step alone, got: " <> show steps)
+  | otherwise = Right ()
+
+-- | A deduplicated enqueue by name replays the way it went: a join hands
+-- back the holder, a refusal records and replays after the key is free,
+-- and no replay enqueues again. Returns the two first answers, the two
+-- replayed answers, and the worker-name row count. Mirrors Rust's dedup
+-- test; the worker name is scenario-unique, as listings are global.
+scenarioEnqueueByNameDedupReplays :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                                  => WfFixture m -> m (Text, Text, Text, Text, Int)
+scenarioEnqueueByNameDedupReplays fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    fresh <- fx.wfFreshId "byname-dedup"
+    let WorkflowId base = fresh
+        workerName = "remote-dedup"
+        queueName = "idle-dedup-queue-" <> base
+        holderWid = WorkflowId ("hs-l2-wf-byname-holder-" <> base)
+        joinsWid = WorkflowId ("hs-l2-wf-byname-joins-" <> base)
+        refusedWid = WorkflowId ("hs-l2-wf-byname-refused-" <> base)
+        WorkflowId holderText = holderWid
+        QueueName internal = internalQueueName
+        parentBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
+        parentBody policy wctx = do
+          let duplication = if policy == ("join" :: Text) then ReturnExisting else Reject
+          enqueued <- enqueueWorkflowByNameInWorkflow wctx (newQualifiedWorkflowName workerName) ((enqueueOptionsNew queueName) {deduplicationId = Just ("held-key-" <> base), duplicationPolicy = duplication} :: EnqueueOptions) Nothing
+          pure $ case enqueued of
+            Left (SystemDatabase (SysErr.QueueDeduplicated {})) -> Right "deduplicated"
+            Left err -> Left err
+            Right handle -> Right ("joined " <> handle.workflowId)
+    parentReg <- registerWorkflow dbos (newQualifiedWorkflowName "dedup-parent") parentBody
+    case parentReg of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.wfLaunchWithQueues (Just [internal]) dbos
+    _ <- enqueueWorkflowByName dbos (newQualifiedWorkflowName workerName) (((enqueueOptionsNew queueName) {workflowId = Just holderText, deduplicationId = Just ("held-key-" <> base)}) :: EnqueueOptions) Nothing >>= either (throwIO . userError . show) pure
+    let runParent wid policy = do
+          ran <- (runWorkflow exec (newQualifiedWorkflowName "dedup-parent") wid (Just (encodeWorkflowInput policy)) :: m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+          case ran of
+            Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+              Right answer -> pure answer
+              Left err -> throwIO (userError (show err))
+            other -> throwIO (userError ("expected the parent's answer, got: " <> show other))
+        replayParent wid = do
+          replayedIds <- forkFrom dbos [wid] (ForkStep 1) defaultForkOptions >>= either (throwIO . userError . show) pure
+          replayId <- case replayedIds of
+            [rid] -> pure rid
+            _ -> throwIO (userError ("expected one replay, got: " <> show replayedIds))
+          replayHandle <- (retrieveWorkflow dbos replayId :: m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))) >>= either (throwIO . userError . show) pure
+          -- The forked replay runs on a driven pass, here and under the sim.
+          _ <- dequeueWorkflows dbos >>= either (throwIO . userError . show) pure
+          replayOutcome <- (handleResult replayHandle :: m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+          case replayOutcome of
+            Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+              Right answer -> pure answer
+              Left err -> throwIO (userError (show err))
+            other -> throwIO (userError ("expected the replayed answer, got: " <> show other))
+    joinText <- runParent joinsWid ("join" :: Text)
+    unless (joinText == "joined " <> holderText) $
+      throwIO (userError ("the join named the wrong holder: " <> show joinText))
+    refusedText <- runParent refusedWid ("reject" :: Text)
+    joinSteps <- fx.wfListSteps joinsWid
+    case joinSteps of
+      [only] -> unless (only.stepRecordChildWorkflowId == Just holderWid) $
+        throwIO (userError ("the join recorded the wrong child: " <> show only.stepRecordChildWorkflowId))
+      _ -> throwIO (userError ("expected the join's one step, got: " <> show (length joinSteps)))
+    replayJoin <- replayParent joinsWid
+    _ <- deleteWorkflows dbos [holderWid] False >>= either (throwIO . userError . show) pure
+    replayRefused <- replayParent refusedWid
+    remotes <- listWorkflows dbos (defaultWorkflowFilter {workflowFilterAppScope = Named [fx.wfIdentity.identityAppName], workflowFilterNames = [workerName]}) >>= either (throwIO . userError . show) pure
+    pure (joinText, refusedText, replayJoin, replayRefused, length remotes)
+
+-- | The join hands back the holder on both runs, the refusal replays
+-- after the delete, and no replay enqueued again.
+checkEnqueueByNameDedupReplays :: (Text, Text, Text, Text, Int) -> Either String ()
+checkEnqueueByNameDedupReplays (joinText, refusedText, replayJoin, replayRefused, remoteCount)
+  | not ("joined " `Text.isPrefixOf` joinText) = Left ("expected the join to name its holder, got: " <> show joinText)
+  | refusedText /= "deduplicated" = Left ("expected the handled refusal, got: " <> show refusedText)
+  | replayJoin /= joinText = Left ("expected the replay to join the same holder, got: " <> show (joinText, replayJoin))
+  | replayRefused /= "deduplicated" = Left ("expected the replayed refusal, got: " <> show replayRefused)
+  | remoteCount /= 0 = Left ("expected no second enqueue, got: " <> show remoteCount)
+  | otherwise = Right ()
+
+-- | An enqueue by name inherits its parent's deadline unless given a
+-- budget of its own, and an unbounded one records neither. Returns the
+-- parent's deadline, the three children's timeouts and deadlines.
+-- Mirrors Rust's deadline test.
+scenarioEnqueueByNameDeadlines :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                               => WfFixture m -> m (Maybe Timestamp, Maybe Timestamp, Maybe Duration, Maybe Timestamp, Maybe Duration, Maybe Timestamp)
+scenarioEnqueueByNameDeadlines fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    fresh <- fx.wfFreshId "byname-deadline"
+    let WorkflowId base = fresh
+        queueName = "idle-deadline-queue-" <> base
+        parentWid = WorkflowId ("hs-l2-wf-byname-deadline-parent-" <> base)
+        WorkflowId parentText = parentWid
+        QueueName internal = internalQueueName
+        parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
+        parentBody () wctx = do
+          let enqueue opts = do
+                outcome <- (enqueueWorkflowByNameInWorkflow wctx (newQualifiedWorkflowName "remote-deadline") opts Nothing :: m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly)))
+                case outcome of
+                  Left err -> pure (Left err)
+                  Right _ -> pure (Right ())
+          first <- enqueue (enqueueOptionsNew queueName)
+          case first of
+            Left err -> pure (Left err)
+            Right () -> do
+              second <- enqueue (((enqueueOptionsNew queueName) {timeout = Explicit (secondsDuration 3600)}) :: EnqueueOptions)
+              case second of
+                Left err -> pure (Left err)
+                Right () -> do
+                  third <- enqueue (((enqueueOptionsNew queueName) {timeout = None}) :: EnqueueOptions)
+                  case third of
+                    Left err -> pure (Left err)
+                    Right () -> pure (Right ())
+    parentRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "deadline-parent") parentBody >>= either (throwIO . userError . show) pure
+    exec <- fx.wfLaunchWithQueues (Just [internal]) dbos
+    (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) <- startWorkflow exec parentRef (startOptionsDefault {startWorkflowId = Just parentWid, startTimeout = Explicit (secondsDuration 600)}) Nothing
+    parentHandle <- case started of
+      Left err -> throwIO (userError (show err))
+      Right handle -> pure handle
+    _ <- handleResult parentHandle >>= either (throwIO . userError . show) pure
+    parent <- fx.wfReadRow parentWid >>= maybe (throwIO (userError "expected the parent row")) pure
+    inherited <- fx.wfReadRow (WorkflowId (parentText <> "-0")) >>= maybe (throwIO (userError "expected the inherited row")) pure
+    own <- fx.wfReadRow (WorkflowId (parentText <> "-1")) >>= maybe (throwIO (userError "expected the budgeted row")) pure
+    unbounded <- fx.wfReadRow (WorkflowId (parentText <> "-2")) >>= maybe (throwIO (userError "expected the unbounded row")) pure
+    pure (parent.workflowRecordDeadline, inherited.workflowRecordDeadline, own.workflowRecordTimeout, own.workflowRecordDeadline, unbounded.workflowRecordTimeout, unbounded.workflowRecordDeadline)
+
+-- | The inherited deadline is the parent's, the budget records its own
+-- timeout but no deadline yet (a claim stamps that, as the queue tests
+-- pin), and the unbounded row records neither.
+checkEnqueueByNameDeadlines :: (Maybe Timestamp, Maybe Timestamp, Maybe Duration, Maybe Timestamp, Maybe Duration, Maybe Timestamp) -> Either String ()
+checkEnqueueByNameDeadlines (parentDl, inheritedDl, ownTo, ownDl, unboundedTo, unboundedDl)
+  | parentDl == Nothing = Left "expected the parent to carry a deadline"
+  | inheritedDl /= parentDl = Left ("expected the inherited deadline to match, got: " <> show (parentDl, inheritedDl))
+  | ownTo /= Just (secondsDuration 3600) = Left ("expected the budgeted timeout, got: " <> show ownTo)
+  | ownDl /= Nothing = Left ("expected no deadline until a claim stamps one, got: " <> show ownDl)
+  | unboundedTo /= Nothing = Left ("expected no unbounded timeout, got: " <> show unboundedTo)
+  | unboundedDl /= Nothing = Left ("expected no unbounded deadline, got: " <> show unboundedDl)
+  | otherwise = Right ()
+
+-- | Bad options are refused before the step id is taken: five invalid
+-- argument details and one recorded step. Mirrors Rust's no-step test.
+scenarioEnqueueByNameRefusedNoStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                                   => WfFixture m -> m ([Text], [(Int, Text)])
+scenarioEnqueueByNameRefusedNoStep fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    fresh <- fx.wfFreshId "byname-refused"
+    let WorkflowId base = fresh
+        queueName = "idle-queue-" <> base
+        parentWid = WorkflowId ("hs-l2-wf-byname-refusing-" <> base)
+        badApp = ((enqueueOptionsNew queueName) {appName = Just "Not-An-App"} :: EnqueueOptions)
+        emptyVersion = ((enqueueOptionsNew queueName) {appVersion = Just ""} :: EnqueueOptions)
+        emptyId = ((enqueueOptionsNew queueName) {workflowId = Just ""} :: EnqueueOptions)
+        emptyDedup = ((enqueueOptionsNew queueName) {deduplicationId = Just ""} :: EnqueueOptions)
+        emptyPartition = ((enqueueOptionsNew queueName) {partitionKey = Just ""} :: EnqueueOptions)
+        parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) [Text])
+        parentBody () wctx = do
+          let tryEnqueue options = do
+                outcome <- (enqueueWorkflowByNameInWorkflow wctx (newQualifiedWorkflowName "remote-refused") options Nothing :: m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly)))
+                case outcome of
+                  Left (InvalidArgument _ detail) -> pure detail
+                  Left err -> throwIO (userError ("expected an InvalidArgument refusal, got: " <> show err))
+                  Right _ -> throwIO (userError "the bad options were not refused")
+          refusals <- traverse tryEnqueue [badApp, emptyVersion, emptyId, emptyDedup, emptyPartition]
+          moved <- runStep wctx "after" (\_ -> pure ())
+          case moved of
+            Left err -> pure (Left err)
+            Right _ -> pure (Right refusals)
+    parentReg <- registerWorkflow dbos (newQualifiedWorkflowName "refusing-parent") parentBody
+    case parentReg of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.wfLaunch dbos
+    ran <- (runWorkflow exec (newQualifiedWorkflowName "refusing-parent") parentWid Nothing :: m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
+    refusals <- case ran of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError [Text] of
+        Right details -> pure details
+        Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the refusals, got: " <> show other))
+    steps <- fx.wfListSteps parentWid
+    pure (refusals, [(record.stepRecordStepId, record.stepRecordStepName) | record <- steps])
+
+-- | Each refusal names its field, and the only recorded step is the one
+-- after them: no refusal spent an id.
+checkEnqueueByNameRefusedNoStep :: ([Text], [(Int, Text)]) -> Either String ()
+checkEnqueueByNameRefusedNoStep (refusals, steps)
+  | length refusals /= 5 = Left ("expected five refusals, got: " <> show refusals)
+  | not ("`app_name`" `Text.isInfixOf` (refusals !! 0)) = Left ("expected the app_name refusal, got: " <> show refusals)
+  | not ("`app_version`" `Text.isInfixOf` (refusals !! 1)) = Left ("expected the app_version refusal, got: " <> show refusals)
+  | not ("`workflow_id`" `Text.isInfixOf` (refusals !! 2)) = Left ("expected the workflow_id refusal, got: " <> show refusals)
+  | not ("`deduplication_id`" `Text.isInfixOf` (refusals !! 3)) = Left ("expected the deduplication_id refusal, got: " <> show refusals)
+  | not ("`partition_key`" `Text.isInfixOf` (refusals !! 4)) = Left ("expected the partition_key refusal, got: " <> show refusals)
+  | steps /= [(0, "after")] = Left ("expected the one step after them, got: " <> show steps)
+  | otherwise = Right ()

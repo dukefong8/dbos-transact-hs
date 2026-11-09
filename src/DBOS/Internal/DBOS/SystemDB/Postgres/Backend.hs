@@ -859,13 +859,14 @@ classifyUsageError usage =
 -- | The retry verdict for a hasql session failure. Mirrors Rust @classify@:
 -- the @40@ class is transient; @08@, @53@ and @57@ are connection failures
 -- (@53@ grouped with connections following Python, since running out of
--- connections is a failure to obtain one); @XX@ reads the message for a
--- transport failure wearing an internal-error code; everything else the
--- server reports is permanent. A failure with no SQLSTATE never reached the
--- database: a lost connection may pass, while driver and type failures will
--- not. A script's server error carries the same SQLSTATE a statement's does
--- (hasql 2 reports BEGIN/COMMIT/ROLLBACK failures separately), so both take
--- one verdict.
+-- connections is a failure to obtain one), except the exact codes
+-- 'serverKind' carves out (@08P01@, @57014@, @57P04@); @XX@ reads the
+-- message for a transport failure wearing an internal-error code;
+-- everything else the server reports is permanent. A failure with no
+-- SQLSTATE never reached the database: a lost connection may pass, while
+-- driver and type failures will not. A script's server error carries the
+-- same SQLSTATE a statement's does (hasql 2 reports BEGIN/COMMIT/ROLLBACK
+-- failures separately), so both take one verdict.
 sessionKind :: Errors.SessionError -> BackendErrorKind
 sessionKind sessionError = case sessionError of
   Errors.ConnectionSessionError _ -> Connection
@@ -876,10 +877,24 @@ sessionKind sessionError = case sessionError of
 -- | The retry verdict for one server-reported error, by SQLSTATE class.
 -- @25P03@ is a lost connection by code, not by class: the server ended a
 -- session left idle inside a transaction, so asking again on a new
--- connection is what a lost connection asks for.
+-- connection is what a lost connection asks for. Three codes are carved
+-- out of the connection classes, because asking again cannot help (Rust
+-- #153): @57P04@ names a dropped database; @57014@ is a cancelled
+-- statement, unless its message is CockroachDB ending the session under
+-- it (see 'cockroachSessionCanceled'); @08P01@ is a malformed request.
+-- The oracle splits @08P01@ by severity — FATAL from a pooler closing
+-- the connection stays a connection failure — but hasql's @ServerError@
+-- carries no severity, so the port refuses every @08P01@. Decided
+-- 2026-11-09 under the oracle rule: Postgres raises @08P01@ only at
+-- ERROR, and no pooler stands in this deployment; if one does, the arm
+-- needs a severity the driver does not report. @08007@ stays in its
+-- class: nothing Postgres raises carries it.
 serverKind :: Errors.ServerError -> BackendErrorKind
 serverKind (Errors.ServerError code message _ _ _)
   | code == "25P03" = Connection
+  | code == "57P04" = Permanent
+  | code == "57014" = if Text.strip message == cockroachSessionCanceled then Connection else Permanent
+  | code == "08P01" = Permanent
   | otherwise = case Text.take 2 code of
   "40"                              -> Transient
   "08"                              -> Connection
@@ -887,6 +902,14 @@ serverKind (Errors.ServerError code message _ _ _)
   "57"                              -> Connection
   "XX" | isTransportFailure message -> Connection
   _                                 -> Permanent
+
+-- | The message CockroachDB attaches to @57014@ when it cuts off a
+-- statement by draining the node or cancelling the session, rather than
+-- by a statement timeout. The bare message — exactly, modulo whitespace
+-- — is a connection failure; statement timeouts on both backends carry a
+-- different message and stay permanent.
+cockroachSessionCanceled :: Text
+cockroachSessionCanceled = "query execution canceled"
 
 -- | The SQLSTATE a session failure carries, if the server reported one.
 sessionSqlState :: Errors.SessionError -> Maybe Text

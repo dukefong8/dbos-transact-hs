@@ -64,7 +64,7 @@ selectWorkflow wctx workflowIds = do
   stepId' <- nextStepId wctx
   checked <- withSystemDB wctx (\db -> SystemDB.checkStep db workflowId' stepId' selectStepName)
   case checked of
-    Left err -> pure (Left (TransactError.fromSystemDB err))
+    Left err -> pure (Left (TransactError.fromExecution err))
     Right (Just recorded) ->
       case recorded.stepRecordError of
         -- The only refusal this call records is the empty set, so a replay
@@ -116,20 +116,22 @@ selectWorkflow wctx workflowIds = do
         else do
           winner <- withSystemDB wctx (\db -> SystemDB.awaitFirstWorkflowId db workflowIds interval)
           case winner of
-            Left err -> pure (Left (TransactError.fromSystemDB err))
+            Left err -> pure (Left (TransactError.fromExecution err))
             Right winnerId@(WorkflowId winnerText') -> do
               completedAt <- timestampNow
               let encoded = encodeWorkflowValue winnerText'
                   serialization = case encoded.serializedSerialization of
                     Nothing -> Nothing
                     Just (Serialization name) -> Just name
-              _ <-
+              -- The win is checkpointed: a refused record ends the call
+              -- rather than answering what recovery could not replay.
+              recorded <-
                 withSystemDB
                   wctx
                   ( \db ->
                       SystemDB.recordStep db workflowId' stepId' selectStepName (OutcomeOutput (Just encoded.serializedText)) serialization (Just (StepTiming startedAt completedAt)) (ownerToken wctx)
                   )
-              pure (Right winnerId)
+              pure (either (Left . TransactError.fromExecution) (const (Right winnerId)) recorded)
   where
     summarize ids =
       "[" <> Text.intercalate ", " [text | WorkflowId text <- ids] <> "]"

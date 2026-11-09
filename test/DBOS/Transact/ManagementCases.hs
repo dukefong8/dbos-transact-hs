@@ -26,6 +26,11 @@ module DBOS.Transact.ManagementCases
     scenarioCancelMissing,
     scenarioResumeMissing,
     scenarioCancelResumeRun,
+    scenarioCancelledSeesOneError,
+    scenarioResumeAfterCancelAdoptsOwner,
+    scenarioSupervisorManagesFreely,
+    scenarioStepManagementIsPlain,
+    scenarioSwitchFormsReplay,
     scenarioResumeOntoQueue,
     scenarioCancelTree,
     scenarioDelete,
@@ -75,6 +80,11 @@ module DBOS.Transact.ManagementCases
     checkCancelMissing,
     checkResumeMissing,
     checkCancelResumeRun,
+    checkCancelledSeesOneError,
+    checkResumeAfterCancelAdoptsOwner,
+    checkSupervisorManagesFreely,
+    checkStepManagementIsPlain,
+    checkSwitchFormsReplay,
     checkResumeOntoQueue,
     checkCancelTree,
     checkDelete,
@@ -124,10 +134,12 @@ where
 
 import DBOS.Prelude
 import Data.Int (Int64)
+import Data.List (sort)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
+import Data.Vector.Fusion.Stream.Monadic qualified as Vector
 import GHC.Stack (HasCallStack)
-import DBOS.SystemDB (EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (..), QueueName (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StreamRecord (..), SysRewindOptions (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, durationFromMs, durationFromSecs, forkNew, internalQueueName, newWorkflow, streamClosedSentinel, portableJsonSerialization)
+import DBOS.SystemDB (AppScope (..), EventRecord (..), Fork (..), ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (..), QueueName (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus (..), cancelStepName, defaultForkOptions, defaultWorkflowFilter, deleteStepName, durationFromMs, durationFromSecs, forkNew, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, newWorkflow, resumeStepName, rewindStepName, setWorkflowDelayStepName, streamClosedSentinel, portableJsonSerialization, updateWorkflowAttributesStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
@@ -164,6 +176,7 @@ import DBOS.Transact
     forkFrom,
     forkWorkflows,
     getWorkflowStatus,
+    getWorkflowRecord,
     handleResult,
     handleStatus,
     millisDuration,
@@ -187,6 +200,24 @@ import DBOS.Transact
     runStepWith,
     awaitChild,
     stepOptionsDefault,
+    StreamReader,
+    cancelWorkflowInWorkflow,
+    defaultReadStreamOptions,
+    deleteWorkflowInWorkflow,
+    forkWorkflowInWorkflow,
+    forkWorkflowsInWorkflow,
+    getEvent,
+    patchStep,
+    pendingSleep,
+    readStreamFrom,
+    resumeWorkflowInWorkflow,
+    retrieveWorkflowInWorkflow,
+    rewindWorkflowInWorkflow,
+    selectStep,
+    SelectArm (..),
+    selectWorkflow,
+    sleepStep,
+    toVectorStream,
     send,
     setEvent,
     setWorkflowDelay,
@@ -202,6 +233,7 @@ import DBOS.Transact
     listWorkflowSteps,
     listWorkflowStepsWith,
     listWorkflowStepsInWorkflow,
+    listWorkflowsInWorkflow,
     secondsDuration,
     shutdown,
     startChildWorkflow,
@@ -295,11 +327,11 @@ mkMgmtFixture config identity connApp genId genEntropy sysdb tracer freshBase = 
 -- | Engine-only driver aliases: every scenario reads through these, so the
 -- error channel pins to 'EngineOnly' once instead of at each call site.
 -- Local copies are deliberate: this module carries only the aliases it uses.
-runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadAsync m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
       => Executor m -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
-startWfRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+startWfRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadAsync m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
            => Executor m -> WorkflowRef m EngineOnly -> StartOptions -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))
 startWfRef = startWorkflow
 
@@ -355,7 +387,7 @@ treeParentBody childRef started () wctx = do
 
 -- | The management surface needs a launched instance. Returns whether the
 -- unlaunched call was refused.
-scenarioUnlaunched :: forall m. (MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m)
+scenarioUnlaunched :: forall m. (MonadCatch m, MonadMonotonicTimeNSec m, MonadDelay m, MonadAsync m, MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m)
                    => MgmtFixture m ->
                       m Bool
 scenarioUnlaunched fx = do
@@ -367,7 +399,7 @@ scenarioUnlaunched fx = do
       other -> throwIO (userError ("expected not-launched refusals, got: " <> show other))
 
 -- | Cancelling a workflow that does not exist is not an error.
-scenarioCancelMissing :: forall m. (MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m)
+scenarioCancelMissing :: forall m. (MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m, MonadCatch m, MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m)
                       => MgmtFixture m ->
                          m [WorkflowId]
 scenarioCancelMissing fx = do
@@ -380,7 +412,7 @@ scenarioCancelMissing fx = do
 
 -- | Resuming a workflow that does not exist is an error. Returns the
 -- missing ids the refusal names.
-scenarioResumeMissing :: forall m. (MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m)
+scenarioResumeMissing :: forall m. (MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m, MonadCatch m, MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m)
                       => MgmtFixture m ->
                          m [Text]
 scenarioResumeMissing fx = do
@@ -395,7 +427,7 @@ scenarioResumeMissing fx = do
 -- queued run before it starts, resume it, and watch it run exactly once.
 -- Returns the cancelled ids, the terminal status, the pre-resume run
 -- count, the resumed ids, the decoded result, and the final run count.
-scenarioCancelResumeRun :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioCancelResumeRun :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => MgmtFixture m ->
                            m (Text, [Text], Maybe WorkflowStatus, Int, [Text], Int, Int)
 scenarioCancelResumeRun fx = do
@@ -455,7 +487,7 @@ scenarioCancelResumeRun fx = do
 -- | Resuming onto a named queue puts the workflow there... (first shape:
 -- start on a runnerless queue, cancel, resume queueless, watch it run).
 -- Returns the decoded result.
-scenarioResumeOntoQueue :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioResumeOntoQueue :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => MgmtFixture m ->
                            m Int
 scenarioResumeOntoQueue fx = do
@@ -500,7 +532,7 @@ scenarioResumeOntoQueue fx = do
 
 -- | Cancelling a tree reaches the children. Returns the child's id, the
 -- ids the tree cancel named, and the child's terminal status.
-scenarioCancelTree :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioCancelTree :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => MgmtFixture m ->
                       m (Text, [Text], Maybe WorkflowStatus)
 scenarioCancelTree fx = do
@@ -545,7 +577,7 @@ scenarioCancelTree fx = do
 
 -- | Deleting a workflow removes its row. Returns the deleted count and the
 -- status a fresh handle reads.
-scenarioDelete :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDelete :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                => MgmtFixture m ->
                   m (Word64, Maybe WorkflowStatus)
 scenarioDelete fx = do
@@ -579,7 +611,7 @@ scenarioDelete fx = do
 
 -- | A workflow can be retrieved by id. Returns the status it reports and
 -- the decoded result.
-scenarioRetrieve :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRetrieve :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                  => MgmtFixture m ->
                     m (Maybe WorkflowStatus, Int)
 scenarioRetrieve fx = do
@@ -618,7 +650,7 @@ scenarioRetrieve fx = do
 -- | A workflow's steps list in execution order with their zero-based ids,
 -- and an id with no workflow behind it lists nothing: mirrors the Rust
 -- @listing_a_workflows_steps_reports_them_in_execution_order@ case.
-scenarioListSteps :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioListSteps :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                   => MgmtFixture m ->
                      m ([Text], [Int], [Text])
 scenarioListSteps fx = do
@@ -692,7 +724,7 @@ scenarioListStepsWithoutOutputs fx = do
       (_, Left err) -> throwIO (userError (show err))
 
 -- | A listing pages with 'limit' and 'offset', in step order.
-scenarioListStepsPaging :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioListStepsPaging :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => MgmtFixture m -> m [[Text]]
 scenarioListStepsPaging fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
@@ -776,7 +808,7 @@ scenarioListStepsInWorkflow fx = do
 -- | The singular wrappers move one workflow each, per the Rust @DBOS@
 -- singular surface: cancel (children skipped), resume (handle back),
 -- delete, fork-from-the-top (handle back), and the singular status read.
-scenarioSingular :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioSingular :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                  => MgmtFixture m ->
                     m (Maybe WorkflowStatus, Maybe WorkflowStatus, Maybe WorkflowStatus, Bool, Maybe WorkflowStatus)
 scenarioSingular fx = do
@@ -856,8 +888,579 @@ checkCancelResumeRun (widText, cancelled, status, before, resumed, decoded, afte
 checkResumeOntoQueue :: Int -> Either String ()
 checkResumeOntoQueue = checkEq 7
 
+-- | A cancelled workflow sees one error from every call: the step in
+-- progress when its result is refused, and every kind of durable call
+-- made after that. The body keeps going past each error to try the next
+-- call, so the run ends cancelled and only the pre-cancel child start is
+-- recorded. Mirrors Rust
+-- @a_cancelled_workflow_sees_one_error_from_every_call@. Returns the
+-- noted calls, the run's error, the row's status, and the recorded step
+-- names.
+scenarioCancelledSeesOneError :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                              => MgmtFixture m -> m ([(Text, Text)], Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus, [Text])
+scenarioCancelledSeesOneError fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let parentText = "hs-l2-mgmt-one-error-" <> suffix
+        wid = WorkflowId parentText
+    seen <- newTVarIO []
+    entered <- newEmptyMVar
+    released <- newEmptyMVar
+    let note :: forall a. Text -> m (Either (Error EngineOnly) a) -> m ()
+        note name action = do
+          result <- action
+          atomically (modifyTVar seen ((name, render result) :))
+        render :: forall b. Either (Error EngineOnly) b -> Text
+        render (Left (WorkflowCancelled {workflowId})) = "cancelled " <> workflowId
+        render (Left err) = "other " <> showText err
+        render (Right _) = "ok"
+        childBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
+        childBody _ _ = pure (Right ())
+    childRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "one-error-child") childBody >>= either (throwIO . userError . show) pure
+    let parentBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
+        parentBody _ wctx = do
+          started <- startChildWorkflow wctx childRef startOptionsDefault Nothing
+          firstChild <- case (started :: Either (Error EngineOnly) (WorkflowHandle m EngineOnly)) of
+            Left err -> throwIO (userError (show err))
+            Right handle -> pure handle
+          note "step in progress" (runStep wctx "slow" (\_ -> putMVar entered () >> takeMVar released >> pure (1 :: Int)))
+          note "step" (runStep wctx "later" (\_ -> pure (2 :: Int)))
+          note "sleep" (sleepStep wctx (millisDuration 10))
+          note "set_event" (setEvent wctx "key" ("1" :: Text))
+          note "get_event" (getEvent wctx wid "key" (millisDuration 10) :: m (Either (Error EngineOnly) (Maybe Text)))
+          note "send" (send wctx wid (Just (Topic "t")) Nothing ("1" :: Text))
+          note "recv" (recv wctx (Just (Topic "t")) (millisDuration 10) :: m (Either (Error EngineOnly) (Maybe Text)))
+          note "write_stream" (writeStream wctx "key" ("1" :: Text))
+          note "close_stream" (closeStream wctx "key")
+          note "patch" (patchStep wctx "v2")
+          note "cancel_workflow" (cancelWorkflowsInWorkflow wctx [WorkflowId ("other-" <> suffix)] False)
+          note "start a child" (startChildWorkflow wctx childRef startOptionsDefault Nothing)
+          note "await a child" (awaitChild wctx firstChild)
+          reader <- readStreamFrom wctx wid "out" 0 defaultReadStreamOptions
+          note "read stream" (pullHead reader)
+          note "select_workflow" (selectWorkflow wctx [WorkflowId firstChild.workflowId])
+          armAResult <- pendingSleep wctx (millisDuration 10)
+          armBResult <- pendingSleep wctx (millisDuration 10)
+          case (armAResult, armBResult) of
+            (Right armA, Right armB) -> note "select_step" (selectStep wctx [SelectArm "raced-a" armA pure, SelectArm "raced-b" armB pure])
+            _ -> throwIO (userError "pending sleeps were refused")
+          pure (Right ())
+        pullHead :: StreamReader (Error EngineOnly) m Text -> m (Either (Error EngineOnly) (Maybe Text))
+        pullHead reader = case toVectorStream reader of
+          Vector.Stream next initial -> runExceptT $ do
+            result <- next initial
+            pure $ case result of
+              Vector.Yield value _ -> Just value
+              _ -> Nothing
+    parentRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "one-error") parentBody >>= either (throwIO . userError . show) pure
+    exec <- fx.mfLaunch dbos
+    started <- startWfRef exec parentRef (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+    handle <- case started of
+      Left err -> throwIO (userError (show err))
+      Right h -> pure h
+    takeMVar entered
+    cancelled <- cancelWorkflows dbos [wid] False
+    case cancelled of
+      Right [cancelledId] | cancelledId == wid -> pure ()
+      other -> throwIO (userError ("expected the cancel to land, got: " <> show other))
+    putMVar released ()
+    outcome <- resultWf handle
+    notes <- readTVarIO seen
+    row <- fx.mfReadRow wid
+    listed <- listStepsWf dbos wid
+    steps <- case listed of
+      Left err -> throwIO (userError (show err))
+      Right records -> pure [record.stepInfoName | record <- records]
+    pure (notes, outcome, Just row.workflowRecordStatus, steps)
+
+-- | Every noted call saw the cancellation, the run reports its own
+-- cancellation like the oracle's handle, the row reads CANCELLED, and
+-- only the pre-cancel child start was recorded.
+checkCancelledSeesOneError :: ([(Text, Text)], Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Maybe WorkflowStatus, [Text]) -> Either String ()
+checkCancelledSeesOneError (notes, outcome, status, steps) = do
+  checkEq 16 (length notes)
+  forM_ notes $ \(call, saw) -> unless ("cancelled hs-l2-mgmt-one-error-" `Text.isPrefixOf` saw) (Left ("expected WorkflowCancelled from " <> show call <> ", got: " <> show saw))
+  case outcome of
+    Left (WorkflowCancelled {workflowId}) -> checkEq True ("hs-l2-mgmt-one-error-" `Text.isPrefixOf` workflowId)
+    other -> Left ("expected the run cancelled, got: " <> show other)
+  checkEq (Just Cancelled) status
+  checkEq ["one-error-child"] steps
+
+-- | A resume after the body hears of a cancel gives the owner's outcome:
+-- the body outlives the call that told it, and by the time it returns
+-- that error the workflow has been resumed and finished by a new owner.
+-- The error is no longer the outcome, so the old execution's caller gets
+-- what the owner recorded. Mirrors Rust
+-- @a_resume_after_the_body_hears_of_a_cancel_gives_the_owners_outcome@.
+-- Returns the stale handle's decoded outcome and the row's status.
+scenarioResumeAfterCancelAdoptsOwner :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                                    => MgmtFixture m -> m (Int, Maybe WorkflowStatus)
+scenarioResumeAfterCancelAdoptsOwner fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let parentText = "hs-l2-mgmt-heard-cancel-" <> suffix
+        wid = WorkflowId parentText
+    entered <- newTVarIO (0 :: Int)
+    heard <- newTVarIO (0 :: Int)
+    release <- newTVarIO False
+    hold <- newTVarIO False
+    let bump var = atomically (modifyTVar var (+ 1))
+        waitFlag var = atomically (readTVar var >>= check)
+        waitCount var n label = go (0 :: Int)
+          where
+            go attempts = do
+              count <- readTVarIO var
+              if count >= n
+                then pure ()
+                else
+                  if attempts >= 600
+                    then throwIO (userError label)
+                    else threadDelay 100000 >> go (attempts + 1)
+        body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        body _ wctx = do
+          outcome <- runStep wctx "first" (\_ -> bump entered >> waitFlag release >> pure (2 :: Int))
+          case outcome of
+            Right n -> pure (Right n)
+            Left err -> bump heard >> waitFlag hold >> pure (Left err)
+    ref <- registerWorkflowRef dbos (newQualifiedWorkflowName "heard") body >>= either (throwIO . userError . show) pure
+    exec <- fx.mfLaunch dbos
+    started <- startWfRef exec ref (startOptionsDefault {startWorkflowId = Just wid}) Nothing
+    handle <- case started of
+      Left err -> throwIO (userError (show err))
+      Right h -> pure h
+    waitCount entered 1 "the workflow never reached its gate"
+    cancelled <- cancelWorkflows dbos [wid] False
+    case cancelled of
+      Right [cancelledId] | cancelledId == wid -> pure ()
+      other -> throwIO (userError ("expected the cancel to land, got: " <> show other))
+    atomically (writeTVar release True)
+    waitCount heard 1 "the body never heard of the cancel"
+    resumed <- resumeWorkflows dbos [wid] Nothing
+    case resumed of
+      Right [resumedId] | resumedId == wid -> pure ()
+      other -> throwIO (userError ("expected the resume to land, got: " <> show other))
+    -- Drive the dequeue entry synchronously: the resumed row runs now
+    -- instead of waiting for a supervisor tick that bare launches never
+    -- fork, as the cancel-resume case does.
+    drove <- dequeueWorkflows dbos
+    case drove of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    -- The resumed run replays nothing (the first run's step was refused)
+    -- and finishes; only then is the old execution let go, so its error
+    -- is no longer the outcome.
+    awaitStatus dbos wid Success
+    atomically (writeTVar hold True)
+    outcome <- resultWf handle
+    decoded <- case outcome of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+        Right n -> pure n
+        Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the owner's outcome, got: " <> show other))
+    row <- fx.mfReadRow wid
+    pure (decoded, Just row.workflowRecordStatus)
+  where
+    awaitStatus dbos wid status = go (0 :: Int)
+      where
+        go attempts = do
+          found <- getWorkflowRecord dbos wid >>= either (throwIO . userError . show) pure
+          case found of
+            Just row | row.workflowRecordStatus == status -> pure ()
+            _ ->
+              if attempts >= 600
+                then throwIO (userError "the workflow never reached SUCCESS")
+                else threadDelay 100000 >> go (attempts + 1)
+
+-- | The stale handle reports the owner's outcome, and the row reads
+-- SUCCESS.
+checkResumeAfterCancelAdoptsOwner :: (Int, Maybe WorkflowStatus) -> Either String ()
+checkResumeAfterCancelAdoptsOwner = checkEq (2, Just Success)
+
+-- | Management calls inside a step body run plainly and record nothing
+-- of their own, and a refused fork spends no step id: the operator
+-- refuses a negative-step fork, then cancels and lists its parked target
+-- from inside one @manage@ step. Returns the listed count, the target's
+-- status, and the operator's recorded (id, name) steps. Mirrors Rust's
+-- in-step test.
+scenarioStepManagementIsPlain :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                              => MgmtFixture m -> m (Int, Maybe WorkflowStatus, [(Int, Text)])
+scenarioStepManagementIsPlain fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let targetText = "hs-l2-mgmt-step-target-" <> suffix
+        operatorText = "hs-l2-mgmt-step-operator-" <> suffix
+        targetBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        targetBody _ _ = pure (Right 1)
+        operatorBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        operatorBody target wctx = do
+          refused <- forkWorkflowInWorkflow wctx (WorkflowId target) (Just (ForkStep (-1))) defaultForkOptions
+          case refused of
+            Left _ -> pure ()
+            Right _ -> throwIO (userError "the refused fork handed back a handle")
+          listed <- runStep wctx "manage" $ \_ -> do
+            _ <- cancelWorkflowInWorkflow wctx (WorkflowId target) >>= either (\e -> throwIO (userError (show e))) pure
+            rows <- listWorkflowsInWorkflow wctx (defaultWorkflowFilter {workflowFilterWorkflowIds = [target]}) >>= either (\e -> throwIO (userError (show e))) pure
+            pure (length rows)
+          case listed of
+            Left err -> pure (Left err)
+            Right n -> pure (Right n)
+    targetRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "step-target") targetBody >>= either (throwIO . userError . show) pure
+    let operatorKey = newQualifiedWorkflowName "step-operator"
+    registered <- registerWorkflow dbos operatorKey operatorBody
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    started <- startWfRef exec targetRef (startOptionsDefault {startWorkflowId = Just (WorkflowId targetText), startQueue = Just (queueRequestNew "nothing-polls-this")}) (Just (encodeWorkflowInput ()))
+    case started of
+      Left err -> throwIO (userError (show err))
+      Right _ -> pure ()
+    ran <- runWf exec operatorKey (WorkflowId operatorText) (Just (encodeWorkflowInput targetText))
+    listed <- case ran of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+        Right n -> pure n
+        Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the operator's count, got: " <> show other))
+    found <- getWorkflowRecord dbos (WorkflowId targetText) >>= either (throwIO . userError . show) pure
+    steps <- listStepsWf dbos (WorkflowId operatorText) >>= either (throwIO . userError . show) pure
+    pure (listed, (.workflowRecordStatus) <$> found, [(record.stepInfoId, record.stepInfoName) | record <- steps])
+
+-- | The target is cancelled, the operator counted it, and the only
+-- recorded step is the managing one: the refusal spent no id and the
+-- in-step calls recorded nothing of their own.
+checkStepManagementIsPlain :: (Int, Maybe WorkflowStatus, [(Int, Text)]) -> Either String ()
+checkStepManagementIsPlain = checkEq (1, Just Cancelled, [(0, "manage")])
+
+-- | A run recorded through the plural forms replays through the singular
+-- ones, which is what sharing one step name buys: a body that drops its
+-- bulk calls for the one-row forms recovers the executions the old code
+-- started. The first instance records cancel, fork, list and list-steps
+-- through the plurals; the second registers the same name with the
+-- singulars and forks the first run past its last step, so the whole
+-- body replays. Returns the recorded summary, the replay's, and the
+-- source's forks. Mirrors Rust's switch-forms test; the oracle switches
+-- from captured-handle methods, which the port's explicit context makes
+-- unrepresentable, so the port switches from the plural free forms.
+scenarioSwitchFormsReplay :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                          => MgmtFixture m -> m ((Text, Int, Int), (Text, Int, Int), [Text])
+scenarioSwitchFormsReplay fx = do
+  let sourceBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+      sourceBody _ _ = pure (Right 5)
+      firstBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) (Text, Int, Int))
+      firstBody source wctx = do
+        _ <- orThrow "cancel" =<< cancelWorkflowsInWorkflow wctx [WorkflowId source] False
+        forked <- orThrow "fork" =<< forkWorkflowsInWorkflow wctx [forkNew source] defaultForkOptions
+        rows <- orThrow "list" =<< listWorkflowsInWorkflow wctx (defaultWorkflowFilter {workflowFilterWorkflowIds = [source]})
+        steps <- orThrow "list-steps" =<< listWorkflowStepsInWorkflow wctx (WorkflowId source)
+        case forked of
+          [WorkflowId forkId] -> pure (Right (forkId, length rows, length steps))
+          _ -> throwIO (userError ("expected one fork, got: " <> show forked))
+      secondBody :: forall exec. Text -> WorkflowCtx exec m -> m (Either (Error EngineOnly) (Text, Int, Int))
+      secondBody source wctx = do
+        _ <- orThrow "cancel" =<< cancelWorkflowInWorkflow wctx (WorkflowId source)
+        forked <- orThrow "fork" =<< forkWorkflowInWorkflow wctx (WorkflowId source) Nothing defaultForkOptions
+        rows <- orThrow "list" =<< listWorkflowsInWorkflow wctx (defaultWorkflowFilter {workflowFilterWorkflowIds = [source]})
+        steps <- orThrow "list-steps" =<< listWorkflowStepsInWorkflow wctx (WorkflowId source)
+        pure (Right (forked.workflowId, length rows, length steps))
+      orThrow :: forall a. Text -> Either (Error EngineOnly) a -> m a
+      orThrow label = either (\e -> throwIO (userError (Text.unpack label <> ": " <> show e))) pure
+      awaitSummary wid dbos = do
+        handle <- retrieveWf dbos wid >>= either (throwIO . userError . show) pure
+        outcome <- resultWf handle
+        stored <- orThrow "operator" outcome
+        case stored of
+          Just value -> case decodeWorkflowValue "result" (Just value) :: Either CodecError (Text, Int, Int) of
+            Right summary -> pure summary
+            Left err -> throwIO (userError (show err))
+          Nothing -> throwIO (userError "the operator handed back no summary")
+      forksOf dbos wanted = do
+        rows <- listWorkflows dbos (defaultWorkflowFilter {workflowFilterAppScope = Named [fx.mfIdentity.identityAppName], workflowFilterForkedFrom = [wanted]}) >>= either (throwIO . userError . show) pure
+        pure (sort [t | WorkflowId t <- (.workflowRecordId) <$> rows])
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let source = "hs-l2-mgmt-switch-source-" <> suffix
+        operator = WorkflowId ("hs-l2-mgmt-switching-" <> suffix)
+        operatorKey = newQualifiedWorkflowName "switching"
+    sourceRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "switch-target") sourceBody >>= either (throwIO . userError . show) pure
+    registered <- registerWorkflow dbos operatorKey firstBody
+    case registered of
+      Left err -> throwIO (userError (show err))
+      Right () -> pure ()
+    exec <- fx.mfLaunch dbos
+    started <- startWfRef exec sourceRef (startOptionsDefault {startWorkflowId = Just (WorkflowId source)}) (Just (encodeWorkflowInput ()))
+    sourceHandle <- case started of
+      Left err -> throwIO (userError (show err))
+      Right handle -> pure handle
+    _ <- awaitIntHandle sourceHandle
+    ran <- runWf exec operatorKey operator (Just (encodeWorkflowInput source))
+    recorded <- case ran of
+      Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError (Text, Int, Int) of
+        Right summary -> pure summary
+        Left err -> throwIO (userError (show err))
+      other -> throwIO (userError ("expected the method-form summary, got: " <> show other))
+    listed <- listStepsWf dbos operator >>= either (throwIO . userError . show) pure
+    bracket fx.mfNewDBOS shutdown $ \dbos2 -> do
+      registered2 <- registerWorkflow dbos2 operatorKey secondBody
+      case registered2 of
+        Left err -> throwIO (userError (show err))
+        Right () -> pure ()
+      _ <- fx.mfLaunch dbos2
+      -- Past the last step the plurals recorded, so the whole body
+      -- replays through the singulars.
+      replayedIds <- forkFrom dbos2 [operator] (ForkStep (length listed)) defaultForkOptions >>= either (throwIO . userError . show) pure
+      replayId <- case replayedIds of
+        [rid] -> pure rid
+        _ -> throwIO (userError ("expected one replayed operator, got: " <> show replayedIds))
+      _ <- dequeueWorkflows dbos2 >>= either (throwIO . userError . show) pure
+      replayed <- awaitSummary replayId dbos2
+      forks <- forksOf dbos2 source
+      -- Forced before the return: the rows escape runSimCase with it,
+      -- and a one-element sort performs no comparison, so an unevaluated
+      -- element would read the sim's rows outside it.
+      length (map (\t -> t `seq` t) forks) `seq` pure (recorded, replayed, forks)
+  where
+    awaitIntHandle handle = do
+      outcome <- resultWf handle
+      case outcome of
+        Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+          Right n -> pure n
+          Left err -> throwIO (userError (show err))
+        other -> throwIO (userError ("expected an output, got: " <> show other))
+
+-- | The replay hands back what the recording saw, and the source was
+-- forked exactly once: the singulars replayed the plurals' history.
+checkSwitchFormsReplay :: ((Text, Int, Int), (Text, Int, Int), [Text]) -> Either String ()
+checkSwitchFormsReplay (recorded, replayed, forks) = do
+  checkEq recorded replayed
+  let (forkId, _, _) = recorded
+  checkEq True (not (Text.null forkId))
+  checkEq [forkId] forks
+
+-- | A supervisor whose closure captures no handle manages other
+-- workflows through every free form: cancel, resume, fork, rewind,
+-- delete, delay, tag, list and retrieve. Each records under its DBOS
+-- method's step name, in the order it was made. Forking the supervisor
+-- past its last step replays every call from its checkpoint: the replay
+-- hands back what the first run saw, the rewound row is untouched, and
+-- nothing forks again. Mirrors Rust's supervisor test. Awaiting
+-- unfinished handles stays outside the body, as bare launches never fork
+-- a supervisor tick, and direct row reads stay outside too, so the
+-- replayed body is fully checkpointed.
+-- Returns the first run's summary, the replay's, the targets' outputs,
+-- the supervisor's recorded step names in order, and the replay-effect
+-- probes.
+scenarioSupervisorManagesFreely :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+                                => MgmtFixture m -> m ((([Text], Text, Text, Text), (Int, Int, [Text], Int)), (([Text], Text, Text, Text), (Int, Int, [Text], Int)), Int, Int, Int, Int, Int, [Text], [Text], [Text], (WorkflowStatus, Timestamp), (WorkflowStatus, Timestamp), Int, Bool, Maybe Text)
+scenarioSupervisorManagesFreely fx = do
+  bracket fx.mfNewDBOS shutdown $ \dbos -> do
+    suffix <- fx.mfFreshBase
+    let t1 = WorkflowId ("hs-l2-mgmt-sup-victim-" <> suffix)
+        t2 = WorkflowId ("hs-l2-mgmt-sup-forked-" <> suffix)
+        t3 = WorkflowId ("hs-l2-mgmt-sup-rewound-" <> suffix)
+        t4 = WorkflowId ("hs-l2-mgmt-sup-deleted-" <> suffix)
+        t5 = WorkflowId ("hs-l2-mgmt-sup-tagged-" <> suffix)
+        t6 = WorkflowId ("hs-l2-mgmt-sup-delayed-" <> suffix)
+        sup = WorkflowId ("hs-l2-mgmt-supervisor-" <> suffix)
+        WorkflowId t1text = t1
+        WorkflowId t2text = t2
+        WorkflowId t3text = t3
+        WorkflowId t5text = t5
+    entered <- newTVarIO (0 :: Int)
+    released <- newTVarIO False
+    rewindRuns <- newTVarIO (0 :: Int)
+    let orThrow :: forall a. Text -> Either (Error EngineOnly) a -> m a
+        orThrow label = either (\e -> throwIO (userError (Text.unpack label <> ": " <> show e))) pure
+        waitCount var n label = go (0 :: Int)
+          where
+            go attempts = do
+              count <- readTVarIO var
+              if count >= n
+                then pure ()
+                else
+                  if attempts >= 600
+                    then throwIO (userError label)
+                    else threadDelay 100000 >> go (attempts + 1)
+        decodeStored :: Text -> Maybe SerializedWorkflowValue -> m Int
+        decodeStored label = \case
+          Just stored -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+            Right n -> pure n
+            Left err -> throwIO (userError (Text.unpack label <> ": " <> show err))
+          Nothing -> throwIO (userError (Text.unpack label <> ": no output"))
+        victimBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        victimBody _ _ = do
+          atomically (modifyTVar entered (+ 1))
+          atomically (readTVar released >>= check)
+          pure (Right 41)
+        quickBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        quickBody _ _ = pure (Right 7)
+        rewindBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        rewindBody _ wctx = do
+          ticked <- runStep wctx "tick" (\_ -> atomically (modifyTVar rewindRuns (+ 1)) >> pure (9 :: Int))
+          case ticked of
+            Left err -> pure (Left err)
+            Right n -> pure (Right n)
+        serveBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+        serveBody _ wctx = do
+          served <- runStep wctx "serve" (\_ -> pure (7 :: Int))
+          case served of
+            Left err -> pure (Left err)
+            Right n -> pure (Right n)
+        superBody :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) (([Text], Text, Text, Text), (Int, Int, [Text], Int)))
+        superBody _ wctx = do
+          cancelled <- orThrow "cancel" =<< cancelWorkflowsInWorkflow wctx [t1] False
+          resumedHandle <- orThrow "resume" =<< resumeWorkflowInWorkflow wctx t1 Nothing
+          forkedHandle <- orThrow "fork" =<< forkWorkflowInWorkflow wctx t2 Nothing defaultForkOptions
+          rewoundHandle <- orThrow "rewind" =<< rewindWorkflowInWorkflow wctx t3 (defaultRewindOptions {rewindStartStep = 0})
+          deleted <- orThrow "delete" =<< deleteWorkflowsInWorkflow wctx [t4] False
+          _ <- orThrow "delay" =<< setWorkflowDelayInWorkflow wctx t6 (DelayFor (secondsDuration 0))
+          _ <- orThrow "tag" =<< updateWorkflowAttributesInWorkflow wctx t5 (Just "{\"a\":1}")
+          _ <- orThrow "tag-merge" =<< mergeWorkflowAttributesInWorkflow wctx t5 "{\"b\":2}"
+          listed <- orThrow "list" =<< listWorkflowsInWorkflow wctx (defaultWorkflowFilter {workflowFilterWorkflowIds = [t5text]})
+          listedSteps <- orThrow "list-steps" =<< listWorkflowStepsInWorkflow wctx t5
+          retrieved <- orThrow "retrieve" =<< awaitChild wctx (retrieveWorkflowInWorkflow wctx t5)
+          retrievedOut <- decodeStored "retrieve" retrieved
+          pure
+            ( Right
+                ( ([t | WorkflowId t <- cancelled], resumedHandle.workflowId, forkedHandle.workflowId, rewoundHandle.workflowId),
+                  (fromIntegral deleted, length listed, [record.stepInfoName | record <- listedSteps], retrievedOut)
+                )
+            )
+    victimRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "victim") victimBody >>= either (throwIO . userError . show) pure
+    quickRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "quick") quickBody >>= either (throwIO . userError . show) pure
+    rewindRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "rewindable") rewindBody >>= either (throwIO . userError . show) pure
+    serveRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "serve") serveBody >>= either (throwIO . userError . show) pure
+    _superRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "supervisor") superBody >>= either (throwIO . userError . show) pure
+    exec <- fx.mfLaunch dbos
+    let startTarget ref wid input = do
+          started <- startWfRef exec ref (startOptionsDefault {startWorkflowId = Just wid}) input
+          case started of
+            Left err -> throwIO (userError (show err))
+            Right handle -> pure handle
+        awaitIntHandle handle = do
+          outcome <- resultWf handle
+          decodeStored "target" =<< orThrow "target" outcome
+        awaitSummary wid = do
+          handle <- retrieveWf dbos wid >>= either (throwIO . userError . show) pure
+          outcome <- resultWf handle
+          case outcome of
+            Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError (([Text], Text, Text, Text), (Int, Int, [Text], Int)) of
+              Right summary -> pure summary
+              Left err -> throwIO (userError (show err))
+            other -> throwIO (userError ("expected the supervisor's summary, got: " <> show other))
+        runSupervisor = do
+          ran <- runWf exec (newQualifiedWorkflowName "supervisor") sup (Just (encodeWorkflowInput ()))
+          case ran of
+            Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError (([Text], Text, Text, Text), (Int, Int, [Text], Int)) of
+              Right summary -> pure summary
+              Left err -> throwIO (userError (show err))
+            other -> throwIO (userError ("expected the supervisor's summary, got: " <> show other))
+        forksOf wanted = do
+          -- Scoped to this fixture's app and filtered by forked_from in
+          -- the query: a global list would also parse every other test's
+          -- rows, including fixture litter with statuses the reader
+          -- refuses.
+          rows <- listWorkflows dbos (defaultWorkflowFilter {workflowFilterAppScope = Named [fx.mfIdentity.identityAppName], workflowFilterForkedFrom = [wanted]}) >>= either (throwIO . userError . show) pure
+          pure (sort [t | WorkflowId t <- (.workflowRecordId) <$> rows])
+        rowMark wid = do
+          found <- fx.mfReadRow wid
+          pure (found.workflowRecordStatus, found.workflowRecordUpdatedAt)
+    h1 <- startTarget victimRef t1 (Just (encodeWorkflowInput ()))
+    waitCount entered 1 "the victim never started"
+    h2 <- startTarget quickRef t2 (Just (encodeWorkflowInput ()))
+    h4 <- startTarget quickRef t4 (Just (encodeWorkflowInput ()))
+    h5 <- startTarget serveRef t5 (Just (encodeWorkflowInput ()))
+    h3 <- startTarget rewindRef t3 (Just (encodeWorkflowInput ()))
+    _ <- awaitIntHandle h2
+    _ <- awaitIntHandle h4
+    _ <- awaitIntHandle h5
+    _ <- awaitIntHandle h3
+    let QueueName internal = internalQueueName
+    h6 <- do
+      started <- startWfRef exec quickRef (startOptionsDefault {startWorkflowId = Just t6, startQueue = Just ((queueRequestNew internal) {delay = Just (secondsDuration 3600)})}) (Just (encodeWorkflowInput ()))
+      case started of
+        Left err -> throwIO (userError (show err))
+        Right handle -> pure handle
+    firstSummary <- runSupervisor
+    let ((cancelled, resumedId, forked1, rewoundId), (deleted, listedCount, listedSteps, retrievedOut)) = firstSummary
+    unless (cancelled == [t1text] && resumedId == t1text) $
+      throwIO (userError ("the cancel/resume did not name the victim: " <> show firstSummary))
+    unless (not (Text.null forked1) && forked1 /= t2text) $
+      throwIO (userError ("the fork handed back no new id: " <> show firstSummary))
+    unless (rewoundId == t3text) $
+      throwIO (userError ("the rewind did not name its target: " <> show firstSummary))
+    unless (deleted == 1 && listedCount == 1 && listedSteps == ["serve"] && retrievedOut == 7) $
+      throwIO (userError ("the supervisor saw what it should not have: " <> show firstSummary))
+    -- The resumed, forked, rewound and released rows run now instead of
+    -- waiting for a supervisor tick that bare launches never fork, as the
+    -- cancel-resume case does.
+    _ <- dequeueWorkflows dbos >>= either (throwIO . userError . show) pure
+    atomically (writeTVar released True)
+    t1out <- awaitIntHandle h1
+    forkOut <- awaitIntHandle =<< (retrieveWf dbos (WorkflowId forked1) >>= either (throwIO . userError . show) pure)
+    t6out <- awaitIntHandle h6
+    t3out <- awaitIntHandle h3
+    count3 <- readTVarIO rewindRuns
+    taggedRow <- fx.mfReadRow t5
+    deletedRow <- getWorkflowRecord dbos t4 >>= either (throwIO . userError . show) pure
+    deletedSteps <- listStepsWf dbos t4 >>= either (throwIO . userError . show) pure
+    let deletedGone = case deletedRow of
+          Nothing -> null deletedSteps
+          _ -> False
+    listed <- listStepsWf dbos sup >>= either (throwIO . userError . show) pure
+    let steps = [record.stepInfoName | record <- listed]
+    forksBefore <- forksOf t2text
+    length (map (\t -> t `seq` t) forksBefore) `seq` pure ()
+    rowBefore <- rowMark t3
+    -- Past the last step, so the fork replays every call from its
+    -- checkpoint instead of running one again.
+    replayedIds <- forkFrom dbos [sup] (ForkStep (length steps)) defaultForkOptions >>= either (throwIO . userError . show) pure
+    replayId <- case replayedIds of
+      [rid] -> pure rid
+      _ -> throwIO (userError ("expected one replayed supervisor, got: " <> show replayedIds))
+    _ <- dequeueWorkflows dbos >>= either (throwIO . userError . show) pure
+    replayedSummary <- awaitSummary replayId
+    forksAfter <- forksOf t2text
+    length (map (\t -> t `seq` t) forksAfter) `seq` pure ()
+    rowAfter <- rowMark t3
+    runsAfter <- readTVarIO rewindRuns
+    pure (firstSummary, replayedSummary, t1out, forkOut, t6out, t3out, count3, steps, forksBefore, forksAfter, rowBefore, rowAfter, runsAfter, deletedGone, taggedRow.workflowRecordAttributes)
+
+-- | The free forms manage, the replay is stable, and the recorded steps
+-- carry the methods' names.
+checkSupervisorManagesFreely :: ((([Text], Text, Text, Text), (Int, Int, [Text], Int)), (([Text], Text, Text, Text), (Int, Int, [Text], Int)), Int, Int, Int, Int, Int, [Text], [Text], [Text], (WorkflowStatus, Timestamp), (WorkflowStatus, Timestamp), Int, Bool, Maybe Text) -> Either String ()
+checkSupervisorManagesFreely (first, replayed, t1out, forkOut, t6out, t3out, count3, steps, forksBefore, forksAfter, rowBefore, rowAfter, runsAfter, deletedGone, attrs) = do
+  checkEq first replayed
+  checkEq 41 t1out
+  checkEq 7 forkOut
+  checkEq 7 t6out
+  checkEq 9 t3out
+  checkEq 2 count3
+  checkEq count3 runsAfter
+  checkEq
+    [ "DBOS.cancelWorkflow",
+      "DBOS.resumeWorkflow",
+      "DBOS.forkWorkflow",
+      "DBOS.rewindWorkflow",
+      "DBOS.deleteWorkflow",
+      "DBOS.setWorkflowDelay",
+      "DBOS.updateWorkflowAttributes",
+      "DBOS.updateWorkflowAttributes",
+      "DBOS.listWorkflows",
+      "DBOS.listWorkflowSteps",
+      "DBOS.getResult"
+    ]
+    steps
+  checkEq forksBefore forksAfter
+  checkEq True (not (null forksBefore))
+  checkEq rowBefore rowAfter
+  checkEq True deletedGone
+  case attrs of
+    Just merged
+      | "a" `Text.isInfixOf` merged && "b" `Text.isInfixOf` merged -> pure ()
+      | otherwise -> Left ("the tags did not merge: " <> show merged)
+    Nothing -> Left "the tags did not land"
+
 -- | The tree cancel names the child, and the child is terminal.
-checkCancelTree :: (Text, [Text], Maybe WorkflowStatus) -> Either String ()
 checkCancelTree (childText, cancelled, status) = do
   checkEq True (childText `elem` cancelled)
   checkEq (Just Cancelled) status
@@ -987,7 +1590,7 @@ zeroBody () _ = pure (Right 0)
 -- | A fork from the beginning runs the source's workflow again under a new id
 -- and succeeds on the retry. Returns the fork's id, the fork's decoded result,
 -- and the source's attempt count.
-scenarioForkFromBeginning :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForkFromBeginning :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => MgmtFixture m ->
                              m (Text, Int, Int)
 scenarioForkFromBeginning fx = do
@@ -1048,7 +1651,7 @@ data ForkReplacementFacts = ForkReplacementFacts
 -- parent never started) waits on the original and fails with it; a map
 -- naming one child twice, or either side empty, is refused before anything
 -- is written. Mirrors Rust's @a_fork_adopts_the_replacement_for_a_failed_child@.
-scenarioForkReplacesChild :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForkReplacesChild :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => MgmtFixture m ->
                              m ForkReplacementFacts
 scenarioForkReplacesChild fx =
@@ -1216,7 +1819,7 @@ scenarioForkReplacesChild fx =
 
 -- | A fork takes the id it is given. Returns the fork's id, the queue its row
 -- carries, and the fork's decoded result.
-scenarioForkTakesIdAndQueue :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForkTakesIdAndQueue :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                             => MgmtFixture m ->
                                m (Text, Maybe Text, Int)
 scenarioForkTakesIdAndQueue fx = do
@@ -1258,7 +1861,7 @@ scenarioForkTakesIdAndQueue fx = do
 -- | A workflow's row carries the application that ran it, and a fork's row
 -- inherits that owner rather than starting unclaimed. Mirrors Python's
 -- @test_steps_carry_owner_and_forks_inherit_it@ at the row level.
-scenarioForkInheritsOwner :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForkInheritsOwner :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => MgmtFixture m ->
                              m (Maybe Text, Maybe Text, Text)
 scenarioForkInheritsOwner fx = do
@@ -1296,7 +1899,7 @@ scenarioForkInheritsOwner fx = do
 
 -- | Forking from a chosen step replays the steps below it: the fork runs only
 -- the steps at or above the fork point. Returns the fork's step names.
-scenarioForkFromStep :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForkFromStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                      => MgmtFixture m ->
                         m [Text]
 scenarioForkFromStep fx = do
@@ -1338,7 +1941,7 @@ scenarioForkFromStep fx = do
 -- failure and both stacks fall back to the last recorded step (step zero):
 -- the fork re-runs every step. Returns the source's first-failure step, the
 -- fork's id, and the fork's decoded result.
-scenarioForkFromFailure :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForkFromFailure :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => MgmtFixture m ->
                            m (Text, Text, Int)
 scenarioForkFromFailure fx = do
@@ -1430,7 +2033,7 @@ checkForkInheritsOwner (parentOwner, forkOwner, appName) = do
 -- | Bulk cancel and resume hand back every id, in any order: two queued runs
 -- are cancelled and resumed, and both ids come back from each call. Returns
 -- the two source texts with the cancelled and resumed ids.
-scenarioBulkCancelResume :: forall m. (MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m)
+scenarioBulkCancelResume :: forall m. (MonadCatch m, MonadMonotonicTimeNSec m, MonadDelay m, MonadAsync m, MonadFork m, MonadMVar m, MonadSTM m, MonadThrow m)
                          => MgmtFixture m ->
                             m (Text, Text, [Text], [Text])
 scenarioBulkCancelResume fx = do
@@ -1467,7 +2070,7 @@ scenarioBulkCancelResume fx = do
 -- both fork, one drive runs both forks, and the i-th fork replays the i-th
 -- source's input. Returns the source texts with the forked ids and decoded
 -- results, in order.
-scenarioBulkFork :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioBulkFork :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                  => MgmtFixture m ->
                     m (Text, Text, [Text], [Int])
 scenarioBulkFork fx = do
@@ -1511,7 +2114,7 @@ scenarioBulkFork fx = do
 
 -- | A fork onto a partitioned queue carries the key it is given. Returns the
 -- partition key on the fork's row.
-scenarioForkPartitioned :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForkPartitioned :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => MgmtFixture m ->
                            m (Maybe Text)
 scenarioForkPartitioned fx = do
@@ -1562,7 +2165,7 @@ checkBulkFork (firstText, secondText, forked, decoded) = do
 -- write, so the explicitly named fork id must stay absent. Empty inputs
 -- are an immediate success with no validation, as the oracle returns @Ok@
 -- before validating options: the last two verdicts must both be empty.
-scenarioForkRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForkRefusals :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                      => MgmtFixture m -> m ( Either (Error EngineOnly) [WorkflowId],
                                             Either (Error EngineOnly) [WorkflowId],
                                             Either (Error EngineOnly) [WorkflowId],
@@ -1622,7 +2225,7 @@ checkForkRefusals (emptySource, negativeStep, emptyQueue, emptyForks, emptyIds, 
 -- read, so the sources need not exist; the pinned id's absence
 -- afterwards proves nothing was written. Mirrors the oracle's bulk
 -- refusal twin.
-scenarioForkBatchRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForkBatchRefusals :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => MgmtFixture m -> m ( Either (Error EngineOnly) [WorkflowId],
                                                  Either (Error EngineOnly) [WorkflowId],
                                                  Either (Error EngineOnly) [WorkflowId],
@@ -1684,7 +2287,7 @@ checkForkBatchRefusals (duplicated, collided, huge, duped, first, written) = do
 -- start's timeout to "start a workflow", and a queued start's delay and
 -- timeout to "enqueue a workflow" naming the queue. Nothing runs, so the
 -- bodies never need registering.
-scenarioStartRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioStartRefusals :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => MgmtFixture m -> m ( Either (Error EngineOnly) (),
                                              Either (Error EngineOnly) (),
                                              Either (Error EngineOnly) ()
@@ -1860,7 +2463,7 @@ checkForkPartitioned = checkEq (Just "pk-7")
 -- one-key filter by containment, a narrower replacement drops the unseen key,
 -- and clearing removes them. Returns the matching ids at each search and the
 -- cleared row's attributes.
-scenarioAttributes :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioAttributes :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => MgmtFixture m ->
                       m (Text, [Text], [Text], Maybe Text)
 scenarioAttributes fx = do
@@ -2153,7 +2756,7 @@ checkDelayRelease = checkEq (Just Delayed, 0)
 -- @a_client_lists_tags_and_delays_workflows@'s delay tail. Returns the
 -- zero move, the refusal, the saturating move, and the row status after
 -- all three.
-scenarioSetDelayRefusal :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m)
+scenarioSetDelayRefusal :: forall m. (MonadMonotonicTimeNSec m, MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m)
                         => MgmtFixture m ->
                            m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Either (Error EngineOnly) (), Maybe WorkflowStatus)
 scenarioSetDelayRefusal fx = do
@@ -2347,7 +2950,7 @@ rewindRefusedBody target wctx = do
 -- step is gone, and the driven pass re-executes it. Returns the row
 -- status, queue, attempts, output, remaining step ids, the re-run output,
 -- and the run count.
-scenarioRewindRunsAgain :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRewindRunsAgain :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                         => MgmtFixture m ->
                            m (WorkflowStatus, Maybe Text, Int64, Maybe Text, [Int], Int, Int)
 scenarioRewindRunsAgain fx = do
@@ -2399,7 +3002,7 @@ scenarioRewindRunsAgain fx = do
 -- | A delayed workflow can be released sooner: started an hour out it waits
 -- as delayed; brought forward to now, the driven pass transitions and runs
 -- it. Returns the waiting status and the decoded result.
-scenarioDelayRelease :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDelayRelease :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                      => MgmtFixture m ->
                         m (Maybe WorkflowStatus, Int)
 scenarioDelayRelease fx = do
@@ -2550,7 +3153,7 @@ checkRewindRunsAgain (status, queue, attempts, output, stepIds, decoded, after) 
 -- | Refusals name their cause and write nothing: a missing id, a negative
 -- cut, an empty queue name, and a workflow still enqueued. Returns the
 -- four verdicts with the active row's status and steps afterwards.
-scenarioRewindRefusals :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRewindRefusals :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => MgmtFixture m ->
                           m ( Either (Error EngineOnly) (),
                               Either (Error EngineOnly) (),
@@ -2631,7 +3234,7 @@ checkRewindRefusals (missing, negative, emptyQueue, refused, statusAfter, stepsA
 -- every undone surface: the surviving notification messages, the current
 -- event value for the published key, the stream values in order, the
 -- surviving step ids, and the row status.
-undoAt :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+undoAt :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
        => MgmtFixture m ->
           Int ->
           m ([Text], Maybe Text, [Text], [Int], WorkflowStatus)
@@ -2676,7 +3279,7 @@ undoAt fx cut = do
 -- | Rewound at the first step, everything the run did is undone: no
 -- message survives, the published key is gone, the close is lifted while
 -- the entries stay, and only the first step stands.
-scenarioRewindUndoCut :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRewindUndoCut :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => MgmtFixture m -> m ([Text], Maybe Text, [Text], [Int], WorkflowStatus)
 scenarioRewindUndoCut fx = undoAt fx 1
 
@@ -2693,7 +3296,7 @@ checkRewindUndoCut (messages, eventHit, values, stepIds, status) = do
 -- | Rewound mid-run, what fell below the cut survives: the message the
 -- first recv took stays queued, the key restores to its first value, and
 -- the later message and the parked send are gone.
-scenarioRewindKeepBelowCut :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRewindKeepBelowCut :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                            => MgmtFixture m -> m ([Text], Maybe Text, [Text], [Int], WorkflowStatus)
 scenarioRewindKeepBelowCut fx = undoAt fx 5
 
@@ -2732,7 +3335,7 @@ streamCloseBody () wctx = do
 --
 -- IO only: the management slice skips its sim half by decision (2026-10-18),
 -- so this case is wired into 'ManagementTest' alone.
-scenarioRewindKeepStreamClose :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRewindKeepStreamClose :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                               => MgmtFixture m -> m [Text]
 scenarioRewindKeepStreamClose fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
@@ -2779,7 +3382,7 @@ checkRewindKeepStreamClose values =
 -- gets: the row carries them, the counters clear, and the history from
 -- the cut is gone. Mirrors Python's
 -- @test_rewind_onto_a_queue_with_a_partition_key@.
-scenarioRewindQueueVersion :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRewindQueueVersion :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                            => MgmtFixture m -> m (WorkflowStatus, Maybe Text, Maybe Text, Maybe Text, Int64, [Int])
 scenarioRewindQueueVersion fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
@@ -2882,7 +3485,7 @@ checkRewindInWorkflow (decoded, status, names) = do
 -- the fake holds one checkpoint before the rewind and none after, while
 -- the row is re-enqueued. Returns the checkpoint count before and after
 -- with the row status.
-scenarioRewindDropsDatasourceCheckpoints :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRewindDropsDatasourceCheckpoints :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                          => MgmtFixture m -> m (Int, Int, WorkflowStatus)
 scenarioRewindDropsDatasourceCheckpoints fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
@@ -2928,7 +3531,7 @@ checkRewindDropsDatasourceCheckpoints (before, after, status) = do
 -- path and on the driven (dequeue) path alike. Mirrors Python's
 -- @test_sync_ds_completion_clears_checkpoints@. Returns the mid-run and
 -- post-run counts for each path.
-scenarioCompletionClearsCheckpoints :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, HasCallStack)
+scenarioCompletionClearsCheckpoints :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, HasCallStack)
                                     => MgmtFixture m -> m (Int, Int, Int, Int)
 scenarioCompletionClearsCheckpoints fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
@@ -3020,7 +3623,7 @@ childClearParentBody fake childRef midParent () wctx = do
 -- @_dropping_datasource_checkpoints@ covering the child execution paths.
 -- Returns the checkpoint count inside the child, inside the parent once the
 -- child finished, and after the parent finished.
-scenarioChildClearsCheckpoints :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, HasCallStack)
+scenarioChildClearsCheckpoints :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, HasCallStack)
                                 => MgmtFixture m -> m (Int, Int, Int)
 scenarioChildClearsCheckpoints fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
@@ -3066,7 +3669,7 @@ checkChildClearsCheckpoints (midChild, midParent, post) = do
 -- names, the row status, and whether the invalid call refused as
 -- 'InvalidInput'. Exercises the caller branch the engine paths leave to
 -- the backend, on both stacks.
-scenarioRewindCallerStep :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRewindCallerStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                          => MgmtFixture m -> m (Bool, Bool, [Text], WorkflowStatus, Bool)
 scenarioRewindCallerStep fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do
@@ -3109,7 +3712,7 @@ checkRewindCallerStep (first, second, names, status, invalidRefused) = do
 -- | A rewound parent replays to its child and adopts the row already
 -- there: the parent runs again, the child does not. Returns both decoded
 -- outputs with the run counts.
-scenarioRewindAdoptsChild :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioRewindAdoptsChild :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => MgmtFixture m -> m (Int, Int, Int, Int)
 scenarioRewindAdoptsChild fx = do
   bracket fx.mfNewDBOS shutdown $ \dbos -> do

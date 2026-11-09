@@ -69,7 +69,6 @@ import DBOS.Transact.Workflow (abortAll, newTasks, tasksSpawner)
 import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
 import DBOS.Transact.Context (spawnLocal)
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.Transact.ContextTest (ctxOver)
 import GHC.Conc (ThreadStatus (..), threadStatus)
 import Data.Int (Int64)
 import Hasql.Decoders qualified as Decoders
@@ -129,6 +128,11 @@ import DBOS.Transact.WorkflowCases
     scenarioDedupStartRecorded,
     scenarioConflictStartRecorded,
     scenarioRejectStartRecorded,
+    scenarioEnqueueByNameIsChild,
+    scenarioEnqueueByNameWritesRow,
+    scenarioEnqueueByNameDedupReplays,
+    scenarioEnqueueByNameDeadlines,
+    scenarioEnqueueByNameRefusedNoStep,
     checkRegisteredResult,
     checkJoinTakesId,
     checkFreshJoinPolls,
@@ -176,11 +180,18 @@ import DBOS.Transact.WorkflowCases
     checkDedupStartRecorded,
     checkConflictStartRecorded,
     checkRejectStartRecorded,
+    checkEnqueueByNameIsChild,
+    checkEnqueueByNameWritesRow,
+    checkEnqueueByNameDedupReplays,
+    checkEnqueueByNameDeadlines,
+    checkEnqueueByNameRefusedNoStep,
     taskAbortAllWaits,
     taskFinishedNotRegistered,
     taskRefusedAfterSweep,
     taskEmptySweep,
     taskEarlyFinishNotSwept,
+    taskWaitAllUntilDeadline,
+    taskRunningNamesTasks,
     checkNoMiscounts,
     mkWfFixture
   )
@@ -592,9 +603,19 @@ tests =
         let config = config0 {configAppVersion = Just ("v-" <> suffix), configExecutorId = Just ("exec-" <> suffix)}
             childBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
             childBody n _ = putMVar (entered !! n) () >> takeMVar (gates !! n) >> pure (Right n)
+            readerBody :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Text)
+            readerBody _ wctx = do
+              won <- selectWorkflow wctx (map (WorkflowId . childText) [0, 1, 2])
+              pure $ case won of
+                Left err -> Left err
+                Right (WorkflowId winnerText) -> Right winnerText
         bracket (newDBOS config) shutdown $ \dbos -> do
           childRegistered <- registerWorkflowRef dbos childKey childBody
           childRef <- case childRegistered of
+            Left err -> fail (show err)
+            Right ref -> pure ref
+          readerRegistered <- registerWorkflowRef dbos (newQualifiedWorkflowName "reader") readerBody
+          readerRef <- case readerRegistered of
             Left err -> fail (show err)
             Right ref -> pure ref
           exec <- launchExec dbos isolatedEnvironment
@@ -614,29 +635,27 @@ tests =
           -- All three are at their gates, so nothing has settled and none
           -- can win by accident.
           mapM_ takeMVar entered
-          reader <- getBackend
-          waiterCreated <-
-            SystemDB.initWorkflow
-              reader
-              ((newWorkflow waiterText) {newWorkflowName = Just "L2FirstWaiter"})
-              Nothing
-              WorkflowIdReturnExisting
-          case waiterCreated of
+          startedReader <-
+            startWfRef
+              exec
+              readerRef
+              (startOptionsDefault {startWorkflowId = Just (WorkflowId waiterText)})
+              (Just (encodeWorkflowInput ()))
+          readerHandle <- case startedReader of
             Left err -> fail (show err)
-            Right _ -> pure ()
-          waiterCtx <- ctxOver reader nullTracer waiterText
+            Right handle -> pure handle
           -- Released after the wait is in flight, so the wait genuinely
-          -- waits rather than reading an already-settled row.
-          winner <- newEmptyMVar
-          waiter <- async (selectWorkflow waiterCtx (map (WorkflowId . childText) [0, 1, 2]) >>= putMVar winner)
+          -- waits rather than reading an already-settled row. Either way
+          -- the middle one wins: the others never settle.
           threadDelay 200000
           -- The middle one, neither the first id passed nor the first
           -- started: the answer has to name it.
           putMVar (gates !! 1) ()
-          decided <- timeout 15000000 (takeMVar winner)
-          cancel waiter
+          decided <- timeout 15000000 (handleResult readerHandle)
           case decided of
-            Just (Right won) -> won @?= WorkflowId (childText 1)
+            Just (Right (Just stored)) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+              Right winnerText -> winnerText @?= childText 1
+              Left err -> fail (show err)
             other -> fail ("expected the middle workflow to win, got: " <> show other)
           mapM_ (`putMVar` ()) [gates !! 0, gates !! 2],
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "an assigned child id wins over the derived one" scenarioAssignedChildAdopted checkAssignedChildAdopted,
@@ -648,6 +667,11 @@ tests =
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a refused child start replays after the key is freed" scenarioDedupStartRecorded checkDedupStartRecorded,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a taken child id replays after the row is deleted" scenarioConflictStartRecorded checkConflictStartRecorded,
       liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a rejected child start replays after the row is deleted" scenarioRejectStartRecorded checkRejectStartRecorded,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow enqueued by name is a child and a replay does not enqueue it again" scenarioEnqueueByNameIsChild checkEnqueueByNameIsChild,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "an enqueue by name writes a client's row and is refused inside a step" scenarioEnqueueByNameWritesRow checkEnqueueByNameWritesRow,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a deduplicated enqueue by name replays the way it went" scenarioEnqueueByNameDedupReplays checkEnqueueByNameDedupReplays,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "an enqueue by name inherits its parent's deadline" scenarioEnqueueByNameDeadlines checkEnqueueByNameDeadlines,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "bad enqueue options are refused before the step id is taken" scenarioEnqueueByNameRefusedNoStep checkEnqueueByNameRefusedNoStep,
       testCase "a rejecting start refuses a taken id and joins by default" $ do
         -- Mirrors Rust @a_rejecting_start_or_enqueue_refuses_a_taken_id@: a
         -- Reject start or enqueue whose id is taken runs nothing, even when
@@ -816,13 +840,15 @@ tasksTests =
         filled <- mapM (\_ -> do
             tasks <- newTasks
             _ <- abortAll tasks
-            channel <- spawnLocal (tasksSpawner tasks (\_ -> pure ())) (\_ -> pure ())
+            channel <- spawnLocal (tasksSpawner tasks (\_ -> pure ())) "test" (\_ -> pure ())
             timeout 1000000 (readMVar channel)
           ) [1 .. 50 :: Int]
         case [() | Nothing <- filled] of
           [] -> pure ()
           missing -> fail ("refused spawns left channels empty: " <> show (length missing)),
-      testCase "a task finishing before registration is not swept as aborted" (taskEarlyFinishNotSwept @IO waitFinished >>= checkNoMiscounts)
+      testCase "a task finishing before registration is not swept as aborted" (taskEarlyFinishNotSwept @IO waitFinished >>= checkNoMiscounts),
+      testCase "a bounded wait ends at the deadline with the set still held" (taskWaitAllUntilDeadline @IO >>= (@?= (False, True))),
+      testCase "the registry reports the labels spawns were tracked under" (taskRunningNamesTasks @IO >>= (@?= ["alpha", "beta"]))
     ]
 
 -- | Launch over the isolated environment and hand back the executor:

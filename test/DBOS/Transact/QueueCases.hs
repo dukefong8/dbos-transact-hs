@@ -115,7 +115,7 @@ import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact.Connection (Connection (connSysdb), runSystemDB)
 import DBOS.Transact.Dequeue (Polled (..), newRunning, pollOnce)
 import DBOS.Transact.Identity (Identity (identityAppVersion))
-import DBOS.Transact.Instance (Executor (conn, datasources, identity, tasks, workflows))
+import DBOS.Transact.Instance (Executor (conn, datasources, identity, workflowTasks, workflows))
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
@@ -1599,7 +1599,7 @@ pollWalk :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, Mona
          => QueueFixture m -> Executor m -> QueueRecord -> m Polled
 pollWalk fx executor record = do
   running <- newRunning
-  polled <- pollOnce executor.conn executor.identity executor.workflows executor.tasks running record executor.datasources
+  polled <- pollOnce executor.conn executor.identity executor.workflows executor.workflowTasks running record executor.datasources
   fx.qfShutdown
   pure polled
 

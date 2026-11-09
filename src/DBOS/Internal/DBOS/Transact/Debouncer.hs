@@ -46,7 +46,7 @@ import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Client (Client (..), EnqueueOptions (..), clientEnqueueWorkflowWithDebounce, refuseNamelessWorkflow)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, withConnection)
 import DBOS.Transact.Context (WorkflowCtx (wctxConn), insideAStep, nextStepId, workflowId)
-import DBOS.Transact.Identity (validateAppName)
+import DBOS.Transact.Identity (refuseAppName)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), pollingHandle)
 import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor, startWorkflow)
@@ -147,7 +147,7 @@ debounceWith dbos userRef def key period input options = do
       Left err -> pure (Left err)
       Right () -> case refuseDurations period def.debouncerDebounceTimeout of
         Left err -> pure (Left err)
-        Right () -> case refuseDebounceAppName def.debouncerAppName of
+        Right () -> case refuseAppName debounceOperation def.debouncerAppName of
           Left err -> pure (Left err)
           Right () -> do
             generated <- generatedWorkflowId exec.conn
@@ -232,7 +232,7 @@ debounceInWorkflow wctx userRef def key period input = do
               Left err -> pure (Left err)
               Right () -> case refuseDurations period def.debouncerDebounceTimeout of
                 Left err -> pure (Left err)
-                Right () -> case refuseDebounceAppName def.debouncerAppName of
+                Right () -> case refuseAppName debounceOperation def.debouncerAppName of
                   Left err -> pure (Left err)
                   Right () -> bounceLoop conn
   where
@@ -360,7 +360,7 @@ debounceClientWith dc key period input call = do
         Left err -> pure (Left err)
         Right () -> case refuseDurations period dc.debouncerClientDebounceTimeout of
           Left err -> pure (Left err)
-          Right () -> case refuseDebounceAppName dc.debouncerClientAppName of
+          Right () -> case refuseAppName debounceOperation dc.debouncerClientAppName of
             Left err -> pure (Left err)
             Right () -> do
               generated <- generatedWorkflowId conn
@@ -414,7 +414,7 @@ debounceClientWith dc key period input call = do
                     workflowIdReusePolicy = WorkflowIdReturnExisting,
                     appName = targetApp,
                     appVersion = dc.debouncerClientAppVersion,
-                    timeout = dc.debouncerClientTimeout,
+                    timeout = maybe None Explicit dc.debouncerClientTimeout,
                     attributes = dc.debouncerClientAttributes
                   }
           enqueued <- clientEnqueueWorkflowWithDebounce dc.debouncerClient dc.debouncerClientWorkflow fresh (Just dc.debouncerClientDebounceTimeout) input
@@ -423,18 +423,6 @@ debounceClientWith dc key period input call = do
             -- enqueue; loop to bounce that workflow instead.
             Left (TransactError.SystemDatabase (SystemDBError.QueueDeduplicated {})) -> bounceLoop offered
             other -> pure other
-
--- | Refuses an empty or malformed app name as `app_name`, not as the
--- column it would fill: a row stamped with a name no other executor
--- spells the same way is a row nothing claims. Reuses the shared rule's
--- wording on this operation's channel. Mirrors Rust @refuse_app_name@.
-refuseDebounceAppName :: Maybe Text -> Either (TransactError.Error TransactError.EngineOnly) ()
-refuseDebounceAppName appName = case appName of
-  Nothing -> Right ()
-  Just name -> case validateAppName name of
-    Right () -> Right ()
-    Left (TransactError.ErrorConfig detail) -> Left (TransactError.InvalidArgument debounceOperation detail)
-    Left err -> Left err
 
 -- | What a bounce that found no debounced row to extend means. Mirrors
 -- the oracle's @classify@: a holder that is not debounced, one of a

@@ -96,7 +96,7 @@ sendWith wctx message options = do
   -- client path below presents no owner and skips the fence.
   written <- withSystemDB wctx (\db -> SystemDB.sendMessage db encodedMessage serialization caller (Just (workflowOwner wctx)) fanOut)
   pure $ case written of
-    Left err -> Left (TransactError.fromSystemDB err)
+    Left err -> Left (TransactError.fromExecution err)
     Right () -> Right ()
 
 -- | Send many messages in one transaction: all or none. The batch is
@@ -140,7 +140,7 @@ sendBulkWith wctx messages options = do
             }
     plainSend wctx' encodedMessages serialization caller = do
       written <- withSystemDB wctx' (\db -> SystemDB.sendMessages db encodedMessages serialization caller (Just (workflowOwner wctx')) (options.sendToForks == ForksInclude))
-      pure (either (Left . TransactError.fromSystemDB) Right written)
+      pure (either (Left . TransactError.fromExecution) Right written)
 
 -- | Consume the oldest matching message, waiting up to the polling duration.
 -- It is checkpointed as a read plus timeout so replay returns the same
@@ -168,7 +168,7 @@ recv wctx topic timeout = do
             Just (Topic name) -> Just name
       found <- withSystemDB wctx (\db -> SystemDB.recv db workflowId' stepId' timeoutStepId topicText timeout (ownerToken wctx))
       pure $ case found of
-        Left err -> Left (TransactError.fromSystemDB err)
+        Left err -> Left (TransactError.fromExecution err)
         Right Nothing -> Right Nothing
         Right (Just encoded) ->
           case decodeWorkflowValue "message" (Just (storedValue encoded)) of

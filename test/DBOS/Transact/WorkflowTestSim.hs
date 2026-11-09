@@ -19,7 +19,7 @@ module DBOS.Transact.WorkflowTestSim (tests) where
 
 import Control.Monad.IOSim (IOSim, SimTrace, runSimOrThrow, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
-import DBOS.IOSimTracer (runSimCase, simTracer)
+import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.Prelude
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
@@ -64,6 +64,11 @@ import DBOS.Transact.WorkflowCases
     checkQueuedStartClaimedByNextPass,
     checkConflictStartRecorded,
     checkRejectStartRecorded,
+    checkEnqueueByNameIsChild,
+    checkEnqueueByNameWritesRow,
+    checkEnqueueByNameDedupReplays,
+    checkEnqueueByNameDeadlines,
+    checkEnqueueByNameRefusedNoStep,
     checkJoinTakesId,
     checkLiftChildError,
     checkLosingTokenFired,
@@ -117,6 +122,11 @@ import DBOS.Transact.WorkflowCases
     scenarioQueuedStartClaimedByNextPass,
     scenarioConflictStartRecorded,
     scenarioRejectStartRecorded,
+    scenarioEnqueueByNameIsChild,
+    scenarioEnqueueByNameWritesRow,
+    scenarioEnqueueByNameDedupReplays,
+    scenarioEnqueueByNameDeadlines,
+    scenarioEnqueueByNameRefusedNoStep,
     scenarioJoinTakesId,
     scenarioLiftChildError,
     scenarioLosingTokenFired,
@@ -139,7 +149,9 @@ import DBOS.Transact.WorkflowCases
     taskEarlyFinishNotSwept,
     taskEmptySweep,
     taskFinishedNotRegistered,
-    taskRefusedAfterSweep
+    taskRefusedAfterSweep,
+    taskRunningNamesTasks,
+    taskWaitAllUntilDeadline
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -206,6 +218,11 @@ tests =
       simCase simWfFixture "a queued start is pending once the next pass claims it" scenarioQueuedStartClaimedByNextPass checkQueuedStartClaimedByNextPass traceQueuedStartClaimedByNextPass,
       simCase simWfFixture "a taken child id replays after the row is deleted" scenarioConflictStartRecorded checkConflictStartRecorded traceConflictStartRecorded,
       simCase simWfFixture "a rejected child start replays after the row is deleted" scenarioRejectStartRecorded checkRejectStartRecorded traceRejectStartRecorded,
+      simCase simWfFixture "a workflow enqueued by name is a child and a replay does not enqueue it again" scenarioEnqueueByNameIsChild checkEnqueueByNameIsChild traceEnqueueByNameIsChild,
+      simCase simWfFixture "an enqueue by name writes a client's row and is refused inside a step" scenarioEnqueueByNameWritesRow checkEnqueueByNameWritesRow traceEnqueueByNameWritesRow,
+      simCase simWfFixture "a deduplicated enqueue by name replays the way it went" scenarioEnqueueByNameDedupReplays checkEnqueueByNameDedupReplays traceEnqueueByNameDedupReplays,
+      simCase simWfFixture "an enqueue by name inherits its parent's deadline" scenarioEnqueueByNameDeadlines checkEnqueueByNameDeadlines traceEnqueueByNameDeadlines,
+      simCase simWfFixture "bad enqueue options are refused before the step id is taken" scenarioEnqueueByNameRefusedNoStep checkEnqueueByNameRefusedNoStep traceEnqueueByNameRefusedNoStep,
       simCase simWfFixture "a zero-argument workflow records no input" scenarioZeroNoInput checkZeroNoInput traceZeroNoInput,
       simCase simWfFixture "the row exists before the body starts" scenarioRowBeforeBody checkRowBeforeBody traceRowBeforeBody,
       simCase simWfFixture "a panicking workflow leaves its row pending" scenarioPanic checkPanic tracePanic,
@@ -262,7 +279,15 @@ tasksSimTests =
       testCase "a task finishing before registration is not swept as aborted" $ do
         let simRun :: forall s. IOSim s [Int]
             simRun = taskEarlyFinishNotSwept @(IOSim s) simWaitDeparture
-        checkNoMiscounts (runSimOrThrow simRun)
+        checkNoMiscounts (runSimOrThrow simRun),
+      testCase "a bounded wait ends at the deadline with the set still held" $ do
+        let simRun :: forall s. IOSim s (Bool, Bool)
+            simRun = taskWaitAllUntilDeadline @(IOSim s)
+        (@?= (False, True)) (runSimOrThrow simRun),
+      testCase "the registry reports the labels spawns were tracked under" $ do
+        let simRun :: forall s. IOSim s [Text]
+            simRun = taskRunningNamesTasks @(IOSim s)
+        (@?= ["alpha", "beta"]) (runSimOrThrow simRun)
     ]
 
 -- | The announcement shapes no staged case reaches: a superseded write and
@@ -449,6 +474,73 @@ traceConflictStartRecorded tr = do
 
 -- The first child's row is deleted, then the single fork of the refusing
 -- parent is announced; the replay returns the recorded error.
+-- | The launch records under the workflow's name, the driven child runs,
+-- and the fork past its step replays the join: one launch, one row.
+traceEnqueueByNameIsChild :: forall a. SimTrace a -> IO ()
+traceEnqueueByNameIsChild tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-wf-byname-parent-sim-byname-fork"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowEnqueued "hs-l2-wf-byname-parent-sim-byname-0" "byname-queue-sim-byname",
+          WorkflowCompleted "hs-l2-wf-byname-parent-sim-byname",
+          WorkflowCompleted "hs-l2-wf-byname-parent-sim-byname-0",
+          WorkflowChildJoined "hs-l2-wf-byname-parent-sim-byname-fork" 0 "hs-l2-wf-byname-parent-sim-byname-0",
+          WorkflowCompleted "hs-l2-wf-byname-parent-sim-byname-fork"
+        ]
+
+-- | The in-step enqueue is refused before anything is recorded; the
+-- managing step is the only one.
+traceEnqueueByNameWritesRow :: forall a. SimTrace a -> IO ()
+traceEnqueueByNameWritesRow tr = do
+  selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr
+    @?= [ StepRunning "enqueues" 0,
+          StepOutputRecorded "enqueues" 0,
+          WorkflowCompleted "hs-l2-wf-byname-instep-sim-byname-row"
+        ]
+
+-- | The join hands back the holder and the refusal records; both replays
+-- hand back what the first runs saw, and the deleted holder's key stays
+-- free of new rows.
+traceEnqueueByNameDedupReplays :: forall a. SimTrace a -> IO ()
+traceEnqueueByNameDedupReplays tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-wf-byname-joins-sim-byname-dedup-fork", WorkflowsDeleted 1, WorkflowForked "hs-l2-wf-byname-refused-sim-byname-dedup-fork"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowDedupJoined "hs-l2-wf-byname-holder-sim-byname-dedup" "held-key-sim-byname-dedup",
+          WorkflowCompleted "hs-l2-wf-byname-joins-sim-byname-dedup",
+          WorkflowCompleted "hs-l2-wf-byname-refused-sim-byname-dedup",
+          WorkflowChildJoined "hs-l2-wf-byname-joins-sim-byname-dedup-fork" 0 "hs-l2-wf-byname-holder-sim-byname-dedup",
+          WorkflowCompleted "hs-l2-wf-byname-joins-sim-byname-dedup-fork",
+          WorkflowStartErrorReplayed "hs-l2-wf-byname-refused-sim-byname-dedup-fork" 0 "workflow hs-l2-wf-byname-refused-sim-byname-dedup-0 (queue: idle-dedup-queue-sim-byname-dedup, deduplication id: held-key-sim-byname-dedup) is already enqueued",
+          WorkflowCompleted "hs-l2-wf-byname-refused-sim-byname-dedup-fork"
+        ]
+
+-- | Three launches record under the workflow's name; the rows carry the
+-- budgets the calls named.
+traceEnqueueByNameDeadlines :: forall a. SimTrace a -> IO ()
+traceEnqueueByNameDeadlines tr = do
+  selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr
+    @?= [ WorkflowEnqueued "hs-l2-wf-byname-deadline-parent-sim-byname-deadline-0" "idle-deadline-queue-sim-byname-deadline",
+          WorkflowEnqueued "hs-l2-wf-byname-deadline-parent-sim-byname-deadline-1" "idle-deadline-queue-sim-byname-deadline",
+          WorkflowEnqueued "hs-l2-wf-byname-deadline-parent-sim-byname-deadline-2" "idle-deadline-queue-sim-byname-deadline",
+          WorkflowCompleted "hs-l2-wf-byname-deadline-parent-sim-byname-deadline"
+        ]
+
+-- | Five refusals announce nothing; the step after them is the only one.
+traceEnqueueByNameRefusedNoStep :: forall a. SimTrace a -> IO ()
+traceEnqueueByNameRefusedNoStep tr = do
+  selectTraceEventsDynamic tr @?= ([] :: [ManagementEvent])
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr
+    @?= [ StepRunning "after" 0,
+          StepOutputRecorded "after" 0,
+          WorkflowCompleted "hs-l2-wf-byname-refusing-sim-byname-refused"
+        ]
+
 traceRejectStartRecorded :: forall a. SimTrace a -> IO ()
 traceRejectStartRecorded tr = do
   selectTraceEventsDynamic tr

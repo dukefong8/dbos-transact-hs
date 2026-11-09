@@ -134,7 +134,7 @@ import DBOS.SystemDB.Postgres
     runSession,
     verifySystemDatabase,
   )
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.List (sort)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -168,6 +168,7 @@ tests =
     [ transportTests,
       pollingTests,
       classifyTests,
+      classifyLiveTests getBackend,
       configTests,
       testCase "a step listing without outputs leaves the payload columns out of the SQL" $ do
         let onSql = Statements.listStepsSql True
@@ -548,11 +549,12 @@ pollingTests =
         pollingPermits PollingUnlimited 10 @?= maxBound
     ]
 
--- | The failure classification behind the retry loop. There are no Rust
--- unit tests for @classify@ itself, so these cases are verified against its
--- documented table (@postgres.rs@ classify docs) instead: @40@ transient,
--- @08@/@53@/@57@ connection, @XX@ by message, everything else permanent,
--- and no-SQLSTATE failures by driver variant.
+-- | The failure classification behind the retry loop. Verified against
+-- the oracle's documented table (@postgres.rs@ classify docs) and its
+-- @classify_sqlstate@ unit tests: @40@ transient, @08@/@53@/@57@
+-- connection, @XX@ by message, everything else permanent, and no-SQLSTATE
+-- failures by driver variant. The exact-code carve-outs (@08P01@,
+-- @57014@, @57P04@) mirror Rust #153.
 classifyTests :: TestTree
 classifyTests =
   testGroup
@@ -562,8 +564,25 @@ classifyTests =
         kindOf (serverUsage "40P01" "deadlock detected") @?= Transient,
       testCase "connection-class codes are connection failures" $ do
         kindOf (serverUsage "08000" "connection exception") @?= Connection
+        kindOf (serverUsage "08006" "connection failure") @?= Connection
+        kindOf (serverUsage "08007" "transaction resolution unknown") @?= Connection
         kindOf (serverUsage "53300" "too many connections") @?= Connection
-        kindOf (serverUsage "57000" "cannot connect now") @?= Connection,
+        kindOf (serverUsage "57000" "cannot connect now") @?= Connection
+        kindOf (serverUsage "57P01" "admin shutdown") @?= Connection,
+      testCase "a cancelled statement and a dropped database are permanent" $ do
+        kindOf (serverUsage "57014" "canceling statement due to statement timeout") @?= Permanent
+        kindOf (serverUsage "57014" "canceling statement due to user request") @?= Permanent
+        kindOf (serverUsage "57014" "query execution canceled due to statement timeout") @?= Permanent
+        kindOf (serverUsage "57P04" "database \"gone\" does not exist") @?= Permanent,
+      testCase "a bare CockroachDB session cancel is a connection failure" $ do
+        kindOf (serverUsage "57014" "query execution canceled") @?= Connection
+        kindOf (serverUsage "57014" "  query execution canceled  ") @?= Connection,
+      -- hasql's ServerError carries no severity, so the oracle's
+      -- FATAL-vs-ERROR split for @08P01@ is unportable: every protocol
+      -- violation is permanent. Revisited if a pooler that raises its own
+      -- FATAL @08P01@s enters the deployment (see 'serverKind').
+      testCase "a protocol violation is permanent" $
+        kindOf (serverUsage "08P01" "bind message supplies 1 parameters, but prepared statement \"s\" requires 2") @?= Permanent,
       testCase "an idle session the server ended is a lost connection" $
         kindOf (serverUsage "25P03" "terminating connection due to idle-in-transaction timeout") @?= Connection,
       testCase "XXUUU with a transport message is a connection failure" $
@@ -606,6 +625,47 @@ classifyTests =
       Pool.SessionUsageError (Errors.StatementSessionError 1 0 "select 1" [] True (Errors.ServerStatementError (serverError code message)))
     serverError code message = Errors.ServerError code message Nothing Nothing Nothing
     sessionError code = Errors.StatementSessionError 1 0 "select 1" [] True (Errors.ServerStatementError (serverError code "x"))
+
+-- | The carve-outs against a live server: a malformed statement and a
+-- statement cut off by @statement_timeout@ fail at once rather than
+-- being retried. Each case runs under the ten-second timeout the
+-- oracle's cases use: a regression to the connection class would ask
+-- again forever, so the timeout — not the suite — catches that.
+classifyLiveTests :: IO PostgresSystemDB -> TestTree
+classifyLiveTests getBackend =
+  testGroup
+    "Classification (live)"
+    [ testCase "a malformed statement is refused, not retried" $ do
+        withBackend getBackend $ \env -> do
+          -- One parameter bound to a two-parameter statement: the server
+          -- reports @08P01@, a code in the connection class. Classified
+          -- as a connection error, withRetry would ask again forever.
+          result <-
+            timeout 10000000 $
+              Backend.runSession env "malformed" $
+                Session.statement (1 :: Int32) $
+                  Statement.preparable
+                    "select $1::int4 + $2::int4"
+                    (Encoders.param (Encoders.nonNullable Encoders.int4))
+                    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int4)))
+          case result of
+            Just (Left (Backend backend)) -> do
+              backend.backendKind @?= Permanent
+              backend.backendSqlState @?= Just "08P01"
+            other -> fail ("expected a permanent backend error, got: " <> show other),
+      testCase "a statement timeout is refused, not retried" $ do
+        withBackend getBackend $ \env -> do
+          result <-
+            timeout 10000000 $
+              Backend.runTransaction env "statement-timeout" $ do
+                Tx.statement () (Statement.preparable "SET LOCAL statement_timeout = '50ms'" Encoders.noParams Decoders.noResult)
+                Tx.statement () (Statement.preparable "SELECT pg_sleep(5)" Encoders.noParams Decoders.noResult)
+          case result of
+            Just (Left (Backend backend)) -> do
+              backend.backendKind @?= Permanent
+              backend.backendSqlState @?= Just "57014"
+            other -> fail ("expected a permanent backend error, got: " <> show other)
+    ]
 
 -- | 'Settings' and 'Config' carry the documented defaults: the @dbos@
 -- schema, the shared retry policy, no executor or application identity, no
@@ -2825,7 +2885,44 @@ lifecycleWriteTests getBackend =
           survived <- getWorkflow env (WorkflowId target)
           case survived of
             Right (Just _) -> pure ()
-            other -> fail ("expected the row to survive, got: " <> show other)
+            other -> fail ("expected the row to survive, got: " <> show other),
+      testCase "the owner check tells a cancel from a hand-off" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          creator <- initOwnedRow env (newWorkflow unique) Nothing
+          let write = recordStep env (WorkflowId unique) 0 "late" (OutcomeOutput (Just "1")) Nothing Nothing creator
+          _ <- cancelWorkflows env [WorkflowId unique] False Nothing Nothing
+          cancelled <- write
+          case cancelled of
+            Left (WorkflowCancelled {workflowId}) -> workflowId @?= unique
+            other -> fail ("expected WorkflowCancelled for the cancelled row, got: " <> show other)
+          _ <- resumeWorkflows env [WorkflowId unique] Nothing Nothing Nothing
+          handed <- write
+          case handed of
+            Left (WorkflowConflict {workflowId}) -> workflowId @?= unique
+            other -> fail ("expected WorkflowConflict for the resumed row, got: " <> show other)
+          steps <- listSteps env (WorkflowId unique) True Nothing Nothing Nothing
+          steps @?= Right [],
+      testCase "a cancelled row refuses whoever holds its token" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          creator <- initOwnedRow env (newWorkflow unique) Nothing
+          -- A writer that cancels without clearing the owner: the status
+          -- decides, not the token.
+          marked <-
+            runSession env "fixture" $
+              Session.statement unique $
+                Statement.preparable
+                  "update dbos.workflow_status set status = 'CANCELLED' where workflow_uuid = $1"
+                  (Encoders.param (Encoders.nonNullable Encoders.text))
+                  Decoders.noResult
+          case marked of
+            Left err -> fail ("marking the row failed: " <> show err)
+            Right () -> pure ()
+          refused <- recordStep env (WorkflowId unique) 0 "late" (OutcomeOutput (Just "1")) Nothing Nothing creator
+          case refused of
+            Left (WorkflowCancelled {workflowId}) -> workflowId @?= unique
+            other -> fail ("expected WorkflowCancelled for the owned cancelled row, got: " <> show other)
     ]
   where
     unId (WorkflowId widText) = widText

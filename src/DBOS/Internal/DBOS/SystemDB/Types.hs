@@ -1949,9 +1949,10 @@ data InitWorkflowCaller = InitWorkflowCaller
 -- | A write's claim on its workflow: the row it targets and the token the
 -- execution making the write holds. A write lands only while the row still
 -- holds that token; anything else is a @WorkflowConflict@ and rolls back.
--- Mirrors Rust @WorkflowOwner@. The @None@-shaped absence of one (a plain
--- client or engine path with no execution) is expressed at each call site
--- with @Maybe@, never with a dummy token.
+-- Once the row is cancelled, the write is refused with
+-- @WorkflowCancelled@ instead. Mirrors Rust @WorkflowOwner@. The @None@-shaped
+-- absence of one (a plain client or engine path with no execution) is
+-- expressed at each call site with @Maybe@, never with a dummy token.
 data WorkflowOwner = WorkflowOwner
   { ownerWorkflowId :: WorkflowId,
     ownerToken      :: Text

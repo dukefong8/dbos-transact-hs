@@ -116,7 +116,10 @@ traceEventSilent tr = do
 traceRecoveryKeepsFirst :: forall a. SimTrace a -> IO ()
 traceRecoveryKeepsFirst tr = do
   selectTraceEventsDynamic tr @?= [WorkflowAlreadyOwned "sim-event-recovery-id", WorkflowCompleted "sim-event-recovery-id"]
-  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app", EngineRecovered 1, EngineLaunched "sim-app" "sim-executor" "0.0.0", EngineCancelledRunning 3, EngineShutdown "sim-app"]
+  -- The relaunched supervisor, worker and sweep die silently with the
+  -- producers and monitors: only workflow tasks are announced, and the
+  -- rerun finished before the second shutdown.
+  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app", EngineRecovered 1, EngineLaunched "sim-app" "sim-executor" "0.0.0", EngineShutdown "sim-app"]
 
 -- | The cross-instance read fails the run; the plain in-step read runs its
 -- step and completes. Both instances shut down.

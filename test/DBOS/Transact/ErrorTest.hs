@@ -17,7 +17,7 @@ import DBOS.Transact
     newQualifiedWorkflowName,
     methodQualifiedWorkflowName,
   )
-import DBOS.Transact.Error (Failure (..), controlOf, decodeErrorText, encodeErrorText, failureOf, fromSystemDB, liftEngine)
+import DBOS.Transact.Error (Failure (..), controlOf, decodeErrorText, encodeErrorText, failureOf, fromExecution, fromSystemDB, liftEngine)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
@@ -64,6 +64,15 @@ tests =
           @?= (UnknownSerialization {name = "pickle"} :: Error CardDeclined)
         fromSystemDB (SystemDB.Malformed "bad")
           @?= (SystemDatabase (SystemDB.Malformed "bad") :: Error CardDeclined),
+      testCase "an execution sees cancellation at the top level" $ do
+        fromExecution (SystemDB.WorkflowCancelled {workflowId = "wf-1"})
+          @?= (WorkflowCancelled {workflowId = "wf-1"} :: Error CardDeclined)
+        fromSystemDB (SystemDB.WorkflowCancelled {workflowId = "wf-1"})
+          @?= (WorkflowCancelled {workflowId = "wf-1"} :: Error CardDeclined)
+        fromExecution (SystemDB.WorkflowConflict {workflowId = "wf-1"})
+          @?= (SystemDatabase (SystemDB.WorkflowConflict {workflowId = "wf-1"}) :: Error CardDeclined)
+        displayException (WorkflowCancelled {workflowId = "wf-1"} :: Error CardDeclined) @?= "the workflow wf-1 was cancelled"
+        assertBool "a top-level cancellation is control" (controlOf (WorkflowCancelled {workflowId = "wf-1"} :: Error CardDeclined) /= Nothing),
       testCase "re-targeting recurses into the nested retry errors" $ do
         let err = MaxStepRetriesExceeded {step = "s", attempts = 2, errors = [ErrorApplication (CardDeclined {attempts = 1})]} :: Error CardDeclined
         fmap (const "boom") err

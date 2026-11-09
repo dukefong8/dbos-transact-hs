@@ -167,6 +167,7 @@ test-suite test
     DBOS.Transact.SelectCases
     DBOS.Transact.SelectTest
     DBOS.Transact.SelectTestSim
+    DBOS.Transact.ShutdownTest
     DBOS.Transact.StepRetryCases
     DBOS.Transact.StepRetryTest
     DBOS.Transact.StepRetryTestSim

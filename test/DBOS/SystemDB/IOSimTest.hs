@@ -771,6 +771,47 @@ memTests =
         case targetRow of
           Just _ -> pure ()
           other -> fail ("expected the row to survive, got: " <> show other),
+      -- Twin of the live cancel/hand-off case: a cancelled row refuses
+      -- whoever asks, a resumed row reports the hand-off, and neither
+      -- write lands.
+      testCase "the owner check tells a cancel from a hand-off" $ do
+        (cancelled, handed, steps) <- runMem $ do
+          mem <- newMemDB
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-why") Nothing WorkflowIdReturnExisting
+          let write = recordStep mem (WorkflowId "wf-why") 0 "late" (OutcomeOutput (Just "1")) Nothing Nothing created.initResultCreatorXid
+          _ <- orFailSim =<< cancelWorkflows mem [WorkflowId "wf-why"] False Nothing Nothing
+          cancelled <- write
+          _ <- orFailSim =<< resumeWorkflows mem [WorkflowId "wf-why"] Nothing Nothing Nothing
+          handed <- write
+          steps <- orFailSim =<< listSteps mem (WorkflowId "wf-why") True Nothing Nothing Nothing
+          pure (cancelled, handed, steps)
+        case cancelled of
+          Left (WorkflowCancelled {workflowId}) -> workflowId @?= "wf-why"
+          other -> fail ("expected WorkflowCancelled, got: " <> show other)
+        case handed of
+          Left (WorkflowConflict {workflowId}) -> workflowId @?= "wf-why"
+          other -> fail ("expected WorkflowConflict, got: " <> show other)
+        steps @?= [],
+      -- The status decides, not the token: a row cancelled without
+      -- clearing its owner still refuses whoever holds it. The mem cancel
+      -- always clears, so the status is set directly — the only shape the
+      -- live raw-SQL case cannot take.
+      testCase "a cancelled row refuses whoever holds its token" $ do
+        (refused, status) <- runMem $ do
+          mem <- newMemDB
+          created <- orFailSim =<< initWorkflow mem (newWorkflow "wf-owned") Nothing WorkflowIdReturnExisting
+          atomically $
+            modifyTVar
+              mem.memRows
+              (Map.adjust (\row -> row {workflowRecordStatus = Cancelled}) "wf-owned")
+          refused <-
+            recordStep mem (WorkflowId "wf-owned") 0 "late" (OutcomeOutput (Just "1")) Nothing Nothing created.initResultCreatorXid
+          row <- orFailSim =<< getWorkflow mem (WorkflowId "wf-owned")
+          pure (refused, fmap (.workflowRecordStatus) row)
+        case refused of
+          Left (WorkflowCancelled {workflowId}) -> workflowId @?= "wf-owned"
+          other -> fail ("expected WorkflowCancelled, got: " <> show other)
+        status @?= Just Cancelled,
       -- Twin of the live dead-letter case: the mem mirror enforces the
       -- same guard (only PENDING rows at or above the floor move).
       testCase "dead-letter parks only over-limit pending rows" $ do

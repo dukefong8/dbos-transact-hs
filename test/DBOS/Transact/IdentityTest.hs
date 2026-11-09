@@ -9,13 +9,17 @@ module DBOS.Transact.IdentityTest (tests) where
 import DBOS.Prelude
 import DBOS.Transact
   ( Config (..),
+    EngineOnly,
     Environment (..),
+    Error (..),
     configNew,
   )
+import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Identity
   ( Identity (..),
     appVersionEnv,
     cloudAppNameEnv,
+    refuseAppName,
     resolve,
     validateAppName,
   )
@@ -62,6 +66,14 @@ tests =
           ["abc", "app_1", "a-b-c", Text.replicate 256 "a"]
         mapM_ (\name -> assertBool (show name <> " should be refused") (isLeft (validateAppName name)))
           ["", "ab", Text.replicate 257 "a", "Not A Name", "app!", "APP"],
+      testCase "a name no executor could spell is refused on the caller's channel" $ do
+        refuseAppName "enqueue a workflow" Nothing @?= (Right () :: Either (Error EngineOnly) ())
+        refuseAppName "enqueue a workflow" (Just "acme") @?= (Right () :: Either (Error EngineOnly) ())
+        case refuseAppName "enqueue a workflow" (Just "Not-An-App") of
+          Left (TransactError.InvalidArgument operation detail) -> do
+            operation @?= "enqueue a workflow"
+            assertBool "names the field" ("`app_name`" `Text.isInfixOf` detail)
+          other -> fail ("expected an InvalidArgument refusal, got: " <> show other),
       testCase "the resolved name is the one that is checked" $ do
         case resolve configured {configAppName = "Not A Name"} deployed of
           Left err -> assertBool "names the offending value" ("Not A Name" `Text.isInfixOf` Text.pack (show err))

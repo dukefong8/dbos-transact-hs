@@ -134,7 +134,7 @@ checkSelect wctx branches = do
           parent = WorkflowId (workflowId wctx')
       checked <- runSystemDB conn.connSysdb (\db -> SystemDB.checkStep db parent stepId' selectStepStepName)
       case checked of
-        Left err -> pure (Left (TransactError.fromSystemDB err))
+        Left err -> pure (Left (TransactError.fromExecution err))
         Right Nothing -> pure (Right (Fresh (Recording placement startedAt)))
         Right (Just recorded) ->
           case decodeWorkflowValue "the branch that won a select" (Just (SerializedWorkflowValue (fromMaybe "" recorded.stepRecordOutput) (Serialization <$> recorded.stepRecordSerialization))) :: Either CodecError Int of
@@ -196,7 +196,7 @@ recordSelect recording winner = case recording.recordingPlacement of
           (serialization <|> Just (serializerName conn.connSerializer))
           timing
           (ownerToken wctx)
-    pure (either (Left . TransactError.fromSystemDB) Right written)
+    pure (either (Left . TransactError.fromExecution) Right written)
   _ -> pure (Right ())
 
 -- | Takes a control signal out of the winning branch's slot, if that is
@@ -212,6 +212,7 @@ controlError outcome = case outcome of
   where
     isControl err = case err of
       TransactError.Interrupted {} -> True
+      TransactError.WorkflowCancelled {} -> True
       TransactError.SystemDatabase {} -> True
       _ -> False
 

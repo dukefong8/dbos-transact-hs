@@ -557,7 +557,7 @@ scenarioCancelledReader fx = do
   fx.efCancelWorkflow consumer
   result <- wait readTask
   pure $ case result of
-    Left (SystemDatabase (SystemDB.WorkflowCancelled {})) -> True
+    Left (WorkflowCancelled {}) -> True
     _ -> False
 
 checkCancelledReader :: Bool -> Either String ()

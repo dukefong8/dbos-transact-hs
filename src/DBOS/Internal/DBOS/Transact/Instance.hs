@@ -23,6 +23,9 @@ module DBOS.Transact.Instance
     launchOnWithQueues,
     launchExecutor,
     shutdown,
+    shutdownWith,
+    ShutdownOptions (..),
+    shutdownOptionsDefault,
     requireExecutor,
     withExecutor,
     registerWorkflowRef,
@@ -32,6 +35,7 @@ module DBOS.Transact.Instance
     startWorkflow,
     runWorkflowRef,
     enqueueWorkflow,
+    enqueueWorkflowByName,
     retrieveWorkflow,
     getWorkflowEvent,
     getWorkflowEventSerialized,
@@ -77,12 +81,12 @@ import Data.Map.Strict qualified as Map
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AppScope, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult, QualifiedWorkflowName, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter, renderQualifiedWorkflowName)
+import DBOS.SystemDB.Types (AppScope, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), EncodedSendMessage (..), NewWorkflow (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), durationAsMillis, forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult, QualifiedWorkflowName, qualifiedName, qualifiedClassName, qualifiedConfigName, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter, newWorkflow, renderQualifiedWorkflowName, secondsDuration)
 import DBOS.Transact.Serialization (CodecError (..), SerializationError, WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, unWorkflowInput)
 import DBOS.Transact.Serialization qualified as Serialization
-import DBOS.Transact.Config (Config (..))
+import DBOS.Transact.Config (Config (..), serializerName)
 import DBOS.Transact.Config qualified as Config
-import DBOS.Transact.Connection (Connection (..), releaseConnection, acquireConnection, withConnection)
+import DBOS.Transact.Connection (Connection (..), releaseConnection, acquireConnection, generatedWorkflowId, withConnection)
 import DBOS.Transact.Context (WorkflowCtx)
 import DBOS.Transact.Dequeue (dequeuePass, superviseForever)
 import DBOS.Transact.Error qualified as TransactError
@@ -96,8 +100,8 @@ import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatas
 import DBOS.Transact.Datasource qualified as Datasource (registerDataSource)
 import DBOS.Transact.Registry (Registry, Snapshot, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, snapshotRegistry, snapshotSize, thawRegistry)
 import DBOS.Transact.TimeoutSweep (spawnTimeoutSweep)
-import DBOS.Transact.Workflow (ErasedWorkflow, RunOptions (..), StartOptions, Tasks, WorkflowRef, abortAll, newTasks, runRegisteredWorkflow, spawnTracked)
-import DBOS.Transact.Workflow qualified as Workflow (enqueueWorkflow, registerTypedWorkflow, registerWorkflowRef, runWorkflowRef, startWorkflow)
+import DBOS.Transact.Workflow (EnqueueOptions (..), ErasedWorkflow, RunOptions (..), StartOptions, Submitted (..), Tasks, WorkflowRef, abortAll, newTasks, runRegisteredWorkflow, runningTasks, spawnTracked, waitAllUntil)
+import DBOS.Transact.Workflow qualified as Workflow (EnqueueOptions (..), enqueueWorkflow, initOrJoin, queueRequest, registerTypedWorkflow, registerWorkflowRef, runWorkflowRef, startWorkflow, storedPriority, timeoutBudget, validateEnqueueOptions)
 
 -- | An instance is the application's stable configuration and registry;
 -- its executor slot is empty until launch and may be filled again after a
@@ -113,18 +117,41 @@ data DBOS m = DBOS
 -- | The running process identity and the resources it owns. Mirrors Rust
 -- @Executor@: the connection, the resolved identity, the launch-time
 -- registry snapshot, the queues this executor listens on, and the tracked
--- tasks shutdown reaches. The tracer is the launch's FastLogger backend,
--- announced through by workers and workflow contexts; its release runs at
--- shutdown, after the tasks it outlives.
+-- tasks shutdown reaches. One task set per 'Role', because shutdown stops
+-- them in turn: the producers first so the drained set cannot grow, then
+-- the workflows with a timeout, and the monitors last. The tracer is the
+-- launch's FastLogger backend, announced through by workers and workflow
+-- contexts; its release runs at shutdown, after the tasks it outlives.
 data Executor m = Executor
   { conn          :: Connection m,
     identity      :: Identity,
     datasources   :: DataSourceRegistry m,
     workflows     :: Snapshot m (ErasedWorkflow m),
     listen_queues :: Maybe [Text],
-    tasks         :: Tasks m,
+    producerTasks :: Tasks m,
+    workflowTasks :: Tasks m,
+    monitorTasks  :: Tasks m,
+    stopping      :: StrictTVar m Bool,
     releaseTracer :: m ()
   }
+
+-- | What 'shutdownWith' does with the workflows still running. A struct
+-- rather than a bare argument, matching the other @...With@ calls.
+-- Mirrors Rust @ShutdownOptions@.
+data ShutdownOptions = ShutdownOptions
+  { shutdownWorkflowCompletionTimeout :: Duration
+  }
+  deriving stock (Eq, Show)
+
+-- | Wait for nothing: every running workflow is cancelled at once, as
+-- 'shutdown' always did. Mirrors Rust @ShutdownOptions::default@.
+shutdownOptionsDefault :: ShutdownOptions
+shutdownOptionsDefault = ShutdownOptions { shutdownWorkflowCompletionTimeout = secondsDuration 0 }
+
+-- | How often a draining shutdown says which workflows it is still
+-- waiting for. Mirrors Rust @DRAIN_REPORT_INTERVAL@.
+drainReportInterval :: Duration
+drainReportInterval = secondsDuration 1
 
 newDBOS :: MonadMVar m => Config -> m (DBOS m)
 newDBOS config' = do
@@ -226,34 +253,136 @@ launchWithEnvironment dbos environment =
 -- | Shutdown is idempotent and reopens registration for a later launch.
 -- Tasks are aborted and waited for before the connection closes, so a
 -- workflow caught mid-run stays @PENDING@ and is recovered by the next
--- launch rather than lost.
-shutdown :: (MonadMVar m, MonadFork m, MonadSTM m) => DBOS m -> m ()
-shutdown dbos =
-  withMVar dbos.dbos_lifecycle $ \_ -> do
-    current <- readMVar dbos.dbos_executor
-    case current of
-      Nothing -> pure ()
-      Just executor -> do
-        modifyMVar_ dbos.dbos_executor (const (pure Nothing))
-        cancelled <- abortAll executor.tasks
-        when (cancelled > 0) $
-          runTracer executor.conn.connTracer (EngineCancelledRunning cancelled)
-        -- The release runs last: a throwing close then propagates with the
-        -- tracer released and both registries thawed, rather than skipping
-        -- them. No new constraint earns this; the resources are independent,
-        -- so teardown order among them is free.
-        runTracer executor.conn.connTracer (EngineShutdown executor.identity.identityAppName)
-        executor.releaseTracer
-        thawRegistry dbos.dbos_registry
-        thawDataSourceRegistry dbos.dbos_datasources
-        releaseConnection executor.conn
+-- | Shutdown is idempotent and reopens registration for a later launch.
+-- With the default options this waits for nothing: every running
+-- workflow is cancelled at once and stays @PENDING@, as 'shutdown' always
+-- did. Mirrors Rust @DBOS::shutdown@.
+shutdown :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m, MonadCatch m) => DBOS m -> m ()
+shutdown dbos = shutdownWith dbos shutdownOptionsDefault
 
-runWorkflow :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
+-- | Stops the executor and closes the system database, first waiting up to
+-- @shutdownWorkflowCompletionTimeout@ for the workflows running in this
+-- process to finish. In order: the dequeue loop stops so
+-- nothing new starts here (the port runs no scheduler loop); running workflows drain to the timeout; what
+-- is left is cancelled and stays @PENDING@; the timeout sweep stops; the
+-- system database closes last. The instance stays launched until the
+-- drain is over, so a workflow finishing during the wait can still call
+-- into it. Idempotent, and a second call made while the first is waiting
+-- returns once the first has finished (both serialize on the lifecycle
+-- lock). Mirrors Rust @DBOS::shutdown_with@.
+shutdownWith :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m, MonadCatch m) => DBOS m -> ShutdownOptions -> m ()
+shutdownWith dbos options = do
+  -- The teardown runs as a task of its own, so a caller that stops
+  -- waiting leaves it to finish rather than cutting the shutdown short
+  -- halfway through. The lifecycle lock lives inside that task, not the
+  -- waiter: a dropped wait must not reopen the lifecycle while the
+  -- teardown still holds it, or a second shutdown would tear down twice
+  -- and a relaunch would be wiped when the first teardown takes the
+  -- executor it just installed. The box always fills: a throw in the
+  -- teardown reaches the waiter instead of hanging it.
+  box <- newEmptyMVar
+  _ <- forkIO (do result <- try (tearDownIfLaunched dbos options); putMVar box result)
+  outcome <- takeMVar box
+  either throwIO pure (outcome :: Either SomeException ())
+
+-- | Takes the lifecycle lock and tears down the installed executor, if
+-- any: the lock lives in the teardown task rather than its waiter, so a
+-- dropped wait neither reopens the lifecycle early nor lets a second
+-- shutdown or a relaunch interleave with the teardown still running.
+tearDownIfLaunched :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => DBOS m -> ShutdownOptions -> m ()
+tearDownIfLaunched dbos options = withMVar dbos.dbos_lifecycle $ \_ -> do
+  current <- readMVar dbos.dbos_executor
+  case current of
+    Nothing -> pure ()
+    Just executor -> tearDown dbos executor options
+
+-- | The whole of 'shutdownWith', run as its own task: stop the executor
+-- while still installed, take it once nothing is running that could call
+-- back into the instance, then close. A workflow given time to finish may
+-- call back into this instance — to send, to start a child — and an
+-- instance that already said it was not launched would fail it with an
+-- error its body could record as its outcome. Mirrors Rust @tear_down@.
+tearDown :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => DBOS m -> Executor m -> ShutdownOptions -> m ()
+tearDown dbos executor options = do
+  stop executor options.shutdownWorkflowCompletionTimeout
+  modifyMVar_ dbos.dbos_executor (const (pure Nothing))
+  close executor
+  -- The announcement runs after the close: the tracer is FastLogger, not
+  -- the database, so it survives the release. The registries thaw last
+  -- with the tracer release, reopening registration for a later launch.
+  runTracer executor.conn.connTracer (EngineShutdown executor.identity.identityAppName)
+  executor.releaseTracer
+  thawRegistry dbos.dbos_registry
+  thawDataSourceRegistry dbos.dbos_datasources
+
+-- | Stops this executor starting workflows, waits up to the timeout for
+-- those running to finish, and cancels whatever is still running at the
+-- deadline. The producers stop first so the drained set cannot grow: a
+-- dequeue whose claim has committed starts what it claimed, and that
+-- workflow drains with the rest. A zero timeout waits for nothing.
+-- Mirrors Rust @Executor::stop@.
+stop :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => Executor m -> Duration -> m ()
+stop executor timeout = do
+  atomically (writeTVar executor.stopping True)
+  let draining = timeout /= secondsDuration 0
+  when draining $ do
+    deadline <- deadlineNs timeout
+    producersDone <- waitAllUntil executor.producerTasks deadline
+    -- Waited on before the drain, not alongside it: a dequeue
+    -- mid-dispatch is about to add to the set the drain watches, and a
+    -- drain that saw it empty first would finish before that workflow
+    -- started.
+    when producersDone (drain executor deadline)
+  producers <- abortAll executor.producerTasks
+  abandoned <- abortAll executor.workflowTasks
+  if draining
+    then do
+      unless (null producers) $
+        runTracer executor.conn.connTracer (EngineProducersCut producers)
+      unless (null abandoned) $
+        runTracer executor.conn.connTracer (EngineWorkflowsCut (length abandoned) abandoned)
+    else
+      unless (null abandoned) $
+        runTracer executor.conn.connTracer (EngineCancelledRunning (length abandoned))
+
+-- | Waits for the running workflows to finish on their own, up to the
+-- deadline, saying once a second which ones are still waited on. Waits
+-- only: what is left is cancelled by 'stop' after this returns. Mirrors
+-- Rust @Executor::drain@.
+drain :: (MonadMVar m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => Executor m -> Word64 -> m ()
+drain executor deadline = do
+  now <- getMonotonicTimeNSec
+  let reportAt = min (now + fromInteger (durationAsMillis drainReportInterval * 1000000)) deadline
+  done <- waitAllUntil executor.workflowTasks reportAt
+  unless done $
+    if reportAt >= deadline
+      then pure ()
+      else do
+        running <- runningTasks executor.workflowTasks
+        runTracer executor.conn.connTracer (EngineDrainWaiting (length running) running)
+        drain executor deadline
+
+-- | Stops the background monitors and closes the system database, once no
+-- workflow is running: a workflow still running may wait on the sweep to
+-- record its timeout, and everything before the close could still
+-- checkpoint. Mirrors Rust @Executor::close@.
+close :: (MonadFork m, MonadSTM m, MonadMVar m) => Executor m -> m ()
+close executor = do
+  _ <- abortAll executor.monitorTasks
+  releaseConnection executor.conn
+
+-- | A monotonic-nanosecond deadline the given duration from now.
+deadlineNs :: (MonadMonotonicTimeNSec m) => Duration -> m Word64
+deadlineNs timeout = do
+  now <- getMonotonicTimeNSec
+  pure (now + fromInteger (durationAsMillis timeout * 1000000))
+
+runWorkflow :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
             => Executor m -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflow executor key workflowId input = do
   outcome <-
     runRegisteredWorkflow
-      executor.tasks
+      executor.workflowTasks
       executor.conn
       executor.identity
       executor.workflows
@@ -266,18 +395,18 @@ runWorkflow executor key workflowId input = do
 
 -- | Starts the referenced workflow via the launched executor: what
 -- @WorkflowRef::start_with@ becomes when the call site holds a reference.
-startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
               => Executor m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflow executor ref options input =
-  Workflow.startWorkflow executor.tasks executor.conn executor.identity executor.workflows ref options (unWorkflowInput <$> input) executor.datasources
+  Workflow.startWorkflow executor.workflowTasks executor.conn executor.identity executor.workflows ref options (unWorkflowInput <$> input) executor.datasources
 
 -- | Runs the referenced workflow via the launched executor and waits: a
 -- start followed by an await under the same id.
-runWorkflowRef :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
+runWorkflowRef :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
                => Executor m -> WorkflowRef m e -> RunOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflowRef executor ref options input = do
   outcome <-
-    Workflow.runWorkflowRef executor.tasks executor.conn executor.identity executor.workflows ref options (unWorkflowInput <$> input) executor.datasources
+    Workflow.runWorkflowRef executor.workflowTasks executor.conn executor.identity executor.workflows ref options (unWorkflowInput <$> input) executor.datasources
   pure outcome
 
 enqueueWorkflow :: (MonadMVar m)
@@ -295,12 +424,59 @@ enqueueWorkflow dbos key workflowId input queueName = do
           (unWorkflowInput <$> input)
           queueName
 
+-- | Enqueues a workflow by name, without checking this process's
+-- registrations: one another service or language implements. Outside a
+-- workflow body this writes the row a client's enqueue writes, except it
+-- names this executor on the row. The row belongs to this application
+-- unless the options name another, and carries no version unless one is
+-- named, so the application's latest version dequeues it. Mirrors Rust
+-- @DBOS::enqueue@ outside a workflow (the in-workflow face is
+-- 'enqueueWorkflowByNameInWorkflow').
+enqueueWorkflowByName :: (MonadMVar m)
+                      => DBOS m -> QualifiedWorkflowName -> EnqueueOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
+enqueueWorkflowByName dbos name options input =
+  withExecutor dbos "enqueue a workflow" $ \executor ->
+    case Workflow.validateEnqueueOptions name options of
+      Left err -> pure (Left err)
+      Right () -> do
+        generated <- generatedWorkflowId executor.conn
+        let request = Workflow.queueRequest options
+            workflowText = fromMaybe generated options.workflowId
+            rawInput = unWorkflowInput <$> input
+            serialization = case rawInput >>= (.serializedSerialization) of
+              Just (Serialization serializationName) -> Just serializationName
+              Nothing -> Just (serializerName executor.conn.connSerializer)
+            new =
+              (newWorkflow workflowText)
+              { newWorkflowName = Just (qualifiedName name),
+                newWorkflowClassName = qualifiedClassName name,
+                newWorkflowConfigName = qualifiedConfigName name,
+                newWorkflowInput = (.serializedText) <$> rawInput,
+                newWorkflowSerialization = serialization,
+                newWorkflowQueueName = Just options.queueName,
+                newWorkflowDeduplicationId = options.deduplicationId,
+                newWorkflowPriority = Workflow.storedPriority request,
+                newWorkflowQueuePartitionKey = options.partitionKey,
+                newWorkflowDelay = options.delay,
+                newWorkflowTimeout = Workflow.timeoutBudget options.timeout,
+                newWorkflowDeadline = Nothing,
+                newWorkflowAttributes = Serialization.encodeAttributes options.attributes,
+                newWorkflowExecutorId = Just executor.identity.identityExecutorId,
+                newWorkflowAppName = options.appName <|> Just executor.identity.identityAppName,
+                newWorkflowAppVersion = options.appVersion
+              }
+        started <- Workflow.initOrJoin executor.conn new (Just request) options.workflowIdReusePolicy Nothing
+        pure $ case started of
+          Right (SubmittedCreated _)     -> Right (pollingHandle executor.conn workflowText True)
+          Right (SubmittedJoined holder) -> Right holder
+          Left err                       -> Left (TransactError.refusedStart (Just options.queueName) err)
+
 dequeueWorkflows :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                  => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeueWorkflows dbos = do
   withExecutor dbos "dequeue workflows" $ \executor ->
     dequeuePass
-      executor.tasks
+      executor.workflowTasks
       executor.conn
       executor.identity
       executor.workflows
@@ -669,8 +845,11 @@ launchOn dbos conn identity = do
   -- so a child start can tell another instance's reference apart.
   bindRegistryInstance dbos.dbos_registry conn.connInstanceId
   workflows <- snapshotRegistry dbos.dbos_registry
-  tasks <- newTasks
-  let executor = Executor {conn = conn, identity = identity, datasources = dbos.dbos_datasources, workflows = workflows, listen_queues = Nothing, tasks = tasks, releaseTracer = pure ()}
+  producers <- newTasks
+  flows <- newTasks
+  monitors <- newTasks
+  stopping <- newTVarIO False
+  let executor = Executor {conn = conn, identity = identity, datasources = dbos.dbos_datasources, workflows = workflows, listen_queues = Nothing, producerTasks = producers, workflowTasks = flows, monitorTasks = monitors, stopping = stopping, releaseTracer = pure ()}
   modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
   pure executor
 
@@ -695,7 +874,7 @@ launchOnWithQueues dbos conn identity listen = do
 -- already bound the registry and installed the executor; the repeats below
 -- keep this tail self-contained for the IO builder path, which does
 -- neither — both operations are idempotent.)
-launchExecutor :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+launchExecutor :: (MonadMVar m, MonadFork m, MonadMask m, MonadAsync m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                => DBOS m -> Executor m -> m (Either (TransactError.Error TransactError.EngineOnly) (Executor m))
 launchExecutor dbos executor = do
   prepared <- prepare executor.conn executor.identity
@@ -704,8 +883,8 @@ launchExecutor dbos executor = do
     Right _ -> do
       bindRegistryInstance dbos.dbos_registry executor.conn.connInstanceId
       runTracer executor.conn.connTracer (EngineLaunched executor.identity.identityAppName executor.identity.identityExecutorId executor.identity.identityAppVersion)
-      _ <- spawnTracked executor.tasks (superviseForever executor.tasks executor.conn executor.identity executor.workflows executor.listen_queues executor.datasources)
-      _ <- spawnTimeoutSweep executor.tasks executor.conn
+      _ <- spawnTracked executor.producerTasks "queues" (superviseForever executor.producerTasks executor.workflowTasks executor.stopping executor.conn executor.identity executor.workflows executor.listen_queues executor.datasources)
+      _ <- spawnTimeoutSweep executor.monitorTasks executor.conn
       modifyMVar_ dbos.dbos_executor (const (pure (Just executor)))
       pure (Right executor)
 
@@ -717,7 +896,10 @@ startExecutor config' identity' workflowsSnapshot sources tracer releaseTracer =
   case acquired of
     Left err -> pure (Left (TransactError.fromSystemDB err))
     Right conn' -> do
-      tasks' <- newTasks
+      producers' <- newTasks
+      flows' <- newTasks
+      monitors' <- newTasks
+      stopping' <- newTVarIO False
       pure
         ( Right
             Executor
@@ -726,7 +908,10 @@ startExecutor config' identity' workflowsSnapshot sources tracer releaseTracer =
                 workflows = workflowsSnapshot,
                 datasources = sources,
                 listen_queues = config'.configListenQueues,
-                tasks = tasks',
+                producerTasks = producers',
+                workflowTasks = flows',
+                monitorTasks = monitors',
+                stopping = stopping',
                 releaseTracer = releaseTracer
               }
         )

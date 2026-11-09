@@ -44,6 +44,7 @@ import DBOS.Transact
     configNew)
 import DBOS.Transact.Logger (runTracer)
 import DBOS.Transact.Recovery (EngineEvent (..))
+import DBOS.Transact.Dequeue (QueueEvent (..))
 import DBOS.Transact.Management (ManagementEvent (..))
 import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Step qualified as StepEvent
@@ -55,6 +56,11 @@ import DBOS.Transact.ManagementCases
   ( MgmtFixture (..),
     checkCancelMissing,
     checkCancelResumeRun,
+    checkCancelledSeesOneError,
+    checkResumeAfterCancelAdoptsOwner,
+    checkSupervisorManagesFreely,
+    checkStepManagementIsPlain,
+    checkSwitchFormsReplay,
     checkCancelTree,
     checkDelete,
     checkForkFromBeginning,
@@ -104,6 +110,11 @@ import DBOS.Transact.ManagementCases
     mkMgmtFixture,
     scenarioCancelMissing,
     scenarioCancelResumeRun,
+    scenarioCancelledSeesOneError,
+    scenarioResumeAfterCancelAdoptsOwner,
+    scenarioSupervisorManagesFreely,
+    scenarioStepManagementIsPlain,
+    scenarioSwitchFormsReplay,
     scenarioCancelTree,
     scenarioDelete,
     scenarioForkFromBeginning,
@@ -185,6 +196,11 @@ tests =
       simCase simMgmtFixture "cancelling a workflow that does not exist is not an error" scenarioCancelMissing checkCancelMissing traceMgmtShutdown,
       simCase simMgmtFixture "resuming a workflow that does not exist is an error" scenarioResumeMissing checkResumeMissing traceMgmtShutdown,
       simCase simMgmtFixture "cancelling makes a workflow terminal and leaves it resumable" scenarioCancelResumeRun checkCancelResumeRun traceCancelResumeRun,
+      simCase simMgmtFixture "a cancelled workflow sees one error from every call" scenarioCancelledSeesOneError checkCancelledSeesOneError traceCancelledSeesOneError,
+      simCase simMgmtFixture "a resume after the body hears of a cancel gives the owner's outcome" scenarioResumeAfterCancelAdoptsOwner checkResumeAfterCancelAdoptsOwner traceResumeAfterCancelAdoptsOwner,
+      simCase simMgmtFixture "a supervisor manages other workflows through every free form" scenarioSupervisorManagesFreely checkSupervisorManagesFreely traceSupervisorManagesFreely,
+      simCase simMgmtFixture "management calls inside a step record nothing of their own" scenarioStepManagementIsPlain checkStepManagementIsPlain traceStepManagementIsPlain,
+      simCase simMgmtFixture "a run recorded through the plurals replays through the singulars" scenarioSwitchFormsReplay checkSwitchFormsReplay traceSwitchFormsReplay,
       simCase simMgmtFixture "resuming onto a named queue puts the workflow there" scenarioResumeOntoQueue checkResumeOntoQueue traceResumeOntoQueue,
       simCase simMgmtFixture "cancelling a tree reaches the children" scenarioCancelTree checkCancelTree traceCancelTree,
       simCase simMgmtFixture "deleting a workflow removes its row" scenarioDelete checkDelete traceDelete,
@@ -395,6 +411,55 @@ traceResumeOntoQueue tr = do
   selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1, WorkflowsResumed 1 1]
   selectTraceEventsDynamic tr @?= [WorkflowEnqueued "hs-l2-mgmt-resume-queue-sim" "no-runner-here", WorkflowCompleted "hs-l2-mgmt-resume-queue-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
+-- | The cancel lands; the two attempted steps announce their runs but
+-- record nothing, the pre-cancel child completes, and the body's own
+-- outcome write finds the cancelled row superseded. Producer and monitor
+-- tasks die silently; nothing is left running to announce.
+traceCancelledSeesOneError :: forall a. SimTrace a -> IO ()
+traceCancelledSeesOneError tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [StepRunning "slow" 1, WorkflowCompleted "hs-l2-mgmt-one-error-sim-0", StepRunning "later" 2, WorkflowSuperseded "hs-l2-mgmt-one-error-sim"]
+
+-- | The stale execution adopts what the new owner recorded: the resumed
+-- run's completion. The first attempt announces its run and is refused;
+-- the resumed run announces, records, and completes; the old execution's
+-- control arm warns as it adopts.
+traceResumeAfterCancelAdoptsOwner :: forall a. SimTrace a -> IO ()
+traceResumeAfterCancelAdoptsOwner tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1, WorkflowsResumed 1 1]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [StepRunning "first" 0, StepRunning "first" 0, StepOutputRecorded "first" 0, WorkflowCompleted "hs-l2-mgmt-heard-cancel-sim", WorkflowControlEnded "the workflow hs-l2-mgmt-heard-cancel-sim was cancelled"]
+
+-- | The plurals record four steps; the fork past the last replays them
+-- through the singulars, forking nothing again. The first run's fork
+-- stays pending on the second instance, whose registry never named its
+-- target: the driven pass says so and leaves it for recovery.
+traceSwitchFormsReplay :: forall a. SimTrace a -> IO ()
+traceSwitchFormsReplay tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-mgmt-switch-source-sim-fork", WorkflowForked "hs-l2-mgmt-switching-sim-fork"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app", EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [DequeuedWorkflowFailed "no workflow is registered as switch-target"]
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-switch-source-sim", StepOutputRecorded "DBOS.cancelWorkflow" 0, StepOutputRecorded "DBOS.forkWorkflow" 1, StepOutputRecorded "DBOS.listWorkflows" 2, StepOutputRecorded "DBOS.listWorkflowSteps" 3, WorkflowCompleted "hs-l2-mgmt-switching-sim", StepReplaying "DBOS.cancelWorkflow" 0, StepReplaying "DBOS.forkWorkflow" 1, StepReplaying "DBOS.listWorkflows" 2, StepReplaying "DBOS.listWorkflowSteps" 3, WorkflowCompleted "hs-l2-mgmt-switching-sim-fork"]
+
+-- | The refused fork announces nothing and spends no id; the in-step
+-- calls run plainly under the managing step, which is the only recorded
+-- one.
+traceStepManagementIsPlain :: forall a. SimTrace a -> IO ()
+traceStepManagementIsPlain tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [WorkflowEnqueued "hs-l2-mgmt-step-target-sim" "nothing-polls-this", StepRunning "manage" 0, StepPlain "DBOS.cancelWorkflow", StepPlain "DBOS.listWorkflows", StepOutputRecorded "manage" 0, WorkflowCompleted "hs-l2-mgmt-step-operator-sim"]
+
+-- | The free forms record under the methods' step names in call order;
+-- the fork past the last step replays all ten; the retrieve await
+-- records its get_result row silently, announcing nothing of its own.
+traceSupervisorManagesFreely :: forall a. SimTrace a -> IO ()
+traceSupervisorManagesFreely tr = do
+  selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1, WorkflowsResumed 1 1, WorkflowForked "hs-l2-mgmt-sup-forked-sim-fork", WorkflowRewound "hs-l2-mgmt-sup-rewound-sim" 0 "_dbos_internal_queue", WorkflowsDeleted 1, WorkflowDelayMoveAsked "hs-l2-mgmt-sup-delayed-sim", WorkflowAttributesReplaceAsked "hs-l2-mgmt-sup-tagged-sim", WorkflowAttributesMergeAsked "hs-l2-mgmt-sup-tagged-sim", WorkflowForked "hs-l2-mgmt-supervisor-sim-fork"]
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-sup-forked-sim", WorkflowCompleted "hs-l2-mgmt-sup-deleted-sim", StepRunning "serve" 0, StepOutputRecorded "serve" 0, WorkflowCompleted "hs-l2-mgmt-sup-tagged-sim", StepRunning "tick" 0, StepOutputRecorded "tick" 0, WorkflowCompleted "hs-l2-mgmt-sup-rewound-sim", WorkflowEnqueued "hs-l2-mgmt-sup-delayed-sim" "_dbos_internal_queue", StepOutputRecorded "DBOS.cancelWorkflow" 0, StepOutputRecorded "DBOS.resumeWorkflow" 1, StepOutputRecorded "DBOS.forkWorkflow" 2, StepOutputRecorded "DBOS.rewindWorkflow" 3, StepOutputRecorded "DBOS.deleteWorkflow" 4, StepOutputRecorded "DBOS.setWorkflowDelay" 5, StepOutputRecorded "DBOS.updateWorkflowAttributes" 6, StepOutputRecorded "DBOS.updateWorkflowAttributes" 7, StepOutputRecorded "DBOS.listWorkflows" 8, StepOutputRecorded "DBOS.listWorkflowSteps" 9, WorkflowCompleted "hs-l2-mgmt-supervisor-sim", WorkflowCompleted "hs-l2-mgmt-sup-delayed-sim", WorkflowCompleted "hs-l2-mgmt-sup-forked-sim-fork", StepRunning "tick" 0, WorkflowSuperseded "hs-l2-mgmt-sup-victim-sim", StepOutputRecorded "tick" 0, WorkflowCompleted "hs-l2-mgmt-sup-victim-sim", WorkflowCompleted "hs-l2-mgmt-sup-rewound-sim", StepReplaying "DBOS.cancelWorkflow" 0, StepReplaying "DBOS.resumeWorkflow" 1, StepReplaying "DBOS.forkWorkflow" 2, StepReplaying "DBOS.rewindWorkflow" 3, StepReplaying "DBOS.deleteWorkflow" 4, StepReplaying "DBOS.setWorkflowDelay" 5, StepReplaying "DBOS.updateWorkflowAttributes" 6, StepReplaying "DBOS.updateWorkflowAttributes" 7, StepReplaying "DBOS.listWorkflows" 8, StepReplaying "DBOS.listWorkflowSteps" 9, WorkflowCompleted "hs-l2-mgmt-supervisor-sim-fork"]
 
 -- | The parent runs and completes, then the tree cancel moves the parked
 -- child alone (the finished parent is already terminal).

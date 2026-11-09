@@ -17,6 +17,9 @@ module DBOS.Transact
     launch,
     launchWithEnvironment,
     shutdown,
+    shutdownWith,
+    ShutdownOptions (..),
+    shutdownOptionsDefault,
     registerWorkflow,
     registerWorkflowRef,
 
@@ -61,6 +64,7 @@ module DBOS.Transact
     workflowStatusText,
     workflowId,
     retrieveWorkflow,
+    retrieveWorkflowInWorkflow,
     listWorkflowSteps,
     ListWorkflowStepsOptions (..),
     defaultListWorkflowStepsOptions,
@@ -104,18 +108,22 @@ module DBOS.Transact
   -- workflow-control: cancel, resume, delete, fork, attributes
     cancelWorkflow,
     cancelWorkflows,
+    cancelWorkflowInWorkflow,
     cancelWorkflowsInWorkflow,
     resumeWorkflow,
     resumeWorkflows,
+    resumeWorkflowInWorkflow,
     resumeWorkflowsInWorkflow,
     deleteWorkflow,
     deleteWorkflows,
+    deleteWorkflowInWorkflow,
     deleteWorkflowsInWorkflow,
     ForkPoint (..),
     ForkOptions (..),
     defaultForkOptions,
     forkWorkflow,
     forkWorkflows,
+    forkWorkflowInWorkflow,
     forkWorkflowsInWorkflow,
     forkFrom,
     forkFromInWorkflow,
@@ -123,6 +131,7 @@ module DBOS.Transact
     defaultRewindOptions,
     rewindWorkflow,
     rewindWorkflows,
+    rewindWorkflowInWorkflow,
     rewindWorkflowsInWorkflow,
     updateWorkflowAttributes,
     updateWorkflowAttributesInWorkflow,
@@ -175,6 +184,9 @@ module DBOS.Transact
     RateLimit (..),
     defaultQueueOptions,
     registerQueue,
+    enqueueWorkflow,
+    enqueueWorkflowByName,
+    enqueueWorkflowByNameInWorkflow,
     enqueueWorkflow,
 
   -- queue-management: inspect and change queues at runtime
@@ -348,9 +360,9 @@ import DBOS.Transact.Error (DurableError, EngineOnly, Error (..), decodeErrorTex
 import DBOS.Transact.Event (getEvent, pendingGetEvent, pendingSetEvent, setEvent)
 import DBOS.Transact.Handle (WorkflowHandle (..), awaitChild, handleResult, handleStatus, pendingAwait, pollingHandle)
 import DBOS.Transact.Identity (Environment (..))
-import DBOS.Transact.Instance (DBOS, Executor, cancelWorkflow, cancelWorkflows, deleteWorkflow, deleteWorkflows, enqueueWorkflow, fetchWorkflowStatuses, forkFrom, forkWorkflow, forkWorkflows, getAllEvents, getWorkflowEvent, getWorkflowRecord, getWorkflowStatus, isLaunched, launch, launchWithEnvironment, listWorkflowIdsByName, listWorkflowSteps, listWorkflowStepsWith, listQueuedWorkflows, listWorkflows, mergeWorkflowAttributes, newDBOS, registerDataSource, registerWorkflow, registerWorkflowRef, resumeWorkflow, resumeWorkflows, retrieveWorkflow, rewindWorkflow, rewindWorkflows, runWorkflow, runWorkflowRef, sendWorkflowMessage, sendWorkflowMessages, setWorkflowDelay, shutdown, startWorkflow, updateWorkflowAttributes, listAppVersions, latestAppVersion, promoteAppVersion, promoteAppVersionFor)
+import DBOS.Transact.Instance (DBOS, Executor, cancelWorkflow, cancelWorkflows, deleteWorkflow, deleteWorkflows, enqueueWorkflow, enqueueWorkflowByName, fetchWorkflowStatuses, forkFrom, forkWorkflow, forkWorkflows, getAllEvents, getWorkflowEvent, getWorkflowRecord, getWorkflowStatus, isLaunched, launch, launchWithEnvironment, listWorkflowIdsByName, listWorkflowSteps, listWorkflowStepsWith, listQueuedWorkflows, listWorkflows, mergeWorkflowAttributes, newDBOS, registerDataSource, registerWorkflow, registerWorkflowRef, resumeWorkflow, resumeWorkflows, retrieveWorkflow, rewindWorkflow, rewindWorkflows, runWorkflow, runWorkflowRef, sendWorkflowMessage, sendWorkflowMessages, setWorkflowDelay, shutdown, shutdownOptionsDefault, shutdownWith, ShutdownOptions (..), startWorkflow, updateWorkflowAttributes, listAppVersions, latestAppVersion, promoteAppVersion, promoteAppVersionFor)
 import DBOS.Transact.Logger (logDebug, logError, logInfo, logWarn)
-import DBOS.Transact.Management (ListWorkflowStepsOptions (..), PortableWorkflowError (..), StepFailure (..), StepInfo (..), StepOutcome (..), StepOutput (..), cancelWorkflowsInWorkflow, defaultListWorkflowStepsOptions, deleteWorkflowsInWorkflow, forkFromInWorkflow, forkWorkflowsInWorkflow, listWorkflowStepsInWorkflow, listWorkflowStepsWithInWorkflow, listWorkflowsInWorkflow, mergeWorkflowAttributesInWorkflow, resumeWorkflowsInWorkflow, rewindWorkflowsInWorkflow, setWorkflowDelayInWorkflow, updateWorkflowAttributesInWorkflow)
+import DBOS.Transact.Management (ListWorkflowStepsOptions (..), PortableWorkflowError (..), StepFailure (..), StepInfo (..), StepOutcome (..), StepOutput (..), cancelWorkflowInWorkflow, cancelWorkflowsInWorkflow, defaultListWorkflowStepsOptions, deleteWorkflowInWorkflow, deleteWorkflowsInWorkflow, forkFromInWorkflow, forkWorkflowInWorkflow, forkWorkflowsInWorkflow, listWorkflowStepsInWorkflow, listWorkflowStepsWithInWorkflow, listWorkflowsInWorkflow, mergeWorkflowAttributesInWorkflow, resumeWorkflowInWorkflow, resumeWorkflowsInWorkflow, retrieveWorkflowInWorkflow, rewindWorkflowInWorkflow, rewindWorkflowsInWorkflow, setWorkflowDelayInWorkflow, updateWorkflowAttributesInWorkflow)
 import DBOS.Transact.Message (Forks (..), SendMessage (..), SendOptions (..), recv, send, sendBulk, sendBulkWith, sendOptionsDefault, sendWith)
 import DBOS.Transact.Patch (deprecatePatchStep, patchStep, pendingDeprecatePatch, pendingPatch)
 import DBOS.Transact.Queue (Queue (..), QueueChange (..), QueueConflict (..), QueueOptions (..), defaultQueueChange, defaultQueueOptions, deleteQueue, listQueues, queue, registerQueue, updateQueue)
@@ -361,6 +373,6 @@ import DBOS.Transact.Sleep (pendingSleep, sleepPlain, sleepStep)
 import DBOS.Transact.Step (StepError (..), StepOptions (..), pendingStep, pendingStepWith, runNestedStep, runStep, runStepWith, stepOptionsDefault)
 import DBOS.Transact.Stream (ReadStreamOptions (..), StreamReader, closeStream, defaultReadStreamOptions, foldVectorStream, readStream, readStreamFrom, toVectorStream, writeStream)
 import DBOS.Transact.Wait (joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), QueueRequest (..), RunOptions (..), StartOptions (..), Timeout (..), WorkflowRef, queueRequestNew, runOptionsDefault, startChildWorkflow, startOptionsDefault)
+import DBOS.Transact.Workflow (DuplicationPolicy (..), QueueRequest (..), RunOptions (..), StartOptions (..), Timeout (..), WorkflowRef, enqueueWorkflowByNameInWorkflow, queueRequestNew, runOptionsDefault, startChildWorkflow, startOptionsDefault)
 
 import DBOS.SystemDB.Types (AppScope (..), ApplicationVersion (..), AttributeUpdate (..), Change (..), Duration, ForkOptions (..), ForkPoint (..), IdempotencyKey (..), IdleTransactionTimeout (..), PollingConcurrency (PollingDefault, PollingUnlimited), RateLimit (..), RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), Timestamp, Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), QualifiedWorkflowName, WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultRewindOptions, defaultWorkflowFilter, isTerminal, instanceQualifiedWorkflowName, methodQualifiedWorkflowName, millisDuration, newQualifiedWorkflowName, pollingAtMost, secondsDuration, timestampFromEpochMs, timestampToEpochMs, workflowStatusText)

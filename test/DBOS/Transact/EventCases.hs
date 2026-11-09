@@ -122,7 +122,7 @@ data EventFixture m = EventFixture
 -- 'Identity's, connection app name, id naming, and id/entropy generators,
 -- plus its 'SomeSystemDB' and 'SomeTracer'. Live passes Postgres +
 -- FastLogger; sim passes 'MemSystemDB' + the sim carrier.
-mkEventFixture :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+mkEventFixture :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                => Config ->
                   Config ->
                   Identity ->
@@ -489,7 +489,7 @@ scenarioRecoveryKeepsFirst fx = do
 -- | Reading through another instance from inside a workflow is refused,
 -- while the in-step read stays plain. Returns whether the refusal fired
 -- and what the plain read found.
-scenarioWrongInstance :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioWrongInstance :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => EventFixture m ->
                          m (Bool, Maybe Int)
 scenarioWrongInstance fx = do

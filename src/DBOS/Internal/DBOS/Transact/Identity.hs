@@ -18,6 +18,7 @@ module DBOS.Transact.Identity
     readEnvironment,
     resolve,
     validateAppName,
+    refuseAppName,
   )
 where
 
@@ -150,6 +151,19 @@ resolve config environment = do
     (<|>) :: Maybe a -> Maybe a -> Maybe a
     Just value <|> _ = Just value
     Nothing <|> other = other
+
+-- | Refuses an app name no executor could spell the same way, on the
+-- caller's operation channel: a row stamped with one is a row nothing
+-- claims. A name the shared rule refuses as configuration is reported as
+-- an invalid argument instead, anything else passes through. Mirrors Rust
+-- @refuse_app_name@, which the debouncer and the enqueue validation share.
+refuseAppName :: Text -> Maybe Text -> Either (Error EngineOnly) ()
+refuseAppName operation appName = case appName of
+  Nothing -> Right ()
+  Just name -> case validateAppName name of
+    Right () -> Right ()
+    Left (ErrorConfig detail) -> Left (InvalidArgument operation detail)
+    Left err -> Left err
 
 -- | The rule the other implementations share: 3–256 characters of lowercase
 -- letters, digits, dashes and underscores. Checked rather than trusted

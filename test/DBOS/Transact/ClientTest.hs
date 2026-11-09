@@ -131,7 +131,7 @@ import DBOS.Transact.Datasource qualified as DSTx (Tx (Tx))
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Instance (dequeueWorkflows)
 import DBOS.Transact.Client (clientGetEventSerialized, queueRequest)
-import DBOS.Transact.Workflow (storedPriority, validateEnqueue, validateStart)
+import DBOS.Transact.Workflow (Timeout (..), storedPriority, validateEnqueue, validateStart)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
@@ -386,7 +386,7 @@ tests =
         queueRequest options @?= queueRequestNew "work"
         options.workflowId @?= Nothing
         options.appVersion @?= Nothing
-        options.timeout @?= Nothing
+        options.timeout @?= Inherit
         options.duplicationPolicy @?= Reject,
       testCase "flat queue fields make the queue request" $ do
         -- Mirrors Rust @flat_queue_fields_make_the_queue_request@: the row
@@ -600,7 +600,7 @@ tests =
                   delay = Just (secondsDuration 60),
                   workflowId = Just workflowText,
                   appVersion = Just "v1",
-                  timeout = Just (secondsDuration 30),
+                  timeout = Explicit (secondsDuration 30),
                   attributes = Just (Map.fromList [("k", String "v")])
                 } :: EnqueueOptions)
         clientConfig0 <- clientConfigFromEnv

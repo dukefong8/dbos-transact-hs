@@ -44,6 +44,7 @@ import DBOS.Transact.QueueTestSim qualified as QueueSim
 import DBOS.Transact.RegistryTest qualified as RegistryTest
 import DBOS.Transact.RegistryTestSim qualified as RegistrySim
 import DBOS.Transact.SelectTest qualified as SelectTest
+import DBOS.Transact.ShutdownTest qualified as ShutdownTest
 import DBOS.Transact.SelectTestSim qualified as SelectSim
 import DBOS.Transact.SerializationTest qualified as SerializationTest
 import DBOS.Transact.SimTest qualified as SimTest
@@ -194,6 +195,7 @@ tests =
     , QueueTest.tests
     , RegistryTest.tests
     , SelectTest.tests
+    , ShutdownTest.tests
     , SerializationTest.tests
     , SleepTest.tests
     , StepTest.tests

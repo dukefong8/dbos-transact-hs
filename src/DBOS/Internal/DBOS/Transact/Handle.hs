@@ -105,12 +105,18 @@ handleStatus handle = do
 -- the database: the local-task await is future engine work. This is the
 -- ctx-less polling face, for client and management handles; inside a
 -- workflow body reach for 'awaitChild' instead, or the wait goes
--- unrecorded and a replay decides it again.
+-- unrecorded and a replay decides it again. A cancelled workflow is
+-- reported as its own cancellation here: only an in-workflow await
+-- ('driveAwait') has a caller for the two to be confused with, and only
+-- it reports the awaited cancellation. Mirrors the oracle's
+-- @handle.result()@ outside a workflow.
 handleResult :: (MonadDelay m, MonadTime m, MonadMVar m, MonadThrow m, FromJSON e)
              => WorkflowHandle m e -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 handleResult handle = do
   settled <- settleOutcome handle
-  pure (settled >>= settledResult handle.workflowId)
+  pure (settled >>= \case
+    SettledCancelled -> Left (TransactError.WorkflowCancelled {workflowId = handle.workflowId})
+    other -> settledResult handle.workflowId other)
 
 -- | Await a child workflow from inside a workflow body, recording the wait
 -- as a @DBOS.get_result@ step. Mirrors the oracle's @handle.result()@ where
@@ -168,7 +174,7 @@ driveAwait wctx handle placement =
       let parent = WorkflowId (workflowId wctx')
       checked <- runSystemDB handle.conn.connSysdb (\db -> SystemDB.checkChildResult db parent stepId')
       case checked of
-        Left err -> pure (Left (TransactError.fromSystemDB err))
+        Left err -> pure (Left (TransactError.fromExecution err))
         Right (Just recorded) -> pure (adoptRecordedAwait wctx' handle stepId' recorded)
         Right Nothing -> do
           startedAt <- timestampNow
@@ -233,6 +239,7 @@ settleOutcome handle = case handle.provenance of
   where
     isCancellation err = case err of
       TransactError.SystemDatabase SystemDBError.WorkflowCancelled {} -> True
+      TransactError.WorkflowCancelled {} -> True
       _ -> False
 
 -- | Map a settled outcome onto the result channel, as both faces report it.
@@ -280,7 +287,7 @@ recordAwait wctx handle stepId' startedAt completedAt settled =
   where
     parent = WorkflowId (workflowId wctx)
     record outcome =
-      fmap (either (Left . TransactError.fromSystemDB) Right) $
+      fmap (either (Left . TransactError.fromExecution) Right) $
         runSystemDB handle.conn.connSysdb $ \db ->
           SystemDB.recordChildResult
             db

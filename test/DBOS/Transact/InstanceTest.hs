@@ -15,7 +15,9 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import DBOS.SystemDB (AwaitedOutcome (..), VersionInfo (..), WorkflowRecord (..), getWorkflow, listApplicationVersions)
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Serialization (WorkflowInput, encodeWorkflowInput)
+import DBOS.Transact.Serialization (CodecError (..), WorkflowInput, decodeWorkflowValue, encodeWorkflowInput)
+import System.Mem (performGC)
+import System.Mem.Weak (Weak, deRefWeak, mkWeakPtr)
 import DBOS.Transact
   (
     EngineOnly, Config (..),
@@ -28,6 +30,7 @@ import DBOS.Transact
     Serializer (..),
     SerializedWorkflowValue (..),
     WorkflowCtx,
+    WorkflowHandle,
     WorkflowId (..),
     QualifiedWorkflowName,
     cancelWorkflows,
@@ -38,12 +41,17 @@ import DBOS.Transact
     newDBOS,
     newQualifiedWorkflowName,
     registerWorkflow,
+    registerWorkflowRef,
     runWorkflow,
     shutdown,
+    startChildWorkflow,
+    startWorkflow,
+    handleResult,
     waitForWorkflow,
   )
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Instance (dbosAppVersion, dbosExecutorId)
+import DBOS.Transact.Workflow (WorkflowRef, refName, startOptionsDefault)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 
@@ -367,7 +375,92 @@ tests =
           executorId <- dbosExecutorId dbos
           executorId @?= Right "local"
           version <- dbosAppVersion dbos
-          version @?= Right appVersion
+          version @?= Right appVersion,
+      -- Rust #155: a reference never held the instance — it names the
+      -- workflow and its registry, while the caller passes the executor
+      -- explicitly — so a launched executor serves its refs with no
+      -- handle to the instance left. Runs, starts, and a child started
+      -- from a workflow body, all through the executor alone.
+      testCase "a launched executor serves its refs with no handle to its instance" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-detached-app-" <> Text.take 12 suffix
+            appVersion = "hs-l2-detached-v-" <> suffix
+        base <- configFromEnv appName
+        let configured = base {configAppVersion = Just appVersion, configExecutorId = Just ("hs-l2-detached-exec-" <> suffix)}
+        dbos <- newDBOS configured
+        let childBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            childBody n _ = pure (Right (n * 2))
+        childRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "child") childBody >>= either (fail . show) pure
+        let parentBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            parentBody n wctx = do
+              started <- startChildWorkflow wctx childRef startOptionsDefault (Just (encodeWorkflowInput n))
+              case started of
+                Left err -> pure (Left err)
+                Right child -> do
+                  awaited <- handleResult child
+                  case awaited of
+                    Left err -> pure (Left err)
+                    Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+                      Right doubled -> pure (Right doubled)
+                      Left err -> throwIO (userError (show err))
+                    Right Nothing -> throwIO (userError "the child returned no output")
+        parentRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "parent") parentBody >>= either (fail . show) pure
+        exec <- launchWithEnvironment dbos isolatedEnvironment >>= either (fail . show) pure
+        -- From here the instance handle is never touched again until the
+        -- final shutdown below: a direct run, a start, and a body that
+        -- starts its own child.
+        direct <- runWf exec (newQualifiedWorkflowName "child") (WorkflowId ("hs-l2-detached-direct-" <> suffix)) (Just (encodeWorkflowInput (21 :: Int)))
+        case direct of
+          Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+            Right n -> n @?= 42
+            Left err -> fail (show err)
+          other -> fail ("the direct run failed: " <> show other)
+        started <- startWorkflow exec childRef startOptionsDefault (Just (encodeWorkflowInput (7 :: Int)))
+        case (started :: Either (Error EngineOnly) (WorkflowHandle IO EngineOnly)) of
+          Left err -> fail (show err)
+          Right handle -> do
+            awaited <- handleResult handle
+            case awaited of
+              Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+                Right n -> n @?= 14
+                Left err -> fail (show err)
+              other -> fail ("the start failed: " <> show other)
+        parented <- runWf exec (newQualifiedWorkflowName "parent") (WorkflowId ("hs-l2-detached-parent-" <> suffix)) (Just (encodeWorkflowInput (3 :: Int)))
+        case parented of
+          Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Int of
+            Right n -> n @?= 6
+            Left err -> fail (show err)
+          other -> fail ("the parent run failed: " <> show other)
+        shutdown dbos
+        assertEqual "shutdown still lands" False =<< isLaunched dbos,
+      -- Rust #155's leak, which cannot happen here: the registry cycle
+      -- (registry, closures, refs) never touches the instance, and GHC
+      -- collects cycles, so a launched-then-shutdown instance is freed
+      -- while its refs survive. Fails if anyone ever points a ref, a
+      -- closure, or the executor back at the instance.
+      testCase "a dropped instance is collected while its refs survive" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-leak-app-" <> Text.take 12 suffix
+            appVersion = "hs-l2-leak-v-" <> suffix
+        base <- configFromEnv appName
+        let configured = base {configAppVersion = Just appVersion, configExecutorId = Just ("hs-l2-leak-exec-" <> suffix)}
+            childBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+            childBody n _ = pure (Right (n * 2))
+        -- Built and dropped inside the helper, so no stack slot in this
+        -- frame can retain the instance across the collection: only the
+        -- weak pointer and the refs come back.
+        (weak, parentRef, childRef) <- launchShutdownCollect configured childBody suffix
+        -- The weak pointer must find nothing after a collection.
+        performGC
+        collected <- deRefWeak weak
+        case collected of
+          Nothing -> pure ()
+          Just _ -> fail "the dropped instance survived collection"
+        -- And the surviving refs still name their workflows.
+        refName parentRef @?= "parent"
+        refName childRef @?= "child"
     ]
 
 -- * Engine-only driver aliases
@@ -376,6 +469,30 @@ tests =
 -- copies are deliberate: this module carries only the aliases it uses.
 runWf :: Executor IO -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
+
+-- | Launches an instance, runs one workflow through it, shuts it down,
+-- and hands back only the weak pointer and the refs: by the time the
+-- caller collects, no frame on its stack can still reach the instance or
+-- its executor.
+launchShutdownCollect :: Config -> (forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)) -> Text -> IO (Weak (DBOS IO), WorkflowRef IO EngineOnly, WorkflowRef IO EngineOnly)
+launchShutdownCollect configured childBody suffix = do
+  dbos <- newDBOS configured
+  childRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "child") childBody >>= either (fail . show) pure
+  -- The parent mentions the child ref, closing the registry cycle the
+  -- oracle leaked through: registry, closure, ref, registry. The mention
+  -- shapes the value, so the closure genuinely retains it rather than
+  -- dropping it as dead code.
+  let parentBody :: forall exec. Int -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+      parentBody n _ = pure (Right (n + 1 + Text.length (refName childRef)))
+  parentRef <- registerWorkflowRef dbos (newQualifiedWorkflowName "parent") parentBody >>= either (fail . show) pure
+  weak <- mkWeakPtr dbos Nothing
+  exec <- launchWithEnvironment dbos isolatedEnvironment >>= either (fail . show) pure
+  direct <- runWf exec (newQualifiedWorkflowName "child") (WorkflowId ("hs-l2-leak-direct-" <> suffix)) (Just (encodeWorkflowInput (1 :: Int)))
+  case direct of
+    Right (Just _) -> pure ()
+    other -> fail ("the run failed: " <> show other)
+  shutdown dbos
+  pure (weak, parentRef, childRef)
 
 -- | One backend for the whole group: pools are per-backend, so sharing
 -- bounds connections no matter how many tests run or are interrupted.

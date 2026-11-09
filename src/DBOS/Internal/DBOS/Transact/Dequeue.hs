@@ -54,7 +54,9 @@ import DBOS.Transact.Workflow
     clearCheckpointsFor,
     deadlineOf,
     executeRegisteredWorkflow,
+    isStopping,
     maxRecoveryAttempts,
+    sleepUnlessStopping,
     spawnTracked,
     tasksSpawner,
   )
@@ -524,6 +526,7 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed ow
                           spawned <-
                             spawnTracked
                               tasks
+                              workflowText
                               ( finally
                                   (void (executeRegisteredWorkflow (tasksSpawner tasks (clearCheckpointsFor datasources)) conn identity workflowId workflow input (deadlineOf row.workflowRecordDeadline clock) (Just releaseOnce) (WorkflowOwner {ownerWorkflowId = workflowId, ownerToken = ownerToken})))
                                   releaseOnce
@@ -583,39 +586,49 @@ internalQueueRecord =
     }
 
 -- | Polls one queue until its row leaves the published set, or shutdown
--- aborts the task. The interval is held across iterations, which is the
--- point: a contended queue stays backed off rather than rediscovering the
--- contention.
-pollQueue :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-          => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> DataSourceRegistry m -> m ()
-pollQueue tasks conn identity workflows queues running name datasources = go (secondsDuration 1)
+-- begins. The interval is held across iterations, which is the point: a
+-- contended queue stays backed off rather than rediscovering the
+-- contention. A producer loop: it stops between passes once shutdown has
+-- begun, so a claim that has committed is dispatched and drained with the
+-- rest. The dispatch set runs what is claimed; the producer set owns this
+-- loop itself.
+pollQueue :: (MonadFork m, MonadMask m, MonadMVar m, MonadAsync m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+          => Tasks m -> StrictTVar m Bool -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> DataSourceRegistry m -> m ()
+pollQueue flows stopping conn identity workflows queues running name datasources = go (secondsDuration 1)
   where
     go interval = do
-      current <- Map.lookup name <$> readTVarIO queues
-      case current of
-        Nothing -> runTracer conn.connTracer (QueueWorkerStopping name)
-        Just queue -> do
-          -- The queue's own interval is the floor and the ceiling is
-          -- derived from it; clamped rather than reset, so a backed-off
-          -- worker keeps its backoff.
-          let floorInterval = queue.queueRecordPollingInterval
-              ceiling = max floorInterval maxPollingInterval
-              clamped = max floorInterval (min ceiling interval)
-          polled <- pollOnce conn identity workflows tasks running queue datasources
-          let contended = polled.polledContention
-              next =
-                if contended
-                  then min (scaleDuration backoffFactor clamped) ceiling
-                  else max (scaleDuration scalebackFactor clamped) floorInterval
-          bits <- conn.connEntropy
-          delayDuration (jitter bits next)
-          go next
+      -- Checked before the first pass too: the supervisor may spawn a
+      -- worker after shutdown has begun, and that worker must not claim
+      -- anything.
+      stoppingNow <- isStopping stopping
+      unless stoppingNow $ do
+        current <- Map.lookup name <$> readTVarIO queues
+        case current of
+          Nothing -> runTracer conn.connTracer (QueueWorkerStopping name)
+          Just queue -> do
+            -- The queue's own interval is the floor and the ceiling is
+            -- derived from it; clamped rather than reset, so a backed-off
+            -- worker keeps its backoff.
+            let floorInterval = queue.queueRecordPollingInterval
+                ceiling = max floorInterval maxPollingInterval
+                clamped = max floorInterval (min ceiling interval)
+            polled <- pollOnce conn identity workflows flows running queue datasources
+            let contended = polled.polledContention
+                next =
+                  if contended
+                    then min (scaleDuration backoffFactor clamped) ceiling
+                    else max (scaleDuration scalebackFactor clamped) floorInterval
+            bits <- conn.connEntropy
+            keepGoing <- sleepDuration stopping (jitter bits next)
+            when keepGoing (go next)
 
 -- | The supervisor: transition, rebuild the set, spawn and reap one worker
--- per queue, and sleep a second.
-superviseForever :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
-                 => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Maybe [Text] -> DataSourceRegistry m -> m ()
-superviseForever tasks conn identity workflows listenQueues datasources = do
+-- per queue, and sleep a second. A producer loop: the supervisor and its
+-- workers stop between passes once shutdown has begun. The dispatch set
+-- runs what is claimed.
+superviseForever :: (MonadFork m, MonadMask m, MonadMVar m, MonadAsync m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                 => Tasks m -> Tasks m -> StrictTVar m Bool -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Maybe [Text] -> DataSourceRegistry m -> m ()
+superviseForever producers flows stopping conn identity workflows listenQueues datasources = do
   queues <- newTVarIO Map.empty
   workers <- newTVarIO Map.empty
   warnedInternal <- newTVarIO False
@@ -638,9 +651,10 @@ superviseForever tasks conn identity workflows listenQueues datasources = do
         unless (Map.member name kept) $ do
           spawned <-
             spawnTracked
-              tasks
+              producers
+              ("queue " <> name)
               ( finally
-                  (pollQueue tasks conn identity workflows queues running name datasources)
+                  (pollQueue flows stopping conn identity workflows queues running name datasources)
                   (atomically (modifyTVar workers (Map.delete name)))
               )
           -- A closed registry refuses the worker without forking, so there
@@ -649,8 +663,8 @@ superviseForever tasks conn identity workflows listenQueues datasources = do
           case spawned of
             Nothing -> pure ()
             Just tid -> atomically (modifyTVar workers (Map.insert name tid))
-      delayDuration supervisorInterval
-      loop queues workers running warnedInternal
+      keepGoing <- sleepDuration stopping supervisorInterval
+      when keepGoing (loop queues workers running warnedInternal)
 
 -- | One pass of the sweep outside the supervisor: a fresh tally, one poll
 -- per queue, and the ids it claimed. Dispatch is concurrent; the caller
@@ -710,3 +724,9 @@ scaleDuration factor (Duration interval) = Duration (interval * realToFrac facto
 
 delayDuration :: MonadDelay m => Duration -> m ()
 delayDuration (Duration interval) = threadDelay (round (interval * 1000000))
+
+-- | 'delayDuration' that ends early once shutdown has begun, reporting
+-- whether it slept the whole wait. Producer loops wait through this
+-- rather than 'delayDuration', so they stop between passes.
+sleepDuration :: (MonadSTM m, MonadAsync m, MonadDelay m) => StrictTVar m Bool -> Duration -> m Bool
+sleepDuration stopping (Duration interval) = sleepUnlessStopping stopping (round (interval * 1000000))

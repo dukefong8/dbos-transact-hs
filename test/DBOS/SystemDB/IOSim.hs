@@ -676,6 +676,7 @@ memInitWorkflowAs db new caller reusePolicy creator = do
           Just call ->
             let WorkflowId parentText = call.initCallerParentWorkflowId
              in case Map.lookup parentText rows of
+                  Just row | row.workflowRecordStatus == Cancelled -> Left (WorkflowCancelled {workflowId = parentText})
                   Just row | row.workflowRecordOwnerXid == Just call.initCallerToken -> Right ()
                   _ -> Left (WorkflowConflict {workflowId = parentText})
     case owned of
@@ -875,21 +876,31 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     pure
       ( Right
           ( case filters.workflowFilterWorkflowIds of
-              [] -> [row | row <- Map.elems rows, queuedHere row, attributesHere row]
-              ids -> [row | wid <- ids, Just row <- [Map.lookup wid rows], queuedHere row, attributesHere row]
+              [] -> [row | row <- Map.elems rows, queuedHere row, attributesHere row, forkedHere row, namedHere row]
+              ids -> [row | wid <- ids, Just row <- [Map.lookup wid rows], queuedHere row, attributesHere row, forkedHere row, namedHere row]
           )
       )
     where
-      -- The only list guards the sim halves assert: a queue-name filter
-      -- admits a row only when the row names a listed queue, as the SQL
-      -- @cardinality = 0 or queue_name = any@ guard does (a null queue
-      -- never matches a non-empty filter), and an attributes filter admits
-      -- a row only when the row's JSON contains the filter's, as @attributes
+      -- The list guards the sim halves assert: a queue-name filter admits
+      -- a row only when the row names a listed queue, a forked-from filter
+      -- admits a row only when the row names a listed source, and a name
+      -- filter admits a row only when the row carries a listed name, as
+      -- the SQL @cardinality = 0 or ... = any@ guards do (a null never
+      -- matches a non-empty filter); an attributes filter admits a row
+      -- only when the row's JSON contains the filter's, as @attributes
       -- @> filter@ does. Every other filter stays unmirrored.
       queuedHere row = case filters.workflowFilterQueueNames of
         [] -> True
         names -> row.workflowRecordQueueName `elem` (Just <$> names)
       attributesHere row = memAttributesContain row.workflowRecordAttributes filters.workflowFilterAttributes
+      forkedHere row = case filters.workflowFilterForkedFrom of
+        [] -> True
+        sources -> row.workflowRecordForkedFrom `elem` (Just . WorkflowId <$> sources)
+      namedHere row = case filters.workflowFilterNames of
+        [] -> True
+        names -> row.workflowRecordName `elem` (Just <$> names)
+        [] -> True
+        sources -> row.workflowRecordForkedFrom `elem` (Just . WorkflowId <$> sources)
   getWorkflowChildren db (WorkflowId wid) = do
     rows <- readTVarIO db.memRows
     pure (Right [row.workflowRecordId | row <- Map.elems rows, row.workflowRecordParentWorkflowId == Just (WorkflowId wid)])
@@ -1083,6 +1094,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
         case owner of
           Just o ->
             case Map.lookup (widTextOf o.ownerWorkflowId) rows of
+              Just row | row.workflowRecordStatus == Cancelled -> pure (Left (WorkflowCancelled {workflowId = widTextOf o.ownerWorkflowId}))
               Just row | row.workflowRecordOwnerXid == Just o.ownerToken -> remove rows
               _ -> pure (Left (WorkflowConflict {workflowId = widTextOf o.ownerWorkflowId}))
           Nothing -> remove rows
@@ -1179,7 +1191,9 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     case Map.lookup wid rows of
       -- The row's current owner is the only writer: anything else is a
       -- superseded execution reporting the conflict, as the SQL
-      -- @check_owner_on@ refuses it.
+      -- @check_owner_on@ refuses it. A cancelled row is refused whoever
+      -- asks, status before token, as the SQL check does.
+      Just row | row.workflowRecordStatus == Cancelled -> pure (Left (WorkflowCancelled {workflowId = wid}))
       Just row | row.workflowRecordOwnerXid == Just token -> do
         steps <- readTVar db.memSteps
         let prior = Map.lookup (wid, stepId) steps
@@ -1221,7 +1235,9 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     rows <- readTVar db.memRows
     case Map.lookup parentText rows of
       -- Only the row's current owner records the start: anything else is a
-      -- superseded execution reporting the conflict.
+      -- superseded execution reporting the conflict. Cancelled first, as
+      -- the SQL check refuses a cancelled row whoever asks.
+      Just row | row.workflowRecordStatus == Cancelled -> pure (Left (WorkflowCancelled {workflowId = parentText}))
       Just row | row.workflowRecordOwnerXid == Just token -> do
         steps <- readTVar db.memSteps
         let entry = case Map.lookup (parentText, stepId) steps of
@@ -1383,6 +1399,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     atomically $ do
       rows <- readTVar db.memRows
       case Map.lookup widText rows of
+        Just row | row.workflowRecordStatus == Cancelled -> pure (Left (WorkflowCancelled {workflowId = widText}))
         Just row | row.workflowRecordOwnerXid == Just token -> do
           -- A replay must not append a second entry. Only a workflow-level
           -- write records a step to find; a step-level write is replayed by
@@ -1418,6 +1435,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     atomically $ do
       rows <- readTVar db.memRows
       case Map.lookup (widTextOf wid) rows of
+        Just row | row.workflowRecordStatus == Cancelled -> pure (Left (WorkflowCancelled {workflowId = widTextOf wid}))
         Just row | row.workflowRecordOwnerXid == Just token -> do
           -- A replay adopts the recorded publish instead of republishing it,
           -- mirroring PG's conflict adoption.
@@ -1487,6 +1505,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
                     rights <- atomically $ do
                       rows <- readTVar db.memRows
                       pure $ case Map.lookup (widTextOf c.getEventCallerWorkflowId) rows of
+                        Just row | row.workflowRecordStatus == Cancelled -> Left (WorkflowCancelled {workflowId = widTextOf c.getEventCallerWorkflowId})
                         Just row | row.workflowRecordOwnerXid == Just c.getEventCallerToken -> Right ()
                         _ -> Left (WorkflowConflict {workflowId = widTextOf c.getEventCallerWorkflowId})
                     case rights of
@@ -1851,6 +1870,9 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     rows <- readTVar db.memRows
     case Map.lookup parentText rows of
       -- Only the row's current owner records the result, as for a step.
+      -- Cancelled first, as the SQL check refuses a cancelled row
+      -- whoever asks.
+      Just row | row.workflowRecordStatus == Cancelled -> pure (Left (WorkflowCancelled {workflowId = parentText}))
       Just row | row.workflowRecordOwnerXid == Just token -> do
         steps <- readTVar db.memSteps
         let prior = Map.lookup (parentText, stepId) steps
@@ -2076,6 +2098,7 @@ memCheckRecvOwner :: MemSystemDB s -> WorkflowId -> Text -> STM (IOSim s) (Eithe
 memCheckRecvOwner db wid@(WorkflowId widText) token = do
   rows <- readTVar db.memRows
   pure $ case Map.lookup widText rows of
+    Just row | row.workflowRecordStatus == Cancelled -> Left (WorkflowCancelled {workflowId = widText})
     Just row | row.workflowRecordOwnerXid == Just token -> Right wid
     _ -> Left (WorkflowConflict {workflowId = widText})
 
@@ -2379,6 +2402,7 @@ memSend db stepName messages serialization caller owner sendToForks = do
       let owned = case owner of
             Nothing -> Right ()
             Just o -> case Map.lookup (widTextOf o.ownerWorkflowId) rows of
+              Just row | row.workflowRecordStatus == Cancelled -> Left (WorkflowCancelled {workflowId = widTextOf o.ownerWorkflowId})
               Just row | row.workflowRecordOwnerXid == Just o.ownerToken -> Right ()
               _ -> Left (WorkflowConflict {workflowId = widTextOf o.ownerWorkflowId})
       case (owned, verifyCallerStep stepName caller rows steps) of

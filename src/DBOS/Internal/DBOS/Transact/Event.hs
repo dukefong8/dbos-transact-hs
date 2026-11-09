@@ -72,7 +72,7 @@ driveSetEvent wctx key value placement =
                 (ownerToken wctx')
           )
       pure $ case written of
-        Left err -> Left (TransactError.fromSystemDB err)
+        Left err -> Left (TransactError.fromExecution err)
         Right () -> Right ()
 
 -- | Read an event of another workflow, waiting up to the polling duration.
@@ -114,7 +114,7 @@ getEvent wctx destination key timeout = do
 adoptEventValue :: FromJSON value
                 => Either Error (Maybe EncodedValue) -> Either (TransactError.Error e) (Maybe value)
 adoptEventValue found = case found of
-  Left err -> Left (TransactError.fromSystemDB err)
+  Left err -> Left (TransactError.fromExecution err)
   Right Nothing -> Right Nothing
   Right (Just encoded) ->
     case decodeWorkflowValue "event value" (Just (toStoredValue encoded)) of

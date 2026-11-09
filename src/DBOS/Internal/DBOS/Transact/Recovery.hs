@@ -24,6 +24,9 @@ data EngineEvent
   | EngineNoWorkflows
   | EngineRecovered { engineRecoveredCount :: Int }
   | EngineCancelledRunning { engineCancelledCount :: Int }
+  | EngineDrainWaiting { engineDrainCount :: Int, engineDrainIds :: [Text] }
+  | EngineProducersCut { engineCutProducers :: [Text] }
+  | EngineWorkflowsCut { engineCutCount :: Int, engineCutIds :: [Text] }
   deriving stock (Eq, Show)
 
 instance LogEvent EngineEvent where
@@ -34,6 +37,9 @@ instance LogEvent EngineEvent where
   eventSeverity (EngineRecovered 0)       = SeverityDebug
   eventSeverity EngineRecovered {}        = SeverityInfo
   eventSeverity EngineCancelledRunning {} = SeverityInfo
+  eventSeverity EngineDrainWaiting {}     = SeverityInfo
+  eventSeverity EngineProducersCut {}     = SeverityWarning
+  eventSeverity EngineWorkflowsCut {}     = SeverityWarning
   renderEvent (EngineLaunched app exec ver) =
     "DBOS launched app_name=" <> app <> " executor_id=" <> exec <> " app_version=" <> ver
   renderEvent (EngineShutdown app) = "DBOS shut down app_name=" <> app
@@ -51,6 +57,12 @@ instance LogEvent EngineEvent where
     "re-enqueued workflows a previous run left PENDING workflows=" <> showText count
   renderEvent (EngineCancelledRunning count) =
     "cancelled workflows still running; they stay PENDING cancelled=" <> showText count
+  renderEvent (EngineDrainWaiting count ids) =
+    "waiting for workflows to finish before shutting down workflows=" <> showText count <> " ids=" <> showText ids
+  renderEvent (EngineProducersCut producers) =
+    "the dequeue loop or the scheduler was still mid-pass at the shutdown deadline and was cancelled producers=" <> showText producers
+  renderEvent (EngineWorkflowsCut count ids) =
+    "workflows still running at the shutdown deadline were cancelled; they stay PENDING workflows=" <> showText count <> " ids=" <> showText ids
 
 instance ToLogStr EngineEvent where
   toLogStr = toLogStr . renderLine
