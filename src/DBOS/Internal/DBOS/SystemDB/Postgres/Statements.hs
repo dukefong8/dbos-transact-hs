@@ -37,6 +37,7 @@ module DBOS.SystemDB.Postgres.Statements
     StepCheckRaw (..),
     checkStepSession,
     checkStepStatement,
+    checkStepAtOrAfterStatement,
     RecordStepParams (..),
     recordStepSession,
     recordStepStatement,
@@ -46,7 +47,7 @@ module DBOS.SystemDB.Postgres.Statements
     versionInsertSession,
     listApplicationVersionsSession,
     latestApplicationVersionSession,
-    updateVersionTimestampSession,
+    promoteVersionTimestampStatement,
     directForksSession,
     directForksTxStatement,
     renameRowsStatement,
@@ -747,6 +748,38 @@ checkStepStatement = Statement.preparable sql encoder decoder
             <*> Decoders.column (Decoders.nullable Decoders.text)
         )
 
+-- | The workflow's status and the first step recorded at or past a
+-- position, in one statement so the two come from a single snapshot: the
+-- cancellation check, the step and any gap share one read and one round
+-- trip. The subquery names its workflow id rather than correlating on the
+-- outer row: a correlated lateral would decode every step from the
+-- position to the end of the history on engines that decorrelate it, while
+-- the uncorrelated limit stays in the scan. Mirrors the oracle's
+-- @check_step_at_or_after@ statement.
+checkStepAtOrAfterStatement :: Statement.Statement (Text, Int) (Maybe (Maybe Text, Maybe Int, Maybe Text))
+checkStepAtOrAfterStatement =
+  Statement.preparable sql encoder decoder
+  where
+    sql =
+      "select s.status, o.function_id, o.function_name \
+      \from dbos.workflow_status s \
+      \left join ( \
+      \  select function_id, function_name from dbos.operation_outputs \
+      \  where workflow_uuid = $1 and function_id >= $2 \
+      \  order by function_id limit 1 \
+      \) o on true \
+      \where s.workflow_uuid = $1"
+    encoder =
+      contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (fromIntegral . snd) (Encoders.param (Encoders.nonNullable Encoders.int4))
+    decoder =
+      Decoders.rowMaybe
+        ( (,,)
+            <$> Decoders.column (Decoders.nullable Decoders.text)
+            <*> (fmap fromIntegral <$> Decoders.column (Decoders.nullable Decoders.int4))
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+        )
+
 -- | Everything @record_step@ binds. Mirrors the oracle's statement, whose
 -- parameter list is the union of the plain step and the child-result form.
 data RecordStepParams = RecordStepParams
@@ -944,16 +977,44 @@ latestVersionNameTx applicationName = do
     Just name -> Tx.statement name latestVersionNamedStatement
   pure ((.versionRowName) <$> found)
 
--- | Moves a version's timestamp, claiming a nameless row for the owner the
--- caller resolved. Mirrors @update_application_version_timestamp@.
-updateVersionTimestampSession :: Text -> Int64 -> Maybe Text -> Session.Session Int64
-updateVersionTimestampSession versionName timestamp owner =
-  sqlExecTypedSession [typedSql|
-    update dbos.application_versions
-    set version_timestamp = ${timestamp}, application_name = ${owner}
-    where version_name = ${versionName}
-      and (application_name is null or application_name = ${owner})
-  |]
+-- | Promotes a version by stamping it past every other version's. The
+-- stamp is @GREATEST@ of the database's clock and the highest stamp plus
+-- one, computed in the one statement that writes it: the maximum over the
+-- rows the latest-version read considers for the caller's application. The
+-- probes read the latest read's way — the caller's rows and the unclaimed
+-- ones as two index entries, or every row for a nameless caller — rather
+-- than one filter with an @OR@. Scoped by the caller's name, not the
+-- version's resolved owner (which a nameless caller takes from the row):
+-- the nameless latest read spans every application, so scoping to the
+-- owner could report success while a peer's version stayed the latest.
+-- Held below @bigint@'s ceiling before the @+ 1@, so a version pinned at
+-- the largest value ties rather than overflowing. Hand-written rather than
+-- typedSql: the probes differ by scoping, as @versionsStatement@ does.
+-- Mirrors the oracle's promotion @UPDATE@.
+promoteVersionTimestampStatement :: Maybe Text -> Statement.Statement (Text, Maybe Text, Maybe Text) Int64
+promoteVersionTimestampStatement scope =
+  Statement.preparable sql encoder Decoders.rowsAffected
+  where
+    probe scoped =
+      "COALESCE((SELECT version_timestamp FROM dbos.application_versions "
+        <> scoped
+        <> " ORDER BY application_name, version_timestamp DESC LIMIT 1), 0)"
+    highest = case scope of
+      Just _ ->
+        "GREATEST(" <> probe "WHERE application_name = $3" <> ", " <> probe "WHERE application_name IS NULL" <> ")"
+      Nothing ->
+        "COALESCE((SELECT version_timestamp FROM dbos.application_versions ORDER BY version_timestamp DESC LIMIT 1), 0)"
+    sql =
+      "UPDATE dbos.application_versions SET version_timestamp = "
+        <> "GREATEST((EXTRACT(epoch FROM clock_timestamp()) * 1000)::bigint, LEAST("
+        <> highest
+        <> ", 9223372036854775806) + 1), "
+        <> "application_name = $2 WHERE version_name = $1 "
+        <> "AND (application_name IS NULL OR application_name = $2)"
+    encoder =
+      contramap (\(wid, _, _) -> wid) (Encoders.param (Encoders.nonNullable Encoders.text))
+        <> contramap (\(_, owner, _) -> owner) (Encoders.param (Encoders.nullable Encoders.text))
+        <> contramap (\(_, _, scopeName) -> scopeName) (Encoders.param (Encoders.nullable Encoders.text))
 
 -- | The @application_name@ predicate a rename moves rows by. The parameter
 -- index differs per statement, so it is passed in. Mirrors Rust

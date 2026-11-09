@@ -28,6 +28,10 @@ module DBOS.Transact.Management
     rewindWorkflowsInWorkflow,
     updateWorkflowAttributes,
     mergeWorkflowAttributes,
+    listAppVersions,
+    latestAppVersion,
+    promoteAppVersion,
+    promoteAppVersionFor,
     listWorkflows,
     ListWorkflowStepsOptions (..),
     defaultListWorkflowStepsOptions,
@@ -55,7 +59,7 @@ import Data.Int (Int64)
 import Data.Text.Encoding (encodeUtf8)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (AttributeUpdate (..), Fork (..), ForkCallRefusal (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes, validateAttributeUpdate)
+import DBOS.SystemDB.Types (AttributeUpdate (..), Fork (..), ForkCallRefusal (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, VersionInfo (..), cancelStepName, deleteStepName, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes, validateAttributeUpdate)
 import DBOS.Transact.Connection (Connection (..), runSystemDB, withConnection)
 import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, workflowId, workflowOwner)
 import DBOS.Transact.Error qualified as TransactError
@@ -482,6 +486,43 @@ mergeWorkflowAttributesInWorkflow wctx workflowId attributes =
         (\_ -> mergeWorkflowAttributes conn workflowId attributes)
   where
     conn = wctx.wctxConn
+
+-- | The registered application versions, newest first: this
+-- application's rows plus the unclaimed ones. What an operator reads to
+-- find out which versions have ever announced themselves. Mirrors Rust
+-- @Connection::list_app_versions@, which the client's and the
+-- application's calls share.
+listAppVersions :: Monad m
+                => Connection m -> m (Either (TransactError.Error TransactError.EngineOnly) [VersionInfo])
+listAppVersions conn =
+  withConnection conn SystemDB.listApplicationVersions
+
+-- | The latest registered application version: the one with the highest
+-- stamp, which is how a rollback is expressed. Scoped to the connection's
+-- own application. Mirrors Rust @Connection::latest_app_version@.
+latestAppVersion :: Monad m
+                 => Connection m -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe VersionInfo))
+latestAppVersion conn =
+  withConnection conn (\db -> SystemDB.getLatestApplicationVersion db Nothing)
+
+-- | Promotes an already-registered version to be the latest, stamping it
+-- past every other version's on the database's clock: promoting an older
+-- one is a rollback. For the connection's own application. A name that
+-- matches nothing is not an error. Mirrors Rust
+-- @Connection::set_latest_app_version@.
+promoteAppVersion :: Monad m
+                  => Connection m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+promoteAppVersion conn version =
+  withConnection conn (\db -> SystemDB.promoteApplicationVersion db version Nothing)
+
+-- | Promotes a version for the named application: how one operator tool
+-- rolls a peer application back. A version another application holds is
+-- refused unless the promotion names it. Mirrors Rust
+-- @Connection::set_latest_app_version_for@.
+promoteAppVersionFor :: Monad m
+                     => Connection m -> Text -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+promoteAppVersionFor conn version application =
+  withConnection conn (\db -> SystemDB.promoteApplicationVersion db version (Just application))
 
 -- | Reads the workflows matching a filter. Mirrors Rust
 -- @DBOS::list_workflows@ outside a workflow, where the call is plain: every

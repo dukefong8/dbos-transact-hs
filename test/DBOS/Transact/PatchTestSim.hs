@@ -38,6 +38,7 @@ import DBOS.Transact.PatchCases
     checkPatchInStep,
     checkProgression,
     checkRecoveredTakesOldPath,
+    checkPlantedGap,
     checkTwoPatches,
     deprecatedBody,
     lastBody,
@@ -50,6 +51,7 @@ import DBOS.Transact.PatchCases
     scenarioPatchInStep,
     scenarioProgression,
     scenarioRecoveredTakesOldPath,
+    scenarioPlantedGap,
     scenarioTwoPatches,
     twoBody,
     v1Body,
@@ -162,6 +164,7 @@ tests =
       simCase simPatchFixture "a patch as the last call replays" scenarioLastCall checkLastCall traceLastMarker,
       simCase simPatchFixture "code that no longer knows a marker finds an unexpected step" scenarioOldMeetsMarker checkOldMeetsMarker traceNoPatchEvents,
       simCase simPatchFixture "an execution recovered under patched code takes the old path" scenarioRecoveredTakesOldPath checkRecoveredTakesOldPath traceRecovered,
+      simCase simPatchFixture "a patch in a gap below a recorded step takes the old path" scenarioPlantedGap checkPlantedGap tracePlantedGap,
       simCase simPatchFixture "a deprecated patch meeting old code finds an unexpected step" scenarioDeprecatedOnOldHistory checkDeprecatedOnOldHistory traceNoPatchEvents,
       simCase simPatchFixture "a patch is added nested deprecated and removed" scenarioProgression checkProgression traceProgression
     ]
@@ -194,6 +197,12 @@ traceLastMarker tr =
 traceRecovered :: forall x. SimTrace x -> IO ()
 traceRecovered tr =
   assertBool "the old path records no marker" (null [() | PatchMarkerRecorded {} <- selectTraceEventsDynamic tr :: [PatchEvent]])
+
+-- | The gap takes the old path with its own announcement: the marker is
+-- never recorded, and the step past the gap stands.
+tracePlantedGap :: forall x. SimTrace x -> IO ()
+tracePlantedGap tr =
+  selectTraceEventsDynamic tr @?= [PatchGapOldPathTaken 0 "v2"]
 
 -- | Markers record once each and replay without rewriting: the v1
 -- history takes the old path, v2 records and replays, v3 records, the

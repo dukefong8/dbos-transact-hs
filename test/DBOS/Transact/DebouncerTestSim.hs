@@ -44,6 +44,7 @@ tests =
       simCase simDebouncerFixture "what a debouncer cannot act on is refused" scenarioDebouncerCannotAct checkDebouncerCannotAct tracePinnedId,
       simCase simDebouncerFixture "a cancelled debounce frees its key" scenarioCancelledDebounceFreesKey checkCancelledDebounceFreesKey traceCancelledFreesKey,
       simCase simDebouncerFixture "a debounce inside a step is refused" scenarioDebounceInsideStepRefused checkDebounceInsideStepRefused tracePinnedId,
+      simCase simDebouncerFixture "a zero period inside a workflow is refused on the debounce channel" scenarioInWorkflowBadPeriodRefused checkInWorkflowBadPeriodRefused tracePinnedId,
       simCase simDebouncerFixture "a key collision between workflows is refused" scenarioKeyCollisionRefused checkKeyCollisionRefused tracePinnedId
     ]
 
@@ -95,6 +96,17 @@ simDebouncerFixture = do
           Right operation -> pure (Right operation)
           Left err -> pure (Left err)
   _ <- registerWorkflow dbos (newQualifiedWorkflowName "debounce-in-step-parent") stepParentBody >>= either (fail . show) pure
+  -- The bad-period refusal's parent: debounces with a zero period, which
+  -- durations refuse on the debounce's channel. Only the refusal case
+  -- runs it.
+  let badPeriodParentBody :: forall exec. Text -> WorkflowCtx exec (IOSim s) -> IOSim s (Either (Error EngineOnly) Text)
+      badPeriodParentBody _ wctx = do
+        debounced <- debounceInWorkflow wctx targetRef (debouncerNew {debouncerQueueName = Just targetQueue}) "bad-period-key" (millisDuration 0) Nothing
+        case debounced of
+          Left (InvalidArgument operation detail) -> pure (Right (operation <> "|" <> detail))
+          Left err -> throwIO (userError (show err))
+          Right joined -> pure (Right ("unexpected-row:" <> joined.workflowId))
+  _ <- registerWorkflow dbos (newQualifiedWorkflowName "debounce-bad-period-parent") badPeriodParentBody >>= either (fail . show) pure
   exec <- memLaunchOnWith mem simTracer dbos (Just [targetQueue])
   _ <- registerQueue dbos targetQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure
   _ <- registerQueue dbos foreignQueue defaultQueueOptions NeverUpdate >>= either (fail . show) pure

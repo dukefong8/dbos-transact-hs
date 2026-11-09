@@ -257,8 +257,42 @@ versionTests =
         case result of
           Right (Just version) -> version.versionInfoId @?= "mock-version-id"
           other -> fail (show other),
-      testCase "updateApplicationVersionTimestamp succeeds" $ do
-        run (updateApplicationVersionTimestamp backend "0.0.0" at Nothing) @?= Right ()
+      testCase "promoteApplicationVersion succeeds" $ do
+        run (promoteApplicationVersion backend "0.0.0" Nothing) @?= Right (),
+      testCase "checkStepAtOrAfter finds the first step at or past a position" $ do
+        result <- runMem $ do
+          mem <- newMemDB
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-gap") Nothing WorkflowIdReturnExisting
+          let plant step name =
+                atomically $
+                  modifyTVar
+                    mem.memSteps
+                    ( Map.insert
+                        ("wf-gap", step)
+                        StepRecord
+                          { stepRecordWorkflowId = WorkflowId "wf-gap",
+                            stepRecordStepId = step,
+                            stepRecordStepName = name,
+                            stepRecordOutput = Nothing,
+                            stepRecordError = Nothing,
+                            stepRecordChildWorkflowId = Nothing,
+                            stepRecordSerialization = Nothing,
+                            stepRecordStartedAt = Nothing,
+                            stepRecordCompletedAt = Nothing
+                          }
+                    )
+          plant 0 "charge"
+          plant 2 "DBOS.sleep"
+          at0 <- checkStepAtOrAfter mem (WorkflowId "wf-gap") 0
+          at1 <- checkStepAtOrAfter mem (WorkflowId "wf-gap") 1
+          at3 <- checkStepAtOrAfter mem (WorkflowId "wf-gap") 3
+          atomically $ modifyTVar mem.memRows (Map.adjust (\row -> row {workflowRecordStatus = Cancelled}) "wf-gap")
+          cancelled <- checkStepAtOrAfter mem (WorkflowId "wf-gap") 1
+          ghost <- checkStepAtOrAfter mem (WorkflowId "wf-ghost") 0
+          pure (at0, at1, at3, cancelled, ghost)
+        case result of
+          (Right (Just (0, "charge")), Right (Just (2, "DBOS.sleep")), Right Nothing, Left (WorkflowCancelled {}), Left (NonExistentWorkflow {})) -> pure ()
+          other -> fail ("expected the gap read, got: " <> show other)
     ]
 
 -- * Queues
@@ -1000,12 +1034,17 @@ memTests =
         result <- runMem $ do
           mem <- newMemDB
           _ <- createApplicationVersion mem "v1" Nothing
-          _ <- updateApplicationVersionTimestamp mem "v1" (Timestamp 0) Nothing
+          threadDelay 1000
           _ <- createApplicationVersion mem "v2" Nothing
-          orFailSim =<< getLatestApplicationVersion mem Nothing
+          newest <- orFailSim =<< getLatestApplicationVersion mem Nothing
+          _ <- promoteApplicationVersion mem "v1" Nothing
+          rolled <- orFailSim =<< getLatestApplicationVersion mem Nothing
+          pure (newest, rolled)
         case result of
-          Just version -> version.versionInfoName @?= "v2"
-          Nothing -> fail "no version was reported",
+          (Just newest, Just rolled) -> do
+            newest.versionInfoName @?= "v2"
+            rolled.versionInfoName @?= "v1"
+          _ -> fail "no version was reported",
       testCase "awaitFirstWorkflowId settles on a recorded outcome" $ do
         result <- runMem $ do
           mem <- newMemDB

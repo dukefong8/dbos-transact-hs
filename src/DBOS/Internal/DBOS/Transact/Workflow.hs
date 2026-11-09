@@ -47,6 +47,7 @@ module DBOS.Transact.Workflow
     startWorkflow,
     runWorkflowRef,
     startChildWorkflow,
+    startChildWorkflowAt,
     maxRecoveryAttempts,
     workflowNewWorkflow,
     -- * Task ownership (workflow.rs @Tasks@)
@@ -85,7 +86,7 @@ import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, In
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry, clearDatasourceCheckpoints)
-import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), clearSpawnerCheckpoints, deadline, insideAStep, nextStepId, ownerToken, spawnLocal, withWorkflow, withWorkflowTaskSpawner, workflowId)
+import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), clearSpawnerCheckpoints, deadline, insideAStep, nextStepId, ownerToken, releaseStart, spawnLocal, startToken, waitForStarts, withWorkflow, withWorkflowTaskSpawner, workflowId)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..))
@@ -317,15 +318,27 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
       withWorkflow conn identity workflowId ((.deadlineAt) <$> deadline) owner $ \wctx -> do
         let scoped = withWorkflowTaskSpawner spawner wctx
             ErasedWorkflow body = workflow
+            -- **A start the body dropped may still be writing under this
+            -- execution's token**, which the outcome write gives up. Its
+            -- write would then be refused with nobody awaiting it, and the
+            -- child would never exist, so the outcome waits for every start
+            -- the body began. Inside the deadline, so a start that stalls
+            -- past it cannot hold the workflow open: the run times out as
+            -- any other would, and a start refused after that is refused
+            -- for a cancelled parent.
+            runWithStarts = do
+              outcome <- body input scoped
+              waitForStarts wctx
+              pure outcome
         raced <- case deadline of
-          Nothing -> Just <$> body input scoped
+          Nothing -> Just <$> runWithStarts
           Just due -> do
             now <- getMonotonicTimeNSec
             let remainingNs = if due.deadlineExpires > now then due.deadlineExpires - now else 0
             -- io-classes' timer is microseconds, the monotonic reading is
             -- nanoseconds: round down, so a sub-microsecond remainder waits
             -- zero rather than a whole extra microsecond.
-            timeout (fromIntegral (remainingNs `div` 1000)) (body input scoped)
+            timeout (fromIntegral (remainingNs `div` 1000)) runWithStarts
         case raced of
           Nothing -> timeOut
           Just outcome -> case outcome of
@@ -1026,14 +1039,37 @@ runWorkflowRef tasks conn identity snapshot ref options input datasources = do
 -- detached at once — a replayed parent never reaches this branch, so the
 -- start keeps its run-once shape across recovery — while a queued child is
 -- the supervisor's and an owned-elsewhere child is already running.
+--
+-- **The writing half runs in a task, and this call awaits it.** A start
+-- creates a durable object part-way through its own write, and abandoning
+-- the caller does not undo a committed row — so a start dropped between
+-- creating the child and recording its step could leave a row nothing
+-- runs. Detached, the drop takes the wait and leaves the work: the child
+-- is created, its start recorded, and it runs. The task holds the parent's
+-- starts count (see 'Context.startToken') for as long as it exists, so a
+-- parent that finishes first still waits for it before recording its
+-- outcome.
+--
 -- Awaiting the handle is a second checkpoint the caller takes through
 -- 'handleResult'; recording that wait against the parent is Select
 -- follow-up. Starting from inside a step is 'InsideStep': a step is a
 -- leaf, and an id-allocating call inside one would shift every later step
 -- onto the wrong replay slot.
-startChildWorkflow :: (MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+startChildWorkflow :: (MonadMVar m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
                    => WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
-startChildWorkflow wctx ref options input = do
+startChildWorkflow = startChildWorkflowWith Nothing
+
+-- | 'startChildWorkflow' at a step the caller has already claimed from
+-- the counter. The debouncer claims its bounce and its fresh start
+-- together, as the oracle's @place@ does, so a coalescing bounce still
+-- spends the start's id and a later step lands where the oracle's would.
+startChildWorkflowAt :: (MonadMVar m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+                     => Int -> WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startChildWorkflowAt = startChildWorkflowWith . Just
+
+startChildWorkflowWith :: (MonadMVar m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+                       => Maybe Int -> WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
+startChildWorkflowWith placedStep wctx ref options input = do
   -- A start inside a step body is refused — and a start through a captured
   -- parent while a step body runs is the same leaf violation with a scope
   -- field predating the body, which the shared depth counter reports. Read
@@ -1058,19 +1094,63 @@ startChildWorkflow wctx ref options input = do
           | otherwise -> case validateStart options.startQueue (timeoutBudget options.startTimeout) ((\(WorkflowId offered) -> offered) <$> options.startWorkflowId) options.startWorkflowIdReusePolicy of
               Left err -> pure (Left err)
               Right _ -> do
-                parentStepId <- nextStepId wctx
-                startChild parentStepId
+                -- Decided at the call, before anything is detached: the
+                -- step the start occupies and the id it would create. An
+                -- interrupted start still names the child in its answer,
+                -- and a replay of this position derives the same id.
+                parentStepId <- maybe (nextStepId wctx) pure placedStep
+                now <- timestampNow
+                generated <- generatedWorkflowId conn
+                let parentText = workflowId wctx
+                    childText = childWorkflowId options.startWorkflowId (Just (parentText, parentStepId)) generated
+                detach parentStepId now childText
   where
     key = ref.refQualifiedName
     name = refName ref
     conn = wctx.wctxConn
     identity = wctx.wctxIdentity
     rawInput = unWorkflowInput <$> input
-    startChild parentStepId = do
-      now <- timestampNow
-      generated <- generatedWorkflowId conn
+
+    -- The doing half, detached when the context carries a task registry (a
+    -- test or client-side body has none and writes record-only). The task
+    -- gives its starts place back on every exit, so an aborted start cannot
+    -- hold its parent open.
+    detach parentStepId now childText =
+      case wctx.wctxSpawner of
+        Nothing -> startChildAt parentStepId now childText
+        -- Token and task are taken under one mask: an async exception
+        -- between them would leave a counted place no task owns, and the
+        -- parent's wait for its starts would never end. The wait itself
+        -- stays interruptible, and the task releases the place either way.
+        Just spawner -> mask $ \_ -> do
+          token <- startToken wctx
+          channel <-
+            spawnLocal spawner (\_ -> startChildAt parentStepId now childText `finally` releaseStart token)
+              `onException` releaseStart token
+          -- Empty: the task is in flight and releases its own place. Full:
+          -- either shutdown refused the spawn (the place has no task, so the
+          -- caller releases it) or the task already finished (it did);
+          -- 'releaseStart' is idempotent, so both settle the same way.
+          running <- tryReadMVar channel
+          case running of
+            Nothing -> awaitChild channel
+            Just _ -> do
+              releaseStart token
+              awaitChild channel
+      where
+        awaitChild channel = do
+          settled <- readMVar channel
+          case settled of
+            LocalTaskValue value -> pure value
+            -- Only shutdown aborts a start task. Before its transaction
+            -- commits nothing was written; after, the child exists and
+            -- recovers and a replay joins it. Either way the caller's
+            -- answer is we stopped waiting.
+            LocalTaskCancelled -> pure (Left (TransactError.Interrupted {workflowId = childText}))
+            LocalTaskPanic err -> throwIO err
+
+    startChildAt parentStepId now childText = do
       let parentText = workflowId wctx
-          childText = childWorkflowId options.startWorkflowId (Just (parentText, parentStepId)) generated
           -- A refused start is recorded at this step, so a replay of a
           -- parent that handled the refusal returns the same answer instead
           -- of starting the child for real once the key is free.

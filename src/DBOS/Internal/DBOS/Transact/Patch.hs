@@ -15,12 +15,15 @@
 -- recording new ones, for when no old execution can run again.
 --
 -- Positions follow the PendingStep shape: building peeks the next step id
--- without taking it ('peekStepId'), and resolving reads the history at the
--- peeked position, then takes the id only if still next ('claimStepId', one
--- compare-and-swap). A call built in between took the position first, and
--- the patch fails with 'PatchNondeterminism' rather than record elsewhere.
--- Placement is checked at drive time ('checkHere'), as for every durable
--- call, so a carried patch is refused with 'StepBuiltElsewhere'.
+-- without taking it ('peekStepId'), and resolving reads the history from
+-- the peeked position on, then takes the id only if still next
+-- ('claimStepId', one compare-and-swap). A call built in between took the
+-- position first, and the patch fails with 'PatchNondeterminism' rather
+-- than record elsewhere. A dropped patch future's replay takes the old
+-- path once a later step is recorded: the empty position reads as the old
+-- code's, which the rest of the history was recorded by. Placement is
+-- checked at drive time ('checkHere'), as for every durable call, so a
+-- carried patch is refused with 'StepBuiltElsewhere'.
 module DBOS.Transact.Patch
   ( patchStep,
     deprecatePatchStep,
@@ -32,7 +35,6 @@ where
 
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (Outcome (..), StepTiming (..), WorkflowId (..), patchMarkerName, timestampNow)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere)
 import DBOS.Transact.Context (WorkflowCtx (wctxTracer), claimStepId, insideAStep, ownerToken, peekStepId, stepCtxBoundary, withSystemDB, workflowId)
@@ -47,6 +49,7 @@ data PatchEvent
   = PatchMarkerRecorded {patchStepId :: Int, patchMarker :: Text}
   | PatchMarkerReplayed {patchStepId :: Int, patchMarker :: Text}
   | PatchOldPathTaken {patchStepId :: Int, patchMarker :: Text}
+  | PatchGapOldPathTaken {patchStepId :: Int, patchMarker :: Text}
   deriving stock (Eq, Show)
 
 instance LogEvent PatchEvent where
@@ -57,6 +60,8 @@ instance LogEvent PatchEvent where
     "replaying a patch marker step_id=" <> showText stepId' <> " patch=" <> marker
   renderEvent (PatchOldPathTaken stepId' marker) =
     "an execution from before the patch: taking the old path step_id=" <> showText stepId' <> " patch=" <> marker
+  renderEvent (PatchGapOldPathTaken stepId' marker) =
+    "an execution from before the patch, with a step recorded past this one: taking the old path step_id=" <> showText stepId' <> " patch=" <> marker
 
 instance ToLogStr PatchEvent where
   toLogStr = toLogStr . renderLine
@@ -75,6 +80,10 @@ data Found
   = FoundNothing
   | FoundThisMarker
   | FoundOtherStep
+  | -- | Nothing at the position, but a step past it: an execution of the
+    -- code from before the patch that left a gap here, as a @recv@
+    -- waiting on its timeout does.
+    FoundGap
   deriving stock (Eq, Show)
 
 -- | A patch built at its position and not yet resolved: the id is peeked at
@@ -132,20 +141,19 @@ drivePatch wctx name marker placement =
 -- | What awaiting a patch does: read, claim, write. The read means
 -- something only if nothing took the position while it was out: a claim
 -- failure, or a moved peek on a non-occupying path, is 'PatchNondeterminism'.
+-- The read answers with the first step at or past the position rather than
+-- the one at it: the old code can leave the position empty behind a step
+-- it recorded first, so only a history that ends before the position is a
+-- first visit. Mirrors the oracle's gap-aware resolve.
 resolvePatch :: (MonadSTM m, MonadTime m) => WorkflowCtx exec m -> Text -> Marker -> Int -> m (Either (TransactError.Error TransactError.EngineOnly) Bool)
 resolvePatch wctx name marker stepId = do
   let wid = WorkflowId (workflowId wctx)
       markerName = patchMarkerName name
       raced = TransactError.PatchNondeterminism {workflowId = workflowId wctx, patch = name, stepId = stepId}
-  found <- withSystemDB wctx (\db -> SystemDB.checkStep db wid stepId markerName)
+  found <- withSystemDB wctx (\db -> SystemDB.checkStepAtOrAfter db wid stepId)
   found' <- case found of
-    Left err -> case err of
-      -- The determinism check's refusal is this call's answer: a row
-      -- recorded under another name is the old code's step.
-      SystemDBError.UnexpectedStep {} -> pure (Right FoundOtherStep)
-      _ -> pure (Left (TransactError.fromSystemDB err))
-    Right (Just _) -> pure (Right FoundThisMarker)
-    Right Nothing -> pure (Right FoundNothing)
+    Left err -> pure (Left (TransactError.fromSystemDB err))
+    Right step -> pure (Right (toFound stepId markerName step))
   case found' of
     Left err -> pure (Left err)
     Right found'' -> do
@@ -153,6 +161,7 @@ resolvePatch wctx name marker stepId = do
             (FoundThisMarker, _) -> True
             (FoundNothing, Write) -> True
             (FoundOtherStep, _) -> False
+            (FoundGap, _) -> False
             (FoundNothing, Honour) -> False
       if occupy
         then do
@@ -166,6 +175,12 @@ resolvePatch wctx name marker stepId = do
             then settleMarker wctx name marker wid markerName stepId found''
             else pure (Left raced)
   where
+    toFound atStep marker step = case step of
+      Nothing -> FoundNothing
+      Just (at, recorded)
+        | at == atStep && recorded == marker -> FoundThisMarker
+        | at == atStep -> FoundOtherStep
+        | otherwise -> FoundGap
     settleMarker wctx' name' marker' wid' markerName' stepId' found'' =
       case (found'', marker') of
         (FoundNothing, Write) -> do
@@ -185,5 +200,9 @@ resolvePatch wctx name marker stepId = do
         (FoundOtherStep, Write) -> do
           runTracer wctx'.wctxTracer (PatchOldPathTaken stepId' name')
           pure (Right False)
+        (FoundGap, Write) -> do
+          runTracer wctx'.wctxTracer (PatchGapOldPathTaken stepId' name')
+          pure (Right False)
         (FoundNothing, Honour) -> pure (Right True)
         (FoundOtherStep, Honour) -> pure (Right True)
+        (FoundGap, Honour) -> pure (Right True)

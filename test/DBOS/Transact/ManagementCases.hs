@@ -341,7 +341,7 @@ treeChildBody started gate () _ = putMVar started () >> takeMVar gate >> pure (R
 
 -- | The tree parent: starts the child, waits until it has begun (so the
 -- cancel below cannot miss it), and hands back the child's id.
-treeParentBody :: forall exec m. (MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+treeParentBody :: forall exec m. (MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
                => WorkflowRef m EngineOnly ->
                   StrictMVar m () ->
                   () ->
@@ -2309,7 +2309,7 @@ adoptChildBody ran input _ = atomically (modifyTVar ran (+ 1)) >> pure (Right (i
 
 -- | The adoption parent: counts its runs, starts the child, and awaits
 -- its result.
-adoptParentBody :: forall exec m. (MonadTime m, MonadMVar m, MonadCatch m, MonadTimer m, MonadMonotonicTimeNSec m)
+adoptParentBody :: forall exec m. (MonadTime m, MonadMask m, MonadMVar m, MonadCatch m, MonadTimer m, MonadMonotonicTimeNSec m)
                 => WorkflowRef m EngineOnly ->
                    StrictTVar m Int ->
                    () ->
@@ -2989,7 +2989,7 @@ checkCompletionClearsCheckpoints (mid1, post1, mid2, post2) = do
 -- | The parent of a child that runs a datasource transaction: the parent's
 -- own checkpoint stands while the child runs, so the child's lands beside
 -- it and the parent observes both once the child finishes.
-childClearParentBody :: forall exec m. (MonadTime m, MonadMVar m, MonadCatch m, MonadTimer m, MonadMonotonicTimeNSec m, HasCallStack)
+childClearParentBody :: forall exec m. (MonadTime m, MonadMask m, MonadMVar m, MonadCatch m, MonadTimer m, MonadMonotonicTimeNSec m, HasCallStack)
                      => FakeDs m ->
                         WorkflowRef m EngineOnly ->
                         StrictTVar m Int ->

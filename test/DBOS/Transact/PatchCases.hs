@@ -26,7 +26,9 @@ module DBOS.Transact.PatchCases
     scenarioOldMeetsMarker,
     checkOldMeetsMarker,
     scenarioRecoveredTakesOldPath,
+    scenarioPlantedGap,
     checkRecoveredTakesOldPath,
+    checkPlantedGap,
     scenarioDeprecatedOnOldHistory,
     checkDeprecatedOnOldHistory,
     scenarioProgression,
@@ -383,6 +385,38 @@ checkRecoveredTakesOldPath (outcome, names) = do
     other -> Left ("expected the old path to answer three, got: " <> show other)
   unless (names == [Just "step_one", Just "step_two"]) $
     Left ("expected the old steps, got: " <> show names)
+
+-- | A gap below a recorded step is the old code's, however it was left:
+-- concurrent calls of one execution can finish out of order, so position
+-- 1 can be recorded while 0 is not. A patch at 0 takes the old path
+-- there, and records nothing in the gap. Mirrors Rust
+-- @a_patch_in_a_gap_below_a_recorded_step_takes_the_old_path@.
+scenarioPlantedGap :: forall m. (MonadSTM m, MonadTime m, MonadCatch m) => PatchFixture m -> m (Either (Error EngineOnly) Int, [Maybe Text])
+scenarioPlantedGap fx = do
+  let PatchFixture {pfRunBody = runBody} = fx
+  wid <- fx.pfFreshWorkflowId
+  fx.pfPlant wid 1 "step_two" (Just "2")
+  outcome <- runBody gapBody wid
+  names <- fx.pfReadNames wid [(0, patchMarkerName "v2"), (1, "step_two")]
+  pure (outcome, names)
+  where
+    gapBody :: forall exec. WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+    gapBody wctx = do
+      patched <- patchStep wctx "v2"
+      case patched of
+        Left err -> pure (Left err)
+        Right True -> pure (Right 1)
+        Right False -> pure (Right 0)
+
+-- | The old path answers zero, and no marker lands in the gap while the
+-- planted step stands past it.
+checkPlantedGap :: (Either (Error EngineOnly) Int, [Maybe Text]) -> Either String ()
+checkPlantedGap (outcome, names) = do
+  case outcome of
+    Right 0 -> pure ()
+    other -> Left ("expected the old path to answer zero, got: " <> show other)
+  unless (names == [Nothing, Just "step_two"]) $
+    Left ("expected no marker in the gap, got: " <> show names)
 
 -- | A deprecated patch meeting old code: honoured past the marker search,
 -- then its first step fails against the old history. Mirrors Rust

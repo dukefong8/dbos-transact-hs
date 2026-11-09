@@ -38,6 +38,7 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text.Encoding (decodeUtf8)
 import Data.List (foldl', nub, partition, sort, sortOn)
+import Data.Maybe (listToMaybe)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -243,6 +244,7 @@ instance SystemDB MockSystemDB (IOSim s) where
   closeStream = \cases _ _ _ _ _ _ -> pure (Right ())
   close = \cases _ -> pure ()
   checkStep = \cases _ _ _ _ -> pure (Right Nothing)
+  checkStepAtOrAfter = \cases _ _ _ -> pure (Right Nothing)
   recordStep = \cases _ _ _ _ _ _ _ _ -> pure (Right ())
   listSteps = \cases _ wid _ _ _ _ -> pure (Right [mockStep wid 0 "mock-step"])
   recordSleep _ _ _ _ _ = do
@@ -258,7 +260,7 @@ instance SystemDB MockSystemDB (IOSim s) where
   createApplicationVersion = \cases _ _ _ -> pure (Right ())
   listApplicationVersions = \cases _ -> pure (Right [mockVersion])
   getLatestApplicationVersion = \cases _ _ -> pure (Right (Just mockVersion))
-  updateApplicationVersionTimestamp = \cases _ _ _ _ -> pure (Right ())
+  promoteApplicationVersion = \cases _ _ _ -> pure (Right ())
   upsertQueue = \cases _ _ _ -> pure (Right True)
   startQueuedWorkflows = \cases _ _ _ _ _ _ _ _ -> pure (Right (Dequeued [mockQueuedId] Nothing))
   countPendingQueueWorkflows = \cases _ _ -> pure (Right 0)
@@ -1158,6 +1160,20 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       Just record
         | record.stepRecordStepName == name -> Right (Just record)
         | otherwise -> Left (UnexpectedStep {workflowId = wid, stepId = stepId, expected = name, recorded = record.stepRecordStepName})
+  -- | The earliest step recorded at or past a position, as its id and
+  -- name: what a patch reads at its position. A gate like 'checkStep',
+  -- with its first check, as the SQL read is. Mirrors Rust
+  -- @SystemDatabase::check_step_at_or_after@.
+  checkStepAtOrAfter db (WorkflowId wid) stepId = do
+    rows <- readTVarIO db.memRows
+    steps <- readTVarIO db.memSteps
+    pure $ case Map.lookup wid rows of
+      Nothing -> Left (NonExistentWorkflow {workflowIds = [wid]})
+      Just row
+        | row.workflowRecordStatus == Cancelled -> Left (WorkflowCancelled {workflowId = wid})
+        | otherwise -> Right $ case [(step, record.stepRecordStepName) | ((w, step), record) <- Map.toList steps, w == wid, step >= stepId] of
+            [] -> Nothing
+            found -> Just (minimum found)
   recordStep db (WorkflowId wid) stepId name outcome serialization timing token = atomically $ do
     rows <- readTVar db.memRows
     case Map.lookup wid rows of
@@ -1563,9 +1579,53 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     versions <- readTVarIO db.memVersions
     let scoped = [v | v <- versions, v.versionInfoAppName == applicationName || v.versionInfoAppName == Nothing]
     pure (Right (case sortOn (.versionInfoTimestamp) scoped of [] -> Nothing; vs -> Just (last vs)))
-  updateApplicationVersionTimestamp db versionName timestamp applicationName =
-    atomically (modifyTVar db.memVersions (map (\v -> if v.versionInfoName == versionName && v.versionInfoAppName == applicationName then v {versionInfoTimestamp = timestamp} else v)))
-      >> pure (Right ())
+  promoteApplicationVersion db versionName applicationName = do
+    now <- memDbNow db
+    atomically $ do
+      versions <- readTVar db.memVersions
+      application <- readTVar db.memAppName
+      let claimant = applicationName <|> application
+          holder = listToMaybe [v.versionInfoAppName | v <- versions, v.versionInfoName == versionName]
+      case memResolveVersionOwner versionName claimant holder of
+        Left err -> pure (Left err)
+        Right owner -> do
+          -- The highest stamp the latest read considers: the caller's rows
+          -- and the unclaimed ones, or every row for a nameless caller.
+          -- Held below the ceiling before the + 1, so a pinned version
+          -- ties rather than overflowing; the database's clock rather than
+          -- the caller's, because versions register stamped by it.
+          let scoped = case claimant of
+                Just app -> [v | v <- versions, v.versionInfoAppName == Just app || v.versionInfoAppName == Nothing]
+                Nothing -> versions
+              highest = foldr (\v acc -> max (timestampToEpochMs v.versionInfoTimestamp) acc) 0 scoped
+              ceilingMs = 9223372036854775806
+              stamp =
+                timestampFromEpochMs
+                  (max (timestampToEpochMs now) (min ceilingMs highest + 1))
+              claimed v
+                | v.versionInfoName == versionName && (v.versionInfoAppName == Nothing || v.versionInfoAppName == owner) =
+                    v {versionInfoTimestamp = stamp, versionInfoAppName = owner}
+                | otherwise = v
+          writeTVar db.memVersions (map claimed versions)
+          pure (Right ())
+    where
+      -- The ownership guard the SQL read-modify-write keeps: a version
+      -- another application holds is refused unless the caller names it.
+      memResolveVersionOwner name claimant holder = case holder of
+        Nothing -> Right claimant
+        Just Nothing -> Right claimant
+        Just (Just owner) -> case claimant of
+          Nothing -> Right (Just owner)
+          Just claimantName
+            | claimantName == owner -> Right (Just owner)
+            | otherwise ->
+                Left
+                  RegisteredByAnother
+                    { kind = "Application version",
+                      name = name,
+                      holder = owner,
+                      claimant = claimant
+                    }
   upsertQueue db queue onExisting = atomically $ do
     queues <- readTVar db.memQueues
     application <- readTVar db.memAppName

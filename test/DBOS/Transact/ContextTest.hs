@@ -43,6 +43,7 @@ module DBOS.Transact.ContextTest
     scenarioExecCounters,
     scenarioRaceCancelled,
     scenarioRaceCompletes,
+    scenarioStartsToken,
     scenarioStepView,
     scenarioLogLines,
     checkWorkflowId,
@@ -67,6 +68,7 @@ module DBOS.Transact.ContextTest
     checkExecCounters,
     checkRaceCancelled,
     checkRaceCompletes,
+    checkStartsToken,
     checkStepView,
     checkLogLines,
     checkScopeStatus,
@@ -124,6 +126,9 @@ import DBOS.Transact.Context
     stepStatusMaxAttempts,
     stepStatusId,
     cancellationToken,
+    startToken,
+    releaseStart,
+    waitForStarts,
     withStep,
     withTracer,
     withWorkflow
@@ -571,6 +576,46 @@ checkLogLines rendered = go rendered appLogLines
       | otherwise = Left ("expected a line carrying " <> show expected <> ", got: " <> line)
     go other expected = Left ("expected " <> show expected <> ", got: " <> show other)
 
+-- | A starts token holds the outcome wait while it is out, and giving it
+-- back twice still settles at zero: the oracle's @Ctx::starts@, which a
+-- workflow drains before recording its outcome so a detached child start
+-- it dropped still lands. The wait is STM-level, so the case pins it
+-- directly rather than through a row lock — every child write locks the
+-- parent row first, so a lock-based probe could not tell the token's wait
+-- from the outcome write's own.
+scenarioStartsToken :: (MonadSTM m, MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadThrow m, MonadDelay m)
+                    => Fixture m -> m Bool
+scenarioStartsToken fx = do
+  ctx <- fx.fixtureMkCtx "wf-starts"
+  -- Empty: the wait returns at once.
+  waitFor (waitForStarts ctx)
+  held <- startToken ctx
+  -- Held: the wait stays put past a short timeout.
+  blocked <- timeout 100000 (waitForStarts ctx)
+  case blocked of
+    Just _ -> pure False
+    Nothing -> do
+      releaseStart held
+      -- Released: the wait returns at once again.
+      waitFor (waitForStarts ctx)
+      -- A second release is a no-op: the count stays at zero rather than
+      -- going negative, which a further wait would hang on.
+      releaseStart held
+      waitFor (waitForStarts ctx)
+      -- From another thread: the wait ends when the holder gives back.
+      heldAgain <- startToken ctx
+      done <- newEmptyMVar
+      _ <- forkIO (threadDelay 100000 >> releaseStart heldAgain >> putMVar done ())
+      waitFor (waitForStarts ctx)
+      waitFor (takeMVar done)
+      pure True
+
+-- | The wait stayed put while the token was out, and every wait after a
+-- release returned.
+checkStartsToken :: Bool -> Either String ()
+checkStartsToken True = Right ()
+checkStartsToken False = Left "the outcome wait returned while a starts token was still out"
+
 -- * Shared helpers, polymorphic over the same vocabulary.
 
 -- | A wait that polls a cooperative flag instead of sleeping through it.
@@ -625,6 +670,7 @@ tests =
           liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "separate executions own independent step counters" scenarioExecCounters checkExecCounters,
           liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a step view reads its status with the workflow id" scenarioStepView checkStepView,
           liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "raceCancel returns the value when the token stays quiet" scenarioRaceCompletes checkRaceCompletes,
+          liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a starts token holds the outcome wait until it is given back" scenarioStartsToken checkStartsToken,
           liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "raceCancel reports cancellation when the token has fired" scenarioRaceCancelled checkRaceCancelled,
           liveCase (liveFixture <$> getBackend <*> (ioTracer . fst <$> getLogger)) "a body logs through its context" scenarioLogLines checkLogLines,
           -- Sim only: hand-emitted structural events; typed assertions live only in sim.

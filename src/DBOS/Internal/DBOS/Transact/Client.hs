@@ -52,6 +52,7 @@ module DBOS.Transact.Client
     clientRewindWorkflows,
     clientUpdateWorkflowAttributes,
     clientMergeWorkflowAttributes,
+    clientPromoteVersionFor,
     clientSetWorkflowDelay,
     -- * Queues from outside
     clientListQueues,
@@ -93,7 +94,7 @@ import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, WorkflowHandle (workflowId), pollingHandle)
 import DBOS.Transact.Identity (validateAppName)
 import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, mergeWorkflowAttributes, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
+import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, latestAppVersion, listAppVersions, mergeWorkflowAttributes, promoteAppVersion, promoteAppVersionFor, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
 import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
 import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
 import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
@@ -774,8 +775,7 @@ clientDeleteQueue client queueName = case reserved queueName of
 -- | The registered application versions.
 clientListAppVersions :: Monad m
                               => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) [VersionInfo])
-clientListAppVersions client = do
-  withConnection client.conn SystemDB.listApplicationVersions
+clientListAppVersions client = listAppVersions client.conn
 
 -- | The latest registered application version, scoped to this client's
 -- application, or global when the client is nameless. Mirrors the oracle's
@@ -784,18 +784,23 @@ clientListAppVersions client = do
 -- to the connection's own application name.
 clientLatestAppVersion :: Monad m
                                => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe VersionInfo))
-clientLatestAppVersion client = do
-  result <- withConnection client.conn (\db -> SystemDB.getLatestApplicationVersion db Nothing)
-  pure result
+clientLatestAppVersion client = latestAppVersion client.conn
 
--- | Promote a version by stamping it now, making it the latest: a rollback
--- is a promotion of the older version.
-clientPromoteVersion :: (MonadDelay m, MonadTime m)
+-- | Promote an already-registered version to be the latest, stamping it
+-- past every other version's on the database's clock: promoting an older
+-- one is a rollback. A name that matches nothing is not an error. Mirrors
+-- Rust @Client::set_latest_app_version@, which promotes through the same
+-- shared body as the application's own call.
+clientPromoteVersion :: Monad m
                      => Client m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-clientPromoteVersion client version = do
-  now <- timestampNow
-  result <- withConnection client.conn (\db -> SystemDB.updateApplicationVersionTimestamp db version now Nothing)
-  pure result
+clientPromoteVersion client version = promoteAppVersion client.conn version
+
+-- | Promote a version for the named application: how one operator tool
+-- rolls a peer application back. Mirrors Rust
+-- @Client::set_latest_app_version_for@.
+clientPromoteVersionFor :: Monad m
+                        => Client m -> Text -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+clientPromoteVersionFor client version application = promoteAppVersionFor client.conn version application
 
 -- | List queued workflows by filter from outside: the same filters as
 -- 'clientListWorkflows', with @queues-only@ forced — only rows carrying a

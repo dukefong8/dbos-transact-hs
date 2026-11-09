@@ -13,6 +13,7 @@ import DBOS.SystemDB
     BackendErrorKind (..),
     Error (..),
     Change (..),
+    checkStepAtOrAfter,
     Debounce (..),
     DebounceRequest (..),
     NewWorkflow (..),
@@ -2146,12 +2147,48 @@ bounceRequest queueName key =
       debounceRequestAppName = Nothing
     }
 
+-- | The database's clock now, in epoch milliseconds: what version
+-- stamps are set on, not this host's clock.
+dbClockMs :: PostgresSystemDB -> IO Int64
+dbClockMs env = do
+  clock <- databaseTime env >>= either (fail . show) pure
+  now <- databaseTimeNow clock
+  pure (timestampToEpochMs now)
+
+-- | Sets a version's timestamp to the given instant, for a test that needs
+-- one at a particular instant: ahead of the database's clock, say, as
+-- another implementation's promoter can leave it. The SDK has no call
+-- that does this, since a promotion stamps the database's clock. Mirrors
+-- the oracle's @set_version_timestamp@ support helper.
+setVersionTimestamp :: PostgresSystemDB -> Text -> Int64 -> IO ()
+setVersionTimestamp env versionName epochMs = do
+  updated <-
+    runSession env "fixture" $
+      Session.statement (versionName, epochMs) $
+        Statement.preparable
+          "update dbos.application_versions set version_timestamp = $2 where version_name = $1"
+          (contramap fst (Encoders.param (Encoders.nonNullable Encoders.text)) <> contramap snd (Encoders.param (Encoders.nonNullable Encoders.int8)))
+          Decoders.rowsAffected
+  case updated of
+    Right 1 -> pure ()
+    other -> fail ("no version timestamp to set: " <> show other)
+
+-- | The stamp a version carries.
+versionStamp :: PostgresSystemDB -> Text -> IO Int64
+versionStamp env versionName = do
+  found <- listApplicationVersions env
+  case found of
+    Right versions -> case [timestampToEpochMs info.versionInfoTimestamp | info <- versions, info.versionInfoName == versionName] of
+      [stamp] -> pure stamp
+      other -> fail ("expected one stamp, got: " <> show other)
+    other -> fail ("expected versions, got: " <> show other)
+
 -- | Application versions: registering one claims a nameless row or inserts
 -- a new one, the listing and latest read the handle's own application plus
--- the unclaimed, and a timestamp update moves the latest. Mirrors
--- @create_application_version@, @list_application_versions@,
--- @get_latest_application_version@ and
--- @update_application_version_timestamp@.
+-- the unclaimed, and a promotion stamps the database's clock past every
+-- other version's. Mirrors @create_application_version@,
+-- @list_application_versions@, @get_latest_application_version@ and
+-- @promote_application_version@.
 versionTests :: IO PostgresSystemDB -> TestTree
 versionTests getBackend =
   testGroup
@@ -2159,34 +2196,46 @@ versionTests getBackend =
     [ testCase "a registered version is listed and is the latest" $ do
         unique <- freshWorkflowId
         let versionName = "v-" <> Text.take 8 unique
-        withBackend getBackend $ \env -> do
+            appName = "app-" <> Text.take 8 unique
+        -- A named application, so the promotion's window and latest read
+        -- are scoped to our own rows: exact stamps are unassertable on a
+        -- shared database, where a concurrent case's rows win any global
+        -- newest-read they overlap.
+        withBackendSettings getBackend (defaultSettings {settingsAppName = Just appName}) $ \env -> do
           created <- createApplicationVersion env versionName Nothing
           created @?= Right ()
           versions <- listApplicationVersions env
           case versions of
             Right found -> assertBool "the version is listed" (versionName `elem` map (.versionInfoName) found)
             other -> fail ("expected versions, got: " <> show other)
-          moved <- updateApplicationVersionTimestamp env versionName (timestampFromEpochMs 4102444800000) Nothing
+          before <- dbClockMs env
+          moved <- promoteApplicationVersion env versionName Nothing
           moved @?= Right ()
+          after <- dbClockMs env
           -- The shared database holds other applications' versions, so the
-          -- assertion is about our own row's timestamp rather than about
-          -- which row is globally newest.
-          refreshed <- listApplicationVersions env
-          case refreshed of
-            Right found -> do
-              let ours = filter (\info -> info.versionInfoName == versionName) found
-              map (.versionInfoTimestamp) ours @?= [timestampFromEpochMs 4102444800000]
-            other -> fail ("expected versions, got: " <> show other)
-          -- Restore a timestamp that can never be latest: a far-future
-          -- stamp left behind would poison every scoped latest-version
-          -- query on the shared database (and with it, every
-          -- UpdateIfLatestVersion registration).
-          restored <- updateApplicationVersionTimestamp env versionName (timestampFromEpochMs 0) Nothing
-          restored @?= Right ()
-          anyLatest <- getLatestApplicationVersion env Nothing
-          case anyLatest of
-            Right (Just _) -> pure ()
-            other -> fail ("expected some latest, got: " <> show other),
+          -- assertion is about our own row's stamp rather than about which
+          -- row is globally newest: the database's now, not this host's.
+          -- Under 'finally', as below: the restore must run even when an
+          -- assertion fails.
+          (do
+            refreshed <- listApplicationVersions env
+            case refreshed of
+              Right found -> do
+                let ours = filter (\info -> info.versionInfoName == versionName) found
+                case map (.versionInfoTimestamp) ours of
+                  [stamp] -> assertBool ("the promotion stamps the database's now: " <> show (timestampToEpochMs stamp)) (timestampToEpochMs stamp >= before - 5 && timestampToEpochMs stamp <= after + 5)
+                  other -> fail ("expected our own stamp, got: " <> show other)
+              other -> fail ("expected versions, got: " <> show other)
+            -- Restore a timestamp that can never be latest: a far-future
+            -- stamp left behind would poison every scoped latest-version
+            -- query on the shared database (and with it, every
+            -- UpdateIfLatestVersion registration). In 'finally' below, so
+            -- it runs on failure too.
+            anyLatest <- getLatestApplicationVersion env Nothing
+            case anyLatest of
+              Right (Just _) -> pure ()
+              other -> fail ("expected some latest, got: " <> show other))
+            `finally` setVersionTimestamp env versionName 0,
       testCase "a version held by another application is reported" $ do
         unique <- freshWorkflowId
         let versionName = "v-" <> Text.take 8 unique
@@ -2198,6 +2247,88 @@ versionTests getBackend =
           case refused of
             Left (RegisteredByAnother {}) -> pure ()
             other -> fail ("expected RegisteredByAnother, got: " <> show other),
+      testCase "a promotion stamps the database clock and wins over a future stamp" $ do
+        unique <- freshWorkflowId
+        let v1 = "v-promote-1-" <> Text.take 8 unique
+            v2 = "v-promote-2-" <> Text.take 8 unique
+            appName = "app-promote-" <> Text.take 8 unique
+        -- A named application, so the maximum and the latest read are
+        -- scoped to our own rows: a concurrent case's versions can never
+        -- enter them.
+        withBackendSettings getBackend (defaultSettings {settingsAppName = Just appName}) $ \env -> do
+          _ <- createApplicationVersion env v1 Nothing
+          _ <- createApplicationVersion env v2 Nothing
+          -- With nothing ahead of the clock, the stamp is the database's now.
+          before <- dbClockMs env
+          promoted <- promoteApplicationVersion env v1 Nothing
+          case promoted of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          after <- dbClockMs env
+          stamped <- versionStamp env v1
+          assertBool ("stamped " <> show stamped <> ", not the database's now (" <> show before <> "..=" <> show after <> ")") (stamped >= before - 5 && stamped <= after + 5)
+          -- A version an hour ahead of the database's clock is the latest,
+          -- and a promotion still wins: the stamp carries forward past it.
+          -- The restores run under 'finally': a failing assertion must not
+          -- leave a far-future stamp behind to poison later latest reads.
+          (do
+            setVersionTimestamp env v2 (after + 3600000)
+            repromoted <- promoteApplicationVersion env v1 Nothing
+            case repromoted of
+              Left err -> fail (show err)
+              Right () -> pure ()
+            latest <- getLatestApplicationVersion env Nothing
+            case latest of
+              Right (Just row) -> do
+                row.versionInfoName @?= v1
+                timestampToEpochMs row.versionInfoTimestamp @?= after + 3600000 + 1
+              other -> fail ("expected v1 latest past the future stamp, got: " <> show other)
+            -- A version stamped at the largest value saturates a promotion,
+            -- which ties it rather than failing with an overflow.
+            setVersionTimestamp env v2 9223372036854775807
+            tied <- promoteApplicationVersion env v1 Nothing
+            case tied of
+              Left err -> fail ("a pinned version should not make promotion overflow: " <> show err)
+              Right () -> pure ()
+            versionStamp env v1 >>= (@?= 9223372036854775807))
+            -- Restore stamps that can never be latest, as above.
+            `finally` (setVersionTimestamp env v1 0 >> setVersionTimestamp env v2 0),
+      testCase "a nameless promotion wins over every application's versions" $ do
+        unique <- freshWorkflowId
+        let alpha = "alpha-" <> Text.take 8 unique
+            beta = "beta-" <> Text.take 8 unique
+            alphaV = "v-alpha-" <> Text.take 8 unique
+            betaV = "v-beta-" <> Text.take 8 unique
+        withBackendSettings getBackend (defaultSettings {settingsAppName = Just alpha}) $ \envAlpha -> do
+          _ <- createApplicationVersion envAlpha alphaV Nothing
+          withBackendSettings getBackend (defaultSettings {settingsAppName = Just beta}) $ \envBeta -> do
+            _ <- createApplicationVersion envBeta betaV Nothing
+            withBackend getBackend $ \env -> do
+              ahead <- (+ 3600000) <$> dbClockMs env
+              -- Under 'finally', as above: a failing assertion must not
+              -- leave the future stamp behind.
+              (do
+                setVersionTimestamp env betaV ahead
+                promoted <- promoteApplicationVersion env alphaV Nothing
+                case promoted of
+                  Left err -> fail (show err)
+                  Right () -> pure ()
+                -- A nameless promotion takes its maximum over every
+                -- application's rows: the stamp carries forward past the
+                -- future stamp it was asked to beat, keeping its owner's
+                -- name. Scoped to our own rows, so no concurrent case can
+                -- move them: had the maximum been scoped to the version's
+                -- owner instead, it would have stayed near the database's
+                -- now, below the future stamp.
+                found <- listApplicationVersions env
+                case found of
+                  Right versions -> case filter (\info -> info.versionInfoName == alphaV) versions of
+                    [row] -> do
+                      row.versionInfoAppName @?= Just alpha
+                      assertBool ("the promotion must carry forward past the future stamp " <> show ahead) (timestampToEpochMs row.versionInfoTimestamp > ahead)
+                    other -> fail ("expected our own promoted row, got: " <> show other)
+                  other -> fail ("expected versions, got: " <> show other))
+                `finally` (setVersionTimestamp env alphaV 0 >> setVersionTimestamp env betaV 0),
       -- Twin of the oracle's per-owner latest-version case: with a peer's
       -- versions newer than ours, each application still sees its own
       -- latest (or the unclaimed one), and each probe reads one index
@@ -3187,7 +3318,29 @@ stepTests :: IO PostgresSystemDB -> TestTree
 stepTests getBackend =
   testGroup
     "Steps"
-    [ testCase "a recorded step reads back whole" $ do
+    [ testCase "the patch read finds the first step at or past a position" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture unique)
+          -- Positions 0 and 2, as a receive waiting on its timeout leaves them.
+          _ <- recordStep env (WorkflowId unique) 0 "charge" (OutcomeOutput Nothing) Nothing Nothing (fixtureOwner unique)
+          _ <- recordStep env (WorkflowId unique) 2 "DBOS.sleep" (OutcomeOutput (Just "999")) Nothing Nothing (fixtureOwner unique)
+          let at step = checkStepAtOrAfter env (WorkflowId unique) step
+          at 0 >>= (@?= Right (Just (0, "charge")))
+          at 1 >>= (@?= Right (Just (2, "DBOS.sleep")))
+          at 3 >>= (@?= Right Nothing)
+          cancelled <- freshWorkflowId
+          _ <- insertFixtureChecked env ((defaultFixture cancelled) {fixtureStatus = "CANCELLED"})
+          refused <- checkStepAtOrAfter env (WorkflowId cancelled) 1
+          case refused of
+            Left (WorkflowCancelled {workflowId = found}) -> found @?= cancelled
+            other -> fail ("expected a cancellation error, got: " <> show other)
+          ghost <- freshWorkflowId
+          missing <- checkStepAtOrAfter env (WorkflowId ghost) 0
+          case missing of
+            Left (NonExistentWorkflow {workflowIds = [found]}) -> found @?= ghost
+            other -> fail ("expected a non-existent-workflow error, got: " <> show other),
+      testCase "a recorded step reads back whole" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture unique)

@@ -57,6 +57,10 @@ module DBOS.Transact.Instance
     dequeueWorkflows,
     updateWorkflowAttributes,
     mergeWorkflowAttributes,
+    listAppVersions,
+    latestAppVersion,
+    promoteAppVersion,
+    promoteAppVersionFor,
     listWorkflowSteps,
     listWorkflowStepsWith,
     listWorkflowStepsSerialized,
@@ -367,6 +371,39 @@ listWorkflows :: (MonadMVar m)
               => DBOS m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 listWorkflows dbos filters = do
   withExecutor dbos "list workflows" $ \executor -> Management.listWorkflows executor.conn filters
+
+-- | The registered application versions, newest first. The
+-- launched-instance guard first; the read itself lives in 'Management',
+-- which the client's calls share. Mirrors Rust @DBOS::list_app_versions@.
+listAppVersions :: (MonadMVar m)
+                => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [VersionInfo])
+listAppVersions dbos = do
+  withExecutor dbos "list application versions" $ \executor -> Management.listAppVersions executor.conn
+
+-- | The latest registered application version. The launched-instance guard
+-- first; the read itself lives in 'Management'. Mirrors Rust
+-- @DBOS::latest_app_version@.
+latestAppVersion :: (MonadMVar m)
+                 => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe VersionInfo))
+latestAppVersion dbos = do
+  withExecutor dbos "read the latest application version" $ \executor -> Management.latestAppVersion executor.conn
+
+-- | Promotes an already-registered version to be the latest for this
+-- application's fleet: promoting an older one is a rollback. The
+-- launched-instance guard first; the write itself lives in 'Management'.
+-- Mirrors Rust @DBOS::set_latest_app_version@.
+promoteAppVersion :: (MonadMVar m)
+                  => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+promoteAppVersion dbos version = do
+  withExecutor dbos "promote an application version" $ \executor -> Management.promoteAppVersion executor.conn version
+
+-- | Promotes a version for the named application. The launched-instance
+-- guard first; the write itself lives in 'Management'. Mirrors Rust
+-- @DBOS::set_latest_app_version_for@.
+promoteAppVersionFor :: (MonadMVar m)
+                     => DBOS m -> Text -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+promoteAppVersionFor dbos version application = do
+  withExecutor dbos "promote an application version" $ \executor -> Management.promoteAppVersionFor executor.conn version application
 
 -- | The shortcut Python calls @list_queued_workflows@: the same filter with
 -- the queue-only narrowing applied.

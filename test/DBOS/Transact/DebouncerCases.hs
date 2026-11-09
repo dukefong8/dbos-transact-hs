@@ -38,6 +38,8 @@ module DBOS.Transact.DebouncerCases
     checkCancelledDebounceFreesKey,
     scenarioDebounceInsideStepRefused,
     checkDebounceInsideStepRefused,
+    scenarioInWorkflowBadPeriodRefused,
+    checkInWorkflowBadPeriodRefused,
     scenarioKeyCollisionRefused,
     checkKeyCollisionRefused,
   )
@@ -357,6 +359,30 @@ checkDebounceInsideStepRefused :: Text -> Either String ()
 checkDebounceInsideStepRefused operation
   | operation == "debouncing a workflow" = Right ()
   | otherwise = Left ("expected the debouncing refusal, got: " <> show operation)
+
+-- | A zero period inside a workflow is refused on the debounce's
+-- channel: the period is policed by durations, not by the enqueue leg's
+-- delay, as the oracle's @place@ validates the queue request without it.
+-- Returns the refused operation and detail. Mirrors Rust @place@'s
+-- validation order.
+scenarioInWorkflowBadPeriodRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                                  => DebouncerFixture m ->
+                                     m Text
+scenarioInWorkflowBadPeriodRefused fx = do
+  parentWid <- fx.dbFreshWid "debounce-bad-period"
+  (ran :: Either (Error EngineOnly) (Maybe SerializedWorkflowValue)) <- runWorkflow fx.dbExecutor (newQualifiedWorkflowName "debounce-bad-period-parent") parentWid (Just (encodeWorkflowInput ("one" :: Text)))
+  case ran of
+    Right (Just stored) -> case decodeWorkflowValue "result" (Just stored) :: Either CodecError Text of
+      Right refusal -> pure refusal
+      Left err -> throwIO (userError (show err))
+    other -> throwIO (userError ("expected the parent to report the refusal, got: " <> show other))
+
+-- | The refusal names the debounce operation and the period field — not
+-- the enqueue leg's delay.
+checkInWorkflowBadPeriodRefused :: Text -> Either String ()
+checkInWorkflowBadPeriodRefused refusal = do
+  unless ("debounce a workflow" `Text.isInfixOf` refusal) $ Left ("expected the debounce operation, got: " <> show refusal)
+  unless ("`period`" `Text.isInfixOf` refusal) $ Left ("expected the period refusal, got: " <> show refusal)
 
 -- | A key collision between unrelated workflows is refused, not
 -- hijacked: a bounce whose deduplication id spells the same as another

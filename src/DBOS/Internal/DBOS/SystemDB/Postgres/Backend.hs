@@ -3360,6 +3360,26 @@ instance SystemDB PostgresSystemDB IO where
       Right (Just row) -> stepCheckToRecord wid stepId stepName row
     where
       unwrap (Types.WorkflowId widText) = widText
+  -- | The earliest step recorded at or past a position, as its id and
+  -- name, or 'Nothing' when the history ends before it. A gate like
+  -- 'checkStep', with its first check: a cancelled workflow raises, and
+  -- one that does not exist reports missing. It does not compare names,
+  -- because a patch asks /which/ step is there rather than claiming one.
+  -- Mirrors Rust @SystemDatabase::check_step_at_or_after@.
+  checkStepAtOrAfter env wid stepId = do
+    result <- runSession env "check_step_at_or_after" (Session.statement (unwrap wid, stepId) Statements.checkStepAtOrAfterStatement)
+    pure $ case result of
+      Left err -> Left err
+      Right Nothing -> Left (NonExistentWorkflow {workflowIds = [unwrap wid]})
+      Right (Just (status, stepFound, stepName)) -> case status of
+        Just statusText | statusText == "CANCELLED" -> Left (WorkflowCancelled {workflowId = unwrap wid})
+        _ -> case (stepFound, stepName) of
+          -- function_id is NOT NULL in the table, so a NULL is the join
+          -- finding nothing.
+          (Just found, Just name) -> Right (Just (found, name))
+          _ -> Right Nothing
+    where
+      unwrap (Types.WorkflowId widText) = widText
   recordStep env wid stepId stepName outcome serialization timing token
     | Text.null widText = pure (Left (invalidInput "workflow_id" "must not be empty"))
     | stepId < 0 = pure (Left (invalidInput "step_id" "must not be negative"))
@@ -3620,19 +3640,18 @@ instance SystemDB PostgresSystemDB IO where
   getLatestApplicationVersion env applicationName = do
     result <- runSession env "get_latest_application_version" (Statements.latestApplicationVersionSession (applicationName <|> env.psdbAppName))
     pure (fmap versionInfoFromRow <$> result)
-  updateApplicationVersionTimestamp env versionName timestamp applicationName = do
+  promoteApplicationVersion env versionName applicationName = do
     let claimant = applicationName <|> env.psdbAppName
-    holder <- runSession env "update_application_version_timestamp" (Statements.versionHolderSession versionName)
+    holder <- runSession env "promote_application_version" (Statements.versionHolderSession versionName)
     case holder of
       Left err -> pure (Left err)
       Right existing -> case resolveOwner "Application version" versionName claimant existing of
         Left err -> pure (Left err)
         Right owner -> do
-          result <-
-            runSession
-              env
-              "update_application_version_timestamp"
-              (Statements.updateVersionTimestampSession versionName (timestampToEpochMs timestamp) owner)
+          -- A name that matches nothing is not an error: the write moves
+          -- no row and reports success, so the row count is discarded, as
+          -- every implementation does.
+          result <- runSession env "promote_application_version" (Session.statement (versionName, owner, claimant) (Statements.promoteVersionTimestampStatement claimant))
           pure (() <$ result)
   upsertQueue env queue onExisting = do
     let name = queue.newQueueName

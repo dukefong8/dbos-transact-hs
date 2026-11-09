@@ -14,7 +14,11 @@ import Data.UUID.V4 qualified as UUID.V4
 import Data.Vector.Fusion.Stream.Monadic qualified as Vector
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
+import Hasql.Pool qualified as Pool
+import Hasql.Pool.Config qualified as PoolConfig
+import Hasql.Connection.Settings qualified as ConnectionSettings
 import Hasql.Session qualified as Session
+import Pqi.Ffi qualified as Pqi
 import Hasql.Statement qualified as Statement
 import Hasql.Transaction qualified as Tx
 import DBOS.SystemDB (AppScope (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, durationFromSecs, forkNew, getWorkflow, millisDuration, secondsDuration)
@@ -67,6 +71,7 @@ import DBOS.Transact
     clientWaitFirst,
     clientListWorkflows,
     clientPromoteVersion,
+    clientPromoteVersionFor,
     clientResumeWorkflows,
     clientRewindWorkflows,
     clientSendMessage,
@@ -1267,13 +1272,6 @@ tests =
                 assertAppLatest appName versionA versions
             bracket (newDBOS configB) shutdown $ \dbosB -> do
               exec <- launchClientExec dbosB isolatedEnvironment
-              -- Settle past DB-vs-app clock skew before promoting: launches
-              -- stamp versions with the database clock while promotion
-              -- stamps with the application clock, and the two have been
-              -- observed ~25ms apart (Docker VM drift), which a back-to-back
-              -- promote can lose by. 100ms keeps the assertion about
-              -- promotion, not about clock agreement.
-              threadDelay 100000
               promoted <- clientPromoteVersion client versionA
               case promoted of
                 Left err -> fail (show err)
@@ -1282,6 +1280,70 @@ tests =
               case rolled of
                 Left err -> fail (show err)
                 Right versions -> assertAppLatest appName versionA versions,
+      testCase "a client promotes a version for another application" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-for-" <> Text.take 12 suffix
+            peerApp = "hs-l2-client-peer-" <> Text.take 12 suffix
+            versionA = "hs-l2-client-for-va-" <> suffix
+            versionP = "hs-l2-client-for-vp-" <> suffix
+        config0 <- configFromEnv appName
+        let configA = config0 {configAppVersion = Just versionA, configExecutorId = Just ("exec-for-a-" <> suffix)}
+        configP0 <- configFromEnv peerApp
+        let configP = configP0 {configAppVersion = Just versionP, configExecutorId = Just ("exec-for-p-" <> suffix)}
+        clientConfig0 <- clientConfigFromEnv
+        let clientConfig = (clientConfig0 :: ClientConfig) {appName = Just appName}
+            peerConfig = (clientConfig0 :: ClientConfig) {appName = Just peerApp}
+        bracket (connectOrFail clientConfig) closeClient $ \client -> do
+          bracket (connectOrFail peerConfig) closeClient $ \peer -> do
+            bracket (newDBOS configA) shutdown $ \dbosA -> do
+              _ <- launchClientExec dbosA isolatedEnvironment
+              bracket (newDBOS configP) shutdown $ \dbosP -> do
+                _ <- launchClientExec dbosP isolatedEnvironment
+                -- A peer's version is refused unless the promotion names
+                -- the peer: the stamp is what the peer's fleet is rolling
+                -- on, so it is not this client's to move without saying so.
+                misowned <- clientPromoteVersionFor client versionP appName
+                case misowned of
+                  Left (SystemDatabase (SystemDBError.RegisteredByAnother {})) -> pure ()
+                  other -> fail ("expected a peer-ownership refusal, got: " <> show other)
+                named <- clientPromoteVersionFor client versionP peerApp
+                case named of
+                  Left err -> fail (show err)
+                  Right () -> pure ()
+                peerLatest <- clientLatestAppVersion peer
+                case peerLatest of
+                  Right (Just row) -> row.versionInfoName @?= versionP
+                  other -> fail ("expected the peer's promotion latest, got: " <> show other),
+      testCase "a client promotes on the database clock" $ do
+        fresh <- UUID.V4.nextRandom
+        let suffix = Text.pack (UUID.toString fresh)
+            appName = "hs-l2-client-skew-" <> Text.take 12 suffix
+        -- The database's clock an hour behind this process: a promotion
+        -- stamped by this process's clock would land an hour ahead of the
+        -- database's, so a version deployed after it would sort below it
+        -- and not become the latest for an hour. Mirrors the oracle's
+        -- skewed client promotion test.
+        withSkewedClient getBackend (Just appName) (-3600) $ \(env, client) -> do
+          let deploy version = do
+                created <- SystemDB.createApplicationVersion env version Nothing
+                case created of
+                  Left err -> fail (show err)
+                  Right () -> pure ()
+              latest = do
+                latest <- clientLatestAppVersion client
+                case latest of
+                  Right (Just row) -> pure row.versionInfoName
+                  other -> fail ("expected a latest version, got: " <> show other)
+          deploy ("v1-" <> suffix)
+          deploy ("v2-" <> suffix)
+          promoted <- clientPromoteVersion client ("v1-" <> suffix)
+          case promoted of
+            Left err -> fail (show err)
+            Right () -> pure ()
+          latest >>= (@?= ("v1-" <> suffix))
+          deploy ("v3-" <> suffix)
+          latest >>= (@?= ("v3-" <> suffix)),
       testCase "a client reads the latest version of its own application" $ do
         fresh <- UUID.V4.nextRandom
         let suffix = Text.pack (UUID.toString fresh)
@@ -1849,6 +1911,53 @@ connectOrFail config = do
   case connected of
     Left err -> fail (show err)
     Right client -> pure client
+
+-- | A skewed system-database backend beside a client over it, for tests
+-- that time promotions against a database whose clock is not this
+-- process's. The schema shadows @now()@ and @clock_timestamp()@ through a
+-- private pool's search path (mirroring the clock-wait tests' backend, but
+-- the client builds its own pool, so it connects through URL options
+-- instead); both are torn down afterwards. The backend serves deploys and
+-- reads, the client the calls under test.
+-- | A skewed clock plus a private schema: connections through this pool
+-- read the database's clock minus the skew. The env claims the skewed
+-- application's name, so versions it deploys are that application's own:
+-- an unclaimed deploy would be visible to every app-scoped latest read
+-- on the shared database, and a concurrent case's read could name this
+-- case's rows.
+withSkewedClient :: IO Postgres.PostgresSystemDB -> Maybe Text -> Int -> ((Postgres.PostgresSystemDB, Client IO) -> IO a) -> IO a
+withSkewedClient getBackend appName skewSeconds action = do
+  base <- getBackend
+  tag <- (Text.filter (/= '-') . Text.pack . UUID.toString) <$> UUID.V4.nextRandom
+  let schema = "skew_" <> tag
+      offset = Text.pack (show skewSeconds) <> " seconds"
+      ddl =
+        [ "CREATE SCHEMA " <> schema,
+          "CREATE FUNCTION " <> schema <> ".now() RETURNS timestamptz LANGUAGE sql STABLE AS $$ SELECT pg_catalog.now() + interval '" <> offset <> "' $$",
+          "CREATE FUNCTION " <> schema <> ".clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE AS $$ SELECT pg_catalog.clock_timestamp() + interval '" <> offset <> "' $$"
+        ]
+  mapM_
+    ( \statement -> Postgres.runSession base "client-skew-ddl" (Session.script statement) >>= either (fail . show) pure
+    )
+    ddl
+  clientConfig0 <- clientConfigFromEnv
+  let skewedUrl = clientConfig0.databaseUrl <> "?options=-c%20search_path%3D" <> schema <> "%2Cpg_catalog%2Cpublic"
+  pool <-
+    Pool.acquire
+      Pqi.adapter
+      ( PoolConfig.settings
+          [ PoolConfig.size 4,
+            PoolConfig.acquisitionTimeout 10,
+            PoolConfig.staticConnectionSettings (ConnectionSettings.connectionString skewedUrl),
+            PoolConfig.initSession (Session.script ("SET search_path = " <> schema <> ", pg_catalog, public"))
+          ]
+      )
+  bracket (Postgres.fromPool pool 4 (Postgres.defaultSettings {Postgres.settingsAppName = appName}) nullTracer) Postgres.releasePostgresSystemDB $ \env -> do
+    let clientConfig = clientConfig0 {appName = appName, databaseUrl = skewedUrl}
+    bracket (connectOrFail clientConfig) closeClient $ \client -> do
+      result <- action (env, client)
+      Postgres.runSession base "client-skew-ddl" (Session.script ("DROP SCHEMA " <> schema <> " CASCADE")) >>= either (fail . show) pure
+      pure result
 
 -- | Scratch-table statements for transaction-atomicity probes: test-owned
 -- DDL on the system database, created and dropped around each case.

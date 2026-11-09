@@ -54,6 +54,7 @@ import DBOS.Transact.ContextTest
     checkRerunIdentity,
     checkRetryAttempt,
     checkScopeStatus,
+    checkStartsToken,
     checkSharedCounter,
     checkStateInterop,
     checkStepIds,
@@ -79,6 +80,7 @@ import DBOS.Transact.ContextTest
     scenarioRerunIdentity,
     scenarioRetryAttempt,
     scenarioScopeStatus,
+    scenarioStartsToken,
     scenarioSharedCounter,
     scenarioStateInterop,
     scenarioStepIds,
@@ -150,6 +152,7 @@ tests =
       simCase (pure simFixture) "separate executions own independent step counters" scenarioExecCounters checkExecCounters traceContextSilent,
       simCase (pure simFixture) "a step view reads its status with the workflow id" scenarioStepView checkStepView traceContextSilent,
       simCase (pure simFixture) "raceCancel returns the value when the token stays quiet" scenarioRaceCompletes checkRaceCompletes traceContextSilent,
+      simCase (pure simFixture) "a starts token holds the outcome wait until it is given back" scenarioStartsToken checkStartsToken traceContextSilent,
       simCase (pure simFixture) "raceCancel reports cancellation when the token has fired" scenarioRaceCancelled checkRaceCancelled traceContextSilent,
       simCase (pure simFixture) "a body logs through its context" scenarioAppLog checkTraceOnly traceAppLog,
       simCase (pure simFixture) "a context announces through its tracer" (const demoTrace) checkCoopFlag traceAnnounce

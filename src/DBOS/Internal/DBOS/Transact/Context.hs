@@ -76,6 +76,10 @@ module DBOS.Transact.Context
     LocalTaskOutcome (..),
     spawnLocal,
     clearSpawnerCheckpoints,
+    StartToken,
+    startToken,
+    releaseStart,
+    waitForStarts,
 
     -- * Backend access
     withSystemDB,
@@ -141,6 +145,43 @@ spawnLocal (TaskSpawner spawn _) = spawn
 clearSpawnerCheckpoints :: TaskSpawner m -> Text -> m ()
 clearSpawnerCheckpoints (TaskSpawner _ clear) = clear
 
+-- | One detached start's hold on its workflow's count — the oracle's
+-- @StartToken@. Taken on the caller's thread before the task exists, so a
+-- body that detached a start and returned in the same instant still sees
+-- it, and given back by the task on every exit, so the body's wait ends
+-- only when the write does.
+data StartToken m = StartToken (StrictTVar m Int) (StrictTVar m Bool)
+
+-- | Counts one more start in flight. Masked, because the count and its
+-- release flag must both exist before the caller can be interrupted and
+-- leave a count nothing owns.
+startToken :: (MonadSTM m, MonadMask m) => WorkflowCtx exec m -> m (StartToken m)
+startToken wctx = mask_ $ do
+  released <- newTVarIO False
+  atomically $ modifyTVar wctx.wctxState.startsInFlight (+ 1)
+  pure (StartToken wctx.wctxState.startsInFlight released)
+
+-- | Gives back a start's place, once. The flag lets the caller release a
+-- place shutdown never gave a task (the spawn was refused) and the task
+-- release its own without counting either down twice when the task
+-- finished before the caller looked.
+releaseStart :: MonadSTM m => StartToken m -> m ()
+releaseStart (StartToken inFlight released) = atomically $ do
+  done <- readTVar released
+  unless done $ do
+    writeTVar released True
+    modifyTVar inFlight (subtract 1)
+
+-- | Waits until no detached start this execution began is still writing:
+-- what a workflow does before recording its outcome, because that write
+-- gives up the token the starts write under. Outside a deadline this is
+-- unbounded, as the oracle's @Starts::drained@ is; the run path bounds it
+-- with the workflow's deadline instead.
+waitForStarts :: MonadSTM m => WorkflowCtx exec m -> m ()
+waitForStarts wctx = atomically $ do
+  inFlight <- readTVar wctx.wctxState.startsInFlight
+  check (inFlight == 0)
+
 -- | Two views are equal when they are the same execution — identity, not
 -- structure, because the mutable refs inside cannot be compared. This is
 -- what a placement refusal names.
@@ -164,13 +205,17 @@ instance Show (StepCtx exec m) where
 -- | The parts of a workflow that outlive any one call within it. Mirrors
 -- Rust @WorkflowState@: the id, the deadline the database holds, the step
 -- id counter, the marker counter, the execution's identity, and the owner
--- token this execution presents on every write it makes.
+-- token this execution presents on every write it makes. The count of
+-- detached starts in flight is the oracle's @Ctx::starts@: a start the
+-- body began may still be writing under this execution's token when the
+-- body returns, and the outcome write gives that token up.
 data WorkflowState m = WorkflowState
   { workflowId        :: Text,
     deadline          :: Maybe Timestamp,
     nextStepIdRef     :: StrictTVar m Int,
     nextMarkerRef     :: StrictTVar m Int,
     stepDepthRef      :: StrictTVar m Int,
+    startsInFlight    :: StrictTVar m Int,
     executionIdentity :: ExecutionIdentity,
     workflowOwner     :: WorkflowOwner
   }
@@ -183,6 +228,7 @@ newWorkflowState workflowText deadlineAt owner identity = do
   stepRef <- newTVarIO 0
   markerRef <- newTVarIO 0
   depthRef <- newTVarIO 0
+  startsRef <- newTVarIO 0
   pure
     WorkflowState
       { workflowId = workflowText,
@@ -190,6 +236,7 @@ newWorkflowState workflowText deadlineAt owner identity = do
         nextStepIdRef = stepRef,
         nextMarkerRef = markerRef,
         stepDepthRef = depthRef,
+        startsInFlight = startsRef,
         executionIdentity = identity,
         workflowOwner = owner
       }

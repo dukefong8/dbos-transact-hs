@@ -52,7 +52,8 @@ import DBOS.Transact.Handle (WorkflowHandle (..), pollingHandle)
 import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor, startWorkflow)
 import DBOS.Transact.Registry (registryInstanceId)
 import DBOS.Transact.Serialization (WorkflowInput (..), unWorkflowInput)
-import DBOS.Transact.Workflow (DuplicationPolicy (Reject), QueueRequest (..), Timeout (..), StartOptions (..), WorkflowRef (..), checkStartDuration, childWorkflowId, queueRequestNew, startChildWorkflow, startOptionsDefault, validateStart)
+import DBOS.Transact.Workflow (DuplicationPolicy (Reject), QueueRequest (..), Timeout (..), StartOptions (..), WorkflowRef (..), checkStartDuration, childWorkflowId, queueRequestNew, startChildWorkflowAt, startOptionsDefault, timeoutBudget, validateStart)
+import DBOS.Transact.Workflow qualified as Workflow (QueueRequest (..))
 
 -- | What a debounce sets: the fields apply to every workflow a debounce
 -- enqueues. They are the part of a start a debounce leaves to its caller:
@@ -205,9 +206,9 @@ debounceWith dbos userRef def key period input options = do
 -- with its step checkpoint, as the oracle's @call_txn_as_step@ does, so a
 -- crash can never commit one without the other. The fresh-enqueue leg
 -- starts a child of the running workflow, which replays through its own
--- checkpoint; its id derives from the parent and the bounce's step, so a
+-- checkpoint; its id derives from the parent and the start's step, so a
 -- replay re-enqueues the same id rather than a second row.
-debounceInWorkflow :: (MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+debounceInWorkflow :: (MonadMVar m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
                    => WorkflowCtx exec m ->
                       WorkflowRef m TransactError.EngineOnly ->
                       Debouncer ->
@@ -227,7 +228,7 @@ debounceInWorkflow wctx userRef def key period input = do
         Just instanceId
           | instanceId /= conn.connInstanceId ->
               pure (Left (TransactError.WrongInstance {operation = "debounce a workflow"}))
-          | otherwise -> case traverse_ (checkStartDuration (Just queueName) "timeout") def.debouncerTimeout of
+          | otherwise -> case validateStart probeQueue (timeoutBudget probe.startTimeout) Nothing probe.startWorkflowIdReusePolicy of
               Left err -> pure (Left err)
               Right () -> case refuseDurations period def.debouncerDebounceTimeout of
                 Left err -> pure (Left err)
@@ -236,15 +237,17 @@ debounceInWorkflow wctx userRef def key period input = do
                   Right () -> bounceLoop conn
   where
     rawInput = unWorkflowInput <$> input
-    -- Each attempt takes its own step id and pinned id, as the oracle
-    -- re-places both per attempt: a retry must bounce again, never
-    -- replay the recorded outcome.
+    -- Each attempt takes both placements, as the oracle's @place@ does: the
+    -- bounce's step and the fresh start's. A coalescing bounce still spends
+    -- the start's id, the child's id derives from the start's step, and a
+    -- retry re-places both.
     bounceLoop conn = do
-      stepId <- nextStepId wctx
+      bounceStep <- nextStepId wctx
+      startStep <- nextStepId wctx
       generated <- generatedWorkflowId conn
       let parentText = workflowId wctx
-          pinned = childWorkflowId Nothing (Just (parentText, stepId)) generated
-          caller = Just (WorkflowId parentText, stepId)
+          pinned = childWorkflowId Nothing (Just (parentText, startStep)) generated
+          caller = Just (WorkflowId parentText, bounceStep)
       bounced <- withConnection conn (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest conn period) caller)
       case bounced of
             Left (TransactError.SystemDatabase sysErr) -> pure (Left (TransactError.refusedArgument debounceOperation sysErr))
@@ -262,7 +265,7 @@ debounceInWorkflow wctx userRef def key period input = do
                       )
                   )
             Right DebounceUnheld -> do
-              enqueued <- startChildWorkflow wctx userRef (debouncedStartOptions def queueName dedupKey period (Just (WorkflowId pinned))) input
+              enqueued <- startChildWorkflowAt startStep wctx userRef (debouncedStartOptions def queueName dedupKey period (Just (WorkflowId pinned))) input
               case enqueued of
                 Left (TransactError.SystemDatabase (SystemDBError.QueueDeduplicated {})) -> bounceLoop conn
                 other -> pure (adoptHandleConn conn <$> other)
@@ -279,6 +282,13 @@ debounceInWorkflow wctx userRef def key period input = do
     queueName = case def.debouncerQueueName of
       Just name -> name
       Nothing -> case internalQueueName of QueueName name -> name
+    -- The options a fresh enqueue will carry, minus its delay: the delay
+    -- is the period under another name, and the oracle's @place@
+    -- validates the queue request without it, leaving the period to
+    -- 'refuseDurations' below. Probed before any step is claimed so a
+    -- refused one moves no counter.
+    probe = debouncedStartOptions def queueName dedupKey period Nothing
+    probeQueue = (\q -> q { Workflow.delay = Nothing }) <$> probe.startQueue
     dedupKey = debounceDedupKey userRef.refQualifiedName key
     targetApp conn = def.debouncerAppName <|> conn.connAppName
 

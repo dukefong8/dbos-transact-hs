@@ -106,7 +106,7 @@ camelCase; `&str` → `Text` (`WorkflowId` for ids); `Result<_, Error>` →
 | 35 | `create_application_version` | ✓ | ✓ |
 | 36 | `list_application_versions` | ✓ | ✓ |
 | 37 | `get_latest_application_version` | ✓ | ✓ |
-| 38 | `update_application_version_timestamp` | ✓ | ✓ |
+| 38 | `promote_application_version` | ✓ | ✓ |
 | 39 | `upsert_queue` | ✓ | ✓ |
 | 40 | `start_queued_workflows` | ✓ | ✓ |
 | 41 | `get_queue_partitions` | ✓ | ✓ |

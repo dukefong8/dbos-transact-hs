@@ -148,6 +148,7 @@ test-suite test
     DBOS.Transact.WidgetTest
     DBOS.Transact.WidgetCases
     DBOS.Transact.WidgetSim
+    DBOS.Transact.VersionsTest
     DBOS.Transact.ContextSimData
     DBOS.Transact.DeadlinesCases
     DBOS.Transact.DeadlinesTest

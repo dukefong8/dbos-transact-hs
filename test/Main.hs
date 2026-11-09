@@ -28,6 +28,7 @@ import DBOS.Transact.HandleTestSim qualified as HandleSim
 import DBOS.Transact.IdentityTest qualified as IdentityTest
 import DBOS.Transact.InstanceTest qualified as InstanceTest
 import DBOS.Transact.ClockTest qualified as ClockTest
+import DBOS.Transact.VersionsTest qualified as VersionsTest
 import DBOS.Transact.InteropTest qualified as InteropTest
 import DBOS.Transact.LoggerTest qualified as Logger
 import DBOS.Transact.ManagementTest qualified as ManagementTest
@@ -82,6 +83,7 @@ import Test.Tasty.Options (OptionSet)
 --- $> tasty CheckpointTest.tests
 -- $> tasty CheckpointSim.tests
 --- $> tasty ClientTest.tests
+--- $> tasty VersionsTest.tests
 --- $> tasty ClockTest.tests
 --- $> tasty ConfigTest.tests
 --- $> tasty ContextTest.tests
@@ -170,6 +172,7 @@ tests =
     , CheckpointTest.tests
     , CheckpointSim.tests
     , ClientTest.tests
+    , VersionsTest.tests
     , ClockTest.tests
     , ConfigTest.tests
     , ContextTest.tests
