@@ -13,6 +13,7 @@ import DBOS.Prelude
 import Data.Aeson (Value (..), eitherDecodeStrict, toJSON)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Vector qualified as Vector
+import Data.Text qualified as Text
 import DBOS.Transact (Serialization (..), SerializedWorkflowValue (..))
 import DBOS.Transact.Error (Error (..), decodeErrorText, encodeErrorText)
 import DBOS.Transact.Serialization
@@ -40,6 +41,15 @@ tests =
         encoded.serializedText @?= "[1,\"two\"]"
         encoded.serializedSerialization @?= Just (Serialization "portable_json")
         (decodeWorkflowValue "result" (Just encoded) :: Either CodecError (Word32, Text)) @?= Right (1, "two"),
+      testCase "encoded text never holds a NUL byte" $ do
+        -- Mirrors Rust #148 by vacuity: the port has one codec and no
+        -- custom-serializer surface, and aeson escapes NUL as \u0000, so
+        -- the stored-text failure mode cannot arise. Pinned here so a
+        -- future codec must preserve it.
+        let nul = Text.pack ['a', '\0', 'b']
+            encoded = encodeWorkflowValue (nul, [nul])
+        assertBool "a literal NUL reached the stored text" (not ("\0" `Text.isInfixOf` encoded.serializedText))
+        (decodeWorkflowValue "result" (Just encoded) :: Either CodecError (Text, [Text])) @?= Right (nul, [nul]),
       testCase "a workflow argument is the portable envelope" $ do
         let encoded = unWorkflowInput (encodeWorkflowInput ((1 :: Word32, "two" :: Text)))
         encoded.serializedSerialization @?= Just (Serialization "portable_json")
