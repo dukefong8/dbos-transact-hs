@@ -31,30 +31,41 @@ import DBOS.Transact.Instance (DBOS, Executor (..), requireExecutor)
 -- operation id would shift replay order.
 setEvent :: (ToJSON value, MonadSTM m)
          => WorkflowCtx exec m -> Text -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-setEvent wctx key value = placeCall wctx >>= driveSetEvent wctx key value
+setEvent wctx key value =
+  let encoded = forceEncoded value
+   in encoded `seq` (placeCall wctx >>= driveSetEvent wctx key encoded)
 
 -- | A publish built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the write runs when the
 -- pending value is awaited or raced.
 pendingSetEvent :: (ToJSON value, MonadSTM m)
                 => WorkflowCtx exec m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
-pendingSetEvent wctx key value = do
-  placement <- placeCall wctx
-  pure (PendingStep setEventStepName (Just placement) (driveSetEvent wctx key value placement))
+pendingSetEvent wctx key value =
+  let encoded = forceEncoded value
+   in encoded `seq` do
+        placement <- placeCall wctx
+        pure (PendingStep setEventStepName (Just placement) (driveSetEvent wctx key encoded placement))
+
+-- | Encode before the id is claimed: a value whose encoder throws must be
+-- a publish that never happened, not one that spent a step id. Forcing the
+-- text field forces the JSON encode.
+forceEncoded :: ToJSON value => value -> SerializedWorkflowValue
+forceEncoded value =
+  let encoded = encodeWorkflowValue value
+   in encoded.serializedText `seq` encoded
 
 -- | Drives a placed publish: refused from inside a step, otherwise the
 -- checkpointed write under the claimed id.
-driveSetEvent :: (ToJSON value, MonadSTM m)
-              => WorkflowCtx exec m -> Text -> value -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-driveSetEvent wctx key value placement =
+driveSetEvent :: MonadSTM m
+              => WorkflowCtx exec m -> Text -> SerializedWorkflowValue -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+driveSetEvent wctx key encoded placement =
   case checkHere placement setEventStepName (Just (stepCtxBoundary wctx)) of
     Left err -> pure (Left err)
     -- No plain form exists: a publish built in a step can never run, so
     -- driving it reports the refusal the eager call would have raised.
     Right DurabilityPlain -> pure (Left (TransactError.InsideStep "set_event"))
     Right (DurabilityRecorded wctx' stepId') -> do
-      let encoded = encodeWorkflowValue value
-          serialization = case encoded.serializedSerialization of
+      let serialization = case encoded.serializedSerialization of
             Nothing -> Nothing
             Just (Serialization name) -> Just name
           workflowText = workflowId wctx'

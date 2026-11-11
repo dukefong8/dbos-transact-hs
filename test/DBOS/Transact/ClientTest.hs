@@ -396,12 +396,10 @@ tests =
         queueRequest options
           @?= (((queueRequestNew "billing") {priority = Just 3, partitionKey = Just "tenant-7"}) :: QueueRequest),
       testCase "an enqueue no queue could honour is refused before any write" $ do
+        -- A deduplication id beside a partition key is legal: the key is
+        -- held across the whole queue, not within one partition.
         let both = (((queueRequestNew "q") {deduplicationId = Just "key", partitionKey = Just "part"}) :: QueueRequest)
-        case (validateEnqueue both :: Either (Error EngineOnly) ()) of
-          Left (InvalidArgument operation detail) -> do
-            operation @?= "enqueue a workflow"
-            assertBool "names the queue" ("queue `q`" `Text.isInfixOf` detail)
-          other -> fail ("expected an InvalidArgument refusal, got: " <> show other)
+        (validateEnqueue both :: Either (Error EngineOnly) ()) @?= Right ()
         let noKey = (((queueRequestNew "q") {duplicationPolicy = ReturnExisting}) :: QueueRequest)
         case (validateEnqueue noKey :: Either (Error EngineOnly) ()) of
           Left (InvalidArgument _ _) -> pure ()
@@ -765,17 +763,20 @@ tests =
             (Right holder, Right joiner) -> joiner.workflowId @?= holder.workflowId
             (Left err, _) -> fail ("the first enqueue failed: " <> show err)
             (_, Left err) -> fail ("the joining enqueue failed: " <> show err),
-      testCase "closing is clean and the pool stays usable" $ do
+      testCase "closing is clean and a closed client refuses further calls" $ do
         clientConfig0 <- clientConfigFromEnv
         client <- connectOrFail clientConfig0
-        -- hasql-pool stays usable after release: close frees the connections
-        -- without invalidating the client, so a later call reconnects.
+        -- A closed client is settled, not reset: its pool is released and
+        -- every later call is a permanent refusal, which is what ends a
+        -- parked wait instead of reconnecting it. Closing twice is safe.
         closeClient client
         closeClient client
         enqueued <- clientEnqueueWorkflowWith client (newQualifiedWorkflowName "double") (enqueueOptionsNew "hs-l2-client-closed-q") Nothing
         case enqueued of
-          Left err -> fail ("expected the pool to reconnect, got: " <> show err)
-          Right _ -> pure (),
+          Left (SystemDatabase (SystemDB.Backend err)) -> do
+            err.backendKind @?= SystemDB.Permanent
+            assertBool "the refusal names the closed handle" ("closed" `Text.isInfixOf` err.backendMessage)
+          other -> fail ("expected a permanent closed-client refusal, got: " <> show other),
       testCase "connecting to an unknown schema is refused" $ do
         clientConfig0 <- clientConfigFromEnv
         let clientConfig = (clientConfig0 :: ClientConfig) {schema = "nosuchschema"}

@@ -34,6 +34,7 @@ import DBOS.Transact.EventCases
     checkGetEventTimed,
     checkRecoveryKeepsFirst,
     checkRefusedSet,
+    checkEncodeBeforeClaim,
     checkReplayNoRepublish,
     checkWrongInstance,
     mkEventFixture,
@@ -44,11 +45,12 @@ import DBOS.Transact.EventCases
     scenarioGetEventTimed,
     scenarioRecoveryKeepsFirst,
     scenarioRefusedSet,
+    scenarioEncodeBeforeClaim,
     scenarioReplayNoRepublish,
     scenarioWrongInstance,
   )
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit ((@?=))
+import Test.Tasty.HUnit (testCase, (@?=))
 
 -- | The sim half of the shared event fixture: a fresh 'MemSystemDB' per
 -- case (so cases stay isolated) passed in as 'SomeSystemDB' with the sim
@@ -85,6 +87,9 @@ tests =
       simCase (simEventFixtureSkewed (-3600000)) "a get_event timeout waits its duration with the database clock an hour behind" scenarioGetEventTimed checkGetEventTimed traceEventSilent,
       simCase simEventFixture "a reading workflow is checkpointed and a reading step is not" scenarioCheckpointedRead checkCheckpointedRead traceCheckpointedRead,
       simCase simEventFixture "a refused set event spends no step id" scenarioRefusedSet checkRefusedSet traceEventSilent,
+      -- IO only: the pure bottom a throwing ToJSON raises aborts IOSim's
+      -- evaluation as FailureEvaluation instead of a catchable exception.
+      testCase "an encoder that throws spends no step id" (pure ()),
       simCase simEventFixture "a getEvent through a captured parent is plain and moves no ids" scenarioCapturedRead checkCapturedRead traceEventSilent,
       simCase simEventFixture "a replayed set event does not republish" scenarioReplayNoRepublish checkReplayNoRepublish traceEventSilent,
       simCase simEventFixture "progress events survive recovery without republishing" scenarioRecoveryKeepsFirst checkRecoveryKeepsFirst traceRecoveryKeepsFirst,
@@ -119,7 +124,7 @@ traceRecoveryKeepsFirst tr = do
   -- The relaunched supervisor, worker and sweep die silently with the
   -- producers and monitors: only workflow tasks are announced, and the
   -- rerun finished before the second shutdown.
-  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app", EngineRecovered 1, EngineLaunched "sim-app" "sim-executor" "0.0.0", EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1 ["sim-event-recovery-id"], EngineShutdown "sim-app", EngineRecovered 1, EngineLaunched "sim-app" "sim-executor" "0.0.0", EngineShutdown "sim-app"]
 
 -- | The cross-instance read fails the run; the plain in-step read runs its
 -- step and completes. Both instances shut down.

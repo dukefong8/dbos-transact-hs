@@ -125,6 +125,11 @@ data Error e
     WorkflowCancelled {workflowId :: Text}
   | -- | A prior execution recorded a workflow failure.
     WorkflowFailed {workflowId :: Text, message :: Text}
+  | -- | The row this caller was adopting or awaiting is gone. The system
+    -- database says the same thing as @NonExistentWorkflow@; a caller sees
+    -- this instead, as the oracle's @adopt@ maps it. Recorded like a step's
+    -- answer. Mirrors Rust @Error::WorkflowNotFound@.
+    WorkflowNotFound {workflowId :: Text}
   | -- | The workflow this caller was awaiting was cancelled — the child,
     -- not the caller. It is the awaited workflow's outcome, so it is
     -- recorded like one and a replay is told the same thing without
@@ -199,6 +204,7 @@ renderErrorWithoutApplication = \case
   Interrupted workflowId -> "the workflow " <> workflowId <> " was interrupted by shutdown and left PENDING"
   WorkflowCancelled workflowId -> "the workflow " <> workflowId <> " was cancelled"
   WorkflowFailed workflowId message -> "the workflow " <> workflowId <> " failed: " <> message
+  WorkflowNotFound workflowId -> "no workflow exists with id " <> workflowId
   AwaitedWorkflowCancelled workflowId -> "the workflow " <> workflowId <> " this one was awaiting was cancelled"
   ErrorMaxRecoveryAttemptsExceeded workflowId recoveryAttempts -> "the workflow " <> workflowId <> " exceeded " <> pack (show recoveryAttempts) <> " recovery attempts"
   NotInWorkflow operation -> operation <> " must be called from within a workflow"
@@ -242,6 +248,7 @@ instance ToJSON e => ToJSON (Error e) where
     Interrupted workflowId -> tagged "Interrupted" (object ["workflowId" .= workflowId])
     WorkflowCancelled workflowId -> tagged "WorkflowCancelled" (object ["workflowId" .= workflowId])
     WorkflowFailed workflowId message -> tagged "WorkflowFailed" (object ["workflowId" .= workflowId, "message" .= message])
+    WorkflowNotFound workflowId -> tagged "WorkflowNotFound" (object ["workflowId" .= workflowId])
     AwaitedWorkflowCancelled workflowId -> tagged "AwaitedWorkflowCancelled" (object ["workflowId" .= workflowId])
     -- Tag keeps the Rust spelling; the constructor carries the documented
     -- @Error@-prefix deviation (@WorkflowStatus@ owns the bare name).
@@ -280,6 +287,7 @@ instance FromJSON e => FromJSON (Error e) where
       "Interrupted"                 -> withObject "Interrupted" (\o -> Interrupted <$> o .: "workflowId") payload
       "WorkflowCancelled"           -> withObject "WorkflowCancelled" (\o -> WorkflowCancelled <$> o .: "workflowId") payload
       "WorkflowFailed"              -> withObject "WorkflowFailed" (\o -> WorkflowFailed <$> o .: "workflowId" <*> o .: "message") payload
+      "WorkflowNotFound"            -> withObject "WorkflowNotFound" (\o -> WorkflowNotFound <$> o .: "workflowId") payload
       "AwaitedWorkflowCancelled"    -> withObject "AwaitedWorkflowCancelled" (\o -> AwaitedWorkflowCancelled <$> o .: "workflowId") payload
       "MaxRecoveryAttemptsExceeded" -> withObject "MaxRecoveryAttemptsExceeded" (\o -> ErrorMaxRecoveryAttemptsExceeded <$> o .: "workflowId" <*> o .: "recoveryAttempts") payload
       "NotInWorkflow"               -> withObject "NotInWorkflow" (\o -> NotInWorkflow <$> o .: "operation") payload

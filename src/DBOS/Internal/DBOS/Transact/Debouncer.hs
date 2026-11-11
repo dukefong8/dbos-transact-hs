@@ -41,18 +41,54 @@ import Data.Map.Strict (Map)
 import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Debounce (..), DebounceHolder (..), DebounceRequest (..), Duration, QueueName (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), QualifiedWorkflowName, WorkflowIdReusePolicy (..), qualifiedName, qualifiedClassName, qualifiedConfigName, durationIsZero, durationToMs, internalQueueName)
+import DBOS.SystemDB.Types
+  ( Debounce (..),
+    DebounceHolder (..),
+    DebounceRequest (..),
+    Duration,
+    QueueName (..),
+    Serialization (..),
+    SerializedWorkflowValue (..),
+    WorkflowId (..),
+    StepCaller (..),
+    QualifiedWorkflowName,
+    WorkflowIdReusePolicy (..),
+    qualifiedName,
+    qualifiedClassName,
+    qualifiedConfigName,
+    durationIsZero,
+    durationToMs,
+    internalQueueName
+  )
 import DBOS.Transact.Config (serializerName)
-import DBOS.Transact.Client (Client (..), EnqueueOptions (..), clientEnqueueWorkflowWithDebounce, refuseNamelessWorkflow)
+import DBOS.Transact.Client
+  ( Client (..),
+    EnqueueOptions (..),
+    clientEnqueueWorkflowWithDebounce,
+    refuseNamelessWorkflow
+  )
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, withConnection)
-import DBOS.Transact.Context (WorkflowCtx (wctxConn), insideAStep, nextStepId, workflowId)
+import DBOS.Transact.Context (WorkflowCtx (wctxConn), insideAStep, nextStepId, workflowId, workflowOwner)
 import DBOS.Transact.Identity (refuseAppName)
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), pollingHandle)
 import DBOS.Transact.Instance (DBOS, Executor (..), withExecutor, startWorkflow)
 import DBOS.Transact.Registry (registryInstanceId)
 import DBOS.Transact.Serialization (WorkflowInput (..), unWorkflowInput)
-import DBOS.Transact.Workflow (DuplicationPolicy (Reject), QueueRequest (..), Timeout (..), StartOptions (..), WorkflowRef (..), checkStartDuration, childWorkflowId, queueRequestNew, startChildWorkflowAt, startOptionsDefault, timeoutBudget, validateStart)
+import DBOS.Transact.Workflow
+  ( DuplicationPolicy (Reject),
+    QueueRequest (..),
+    Timeout (..),
+    StartOptions (..),
+    WorkflowRef (..),
+    checkStartDuration,
+    childWorkflowId,
+    queueRequestNew,
+    startChildWorkflowAt,
+    startOptionsDefault,
+    timeoutBudget,
+    validateStart
+  )
 import DBOS.Transact.Workflow qualified as Workflow (QueueRequest (..))
 
 -- | What a debounce sets: the fields apply to every workflow a debounce
@@ -114,7 +150,7 @@ debounceOperation = "debounce a workflow"
 -- call for a quiet key enqueues a fresh debounced row; concurrent calls
 -- join it through the bounce, extending its delay and replacing its
 -- inputs. Answers a handle to the user workflow.
-debounce :: (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+debounce :: (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
          => DBOS m ->
             WorkflowRef m TransactError.EngineOnly ->
             Debouncer ->
@@ -129,7 +165,7 @@ debounce dbos userRef def key period input =
 -- workflow, the fresh row takes it; when it names one, the creation is a
 -- conflict rather than a silent join, as the sysdb arm refuses. Mirrors
 -- Rust @Debouncer::debounce_with@.
-debounceWith :: (MonadMVar m, MonadFork m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+debounceWith :: (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
              => DBOS m ->
                 WorkflowRef m TransactError.EngineOnly ->
                 Debouncer ->
@@ -208,7 +244,7 @@ debounceWith dbos userRef def key period input options = do
 -- starts a child of the running workflow, which replays through its own
 -- checkpoint; its id derives from the parent and the start's step, so a
 -- replay re-enqueues the same id rather than a second row.
-debounceInWorkflow :: (MonadMVar m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+debounceInWorkflow :: (MonadAsync m, MonadMVar m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => WorkflowCtx exec m ->
                       WorkflowRef m TransactError.EngineOnly ->
                       Debouncer ->
@@ -247,7 +283,7 @@ debounceInWorkflow wctx userRef def key period input = do
       generated <- generatedWorkflowId conn
       let parentText = workflowId wctx
           pinned = childWorkflowId Nothing (Just (parentText, startStep)) generated
-          caller = Just (WorkflowId parentText, bounceStep)
+          caller = Just (StepCaller (workflowOwner wctx) bounceStep)
       bounced <- withConnection conn (\db -> SystemDB.debounceDelayedWorkflow db (bounceRequest conn period) caller)
       case bounced of
             Left (TransactError.SystemDatabase sysErr) -> pure (Left (TransactError.refusedArgument debounceOperation sysErr))
@@ -331,7 +367,7 @@ debouncerClientNew client workflow queueName =
 -- | Debounce a key through a client: quiet calls collapse onto one
 -- delayed row running with the last call's inputs, as 'debounce' does
 -- through an executor.
-debounceClient :: (MonadSTM m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+debounceClient :: (MonadTimer m)
                => DebouncerClient m ->
                   Text ->
                   Duration ->
@@ -341,7 +377,7 @@ debounceClient dc key period input = debounceClientWith dc key period input debo
 
 -- | 'debounceClient' with a per-call id, as 'debounceWith' is to
 -- 'debounce'. Mirrors Rust @DebouncerClient::debounce_with@.
-debounceClientWith :: (MonadSTM m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+debounceClientWith :: (MonadSTM m, MonadDelay m)
                    => DebouncerClient m ->
                       Text ->
                       Duration ->

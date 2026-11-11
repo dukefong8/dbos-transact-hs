@@ -67,10 +67,12 @@ selectWorkflow wctx workflowIds = do
     Left err -> pure (Left (TransactError.fromExecution err))
     Right (Just recorded) ->
       case recorded.stepRecordError of
-        -- The only refusal this call records is the empty set, so a replay
-        -- reads that refusal back rather than re-deciding it — the Rust
-        -- revive of the recorded error, narrowed to this call's one error.
-        Just _errorText -> pure (Left (TransactError.InvalidArgument "select_workflow" "no workflow ids to wait for"))
+        -- Read the refusal the first run recorded, not a guess at it: a
+        -- different build may have refused the same position for another
+        -- reason, and replay must give the caller that answer back.
+        Just errorText -> case TransactError.decodeErrorText errorText of
+          Right err -> pure (Left err)
+          Left _ -> pure (Left (TransactError.StepFailed selectStepName errorText))
         Nothing -> case recorded.stepRecordOutput of
           Nothing -> pure (Left (TransactError.StepFailed selectStepName "recorded select_workflow has no output"))
           Just output ->
@@ -155,10 +157,15 @@ waitForWorkflow dbos awaitedWorkflowId = do
 
 waitForFirstWorkflow :: (MonadMVar m, MonadDelay m, MonadTime m)
                      => DBOS m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) WorkflowId)
-waitForFirstWorkflow dbos workflowIds = do
-  withExecutor dbos "wait for the first workflow" $ \executor -> do
-    result <- withConnection executor.conn (\db -> SystemDB.awaitFirstWorkflowId db workflowIds executor.conn.connOutcomePollInterval)
-    pure result
+waitForFirstWorkflow dbos workflowIds
+  -- The engine refuses an empty first-wait on the select channel, before
+  -- the system database sees it. Mirrors @wait.rs@.
+  | null workflowIds =
+      pure (Left (TransactError.InvalidArgument "select_workflow" "no workflow ids to wait for"))
+  | otherwise = do
+      withExecutor dbos "wait for the first workflow" $ \executor -> do
+        result <- withConnection executor.conn (\db -> SystemDB.awaitFirstWorkflowId db workflowIds executor.conn.connOutcomePollInterval)
+        pure result
 
 waitForWorkflows :: (MonadMVar m, MonadDelay m, MonadTime m)
                  => DBOS m -> [WorkflowId] -> m (Either (TransactError.Error TransactError.EngineOnly) ())

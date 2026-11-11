@@ -15,6 +15,7 @@ module DBOS.Transact.WorkflowCases
     startErrorCase,
     WfFixture (..),
     scenarioRegisteredRecordsResult,
+    scenarioRunRefRejectsWithoutId,
     JoinOutcome (..),
     scenarioJoinTakesId,
     scenarioFreshJoinPolls,
@@ -72,6 +73,7 @@ module DBOS.Transact.WorkflowCases
     scenarioEnqueueByNameRefusedNoStep,
     waitForRowShared,
     checkRegisteredResult,
+    checkRunRefRejectsWithoutId,
     checkJoinTakesId,
     checkFreshJoinPolls,
     checkQueuedStartPolls,
@@ -130,6 +132,7 @@ module DBOS.Transact.WorkflowCases
     taskRefusedAfterSweep,
     taskEmptySweep,
     taskEarlyFinishNotSwept,
+    taskFinishRacingSweep,
     taskWaitAllUntilDeadline,
     taskRunningNamesTasks,
     checkNoMiscounts,
@@ -147,7 +150,29 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.SystemDB (AppScope (..), AwaitedOutcome (..), Duration (..), Fork (..), ForkPoint (..), NewWorkflow (..), QueueName (..), StepRecord (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowRecord (..), Timestamp (..), addTimeout, defaultForkOptions, forkNew, getWorkflow, internalQueueName, listSteps, newWorkflow)
+import DBOS.SystemDB
+  ( AppScope (..),
+    AwaitedOutcome (..),
+    Duration,
+    Fork (..),
+    ForkPoint (..),
+    NewWorkflow (..),
+    QueueName (..),
+    StepRecord (..),
+    WorkflowId (..),
+    WorkflowIdReusePolicy (..),
+    WorkflowInitResult (initResultCreatorXid),
+    WorkflowOwner (..),
+    WorkflowRecord (..),
+    Timestamp (..),
+    addTimeout,
+    defaultForkOptions,
+    forkNew,
+    getWorkflow,
+    internalQueueName,
+    listSteps,
+    newWorkflow
+  )
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SysErr
 import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
@@ -231,7 +256,17 @@ import DBOS.Transact.Context
     tokenCancelled,
     workflowId
   )
-import DBOS.Transact.Workflow (abortAll, childWorkflowId, isRecordedStartError, newTasks, recordedStartErrorNames, runningTasks, shouldRecordStartError, spawnTracked, waitAllUntil)
+import DBOS.Transact.Workflow
+  ( abortAll,
+    childWorkflowId,
+    isRecordedStartError,
+    newTasks,
+    recordedStartErrorNames,
+    runningTasks,
+    shouldRecordStartError,
+    spawnTracked,
+    waitAllUntil
+  )
 import DBOS.Transact.Connection
   ( Connection,
     Owner (..),
@@ -264,21 +299,23 @@ timeoutOptionsCase = do
   childWorkflowId Nothing (Just ("parent", 2)) "generated" @?= "parent-2"
   childWorkflowId Nothing Nothing "generated" @?= "generated"
 
--- | The recorded start-error surface without a database: only the three
--- refusal variants are recorded, the names are the recorded ones, and a
--- value is judged by its single-key shape before the typed read — so a
--- plain step's error is never mistaken for a refusal.
+-- | The recorded start-error surface without a database: the four refusal
+-- variants are recorded, the names are the recorded ones, and a value is
+-- judged by its single-key shape before the typed read — so a plain step's
+-- error is never mistaken for a refusal.
 startErrorCase :: IO ()
 startErrorCase = do
-  recordedStartErrorNames @?= ["QueueDeduplicated", "ConflictingWorkflow", "WorkflowIdInUse"]
+  recordedStartErrorNames @?= ["QueueDeduplicated", "ConflictingWorkflow", "WorkflowIdInUse", "InvalidInput"]
   shouldRecordStartError (SysErr.QueueDeduplicated {workflowId = "w", queueName = "q", deduplicationId = "d"}) @?= True
   shouldRecordStartError (SysErr.ConflictingWorkflow {workflowId = "w", detail = "taken"}) @?= True
   shouldRecordStartError (SysErr.WorkflowIdInUse {workflowId = "w", status = "SUCCESS", existingName = Just "charge"}) @?= True
+  shouldRecordStartError (SysErr.InvalidInput {field = "queue_name", detail = "must be absent rather than empty"}) @?= True
   shouldRecordStartError (SysErr.WorkflowCancelled {workflowId = "w"}) @?= False
   shouldRecordStartError (SysErr.UnexpectedStep {workflowId = "w", stepId = 0, expected = "a child start", recorded = "a plain step"}) @?= False
   isRecordedStartError (object ["QueueDeduplicated" .= True]) @?= True
   isRecordedStartError (object ["ConflictingWorkflow" .= True]) @?= True
   isRecordedStartError (object ["WorkflowIdInUse" .= True]) @?= True
+  isRecordedStartError (object ["InvalidInput" .= True]) @?= True
   isRecordedStartError (object ["WorkflowCancelled" .= True]) @?= False
   isRecordedStartError (object ["QueueDeduplicated" .= True, "extra" .= True]) @?= False
   isRecordedStartError (String "not an object") @?= False
@@ -348,6 +385,23 @@ scenarioRegisteredRecordsResult fx = do
     case row of
       Just found -> pure (decoded, found)
       Nothing -> throwIO (userError "expected exactly one successful row")
+
+-- | A run whose reuse policy names an id it was not given is refused on
+-- the start's channel before the generated id is used or the body runs.
+scenarioRunRefRejectsWithoutId :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+                               => WfFixture m ->
+                                  m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Bool)
+scenarioRunRefRejectsWithoutId fx = do
+  bracket fx.wfNewDBOS shutdown $ \dbos -> do
+    ran <- newTVarIO False
+    let key = newQualifiedWorkflowName "ref-reject"
+        body :: forall exec. () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) ())
+        body () _ = atomically (writeTVar ran True) >> pure (Right ())
+    ref <- registerWorkflowRef dbos key body >>= either (throwIO . userError . show) pure
+    exec <- fx.wfLaunch dbos
+    result <- runWorkflowRef exec ref (runOptionsDefault {runWorkflowIdReusePolicy = WorkflowIdReject}) Nothing
+    executed <- readTVarIO ran
+    pure (result, executed)
 
 -- | One fixture builder over any backend: the tree passes its
 -- 'SomeSystemDB' and 'SomeTracer' in (plus config, identity, connection
@@ -500,7 +554,7 @@ scenarioJoinTakesId fx = do
 -- | A bounded wait for a handle to settle: virtual time in sim, fifteen
 -- seconds live. A lost wakeup fails the case instead of hanging the
 -- suite. Shared by the scenarios that resolve handles.
-awaitSettled :: forall m. (MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+awaitSettled :: forall m. (MonadMask m, MonadMVar m, MonadTimer m, MonadTime m)
              => WorkflowHandle m EngineOnly ->
                 m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 awaitSettled handle = do
@@ -1746,7 +1800,7 @@ scenarioScopedBody fx = do
       Right Nothing -> pure (Right 0)
       Left err -> pure (Left err)
     steps <- fx.wfListSteps wid
-    pure (decoded, map (\row -> (row.stepRecordStepId, row.stepRecordStepName)) steps)
+    pure (decoded, map (\row -> (fromIntegral row.stepRecordStepId, row.stepRecordStepName)) steps)
 
 -- | The converted body's value is the doubled input and its rows are the
 -- step and the sleep, in order.
@@ -1784,7 +1838,7 @@ scenarioScopedSelect fx = do
             SelectArm "fast" fast (\armOutcome -> pure (armOutcome >>= \value -> Right value))
           ]
     steps <- fx.wfListSteps wid
-    pure (outcome, map (\row -> (row.stepRecordStepId, row.stepRecordStepName)) steps)
+    pure (outcome, map (\row -> (fromIntegral row.stepRecordStepId, row.stepRecordStepName)) steps)
 
 -- | The winner is the fast arm's value; the rows are the fast step under
 -- its branch id and the select's own position after both branches.
@@ -2571,6 +2625,15 @@ checkRegisteredResult (n, row)
   | not (portableInputEnvelope [toJSON (21 :: Int)] row.workflowRecordInput) = Left ("expected the portable input envelope for 21, got: " <> show row.workflowRecordInput)
   | row.workflowRecordSerialization /= Just "portable_json" = Left ("expected portable_json, got: " <> show row.workflowRecordSerialization)
   | otherwise = Right ()
+
+checkRunRefRejectsWithoutId :: (Either (Error EngineOnly) (Maybe SerializedWorkflowValue), Bool) -> Either String ()
+checkRunRefRejectsWithoutId (result, ran) = do
+  when ran (Left "the workflow body ran although the policy had no id")
+  case result of
+    Left (InvalidArgument _ detail)
+      | "WorkflowIdReusePolicy::Reject" `Text.isInfixOf` detail -> Right ()
+      | otherwise -> Left ("expected the Reject detail, got: " <> Text.unpack detail)
+    other -> Left ("expected the Reject refusal, got: " <> show other)
 
 -- | A workflow input is the portable envelope with these positional values
 -- and no named ones.
@@ -3382,6 +3445,21 @@ taskRefusedAfterSweep = do
 taskEmptySweep :: (MonadFork m, MonadSTM m, MonadMVar m) => m Int
 taskEmptySweep = length <$> (newTasks >>= abortAll)
 
+-- | A body that has already returned but has not yet deregistered when
+-- the sweep looks must not be reported as cancelled. The child hands its
+-- completion to the parent and returns; the sweep races the child's
+-- deregistration. On the cooperative simulator the child deregisters
+-- before yielding, so the sweep finds nothing; on the IO scheduler the
+-- sweep can see the entry and kill a finished thread, and must subtract
+-- what the departure recorded.
+taskFinishRacingSweep :: TaskCase m => m Int
+taskFinishRacingSweep = do
+  tasks <- newTasks
+  done <- newEmptyMVar
+  _ <- spawnTracked tasks "brief" (putMVar done () >> pure ())
+  takeMVar done
+  length <$> abortAll tasks
+
 -- | A trivial body can depart between the fork and the parent's
 -- registration on a preemptive scheduler; the registration must consume
 -- that early departure rather than list a dead thread, so a later sweep
@@ -3465,7 +3543,7 @@ instance FromJSON GaveUp where
 -- scenario awaits it outside: a queued child needs a driven pass, and
 -- bare launches never fork a supervisor tick. The worker name is
 -- scenario-unique, as listings are global over the shared database.
-scenarioEnqueueByNameIsChild :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+scenarioEnqueueByNameIsChild :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => WfFixture m -> m (Int, WorkflowStatus, Maybe Text, Text, Int, Text, Text, Int)
 scenarioEnqueueByNameIsChild fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -3560,7 +3638,7 @@ checkEnqueueByNameIsChild (out, status, name, step0name, stepCount, firstChild, 
 -- the own row's status, name, version and parent, the other row's app
 -- and version, the in-step refusal's operation, the empty refusal's
 -- operation, and the operator's recorded steps. Mirrors Rust's row test.
-scenarioEnqueueByNameWritesRow :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+scenarioEnqueueByNameWritesRow :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                => WfFixture m -> m (WorkflowStatus, Maybe Text, Maybe Text, Maybe WorkflowId, Maybe Text, Maybe Text, Text, Text, [(Int, Text)])
 scenarioEnqueueByNameWritesRow fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -3605,7 +3683,7 @@ scenarioEnqueueByNameWritesRow fx = do
       Left (InvalidArgument operation _) -> pure operation
       other -> throwIO (userError ("expected the empty refusal, got: " <> show other))
     steps <- fx.wfListSteps operatorWid
-    pure (own.workflowRecordStatus, own.workflowRecordName, own.workflowRecordAppVersion, own.workflowRecordParentWorkflowId, other.workflowRecordAppName, other.workflowRecordAppVersion, inStepOp, emptyOp, [(record.stepRecordStepId, record.stepRecordStepName) | record <- steps])
+    pure (own.workflowRecordStatus, own.workflowRecordName, own.workflowRecordAppVersion, own.workflowRecordParentWorkflowId, other.workflowRecordAppName, other.workflowRecordAppVersion, inStepOp, emptyOp, [(fromIntegral record.stepRecordStepId, record.stepRecordStepName) | record <- steps])
 
 -- | The client's row, the named app and version, the two refusals, and
 -- the single managing step.
@@ -3627,7 +3705,7 @@ checkEnqueueByNameWritesRow (status, name, version, parent, otherApp, otherVersi
 -- and no replay enqueues again. Returns the two first answers, the two
 -- replayed answers, and the worker-name row count. Mirrors Rust's dedup
 -- test; the worker name is scenario-unique, as listings are global.
-scenarioEnqueueByNameDedupReplays :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+scenarioEnqueueByNameDedupReplays :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                   => WfFixture m -> m (Text, Text, Text, Text, Int)
 scenarioEnqueueByNameDedupReplays fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -3705,7 +3783,7 @@ checkEnqueueByNameDedupReplays (joinText, refusedText, replayJoin, replayRefused
 -- budget of its own, and an unbounded one records neither. Returns the
 -- parent's deadline, the three children's timeouts and deadlines.
 -- Mirrors Rust's deadline test.
-scenarioEnqueueByNameDeadlines :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+scenarioEnqueueByNameDeadlines :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                => WfFixture m -> m (Maybe Timestamp, Maybe Timestamp, Maybe Duration, Maybe Timestamp, Maybe Duration, Maybe Timestamp)
 scenarioEnqueueByNameDeadlines fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -3762,7 +3840,7 @@ checkEnqueueByNameDeadlines (parentDl, inheritedDl, ownTo, ownDl, unboundedTo, u
 
 -- | Bad options are refused before the step id is taken: five invalid
 -- argument details and one recorded step. Mirrors Rust's no-step test.
-scenarioEnqueueByNameRefusedNoStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadDelay m)
+scenarioEnqueueByNameRefusedNoStep :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                    => WfFixture m -> m ([Text], [(Int, Text)])
 scenarioEnqueueByNameRefusedNoStep fx = do
   bracket fx.wfNewDBOS shutdown $ \dbos -> do
@@ -3800,7 +3878,7 @@ scenarioEnqueueByNameRefusedNoStep fx = do
         Left err -> throwIO (userError (show err))
       other -> throwIO (userError ("expected the refusals, got: " <> show other))
     steps <- fx.wfListSteps parentWid
-    pure (refusals, [(record.stepRecordStepId, record.stepRecordStepName) | record <- steps])
+    pure (refusals, [(fromIntegral record.stepRecordStepId, record.stepRecordStepName) | record <- steps])
 
 -- | Each refusal names its field, and the only recorded step is the one
 -- after them: no refusal spent an id.

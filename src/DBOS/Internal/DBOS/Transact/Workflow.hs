@@ -78,6 +78,7 @@ module DBOS.Transact.Workflow
   )
 where
 
+import Data.Int (Int32)
 import DBOS.Prelude
 -- NOTE (deviation): the one base import outside the port's prelude. Mapping
 -- the abort channel needs the identity of the exception 'killThread'
@@ -96,18 +97,83 @@ import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (Error (..))
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AwaitedOutcome (..), DatabaseTime (..), Duration, InitWorkflowCaller (..), NewWorkflow (..), Outcome (..), OutcomeWrite (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (..), QualifiedWorkflowName, qualifiedName, qualifiedClassName, qualifiedConfigName, WorkflowOwner (..), WorkflowRecord (workflowRecordStatus), WorkflowStatus (..), databaseTimeRead, databaseTimeReaches, durationIsZero, durationToMs, isTerminal, newWorkflow, renderQualifiedWorkflowName, timestampNow, timestampToEpochMs)
+import DBOS.SystemDB.Types
+  ( AwaitedOutcome (..),
+    DatabaseTime (..),
+    Duration,
+    InitWorkflowCaller (..),
+    NewWorkflow (..),
+    Outcome (..),
+    OutcomeWrite (..),
+    Serialization (..),
+    SerializedWorkflowValue (..),
+    StepRecord (..),
+    StepTiming (..),
+    Timestamp,
+    WorkflowId (..),
+    WorkflowIdReusePolicy (..),
+    WorkflowInitResult (..),
+    QualifiedWorkflowName,
+    qualifiedName,
+    qualifiedClassName,
+    qualifiedConfigName,
+    WorkflowOwner (..),
+    WorkflowRecord (workflowRecordStatus),
+    WorkflowStatus (..),
+    databaseTimeRead,
+    databaseTimeReaches,
+    durationIsZero,
+    durationToMs,
+    isTerminal,
+    newWorkflow,
+    renderQualifiedWorkflowName,
+    timestampNow,
+    timestampToEpochMs
+  )
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Transact.Datasource (DataSourceRegistry, clearDatasourceCheckpoints)
-import DBOS.Transact.Context (LocalTaskOutcome (..), TaskSpawner (..), WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner), clearSpawnerCheckpoints, deadline, insideAStep, nextStepId, ownerToken, releaseStart, spawnLocal, startToken, waitForStarts, withWorkflow, withWorkflowTaskSpawner, workflowId)
+import DBOS.Transact.Context
+  ( LocalTaskOutcome (..),
+    TaskSpawner (..),
+    WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner),
+    clearSpawnerCheckpoints,
+    deadline,
+    insideAStep,
+    nextStepId,
+    ownerToken,
+    releaseStart,
+    spawnLocal,
+    startToken,
+    waitForStarts,
+    withWorkflow,
+    withWorkflowTaskSpawner,
+    workflowId
+  )
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle (..), localHandle, pollingHandle)
 import DBOS.Transact.Identity (Identity (..), refuseAppName)
 import DBOS.Transact.Logger (runTracer)
-import DBOS.Transact.Registry (Registry, Snapshot, lookupRegistryWorkflow, lookupSnapshotWorkflow, registryInstanceId)
+import DBOS.Transact.Registry
+  ( Registry,
+    Snapshot,
+    lookupRegistryWorkflow,
+    lookupSnapshotWorkflow,
+    registryInstanceId
+  )
 import DBOS.Transact.Registry qualified as Registry (registerErasedWorkflow)
-import DBOS.Transact.Serialization (CodecError (..), SerializationError, WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowInput, decodeWorkflowValue, encodeAttributes, encodeWorkflowValue, unWorkflowInput)
+import DBOS.Transact.Serialization
+  ( CodecError (..),
+    SerializationError,
+    WorkflowInput (..),
+    codecErrorText,
+    codecUnknownTag,
+    decodeWorkflowInput,
+    decodeWorkflowValue,
+    encodeAttributes,
+    encodeWorkflowValue,
+    unWorkflowInput
+  )
 import DBOS.Transact.Serialization qualified as Serialization
 import DBOS.Transact.Step (WorkflowEvent (..))
 
@@ -119,7 +185,7 @@ maxRecoveryAttempts = 100
 -- | Start a registered workflow using the SystemDB class-backed engine.
 -- The connection, resolved identity and task registry belong to the
 -- executor; the body takes the explicit context it runs in.
-runRegisteredWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
+runRegisteredWorkflow :: (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
                       => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> QualifiedWorkflowName -> WorkflowId -> Maybe SerializedWorkflowValue -> WorkflowIdReusePolicy -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runRegisteredWorkflow tasks conn identity snapshot key workflowId input reusePolicy datasources = runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId input (workflowNewWorkflow conn identity key workflowId input Nothing) reusePolicy datasources
 
@@ -136,7 +202,7 @@ runRegisteredWorkflow tasks conn identity snapshot key workflowId input reusePol
 -- shutdown that aborts it visible here as 'TransactError.Interrupted'
 -- rather than as a hang.
 
-runRegisteredWorkflowWithRow :: (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
+runRegisteredWorkflowWithRow :: (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
                              => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> QualifiedWorkflowName -> WorkflowId -> Maybe SerializedWorkflowValue -> NewWorkflow -> WorkflowIdReusePolicy -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId@(WorkflowId workflowText) input new reusePolicy datasources =
   case lookupSnapshotWorkflow key snapshot of
@@ -200,6 +266,11 @@ tasksSpawner tasks clear = spawner
       channel <- newEmptyMVar
       spawned <- spawnTracked tasks label $ mask $ \restore -> do
         result <- try (restore (action spawner))
+        let cancelled = case result of
+              Left err -> case fromException err :: Maybe AsyncException of
+                Just ThreadKilled -> True
+                _                 -> False
+              Right _ -> False
         -- The fill below is masked back over: only the body runs
         -- interruptibly, so a kill landing around the body still leaves the
         -- outcome in the box.
@@ -208,6 +279,10 @@ tasksSpawner tasks clear = spawner
           Left err -> case fromException err :: Maybe AsyncException of
             Just ThreadKilled -> LocalTaskCancelled
             _                 -> LocalTaskPanic err
+        -- Rethrow only after the box is filled: 'spawnTracked' uses the
+        -- exception to tell a kill from a body that returned, and GHC's
+        -- default handler ignores an uncaught 'ThreadKilled'.
+        when cancelled (throwIO (ThreadKilled :: AsyncException))
       -- A refused arrival never forked, so the parent fills the
       -- cancellation itself: no child exists to do it, and the waiter must
       -- still learn the outcome rather than hang on an empty box.
@@ -235,6 +310,10 @@ adoptRecordedFailure :: (MonadDelay m, MonadTime m)
 adoptRecordedFailure conn wid@(WorkflowId workflowText) = do
   awaited <- runSystemDB conn.connSysdb (\db -> SystemDB.awaitWorkflowResult db wid conn.connOutcomePollInterval True)
   pure $ case awaited of
+    -- A deleted row is the caller's own verdict, not a system-database
+    -- shape: the oracle's @adopt@ maps it, and only there.
+    Left (SystemDBError.NonExistentWorkflow {workflowIds = [workflowId]}) ->
+      Left (TransactError.FailureControl (TransactError.WorkflowNotFound {workflowId}))
     Left err -> Left (TransactError.FailureControl (TransactError.fromSystemDB err))
     Right (AwaitedSucceeded output serialization) ->
       Right (SerializedWorkflowValue <$> output <*> pure (Serialization <$> serialization))
@@ -278,13 +357,12 @@ adoptRecordedOutcome conn (WorkflowId workflowText) = do
 -- @adopt_superseded@.
 adoptSuperseded :: (MonadDelay m, MonadTime m)
                 => Connection m -> WorkflowId -> Maybe (m ()) -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
-adoptSuperseded conn wid@(WorkflowId workflowText) releaseSlot = do
+adoptSuperseded conn wid releaseSlot = do
   maybe (pure ()) id releaseSlot
-  found <- runSystemDB conn.connSysdb (\db -> SystemDB.getWorkflow db wid)
-  case found of
-    Right (Just row) | row.workflowRecordStatus == Cancelled ->
-      pure (Left (TransactError.FailureControl (TransactError.WorkflowCancelled {workflowId = workflowText})))
-    _ -> adoptRecordedFailure conn wid
+  -- The awaited read answers "cancelled" while the row still is, and
+  -- otherwise returns what every caller sees. A separate pre-read only
+  -- widened the window between the answer and the adoption.
+  adoptRecordedFailure conn wid
 -- | A workflow's deadline, and when it passes on this process's monotonic
 -- clock. Mirrors Rust @workflow::Deadline@: @at@ is the instant the row
 -- holds, which the context carries for children to inherit; @expires@ is
@@ -310,7 +388,7 @@ deadlineOf at clock = (\instant -> Deadline instant (databaseTimeReaches clock i
 -- @releaseSlot@ is the queue slot a dequeued execution holds: it is given up
 -- before waiting for the timeout's row to settle, as Rust's @time_out@ drops
 -- its slot first.
-executeRegisteredWorkflow :: forall m. (MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+executeRegisteredWorkflow :: forall m. (MonadAsync m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
                           => TaskSpawner m -> Connection m -> Identity -> WorkflowId -> ErasedWorkflow m -> Maybe SerializedWorkflowValue -> Maybe Deadline -> Maybe (m ()) -> WorkflowOwner -> m (Either TransactError.Failure (Maybe SerializedWorkflowValue))
 executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowText) workflow input deadline releaseSlot owner = do
   attempted <- try (runBody)
@@ -369,10 +447,17 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
           Just due -> do
             now <- getMonotonicTimeNSec
             let remainingNs = if due.deadlineExpires > now then due.deadlineExpires - now else 0
-            -- io-classes' timer is microseconds, the monotonic reading is
-            -- nanoseconds: round down, so a sub-microsecond remainder waits
-            -- zero rather than a whole extra microsecond.
-            timeout (fromIntegral (remainingNs `div` 1000)) runWithStarts
+                -- io-classes' timer is microseconds, the monotonic reading
+                -- is nanoseconds. A past deadline still gets one
+                -- microsecond, so the body is polled at least once instead
+                -- of @timeout 0@ returning without running it.
+                waitMicros = max 1 (remainingNs `div` 1000)
+            -- Biased with the body on the left, as the oracle's
+            -- @biased;@ race is: a body that finishes at the deadline
+            -- keeps its outcome instead of being cancelled. The body runs
+            -- in this thread, so a caller kill takes the body with it.
+            raced <- race runWithStarts (threadDelay (fromIntegral waitMicros))
+            pure (either Just (const Nothing) raced)
         case raced of
           Nothing -> timeOut
           Just outcome -> case outcome of
@@ -522,9 +607,10 @@ queueRequestNew queueName =
 
 -- | Rejects an enqueue no queue could honour. Only what the shape could not
 -- rule out: nesting under the queue already makes a delay with no queue
--- unbuildable, so what is left is the deduplication/partition pair, the
--- policy without a key, the priority range, and the delay. Each is an
--- Rust @QueueRequest::validate@.
+-- unbuildable, so what is left is the policy without a key, the priority
+-- range, and the delay. A deduplication id and a partition key may be set
+-- together: the key is held across the whole queue, not within one
+-- partition. Each is a Rust @QueueRequest::validate@.
 validateEnqueue :: QueueRequest -> Either (TransactError.Error e) ()
 validateEnqueue queue
   -- The insert's refusal comes after a workflow caller's step id is
@@ -534,12 +620,7 @@ validateEnqueue queue
       refuse "`deduplication_id` must be absent rather than empty"
   | Just "" <- queue.partitionKey =
       refuse "`partition_key` must be absent rather than empty"
-  | Just _ <- queue.deduplicationId,
-    Just _ <- queue.partitionKey =
-      refuse
-        "`deduplication_id` and `partition_key` cannot both be set: a partitioned queue's dequeue and a deduplication key enforce different things"
-  | queue.duplicationPolicy == ReturnExisting,
-    Nothing <- queue.deduplicationId =
+  | queue.duplicationPolicy == ReturnExisting, Nothing <- queue.deduplicationId =
       refuse
         "`DuplicationPolicy::ReturnExisting` needs a `deduplication_id`: with no key there is no collision to resolve"
   | Just 0 <- queue.priority =
@@ -603,7 +684,7 @@ validateStart queue budget workflowId reusePolicy = do
 
 -- | The stored priority: the sentinel @0@ when unprioritised. Infallible
 -- because 'validateEnqueue' has already ruled out what would not fit.
-storedPriority :: QueueRequest -> Int
+storedPriority :: QueueRequest -> Int32
 storedPriority queue = maybe 0 fromIntegral queue.priority
 
 -- | How long a workflow may take. A budget, counted from now when explicit;
@@ -860,12 +941,15 @@ initOrJoin conn new queue reusePolicy caller = go
     -- The handle belongs to whoever holds the key, and the announcement
     -- names them both.
     joinHolder shape err =
-      case (shape.duplicationPolicy, shape.deduplicationId, err) of
-        (ReturnExisting, Just key, QueueDeduplicated {}) -> do
-          holder <- runSystemDB conn.connSysdb (\db -> SystemDB.getDeduplicationKeyHolder db shape.name key)
+      -- The error names the queue and key that actually collided. The
+      -- caller's request may have been normalized; joining on its spelling
+      -- would miss the holder the database named.
+      case (shape.duplicationPolicy, err) of
+        (ReturnExisting, QueueDeduplicated {queueName = holderQueue, deduplicationId = holderKey}) -> do
+          holder <- runSystemDB conn.connSysdb (\db -> SystemDB.getDeduplicationKeyHolder db holderQueue holderKey)
           case holder of
             Right (Just (WorkflowId holderId)) -> do
-              runTracer conn.connTracer (WorkflowDedupJoined holderId key)
+              runTracer conn.connTracer (WorkflowDedupJoined holderId holderKey)
               pure (Right (SubmittedJoined (pollingHandle conn holderId True)))
             Right Nothing  -> go
             Left lookupErr -> pure (Left lookupErr)
@@ -876,7 +960,7 @@ initOrJoin conn new queue reusePolicy caller = go
 -- row written by another step — or another SDK's step failure — stays
 -- 'UnexpectedStep' rather than being mistaken for a start refusal.
 recordedStartErrorNames :: [Text]
-recordedStartErrorNames = ["QueueDeduplicated", "ConflictingWorkflow", "WorkflowIdInUse"]
+recordedStartErrorNames = ["QueueDeduplicated", "ConflictingWorkflow", "WorkflowIdInUse", "InvalidInput"]
 
 -- | Whether a failed start is recorded at the parent's step: a refused
 -- enqueue (another run holds the deduplication key) and an id already
@@ -887,6 +971,7 @@ shouldRecordStartError err = case err of
   QueueDeduplicated {} -> True
   ConflictingWorkflow {} -> True
   WorkflowIdInUse {} -> True
+  InvalidInput {} -> True
   _ -> False
 
 -- | Whether a recorded error value names one of the variants above, judged
@@ -951,7 +1036,7 @@ checkRecordedChild conn parentText stepId stepName stored =
 -- child id; the error goes through the workflow's serializer as an
 -- internal step's refusal does. A recording failure is returned in place of
 -- the refusal, as in the oracle. Mirrors @Parent::record_start_error@.
-recordStartError :: (Monad m, MonadTime m)
+recordStartError :: (MonadTime m)
                  => Connection m -> Text -> Int -> Text -> Timestamp -> Text -> Error
                  -> m (TransactError.Error e)
 recordStartError conn parentText stepId stepName startedAt token err = do
@@ -1002,7 +1087,7 @@ debounceCreation queue = case queue of
 -- tasks at once — the workflow's life is the executor's, so dropping the
 -- handle must not stop the run — while a queued row is the supervisor's,
 -- as the oracle returns a polling handle for enqueues.
-startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+startWorkflow :: (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
               => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowRef m e -> StartOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflow tasks conn identity snapshot ref options input datasources =
   case validateStart options.startQueue (timeoutBudget options.startTimeout) ((\(WorkflowId offered) -> offered) <$> options.startWorkflowId) options.startWorkflowIdReusePolicy of
@@ -1180,20 +1265,28 @@ registerTypedWorkflow registry key body =
 -- awaits whoever does. A run cannot be a start plus a second init — the
 -- second init would always read back the start's foreign owner and poll a
 -- row nothing runs — so the record and the decision are one upsert.
-runWorkflowRef :: (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
+runWorkflowRef :: (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
                => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> WorkflowRef m e -> RunOptions -> Maybe SerializedWorkflowValue -> DataSourceRegistry m -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflowRef tasks conn identity snapshot ref options input datasources = do
-  now <- timestampNow
-  generated <- generatedWorkflowId conn
-  let key = ref.refQualifiedName
-      workflowText = maybe generated (\(WorkflowId offered) -> offered) options.runWorkflowId
-      new =
-        (workflowNewWorkflow conn identity key (WorkflowId workflowText) input Nothing)
-          { newWorkflowTimeout = timeoutBudget options.runTimeout,
-            newWorkflowDeadline = resolveTimeoutDeadline options.runTimeout Nothing,
-            newWorkflowAttributes = encodeAttributes options.runAttributes
-          }
-  runRegisteredWorkflowWithRow tasks conn identity snapshot key (WorkflowId workflowText) input new options.runWorkflowIdReusePolicy datasources
+  -- As a start validates before it writes: the id the caller offered, the
+  -- reuse policy about it, and the budget. A refusal here takes no step id
+  -- and writes no row.
+  case validateStart Nothing (timeoutBudget options.runTimeout) (fmap (\(WorkflowId text) -> text) options.runWorkflowId) options.runWorkflowIdReusePolicy of
+    Left err -> pure (Left err)
+    Right () -> runValidated
+  where
+    runValidated = do
+      now <- timestampNow
+      generated <- generatedWorkflowId conn
+      let key = ref.refQualifiedName
+          workflowText = maybe generated (\(WorkflowId offered) -> offered) options.runWorkflowId
+          new =
+            (workflowNewWorkflow conn identity key (WorkflowId workflowText) input Nothing)
+              { newWorkflowTimeout = timeoutBudget options.runTimeout,
+                newWorkflowDeadline = resolveTimeoutDeadline options.runTimeout Nothing,
+                newWorkflowAttributes = encodeAttributes options.runAttributes
+              }
+      runRegisteredWorkflowWithRow tasks conn identity snapshot key (WorkflowId workflowText) input new options.runWorkflowIdReusePolicy datasources
 
 -- | What a child-creating call resolved before writing: the row's
 -- naming, queueing, budget, version and refusal channel. Starts of
@@ -1229,7 +1322,7 @@ data ChildLaunch m = ChildLaunch
 -- The label names the spawned task; 'interruptedId' is the child the
 -- caller is waiting on and is what an aborted write reports, so a
 -- caller can still look the row up by the id it was given.
-detachChildWrite :: (MonadMVar m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+detachChildWrite :: (MonadMVar m, MonadMask m, MonadTimer m)
                  => WorkflowCtx exec m -> Text -> Text -> m (Either (TransactError.Error c) (WorkflowHandle m e)) -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 detachChildWrite wctx label interruptedId write =
   case wctx.wctxSpawner of
@@ -1267,7 +1360,7 @@ detachChildWrite wctx label interruptedId write =
 -- replay finds the child it already started, or the refusal the call
 -- recorded. Shared by registered starts and enqueues by name. Mirrors
 -- the oracle's @create@ behind both @start_with@ and @DBOS::enqueue@.
-writeChildLaunch :: (MonadMVar m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+writeChildLaunch :: (MonadAsync m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
                  => WorkflowCtx exec m -> Int -> Timestamp -> Text -> Maybe SerializedWorkflowValue -> ChildLaunch m -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 writeChildLaunch wctx parentStepId now childText rawInput launch = do
   let parentText = workflowId wctx
@@ -1382,7 +1475,7 @@ writeChildLaunch wctx parentStepId now childText rawInput launch = do
 -- follow-up. Starting from inside a step is 'InsideStep': a step is a
 -- leaf, and an id-allocating call inside one would shift every later step
 -- onto the wrong replay slot.
-startChildWorkflow :: (MonadMVar m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+startChildWorkflow :: (MonadAsync m, MonadMVar m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                    => WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startChildWorkflow = startChildWorkflowWith Nothing
 
@@ -1390,11 +1483,11 @@ startChildWorkflow = startChildWorkflowWith Nothing
 -- the counter. The debouncer claims its bounce and its fresh start
 -- together, as the oracle's @place@ does, so a coalescing bounce still
 -- spends the start's id and a later step lands where the oracle's would.
-startChildWorkflowAt :: (MonadMVar m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+startChildWorkflowAt :: (MonadAsync m, MonadMVar m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                      => Int -> WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startChildWorkflowAt = startChildWorkflowWith . Just
 
-startChildWorkflowWith :: (MonadMVar m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+startChildWorkflowWith :: (MonadAsync m, MonadMVar m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                        => Maybe Int -> WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startChildWorkflowWith placedStep wctx ref options input = do
   -- A start inside a step body is refused — and a start through a captured
@@ -1460,7 +1553,7 @@ startChildWorkflowWith placedStep wctx ref options input = do
     identity = wctx.wctxIdentity
     rawInput = unWorkflowInput <$> input
 
-enqueueWorkflowByNameInWorkflow :: (MonadMVar m, MonadMask m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, MonadCatch m)
+enqueueWorkflowByNameInWorkflow :: (MonadAsync m, MonadMVar m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => WorkflowCtx exec m -> QualifiedWorkflowName -> EnqueueOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 enqueueWorkflowByNameInWorkflow wctx name options input = do
   -- An enqueue inside a step body is refused, as a start is: a step is
@@ -1548,10 +1641,10 @@ data Tasks m = Tasks  { tasksState :: StrictTVar m (TaskState m),
   }
 
 data TaskState m = TaskState
-  { running  :: [(ThreadId m, Text)],
-    -- | How many spawned tasks exist and have not departed.
-    live     :: Int,
-    -- | Set by 'abortAll'. An arrival past this point is refused outright
+  { running  :: [(ThreadId m, Text)], -- | How many spawned tasks exist and have not departed. Strict:
+    -- 'StrictTVar' forces only the constructor, so a lazy counter would
+    -- grow a thunk chain under a long-lived executor.
+    live     :: !Int, -- | Set by 'abortAll'. An arrival past this point is refused outright
     -- (no fork, no count) rather than added to a list nothing will read
     -- again.
     closed   :: Bool,
@@ -1560,13 +1653,19 @@ data TaskState m = TaskState
     -- the registration. The imminent registration consumes the entry
     -- instead of listing a dead thread, so a later sweep never kills the
     -- dead nor counts it as aborted.
-    orphaned :: [ThreadId m]
+    orphaned :: [ThreadId m], -- | Threads whose action returned before the sweep looked: a normal
+    -- return, or the body's own exception, but not 'ThreadKilled'. The
+    -- sweep subtracts them from the labels it reports, so a task that
+    -- finished in the same instant as the sweep is not called cancelled.
+    -- Cleared by each sweep. Mirrors Rust's @AbortHandle::is_finished@
+    -- filter, which the port has no direct query for.
+    finishedNaturally :: [ThreadId m]
   }
 
 -- | An empty task set.
 newTasks :: (MonadSTM m, MonadMVar m) => m (Tasks m)
 newTasks = do
-  state <- newTVarIO (TaskState [] 0 False [])
+  state <- newTVarIO (TaskState [] 0 False [] [])
   lock <- newMVar ()
   pure (Tasks state lock)
 
@@ -1604,7 +1703,7 @@ spawnTracked tasks label action = mask $ \restore ->
         tid <- forkIO $ do
           self <- myThreadId
           outcome <- try (restore action) :: m (Either SomeException ())
-          departed tasks self
+          departed tasks self (not (wasKilled outcome))
           either throwIO pure outcome
         -- Registration under the same hold: the flag cannot have flipped
         -- since the check above, so this always registers — but the child
@@ -1632,11 +1731,20 @@ abortAll :: (MonadFork m, MonadSTM m, MonadMVar m) => Tasks m -> m [Text]
 abortAll tasks = do
   toAbort <- withMVar tasks.tasksLock $ \_ -> atomically $ do
     st <- readTVar tasks.tasksState
-    writeTVar tasks.tasksState st { running = [], orphaned = [], closed = True }
+    writeTVar tasks.tasksState st { running = [], orphaned = [], closed = True, finishedNaturally = [] }
     pure st.running
   mapM_ (killThread . fst) toAbort
   waitAll tasks
-  pure (map snd toAbort)
+  -- Every snapshot task has departed by now, so each recorded whether its
+  -- own action had already returned. Only the ones a kill actually ended
+  -- are reported: a task that finished in the window between the snapshot
+  -- and the kill is not labelled cancelled, matching the oracle's
+  -- @is_finished@ filter.
+  finished <- atomically $ do
+    st <- readTVar tasks.tasksState
+    writeTVar tasks.tasksState st { finishedNaturally = [] }
+    pure st.finishedNaturally
+  pure [label | (tid, label) <- toAbort, tid `notElem` finished]
 
 -- | Waits until no task is left alive, counting any that arrive while it
 -- waits. Nothing is cancelled: what is still running is left to
@@ -1651,7 +1759,7 @@ waitAll tasks = atomically $ do
 -- at the deadline. Nothing is cancelled, at the deadline or before it.
 -- Raced rather than polled, so a task ending just before the deadline
 -- still reports ended.
-waitAllUntil :: (MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => Tasks m -> Word64 -> m Bool
+waitAllUntil :: (MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => Tasks m -> Word64 -> m Bool
 waitAllUntil tasks deadline = do
   now <- getMonotonicTimeNSec
   if now >= deadline
@@ -1682,7 +1790,7 @@ runningTasks tasks = map snd . (.running) <$> readTVarIO tasks.tasksState
 -- stop landing mid-sleep ends it at once, so unlike the oracle's biased
 -- select either order at the same instant is benign — an extra pass only
 -- runs work already claimed.
-sleepUnlessStopping :: (MonadSTM m, MonadAsync m, MonadDelay m) => StrictTVar m Bool -> Int -> m Bool
+sleepUnlessStopping :: (MonadAsync m, MonadDelay m) => StrictTVar m Bool -> Int -> m Bool
 sleepUnlessStopping stopping micros = do
   already <- readTVarIO stopping
   if already
@@ -1708,10 +1816,21 @@ isStopping = readTVarIO
 -- dead thread for a later sweep to kill and count. Past 'closed' no
 -- registration is coming, so nothing is left behind; a repeat departure
 -- (a kill racing a normal exit) only settles the count.
-departed tasks tid = atomically $ do
+departed tasks tid natural = atomically $ do
   st <- readTVar tasks.tasksState
+  let settled = if natural then tid : st.finishedNaturally else st.finishedNaturally
   if tid `elem` map fst st.running
-    then writeTVar tasks.tasksState st { live = max 0 (st.live - 1), running = mapMaybe (\t -> if fst t == tid then Nothing else Just t) st.running }
+    then writeTVar tasks.tasksState st { live = max 0 (st.live - 1), running = mapMaybe (\t -> if fst t == tid then Nothing else Just t) st.running, finishedNaturally = settled }
     else if st.closed || tid `elem` st.orphaned
-      then writeTVar tasks.tasksState st { live = max 0 (st.live - 1) }
-      else writeTVar tasks.tasksState st { live = max 0 (st.live - 1), orphaned = tid : st.orphaned }
+      then writeTVar tasks.tasksState st { live = max 0 (st.live - 1), finishedNaturally = settled }
+      else writeTVar tasks.tasksState st { live = max 0 (st.live - 1), orphaned = tid : st.orphaned, finishedNaturally = settled }
+
+-- | Whether an action's outcome was the sweep's kill. A normal return or
+-- the body's own failure both count as finished, as the oracle's
+-- @is_finished@ does; only 'ThreadKilled' is a cancellation.
+wasKilled :: Either SomeException () -> Bool
+wasKilled = \case
+  Left err -> case fromException err :: Maybe AsyncException of
+    Just ThreadKilled -> True
+    _                 -> False
+  Right () -> False

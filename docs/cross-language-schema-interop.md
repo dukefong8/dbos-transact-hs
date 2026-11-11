@@ -20,13 +20,14 @@ Rust, Python and TypeScript because all three define it identically"*
 
 | SDK | ceiling | note |
 |---|---|---|
-| Rust | **121** | the corpus this port vendors; ADR-0007 |
-| Haskell (this port) | **121** | `rust-migrate/` vendors the Rust corpus |
-| Python | **123** | 122–123 add columns Rust has not created |
-| TypeScript | **123** | same shared numbers as Python |
+| Rust | **125** | the corpus this port vendors; ADR-0007 |
+| Haskell (this port) | **125** | `rust-migrate/` vendors the Rust corpus |
+| Python | **132** | its corpus continues past the Rust 125; the numbering contract covers 100–125 |
+| TypeScript | **130** | same contract; its corpus also continues past 125 |
 
 A database migrated by a *newer* SDK is still readable by the port for the
-columns the port uses; the gap is the 115–123 additions below.
+columns the port uses; the shared additions are 115–125, and anything past
+125 is outside the Rust corpus this port vendors.
 
 ## The wire format (values that must match exactly)
 
@@ -173,18 +174,23 @@ Inert for this port (verified: zero references in `src/` and `test/`):
 - `transaction_completion` / `datasource_outputs` — datasource bookkeeping,
   outside the system schema.
 
-**Migrations 122–123 (Python/TS only):**
+**Migrations 121–125 (shared with the Rust corpus):**
 
-- `operation_outputs.retention_timestamp` and later columns the Rust corpus
-  has not created. The 109–121 payload tables (`workflow_input` /
-  `workflow_output`) are shared: the port creates, writes, and reads them
-  exactly as the other SDKs do (ported 2026-10-03 from Rust #77, itself
-  verbatim from Python).
-- A shared database may therefore be at **123**. The port's corpus ceiling
-  stays 121 and it never migrates, but launch accepts a database **ahead** of
-  that ceiling (matching Rust's runner tolerance); a database behind 121 is
-  still refused. Verified 2026-10-19: the full suite passes at 123 and a
-  Python DBOS instance and a Haskell GHCi instance share the `dbos` schema.
+- 121 adds `notifications.consumed_by_function_id`; 122 adds the
+  unsettled-deadline partial index; 123 adds `workflow_status.creator_xid`;
+  124 and 125 add the `application_versions` timestamp and
+  `(application_name, version_timestamp DESC)` indexes. The 109–121 payload
+  tables (`workflow_input` / `workflow_output`) arrived earlier and are
+  shared too: the port creates, writes, and reads them exactly as the other
+  SDKs do (ported 2026-10-03 from Rust #77, itself verbatim from Python).
+- The port does not reference `creator_xid` or `consumed_by_function_id`
+  (Python/TS bookkeeping, listed under the divergences above), but its
+  corpus now *creates* both columns.
+- A shared database may be at **125** or ahead. The port's corpus ceiling is
+  125, it never migrates, and launch accepts a database **ahead** of that
+  ceiling (matching Rust's runner tolerance); a database behind 125 is
+  refused. Verified 2026-11-11: the full suite passes at 125 and
+  `make db-migrate` reports `125→125`.
 
 **Schedule contexts are not interoperable yet:** the port stores
 `ScheduleRecord.scheduleRecordContext` as raw JSON text, while Python's
@@ -195,7 +201,7 @@ format is ported.
 
 ## When this changes
 
-The migration-ceiling probe asserts the live database is at **at least 121**
+The migration-ceiling probe asserts the live database is at **at least 125**
 (`test/DBOS/SystemDB/PostgresTest.hs`); a higher value means a newer SDK
 migrated the shared database, and the pinned columns above must be re-verified
 against that corpus. Re-check by diffing `information_schema` between a database

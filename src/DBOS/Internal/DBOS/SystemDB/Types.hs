@@ -9,7 +9,7 @@ module DBOS.SystemDB.Types
     EncodedSendMessage (..),
     Topic (..),
     Timestamp (..),
-    Duration (..),
+    Duration,
     WorkflowId (..),
     WorkflowName (..),
     ExecutorId (..),
@@ -45,6 +45,9 @@ module DBOS.SystemDB.Types
     durationFromMs,
     durationFromSecs,
     durationAsMillis,
+    durationSeconds,
+    durationMicros,
+    scaleDuration,
     durationToMs,
     saturateTimeout,
     addTimeout,
@@ -75,7 +78,6 @@ module DBOS.SystemDB.Types
     OnExistingQueue (..),
     QueueRecord (..),
     QueueUpdate (..),
-    ResolvedLimits (..),
     Dequeued (..),
     DequeueStop (..),
     spansPartitions,
@@ -110,6 +112,8 @@ module DBOS.SystemDB.Types
     GetEventCaller (..),
     InitWorkflowCaller (..),
     WorkflowOwner (..),
+    DeleteCaller (..),
+    StepCaller (..),
     WorkflowInitResult (..),
     WrittenBy (..),
     newWorkflow,
@@ -179,8 +183,6 @@ module DBOS.SystemDB.Types
     newQueue,
     queueHasPartitionLimits,
     queueIsLegacyPartitioned,
-    queueResolvedLimits,
-    resolvedIsPartitioned,
     defaultQueueUpdate,
     isQueueUpdateEmpty,
     applyQueueUpdate,
@@ -211,9 +213,10 @@ module DBOS.SystemDB.Types
 where
 
 import DBOS.Prelude
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.Text qualified as Text
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, withObject, withScientific, withText, (.:), (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON (..), Object, ToJSON (..), Value (..), eitherDecodeStrict, object, withObject, withScientific, withText, (.:), (.:?), (.!=), (.=))
+import Data.Aeson.Key qualified as Key
 import Data.Aeson.Types (Parser)
 import Data.Set qualified as Set
 import DBOS.SystemDB.Error (Error (InvalidInput), invalidInput)
@@ -339,7 +342,7 @@ data NewWorkflow = NewWorkflow
     newWorkflowSerialization      :: Maybe Text,
     newWorkflowQueueName          :: Maybe Text,
     newWorkflowDeduplicationId    :: Maybe Text,
-    newWorkflowPriority           :: Int,
+    newWorkflowPriority           :: Int32,
     newWorkflowQueuePartitionKey  :: Maybe Text,
     newWorkflowDelay              :: Maybe Duration,
     newWorkflowIsDebounced        :: Bool,
@@ -404,6 +407,7 @@ validateNewWorkflow new
   where
     optionalFields =
       [ ("class_name", new.newWorkflowClassName),
+        ("config_name", new.newWorkflowConfigName),
         ("queue_name", new.newWorkflowQueueName),
         ("deduplication_id", new.newWorkflowDeduplicationId),
         ("queue_partition_key", new.newWorkflowQueuePartitionKey),
@@ -600,7 +604,7 @@ data WorkflowRecord = WorkflowRecord
     workflowRecordRequest            :: Maybe Text,
     workflowRecordAppName            :: Maybe Text,
     workflowRecordDeduplicationId    :: Maybe Text,
-    workflowRecordPriority           :: Int,
+    workflowRecordPriority           :: Int32,
     workflowRecordQueuePartitionKey  :: Maybe Text,
     workflowRecordRateLimited        :: Bool,
     workflowRecordScheduleName       :: Maybe Text,
@@ -726,7 +730,7 @@ data StepTiming = StepTiming
 -- two 'Maybe's: a limit with no window is unenforceable. Mirrors Rust
 -- @RateLimit@.
 data RateLimit = RateLimit
-  { rateLimitLimit  :: Int,
+  { rateLimitLimit  :: Int32,
     rateLimitPeriod :: Duration
   }
   deriving stock (Eq, Show)
@@ -1016,54 +1020,6 @@ queueHasPartitionLimits record =
 queueIsLegacyPartitioned :: QueueRecord -> Bool
 queueIsLegacyPartitioned record =
   record.queueRecordPartitionQueue && not (queueHasPartitionLimits record)
-
--- | Every limit on a queue, resolved to the scope it is actually enforced
--- at. Mirrors Rust @ResolvedLimits@.
-data ResolvedLimits = ResolvedLimits
-  { resolvedConcurrency                :: Maybe Int,
-    resolvedWorkerConcurrency          :: Maybe Int,
-    resolvedRateLimit                  :: Maybe RateLimit,
-    resolvedPartitionConcurrency       :: Maybe Int,
-    resolvedPartitionWorkerConcurrency :: Maybe Int,
-    resolvedPartitionRateLimit         :: Maybe RateLimit
-  }
-  deriving stock (Eq, Show)
-
--- | Whether the queue is partitioned, which any per-partition limit makes
--- it. Mirrors @ResolvedLimits::is_partitioned@.
-resolvedIsPartitioned :: ResolvedLimits -> Bool
-resolvedIsPartitioned limits =
-  case limits of
-    ResolvedLimits {resolvedPartitionConcurrency = Just _, resolvedPartitionWorkerConcurrency = _, resolvedPartitionRateLimit = _} -> True
-    ResolvedLimits {resolvedPartitionConcurrency = _, resolvedPartitionWorkerConcurrency = Just _, resolvedPartitionRateLimit = _} -> True
-    ResolvedLimits {resolvedPartitionConcurrency = _, resolvedPartitionWorkerConcurrency = _, resolvedPartitionRateLimit = Just _} -> True
-    _                                                                                                                              -> False
-
--- | This row's limits, each at the scope it is actually enforced at. The
--- deprecated flag re-scopes rather than adds: under it the queue-wide
--- limits move into the partition fields. Everything that enforces a limit
--- reads it through here, never off the columns. Mirrors
--- @QueueRecord::resolved_limits@.
-queueResolvedLimits :: QueueRecord -> ResolvedLimits
-queueResolvedLimits record
-  | queueIsLegacyPartitioned record =
-      ResolvedLimits
-        { resolvedConcurrency = Nothing,
-          resolvedWorkerConcurrency = Nothing,
-          resolvedRateLimit = Nothing,
-          resolvedPartitionConcurrency = record.queueRecordConcurrency,
-          resolvedPartitionWorkerConcurrency = record.queueRecordWorkerConcurrency,
-          resolvedPartitionRateLimit = record.queueRecordRateLimit
-        }
-  | otherwise =
-      ResolvedLimits
-        { resolvedConcurrency = record.queueRecordConcurrency,
-          resolvedWorkerConcurrency = record.queueRecordWorkerConcurrency,
-          resolvedRateLimit = record.queueRecordRateLimit,
-          resolvedPartitionConcurrency = record.queueRecordPartitionConcurrency,
-          resolvedPartitionWorkerConcurrency = record.queueRecordPartitionWorkerConcurrency,
-          resolvedPartitionRateLimit = record.queueRecordPartitionRateLimit
-        }
 
 -- | What one claim from a queue took, and why it took nothing if it did.
 -- Mirrors Rust @Dequeued@.
@@ -1442,7 +1398,7 @@ defaultScheduleFilter =
 -- in @function_id@ and @function_name@. Mirrors Rust @StepRecord@.
 data StepRecord = StepRecord
   { stepRecordWorkflowId      :: WorkflowId,
-    stepRecordStepId          :: Int,
+    stepRecordStepId          :: Int32,
     stepRecordStepName        :: Text,
     stepRecordOutput          :: Maybe Text,
     stepRecordError           :: Maybe Text,
@@ -1526,10 +1482,10 @@ data AwaitedStream
 -- @StreamRecord@.
 data StreamRecord = StreamRecord
   { streamKey           :: Text,
-    streamOffset        :: Int,
+    streamOffset        :: Int32,
     streamValue         :: Text,
     streamSerialization :: Maybe Text,
-    streamStepId        :: Int
+    streamStepId        :: Int32
   }
   deriving stock (Eq, Show)
 
@@ -1673,7 +1629,7 @@ data DebounceHolder = DebounceHolder
 data Fork = Fork
   { forkSourceId  :: Text,
     forkForkedId  :: Maybe Text,
-    forkStartStep :: Int
+    forkStartStep :: Int32
   }
   deriving stock (Eq, Show)
 
@@ -1753,7 +1709,7 @@ forkProblems fork
 data ForkPoint
   = ForkLastFailure
   | ForkLastStep
-  | ForkStep Int
+  | ForkStep Int32
   | ForkStepNamed Text
   deriving stock (Eq, Show)
 
@@ -1842,7 +1798,7 @@ forkOptionProblems options =
 -- unset queue means the internal queue with no partition — not the
 -- workflow's previous ones.
 data RewindOptions = RewindOptions
-  { rewindStartStep           :: Int,
+  { rewindStartStep           :: Int32,
     rewindAppVersion          :: Maybe Text,
     rewindQueueName           :: Maybe Text,
     rewindQueuePartitionKey   :: Maybe Text
@@ -1901,13 +1857,13 @@ rewindOptionProblems options =
 -- Reunites the fields so both channels validate identically; the
 -- system-database entry points (which take the cut separately, as the
 -- oracle's trait does) refuse through this before opening a transaction.
-sysRewindValidate :: Int -> SysRewindOptions -> Either Error ()
+sysRewindValidate :: Int32 -> SysRewindOptions -> Either Error ()
 sysRewindValidate cut sys = case rewindFieldsValid cut (sys.sysRewindAppVersion) (sys.sysRewindQueueName) (sys.sysRewindQueuePartitionKey) of
   Nothing -> Right ()
   Just (field, detail) -> Left (invalidInput field detail)
 
 -- | The shared rule body, positional over the wire fields.
-rewindFieldsValid :: Int -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe (Text, Text)
+rewindFieldsValid :: Int32 -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe (Text, Text)
 rewindFieldsValid cut version queue partition
   | cut < 0 = Just ("start_step", "must not be negative, got " <> showText cut)
   | otherwise = case find (maybe False Text.null . snd) optionals of
@@ -1956,6 +1912,28 @@ data InitWorkflowCaller = InitWorkflowCaller
 data WorkflowOwner = WorkflowOwner
   { ownerWorkflowId :: WorkflowId,
     ownerToken      :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | A delete's caller: the execution whose row is fenced and, when the
+-- call is being checkpointed, the step it records under. 'Nothing' step is
+-- the leaf rule's shape — the fence still applies, nothing is recorded.
+-- Mirrors the port's split of Rust's @StepCaller@ where only the owner and
+-- the optional step matter.
+data DeleteCaller = DeleteCaller
+  { deleteCallerOwner :: WorkflowOwner,
+    deleteCallerStep  :: Maybe Int
+  }
+  deriving stock (Eq, Show)
+
+-- | A management call's caller: the execution, the step it records under,
+-- and the token it owns its workflow by. The token fences the call on the
+-- calling execution, so a hand-off refuses it before the work. Mirrors
+-- Rust @StepCaller@ minus the codec (the port's management results use
+-- portable JSON).
+data StepCaller = StepCaller
+  { stepCallerOwner :: WorkflowOwner,
+    stepCallerStep  :: Int
   }
   deriving stock (Eq, Show)
 
@@ -2133,7 +2111,11 @@ databaseTimeRead epochMs = DatabaseTime epochMs <$> getMonotonicTimeNSec
 -- behind it.
 databaseTimeReaches :: DatabaseTime -> Timestamp -> Word64
 databaseTimeReaches clock instant =
-  clock.databaseTimeReadAt + fromIntegral (max 0 (timestampToEpochMs instant - clock.databaseTimeEpochMs)) * 1000000
+  saturatingAddW64
+    clock.databaseTimeReadAt
+    (saturatingMulW64 (fromIntegral aheadMs) 1000000)
+  where
+    aheadMs = max 0 (saturatingSubI64 (timestampToEpochMs instant) clock.databaseTimeEpochMs)
 
 -- | The database's clock now, as a reading carries it forward: the reading
 -- plus however long this process's monotonic clock has run since. Behind
@@ -2142,8 +2124,37 @@ databaseTimeReaches clock instant =
 databaseTimeNow :: MonadMonotonicTimeNSec m => DatabaseTime -> m Timestamp
 databaseTimeNow clock = do
   now <- getMonotonicTimeNSec
-  let elapsedMs = fromIntegral ((now - clock.databaseTimeReadAt) `div` 1000000) :: Int64
-  pure (timestampFromEpochMs (clock.databaseTimeEpochMs + elapsedMs))
+  -- A clock that started after the reading (a fresh IOSim timeline, a
+  -- monotonic counter reset) has run zero time, not 2^64 nanoseconds.
+  let elapsedNs = if now >= clock.databaseTimeReadAt then now - clock.databaseTimeReadAt else 0
+      elapsedMs = min (toInteger (maxBound :: Int64)) (toInteger elapsedNs `div` 1000000)
+  pure (timestampFromEpochMs (saturatingAddI64 clock.databaseTimeEpochMs (fromInteger elapsedMs)))
+
+-- | Saturating arithmetic for values read from the database or the
+-- monotonic clock. Rust uses the same bounds; a wrapping subtraction here
+-- would turn a skewed clock into a deadline in the wrong era.
+saturatingSubI64 :: Int64 -> Int64 -> Int64
+saturatingSubI64 left right =
+  clampI64 (toInteger left - toInteger right)
+
+saturatingAddI64 :: Int64 -> Int64 -> Int64
+saturatingAddI64 left right =
+  clampI64 (toInteger left + toInteger right)
+
+clampI64 :: Integer -> Int64
+clampI64 value =
+  fromInteger
+    (max (toInteger (minBound :: Int64)) (min (toInteger (maxBound :: Int64)) value))
+
+saturatingAddW64 :: Word64 -> Word64 -> Word64
+saturatingAddW64 left right
+  | maxBound - left < right = maxBound
+  | otherwise = left + right
+
+saturatingMulW64 :: Word64 -> Word64 -> Word64
+saturatingMulW64 left right
+  | right /= 0 && left > maxBound `div` right = maxBound
+  | otherwise = left * right
 
 -- | A recorded wake time, with the reading of the database's clock taken
 -- as it was recorded or read back. What @record_sleep@ answers with, on a
@@ -2218,7 +2229,8 @@ durationFromMs ms
 -- the caller's own rule ('validateNewWorkflow' refuses it, 'setWorkflowDelay'
 -- accepts it). Mirrors Rust @duration_to_ms@.
 durationToMs :: Text -> Duration -> Either Error Int64
-durationToMs field duration
+durationToMs field duration@(Duration seconds)
+  | seconds < 0 = Left (invalidInput field "must not be negative")
   | ms > toInteger (maxBound :: Int64) = Left (invalidInput field "must fit in milliseconds as a 64-bit integer")
   | otherwise = Right (fromInteger ms)
   where
@@ -2250,6 +2262,24 @@ durationFromSecs secs
 -- @u128@ is likewise wider than the storage.
 durationAsMillis :: Duration -> Integer
 durationAsMillis (Duration d) = floor (toRational (nominalDiffTimeToSeconds d) * 1000)
+
+-- | The duration as fractional seconds. The constructor is not exported, so
+-- modules that hand a duration to a seconds-valued column go through this
+-- rather than matching on the representation.
+durationSeconds :: Duration -> Double
+durationSeconds (Duration d) = realToFrac d
+
+-- | The duration as whole microseconds, truncating. The step and poll
+-- timers wait in microseconds.
+durationMicros :: Duration -> Int
+durationMicros (Duration d) = round (d * 1000000)
+
+-- | The duration multiplied by @factor@, or 'Nothing' where
+-- 'durationFromSecs' refuses the product. The constructor stays the only
+-- way a 'Double' becomes a 'Duration', so a negative or non-finite factor
+-- cannot build one.
+scaleDuration :: Double -> Duration -> Maybe Duration
+scaleDuration factor duration = durationFromSecs (durationSeconds duration * factor)
 
 -- | How long a system-database connection may sit idle inside an open
 -- transaction before the server ends its session, as
@@ -2371,11 +2401,12 @@ urlSetsIdleTimeout url pgOptions =
 -- @Timestamp::checked_add@: adding a timeout to a deadline is checked, and a
 -- deadline plus a deadline will not typecheck.
 addTimeout :: Timestamp -> Duration -> Maybe Timestamp
-addTimeout (Timestamp start) duration =
-  let total = toInteger start + durationAsMillis duration
-   in if total > toInteger (maxBound :: Int64)
-        then Nothing
-        else Just (Timestamp (fromInteger total))
+addTimeout (Timestamp start) duration@(Duration seconds)
+  | seconds < 0 = Nothing
+  | total > toInteger (maxBound :: Int64) = Nothing
+  | otherwise = Just (Timestamp (fromInteger total))
+  where
+    total = toInteger start + durationAsMillis duration
 
 -- | How long after @earlier@ this instant is, or 'Nothing' if it is not
 -- after it. Equal instants give @Just@ zero. Mirrors
@@ -2394,18 +2425,24 @@ timestampToIso8601 :: Timestamp -> Text
 timestampToIso8601 (Timestamp ms) =
   Text.pack (iso8601Show (posixSecondsToUTCTime (fromInteger (toInteger ms) / 1000)))
 
--- | Reads an ISO-8601 instant, or 'Nothing' if the text is not one. Via
--- 'iso8601ParseM', which already reads what the four implementations write
--- (Python's @+00:00@ offset, TypeScript's @.000Z@, Go's @RFC3339Nano@ and
--- Java's bare @Z@) and truncates sub-millisecond precision on the way to
--- whole milliseconds. One guard the library needs: it rolls hour 24 and
--- second 60 forward instead of reporting them, so the canonical clock
--- positions are range-checked up front and the library judges the rest.
--- A leap second (@:60@) stays rejected — POSIX milliseconds hold no distinct
--- leap instant.
+-- | Reads an ISO-8601 instant, or 'Nothing' if the text is not one. The
+-- text is first normalized to the one spelling 'iso8601ParseM' reads:
+-- Rust's @Rfc3339@ accepts any single separator byte at position 10 and a
+-- lowercase @z@, while the library wants @T@ and @Z@; Rust rejects a bare
+-- @±HH@ offset, which the library accepts, so the offset is required to be
+-- @±HH:MM@ here. The library also rolls hour 24 and second 60 forward, so
+-- the canonical clock positions are range-checked first.
+--
+-- A leap second (@:60@) stays rejected. Rust accepts it on June 30 and
+-- December 31 and maps it to the last nanosecond of the minute; the port
+-- deliberately keeps the older refusal because POSIX milliseconds hold no
+-- distinct leap instant. Recorded as a deviation rather than silently
+-- differing.
 timestampFromIso8601 :: Text -> Maybe Timestamp
 timestampFromIso8601 text = do
-  guard (validClockFields text)
+  normalized <- normalizeRfc3339 text
+  guard (validClockFields normalized)
+  let raw = Text.unpack normalized
   utc <- case iso8601ParseM raw of
     -- 'UTCTime' reads the @Z@ spelling but not numeric offsets;
     -- 'ZonedTime' reads the offsets but not @Z@. Together they read what
@@ -2416,13 +2453,37 @@ timestampFromIso8601 text = do
   guard (ms >= toInteger (minBound :: Int64) && ms <= toInteger (maxBound :: Int64))
   pure (Timestamp (fromInteger ms))
   where
-    raw = Text.unpack text
     validClockFields t = case Text.uncons (snd (Text.break (== 'T') t)) of
       Just ('T', clock) ->
         case (parseFixed 2 (Text.take 2 clock), parseFixed 2 (Text.take 2 (Text.drop 3 clock)), parseFixed 2 (Text.take 2 (Text.drop 6 clock))) of
           (Just hh, Just mm, Just ss) -> hh <= 23 && mm <= 59 && ss <= 59
           _                           -> True
       _ -> True
+
+-- | Normalize the RFC3339 spellings the oracle accepts. Position 10 is
+-- the date/time separator, a single byte Rust skips rather than requiring
+-- @T@; the zone is @Z@, @z@, or an offset of exactly @±HH:MM@. A bare
+-- @±HH@ is refused here because the library would otherwise accept it and
+-- shift the instant by an hour.
+normalizeRfc3339 :: Text -> Maybe Text
+normalizeRfc3339 text = do
+  guard (Text.length text > 10)
+  let body = Text.take 10 text <> "T" <> Text.drop 11 text
+      afterSeconds = Text.drop 19 body
+      (beforeZone, zone) = Text.break (\c -> c == '+' || c == '-') afterSeconds
+  if Text.null zone
+    then case Text.unsnoc beforeZone of
+      Just (fraction, 'Z') -> pure (Text.take 19 body <> fraction <> "Z")
+      Just (fraction, 'z') -> pure (Text.take 19 body <> fraction <> "Z")
+      _                    -> Nothing
+    else do
+      guard (Text.length zone == 6)
+      let clock = Text.drop 1 zone
+      guard (Text.length clock == 5 && Text.index clock 2 == ':')
+      hours <- parseFixed 2 (Text.take 2 clock)
+      minutes <- parseFixed 2 (Text.drop 3 clock)
+      guard (hours <= 23 && minutes <= 59)
+      pure body
 
 -- | An all-digit field of exactly the given width.
 parseFixed :: Int -> Text -> Maybe Integer
@@ -2441,9 +2502,11 @@ secondsDuration secs = Duration (fromIntegral secs)
 millisDuration :: Word64 -> Duration
 millisDuration ms = Duration (fromIntegral ms / 1000)
 
--- | Whether this duration spans no time. Mirrors @Duration::is_zero@.
+-- | Whether this duration spans no time. Mirrors @Duration::is_zero@:
+-- exact seconds, not the millisecond floor, so a positive sub-millisecond
+-- duration is non-zero and still stores as 0 ms.
 durationIsZero :: Duration -> Bool
-durationIsZero duration = durationAsMillis duration == 0
+durationIsZero (Duration duration) = duration == 0
 
 -- * JSON codec (the replay envelope)
 --
@@ -2485,7 +2548,10 @@ instance ToJSON Duration where
   toJSON duration = toJSON (durationAsMillis duration)
 
 instance FromJSON Duration where
-  parseJSON = withScientific "Duration" (\ms -> pure (Duration (fromIntegral (floor ms :: Integer) / 1000)))
+  parseJSON = withScientific "Duration" $ \ms ->
+    if ms < 0
+      then fail "a duration must not be negative"
+      else pure (Duration (fromIntegral (floor ms :: Integer) / 1000))
 
 instance ToJSON WorkflowRecord where
   toJSON record =
@@ -2533,46 +2599,51 @@ instance ToJSON WorkflowRecord where
 
 instance FromJSON WorkflowRecord where
   parseJSON = withObject "WorkflowRecord" $ \o ->
+    -- Only the two NOT NULL keys are required: a checkpoint is written by
+    -- one build and replayed by the next, so every other field must carry a
+    -- default the way the oracle's @#[serde(default)]@ does. A missing key
+    -- otherwise makes the workflow fail on its replay path and never get
+    -- past the step.
     WorkflowRecord
       <$> o .: "workflowRecordId"
       <*> o .: "workflowRecordStatus"
-      <*> o .: "workflowRecordName"
-      <*> o .: "workflowRecordClassName"
-      <*> o .: "workflowRecordConfigName"
-      <*> o .: "workflowRecordInput"
-      <*> o .: "workflowRecordOutput"
-      <*> o .: "workflowRecordError"
-      <*> o .: "workflowRecordSerialization"
-      <*> o .: "workflowRecordExecutorId"
-      <*> o .: "workflowRecordApplicationVersion"
-      <*> o .: "workflowRecordRecoveryAttempts"
-      <*> o .: "workflowRecordQueueName"
-      <*> o .: "workflowRecordCreatedAt"
-      <*> o .: "workflowRecordUpdatedAt"
-      <*> o .: "workflowRecordStartedAt"
-      <*> o .: "workflowRecordCompletedAt"
-      <*> o .: "workflowRecordForkedFrom"
-      <*> o .: "workflowRecordParentWorkflowId"
-      <*> o .: "workflowRecordWasForkedFrom"
-      <*> o .: "workflowRecordOwnerXid"
-      <*> o .: "workflowRecordCreatorXid"
-      <*> o .: "workflowRecordApplicationId"
-      <*> o .: "workflowRecordAuthenticatedUser"
-      <*> o .: "workflowRecordAuthenticatedRoles"
-      <*> o .: "workflowRecordAssumedRole"
-      <*> o .: "workflowRecordRequest"
-      <*> o .: "workflowRecordApplicationName"
-      <*> o .: "workflowRecordDeduplicationId"
-      <*> o .: "workflowRecordPriority"
-      <*> o .: "workflowRecordQueuePartitionKey"
-      <*> o .: "workflowRecordRateLimited"
-      <*> o .: "workflowRecordScheduleName"
-      <*> o .: "workflowRecordTimeout"
-      <*> o .: "workflowRecordDeadline"
-      <*> o .: "workflowRecordDelayUntil"
-      <*> o .: "workflowRecordDebounceDeadline"
-      <*> o .: "workflowRecordIsDebounced"
-      <*> o .: "workflowRecordAttributes"
+      <*> o .:? "workflowRecordName"
+      <*> o .:? "workflowRecordClassName"
+      <*> o .:? "workflowRecordConfigName"
+      <*> o .:? "workflowRecordInput"
+      <*> o .:? "workflowRecordOutput"
+      <*> o .:? "workflowRecordError"
+      <*> o .:? "workflowRecordSerialization"
+      <*> o .:? "workflowRecordExecutorId"
+      <*> o .:? "workflowRecordApplicationVersion"
+      <*> fieldWithDefault o "workflowRecordRecoveryAttempts" 0
+      <*> o .:? "workflowRecordQueueName"
+      <*> fieldWithDefault o "workflowRecordCreatedAt" (timestampFromEpochMs 0)
+      <*> fieldWithDefault o "workflowRecordUpdatedAt" (timestampFromEpochMs 0)
+      <*> o .:? "workflowRecordStartedAt"
+      <*> o .:? "workflowRecordCompletedAt"
+      <*> o .:? "workflowRecordForkedFrom"
+      <*> o .:? "workflowRecordParentWorkflowId"
+      <*> fieldWithDefault o "workflowRecordWasForkedFrom" False
+      <*> o .:? "workflowRecordOwnerXid"
+      <*> o .:? "workflowRecordCreatorXid"
+      <*> o .:? "workflowRecordApplicationId"
+      <*> o .:? "workflowRecordAuthenticatedUser"
+      <*> fieldWithDefault o "workflowRecordAuthenticatedRoles" []
+      <*> o .:? "workflowRecordAssumedRole"
+      <*> o .:? "workflowRecordRequest"
+      <*> o .:? "workflowRecordApplicationName"
+      <*> o .:? "workflowRecordDeduplicationId"
+      <*> fieldWithDefault o "workflowRecordPriority" 0
+      <*> o .:? "workflowRecordQueuePartitionKey"
+      <*> fieldWithDefault o "workflowRecordRateLimited" False
+      <*> o .:? "workflowRecordScheduleName"
+      <*> o .:? "workflowRecordTimeout"
+      <*> o .:? "workflowRecordDeadline"
+      <*> o .:? "workflowRecordDelayUntil"
+      <*> o .:? "workflowRecordDebounceDeadline"
+      <*> fieldWithDefault o "workflowRecordIsDebounced" False
+      <*> o .:? "workflowRecordAttributes"
 
 instance ToJSON StepRecord where
   toJSON record =
@@ -2590,13 +2661,24 @@ instance ToJSON StepRecord where
 
 instance FromJSON StepRecord where
   parseJSON = withObject "StepRecord" $ \o ->
+    -- The primary key and the name a replay matches on stay required:
+    -- defaulting them would let an unreadable record pass as step 0 of an
+    -- unnamed step. Everything else defaults, as the oracle's record does.
     StepRecord
       <$> o .: "stepRecordWorkflowId"
       <*> o .: "stepRecordStepId"
       <*> o .: "stepRecordStepName"
-      <*> o .: "stepRecordOutput"
-      <*> o .: "stepRecordError"
-      <*> o .: "stepRecordChildWorkflowId"
-      <*> o .: "stepRecordSerialization"
-      <*> o .: "stepRecordStartedAt"
-      <*> o .: "stepRecordCompletedAt"
+      <*> o .:? "stepRecordOutput"
+      <*> o .:? "stepRecordError"
+      <*> o .:? "stepRecordChildWorkflowId"
+      <*> o .:? "stepRecordSerialization"
+      <*> o .:? "stepRecordStartedAt"
+      <*> o .:? "stepRecordCompletedAt"
+
+-- | A field that may be absent from a checkpoint written by an older
+-- build. Aeson's @.:?@ also reads an explicit null as absent, so a null
+-- takes the default here where the oracle's serde default substitutes only
+-- a missing key. The difference is benign for a forward-compatible decoder;
+-- a strict-null variant would need a key-membership check first.
+fieldWithDefault :: FromJSON a => Object -> Text -> a -> Parser a
+fieldWithDefault object' key def = object' .:? Key.fromText key .!= def

@@ -3,6 +3,46 @@
 Date: 2026-11-10. Status: **open, unverified fixes**. No source files were changed to produce
 this document.
 
+## Implementation status and corrected fix directions (2026-11-10)
+
+The findings are being landed in `docs/oracle-validation-fix-todo.md`. Review of this
+document corrected several fix directions; where this section and a finding disagree,
+this section wins:
+
+- **F33** bounds raw transaction connections with a permit and runs the owner check
+  before the app transaction commits. It compares `owner_xid` with `ownerToken wctx`,
+  not `executor_id`, and the check is a separate system-database read, so "before
+  commit" is not one atomic transaction across a split `APP_DATABASE_URL`.
+- **F26** normalizes the text before `iso8601ParseM` rather than adding a stricter
+  pre-check. Rust 0.3.55 accepts lowercase `t`/`z`, a space, and any single separator
+  byte, and requires `±HH:MM`; the port now mirrors that. A leap second on a valid
+  leap date stays a recorded deviation, not a silent difference.
+- **F09** generates fork ids inside the sysdb method, before the retried transaction,
+  not at the Management entry point. The crash window closes only when the work and
+  the caller step share one transaction.
+- **F08** is fixed with an idempotent per-scope restore, not a `MonadMask` cascade:
+  the exception handler covers the depth increment and a `scopeRestored` flag stops a
+  post-restore kill from decrementing twice.
+- **F10** uses the `producers` `Tasks` registry as the worker registry. There is no
+  second map; `spawnTracked` registers a worker and its departure hook removes it.
+- **F18** puts the connection instance into `ExecutionIdentity` first, then wires
+  `isSameExecution` into `checkHere` and `sameStepBody`.
+- **F27** decided ADR-0038 option (b): keep the wire, record the typed cross-SDK
+  replay limitation in the ADR, and pin the `name: message` fallback.
+- **F05** keeps two required `WorkflowRecord` keys and three required `StepRecord`
+  keys (`workflowId`, `stepId`, `stepName`).
+- **F16**'s recordable examples are `InvalidInput`, `QueueDeduplicated`, and
+  `ConflictingWorkflow`; `UnexpectedStep` is control (`shouldRecord = False`).
+- **F37f** ports the named 64-bit `Int` fields to `Int32` as Rust spells them:
+  priority, step id, rate-limit limit, stream offset/step id, and fork/rewind
+  start steps, including the statement parameters they feed. Queue concurrency
+  stays `Int` on the public options but is refused past `maxBound :: Int32`
+  before the INT4 bind. An engine step id is the one remaining `Int`: it is
+  monotone, engine-allocated, and its typed-SQL INT4 write fails loudly rather
+  than truncating.
+- The batch table's `F38` reference does not exist. F21, F25, F34, and F35 batch
+  assignments are superseded by the per-finding statuses in the TODO.
+
 ## What this is
 
 A module-by-module behavioral validation of the Haskell DBOS port against the Rust oracle,
@@ -34,7 +74,7 @@ case, wire/interop, log shape, or latent structural drift.
   (`"DBOS.*"` wire names are data). After any sweep `grep -rn '"DBOS\.'` and compare against
   `sysdb/types.rs`.
 - **No schema migrations in Haskell.** SQL changes go in `Statements.hs` / `Backend.hs` only;
-  the schema is migrated by `make db-migrate` (Rust runner, ceiling 114).
+  the schema is migrated by `make db-migrate` (Rust runner, ceiling 125; it was 114 when these findings were written).
 - **Facade discipline.** Apps/tests/demos import through `DBOS.Transact` only. Every name
   imported into the facade stays exported.
 - **TDD loop.** After **every** edit run `make ghcid-wait` (never sleep-poll). The watcher runs

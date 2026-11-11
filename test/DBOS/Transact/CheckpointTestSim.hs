@@ -8,12 +8,13 @@
 -- proving placement never touches the tracer.
 module DBOS.Transact.CheckpointTestSim (tests) where
 
-import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Transact.Step (WorkflowEvent (..), replayStep)
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.Prelude
-import DBOS.SystemDB (WorkflowId (..))
+import DBOS.SystemDB (StepRecord (..), WorkflowId (..))
+import DBOS.Transact (EngineOnly, Error)
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
 import DBOS.Transact.Checkpoint (takenPlacement)
 import DBOS.Transact.CheckpointCases
@@ -44,7 +45,7 @@ import DBOS.Transact.CheckpointCases
 import DBOS.Transact.Connection (nextExecutionIdentity)
 import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState, testOwner)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool)
+import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 -- | One fixture per leaf over a fresh in-memory database: contexts build
 -- the same workflow state ("wf-1") as the live tree, and the
@@ -80,7 +81,23 @@ tests =
       simCase simCheckpointFixture "a client's call stays plain wherever it is driven" scenarioClientPlain checkClientPlain traceCheckpointSilent,
       simCase simCheckpointFixture "an in-step call polled in its own body stays plain" scenarioInStepOwnBody checkInStepOwnBody traceCheckpointSilent,
       simCase simCheckpointFixture "an in-step call carried to a sibling body is refused" scenarioSiblingRefused checkSiblingRefused traceCheckpointSilent,
-      simCase simCheckpointFixture "only outside has no workflow around it" scenarioPlacementNames checkPlacementNames traceCheckpointSilent
+      simCase simCheckpointFixture "only outside has no workflow around it" scenarioPlacementNames checkPlacementNames traceCheckpointSilent,
+      -- A NULL output column is the recorded unit result: the oracle
+      -- decodes it as JSON null rather than refusing the step.
+      testCase "a NULL-output step replays as JSON null" $ do
+        let record =
+              StepRecord
+                { stepRecordWorkflowId = WorkflowId "wf",
+                  stepRecordStepId = 0,
+                  stepRecordStepName = "unit",
+                  stepRecordOutput = Nothing,
+                  stepRecordError = Nothing,
+                  stepRecordChildWorkflowId = Nothing,
+                  stepRecordSerialization = Nothing,
+                  stepRecordStartedAt = Nothing,
+                  stepRecordCompletedAt = Nothing
+                }
+        (replayStep "unit" 0 record :: Either (Error EngineOnly) ()) @?= Right ()
     ]
 
 -- | Placement never touches the tracer: no 'WorkflowEvent' may be

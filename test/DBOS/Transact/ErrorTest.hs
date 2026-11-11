@@ -59,6 +59,13 @@ tests =
         failureOf (UnknownSerialization {name = "pickle"} :: Error CardDeclined)
           @?= FailureRecorded (encodeErrorText (UnknownSerialization {name = "pickle"} :: Error CardDeclined))
         controlOf failed @?= Nothing,
+      testCase "a Rust-shaped portable error keeps its name and message" $ do
+        -- ADR-0038: typed cross-SDK error replay is not a goal; a Rust
+        -- record's untagged data is reported as its name and message.
+        let rust =
+              "{\"name\":\"dbos::StepTimeout\",\"message\":\"the step s exceeded its 1000ms timeout\",\"data\":{\"step\":\"s\",\"timeout\":{\"secs\":1,\"nanos\":0}}}"
+        (decodeErrorText rust :: Either Text (Error CardDeclined))
+          @?= Left "dbos::StepTimeout: the step s exceeded its 1000ms timeout",
       testCase "an unknown tag lifts to the same engine variant" $ do
         fromSystemDB (SystemDB.UnknownSerialization {name = "pickle"})
           @?= (UnknownSerialization {name = "pickle"} :: Error CardDeclined)
@@ -73,6 +80,10 @@ tests =
           @?= (SystemDatabase (SystemDB.WorkflowConflict {workflowId = "wf-1"}) :: Error CardDeclined)
         displayException (WorkflowCancelled {workflowId = "wf-1"} :: Error CardDeclined) @?= "the workflow wf-1 was cancelled"
         assertBool "a top-level cancellation is control" (controlOf (WorkflowCancelled {workflowId = "wf-1"} :: Error CardDeclined) /= Nothing),
+      testCase "a deleted adopted workflow is a recorded not-found" $ do
+        let err = WorkflowNotFound {workflowId = "wf-gone"} :: Error CardDeclined
+        displayException err @?= "no workflow exists with id wf-gone"
+        controlOf err @?= Nothing,
       testCase "re-targeting recurses into the nested retry errors" $ do
         let err = MaxStepRetriesExceeded {step = "s", attempts = 2, errors = [ErrorApplication (CardDeclined {attempts = 1})]} :: Error CardDeclined
         fmap (const "boom") err
@@ -90,7 +101,8 @@ tests =
                 UnknownSerialization {name = "pickle"},
                 NotRegistered {workflow = newQualifiedWorkflowName "k"},
                 WorkflowClaimLost {workflowId = "wf"},
-                WorkflowFailed {workflowId = "wf", message = "bad"}
+                WorkflowFailed {workflowId = "wf", message = "bad"},
+                WorkflowNotFound {workflowId = "wf-gone"}
               ]
         mapM_ (\err -> decodeErrorText (encodeErrorText err) @?= Right err) renamed,
       testCase "a name with missing optional fields decodes like Rust" $ do

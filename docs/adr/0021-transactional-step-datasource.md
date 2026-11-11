@@ -22,7 +22,8 @@ body — branch-for-branch against Python `run_tx_step:871-933`:
   hand-written `Statement`s via `Tx.statement` (typedSql `Session`s do not compose).
 - `_StepAlreadyRecorded` stays internal → adopt the winner (`_replay_conflicting_step`)
   or raise the ownership conflict unrecorded when this execution lost.
-- Retriable errors (PG `40001`, class `40` → `Transient`) loop with backoff
+- Retriable errors (PG `40001` and `40P01` → `Transient`; the rest of class
+  `40` is permanent) loop with backoff
   (`MonadDelay`, so IOSim drives it); the conflict error is rethrown, never recorded.
 - In workflow the whole body runs under the step-id allocator (Python wraps `_body`
   in `run_step`); outside a workflow it runs plainly with no guarantees. In-step
@@ -134,3 +135,20 @@ the call's name (TS `runInternalStep`, `DBOSUnexpectedStepError`; Rust
 This is additive to Python's schema (which records transactions as steps and
 so has no such column); the port documents it here rather than diverging
 silently. Recorded 2026-10-02.
+
+Amended 2026-11-11 (oracle-validation residuals): the ownership fence now
+distinguishes a lost race from a fence it could not read. `ensureOwned` runs
+inside the application transaction after the checkpoint write; a successful
+read that finds another execution's token throws `TxConflict` and rolls the
+attempt back for the adopt path, while a failed read throws
+`TxOwnerUnreadable` with the system-database error. The old shape treated
+the failure as a loss, so a transient blip rolled back the checkpoint and
+the adopt path then found no winner (`missingWinner`) — a permanent answer
+to a retryable fault. The connection budget is per path: the hasql session
+pool and the raw per-transaction connections are each sized at
+`maxConnections`, because a transaction body may start or await a nested
+execution that transacts too, and a shared budget deadlocks the parent on
+the child (reproduced by the widget and outbox fixtures at
+`maxConnections = 2`). A deployment's server budget must therefore cover
+`2 * max_connections` plus nesting headroom; the sizing and the reason are
+recorded at `acquireAppDataSourceIn`.

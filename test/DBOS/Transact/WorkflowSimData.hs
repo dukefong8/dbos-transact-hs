@@ -65,8 +65,10 @@ mockWorkflow wid =
       workflowRecordForkedFrom = Nothing,
       workflowRecordParentWorkflowId = Nothing,
       workflowRecordWasForkedFrom = False,
-      workflowRecordOwnerXid = Nothing,
-      workflowRecordCreatorXid = Nothing,
+      -- The datasource fixture runs as 'testOwner', so its canned row must
+      -- carry that execution's token for the ownership check to pass.
+      workflowRecordOwnerXid = Just "test-owner",
+      workflowRecordCreatorXid = Just "test-owner",
       workflowRecordAppId = Nothing,
       workflowRecordAuthenticatedUser = Nothing,
       workflowRecordAuthenticatedRoles = [],
@@ -90,7 +92,7 @@ mockStep :: WorkflowId -> Int -> Text -> StepRecord
 mockStep wid stepId' name =
   StepRecord
     { stepRecordWorkflowId = wid,
-      stepRecordStepId = stepId',
+      stepRecordStepId = fromIntegral stepId',
       stepRecordStepName = name,
       stepRecordOutput = Just "\"mock\"",
       stepRecordError = Nothing,

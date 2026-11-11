@@ -110,7 +110,30 @@ import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.Prelude
-import DBOS.SystemDB (AwaitedOutcome (..), Change (..), Dequeued (..), Duration, NewQueue (..), NewWorkflow (..), OnExistingQueue (..), QueueName (..), QueueRecord (..), RateLimit (..), Timestamp, WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (..), WorkflowRecord (..), WorkflowStatus (..), defaultWorkflowFilter, internalQueueName, newQueue, newWorkflow, secondsDuration)
+import DBOS.SystemDB
+  ( AwaitedOutcome (..),
+    Change (..),
+    Dequeued (..),
+    Duration,
+    NewQueue (..),
+    NewWorkflow (..),
+    OnExistingQueue (..),
+    QueueName (..),
+    QueueRecord (..),
+    RateLimit (..),
+    Timestamp,
+    WorkflowFilter (..),
+    WorkflowId (..),
+    WorkflowIdReusePolicy (..),
+    WorkflowInitResult (..),
+    WorkflowRecord (..),
+    WorkflowStatus (..),
+    defaultWorkflowFilter,
+    internalQueueName,
+    newQueue,
+    newWorkflow,
+    secondsDuration
+  )
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact.Connection (Connection (connSysdb), runSystemDB)
 import DBOS.Transact.Dequeue (Polled (..), newRunning, pollOnce)
@@ -173,7 +196,7 @@ data QueueFixture m = QueueFixture
     qfDBOS :: DBOS m,
     qfLaunch :: m (Executor m),
     qfShutdown :: m (),
-    qfUpsertQueue :: NewQueue -> OnExistingQueue -> m (Either SysDB.Error Bool),
+    qfUpsertQueue :: NewQueue -> OnExistingQueue -> m (Either SysDB.Error (Bool, QueueRecord)),
     qfReadQueueRow :: Text -> m (Maybe QueueRecord),
     qfReadWorkflowRow :: WorkflowId -> m (Maybe WorkflowRecord),
     qfPlantAttempts :: WorkflowId -> Int64 -> m ()
@@ -216,14 +239,14 @@ checkQueueDefaults options = do
 checkLegacyRescope :: Queue -> Either String ()
 checkLegacyRescope receipt = do
   unless (receipt.name == "legacy") $ Left ("expected the legacy name, got: " <> show receipt.name)
-  unless (receipt.concurrency == Nothing) $ Left ("expected no fleet limit, got: " <> show receipt.concurrency)
-  unless (receipt.workerConcurrency == Nothing) $ Left ("expected no worker limit, got: " <> show receipt.workerConcurrency)
-  unless (receipt.partitionConcurrency == Just 8) $ Left ("expected the partition limit 8, got: " <> show receipt.partitionConcurrency)
-  unless (receipt.partitionWorkerConcurrency == Just 3) $ Left ("expected the partition worker limit 3, got: " <> show receipt.partitionWorkerConcurrency)
-  unless (queueIsPartitioned receipt) $ Left "expected the resolved receipt partitioned"
+  unless (receipt.concurrency == Just 8) $ Left ("expected the fleet limit 8, got: " <> show receipt.concurrency)
+  unless (receipt.workerConcurrency == Just 3) $ Left ("expected the worker limit 3, got: " <> show receipt.workerConcurrency)
+  unless (receipt.partitionConcurrency == Nothing) $ Left ("expected no partition limit, got: " <> show receipt.partitionConcurrency)
+  unless (receipt.partitionWorkerConcurrency == Nothing) $ Left ("expected no partition worker limit, got: " <> show receipt.partitionWorkerConcurrency)
+  unless (not (queueIsPartitioned receipt)) $ Left "expected the legacy flag to be ignored"
 
 -- | The internal queue refuses every write with the reservation named.
-scenarioReserved :: forall m. (MonadSTM m, MonadMVar m)
+scenarioReserved ::  forall m. (MonadSTM m, MonadMVar m)
                  => QueueFixture m -> m (Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue, Either (Error EngineOnly) ())
 scenarioReserved fx = do
   _ <- fx.qfLaunch
@@ -250,7 +273,7 @@ checkReserved (refusedRegister, refusedUpdate, refusedDelete) = do
     other -> Left ("expected a configuration refusal, got: " <> show other)
 
 -- | Registering before launch is refused, never stored.
-scenarioUnlaunched :: forall m. (MonadSTM m, MonadMVar m)
+scenarioUnlaunched ::  forall m. (MonadSTM m, MonadMVar m)
                    => QueueFixture m -> m (Either (Error EngineOnly) Queue)
 scenarioUnlaunched fx = do
   let queueName = "hs-l2-queue-" <> Text.take 12 fx.qfSuffix
@@ -267,13 +290,22 @@ checkUnlaunched refused = case refused of
 -- refusal must carry.
 incoherentTable :: [(Text, QueueOptions, Text)]
 incoherentTable =
-  [ ( "a negative fleet-wide limit",
+  [
+    ( "a negative fleet-wide limit",
       (defaultQueueOptions :: QueueOptions) {concurrency = Just (-1)},
       "`concurrency` must not be negative"
     ),
     ( "a negative per-process limit",
       (defaultQueueOptions :: QueueOptions) {workerConcurrency = Just (-1)},
       "`worker_concurrency` must not be negative"
+    ),
+    ( "a fleet-wide limit past the signed 32-bit column",
+      (defaultQueueOptions :: QueueOptions) {concurrency = Just 2147483648},
+      "must fit in a signed 32-bit integer"
+    ),
+    ( "a per-process limit past the signed 32-bit column",
+      (defaultQueueOptions :: QueueOptions) {workerConcurrency = Just 2147483648},
+      "must fit in a signed 32-bit integer"
     ),
     ( "a paused queue with a per-partition limit",
       (defaultQueueOptions :: QueueOptions) {concurrency = Just 0, partitionConcurrency = Just 1},
@@ -307,7 +339,7 @@ incoherentTable =
 
 -- | Every incoherent table entry is refused before it reaches the row,
 -- and the refused registration writes nothing.
-scenarioIncoherent :: forall m. (MonadSTM m, MonadMVar m)
+scenarioIncoherent ::  forall m. (MonadSTM m, MonadMVar m)
                    => QueueFixture m -> m ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue, Either (Error EngineOnly) Queue)
 scenarioIncoherent fx = do
   _ <- fx.qfLaunch
@@ -345,7 +377,7 @@ checkIncoherent (refused, stored, accepted) = do
 -- | An update is judged against the merged row: wrong beside the stored
 -- concurrency is refused and leaves the row untouched, while raising both
 -- together is coherent and accepted.
-scenarioUpdateCoherent :: forall m. (MonadSTM m, MonadMVar m)
+scenarioUpdateCoherent ::  forall m. (MonadSTM m, MonadMVar m)
                        => QueueFixture m -> m (Either (Error EngineOnly) Queue, Maybe Queue, Either (Error EngineOnly) Queue)
 scenarioUpdateCoherent fx = do
   _ <- fx.qfLaunch
@@ -378,7 +410,8 @@ checkUpdateCoherent (refused, stored, raised) = do
 -- alike stay honourable and are accepted.
 unhonourableTable :: [(Text, QueueOptions, Text)]
 unhonourableTable =
-  [ ( "a per-partition rate limit over no window",
+  [
+    ( "a per-partition rate limit over no window",
       defaultQueueOptions {partitionRateLimit = Just (RateLimit {rateLimitLimit = 1, rateLimitPeriod = secondsDuration 0})},
       "partition_rate_limit.period"
     ),
@@ -392,7 +425,7 @@ unhonourableTable =
     )
   ]
 
-scenarioUnhonourable :: forall m. (MonadSTM m, MonadMVar m)
+scenarioUnhonourable ::  forall m. (MonadSTM m, MonadMVar m)
                      => QueueFixture m -> m ([(Text, Text, Either (Error EngineOnly) Queue)], Maybe Queue, Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue)
 scenarioUnhonourable fx = do
   _ <- fx.qfLaunch
@@ -442,7 +475,7 @@ checkUnhonourable (refused, stored, accepted, acceptedFast) = do
 -- paused pair is checked: the sweep that starts the control queue's
 -- worker starts the paused queue's too, so the paused queue has been
 -- polled by then.
-scenarioPausedZero :: forall m. (MonadMVar m, MonadSTM m, MonadFork m, MonadMask m, MonadDelay m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioPausedZero :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                    => QueueFixture m -> m [(Text, Text, Maybe WorkflowStatus, Maybe WorkflowStatus, Maybe Int, Either String Int, Either String Int)]
 scenarioPausedZero fx = do
   let key = newQualifiedWorkflowName "paused"
@@ -538,7 +571,7 @@ checkPausedZero cases = mapM_ judge cases
         Left (Text.unpack name <> ": the raised queue did not run its workflows: " <> show (out0, out1))
 
 -- | A per-process limit may equal the fleet limit it serves.
-scenarioEqualLimits :: forall m. (MonadSTM m, MonadMVar m)
+scenarioEqualLimits ::  forall m. (MonadSTM m, MonadMVar m)
                     => QueueFixture m -> m (Either (Error EngineOnly) Queue)
 scenarioEqualLimits fx = do
   _ <- fx.qfLaunch
@@ -562,7 +595,7 @@ checkEqualLimits registered = case registered of
 -- | The fleet limit has two spellings, and setting both is refused (Python
 -- _queue.py): the explicit spelling alone and the deprecated alias alone
 -- each work, and each gets its own queue reporting the effective limit.
-scenarioConcurrencySpellings :: forall m. (MonadSTM m, MonadMVar m)
+scenarioConcurrencySpellings ::  forall m. (MonadSTM m, MonadMVar m)
                              => QueueFixture m -> m (Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue)
 scenarioConcurrencySpellings fx = do
   _ <- fx.qfLaunch
@@ -590,7 +623,7 @@ checkConcurrencySpellings (explicit, legacy, both) = do
 -- | Updates name one spelling at a time: migrating a queue from the alias
 -- to the explicit spelling succeeds, while a single change naming both
 -- spellings is refused and leaves the row untouched.
-scenarioConcurrencyUpdate :: forall m. (MonadSTM m, MonadMVar m)
+scenarioConcurrencyUpdate ::  forall m. (MonadSTM m, MonadMVar m)
                           => QueueFixture m -> m (Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue, Maybe Queue)
 scenarioConcurrencyUpdate fx = do
   _ <- fx.qfLaunch
@@ -619,7 +652,7 @@ checkConcurrencyUpdate (migrated, refused, stored) = do
 -- | A queue carries a rate limit, and both clear at runtime like every
 -- other limit. Registration and update always persist the legacy priority
 -- column as true, as the Python oracle does: there is no priority option.
-scenarioRateLimit :: forall m. (MonadSTM m, MonadMVar m)
+scenarioRateLimit ::  forall m. (MonadSTM m, MonadMVar m)
                   => QueueFixture m -> m (Either (Error EngineOnly) Queue, Maybe QueueRecord, Either (Error EngineOnly) Queue, Maybe QueueRecord)
 scenarioRateLimit fx = do
   _ <- fx.qfLaunch
@@ -656,7 +689,7 @@ checkRateLimit (registered, stored, updated, storedAgain) = do
 
 -- | Per-partition limits partition the queue — the derived flag is
 -- written — and clearing the last one un-partitions it, flag included.
-scenarioPartitionLimits :: forall m. (MonadSTM m, MonadMVar m)
+scenarioPartitionLimits ::  forall m. (MonadSTM m, MonadMVar m)
                         => QueueFixture m -> m (Either (Error EngineOnly) Queue, Maybe QueueRecord, Either (Error EngineOnly) Queue, Maybe QueueRecord)
 scenarioPartitionLimits fx = do
   _ <- fx.qfLaunch
@@ -695,7 +728,7 @@ checkPartitionLimits (registered, stored, updated, storedAgain) = do
     other -> Left ("expected the queue row, got: " <> show other)
 
 -- | Re-registering updates the stored limits in place.
-scenarioReregister :: forall m. (MonadSTM m, MonadMVar m)
+scenarioReregister ::  forall m. (MonadSTM m, MonadMVar m)
                    => QueueFixture m -> m (Either (Error EngineOnly) Queue, Maybe Queue)
 scenarioReregister fx = do
   _ <- fx.qfLaunch
@@ -717,33 +750,33 @@ checkReregister (second, stored) = do
 
 -- | A legacy partitioned row resolves through the facade, and adding a
 -- per-partition limit to it is refused as the deprecated flag.
-scenarioLegacyUpdateRefused :: forall m. (MonadSTM m, MonadMVar m)
-                            => QueueFixture m -> m (Either SysDB.Error Bool, Maybe Queue, Either (Error EngineOnly) Queue)
+scenarioLegacyUpdateRefused ::  forall m. (MonadSTM m, MonadMVar m)
+                            => QueueFixture m -> m (Either SysDB.Error (Bool, QueueRecord), Maybe Queue, Either (Error EngineOnly) Queue)
 scenarioLegacyUpdateRefused fx = do
   let queueName = "hs-l2-legacy-q-" <> Text.take 12 fx.qfSuffix
   written <- fx.qfUpsertQueue ((newQueue queueName) {newQueueConcurrency = Just 1, newQueueWorkerConcurrency = Just 1, newQueuePartitionQueue = True, newQueueAppName = Just fx.qfAppName}) UpdateExisting
   _ <- fx.qfLaunch
   stored <- queue fx.qfDBOS queueName >>= either (error . show) pure
-  refused <- updateQueue fx.qfDBOS queueName (defaultQueueChange {partitionConcurrency = Set (Just 4)})
+  refused <- updateQueue fx.qfDBOS queueName (defaultQueueChange {partitionConcurrency = Set (Just 1)})
   fx.qfShutdown
   pure (written, stored, refused)
 
-checkLegacyUpdateRefused :: (Either SysDB.Error Bool, Maybe Queue, Either (Error EngineOnly) Queue) -> Either String ()
+checkLegacyUpdateRefused :: (Either SysDB.Error (Bool, QueueRecord), Maybe Queue, Either (Error EngineOnly) Queue) -> Either String ()
 checkLegacyUpdateRefused (written, stored, refused) = do
   case written of
     Right _ -> Right ()
     other -> Left ("could not write the legacy row: " <> show other)
   case stored of
     Just receipt -> do
-      unless (queueIsPartitioned receipt) $ Left "expected the flag to re-scope the row"
-      unless (receipt.partitionConcurrency == Just 1) $ Left ("expected the partition limit 1, got: " <> show receipt.partitionConcurrency)
-      unless (receipt.partitionWorkerConcurrency == Just 1) $ Left ("expected the partition worker limit 1, got: " <> show receipt.partitionWorkerConcurrency)
-      unless (receipt.concurrency == Nothing) $ Left ("expected no fleet limit, got: " <> show receipt.concurrency)
+      unless (not (queueIsPartitioned receipt)) $ Left "expected the flag to be ignored"
+      unless (receipt.concurrency == Just 1) $ Left ("expected the fleet limit 1, got: " <> show receipt.concurrency)
+      unless (receipt.workerConcurrency == Just 1) $ Left ("expected the worker limit 1, got: " <> show receipt.workerConcurrency)
+      unless (receipt.partitionConcurrency == Nothing) $ Left ("expected no partition limit, got: " <> show receipt.partitionConcurrency)
     other -> Left ("expected the legacy row, got: " <> show other)
   case refused of
-    Left (ErrorConfig message) ->
-      unless ("deprecated `partition_queue`" `Text.isInfixOf` message) $ Left ("the refusal names no deprecated flag, got: " <> show message)
-    other -> Left ("expected the update refused, got: " <> show other)
+    Right receipt ->
+      unless (receipt.partitionConcurrency == Just 1) $ Left ("expected the partition limit 1, got: " <> show receipt.partitionConcurrency)
+    other -> Left ("expected the update to succeed, got: " <> show other)
 
 -- * Execution and row reads (slice 2)
 
@@ -773,7 +806,7 @@ decodedText outcome = case outcome of
 -- | A queue registers through the instance, runs an enqueued workflow to
 -- completion, replays it through a direct run, honours NeverUpdate, takes
 -- an update, lists, reads back, deletes, and the launch reads back.
-scenarioCrud :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioCrud :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
              => QueueFixture m -> m (Either (Error EngineOnly) Queue, WorkflowStatus, Either String Int, Either String Int, Either (Error EngineOnly) Queue, Either (Error EngineOnly) Queue, Bool, Maybe Queue, Either (Error EngineOnly) (), Bool)
 scenarioCrud fx = do
   let key = newQualifiedWorkflowName "queued"
@@ -848,7 +881,7 @@ checkCrud (registered, enqueued, awaited, replayed, leftAlone, updated, listed, 
 -- | A dequeue stamps the deadline the enqueue left open: the budget the
 -- start carried is the timeout on the row, and the row carries an expiry
 -- only after a worker takes it.
-scenarioDeadlineStamped :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioDeadlineStamped :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                         => QueueFixture m -> m (Either String Int, Maybe Duration, Maybe Timestamp)
 scenarioDeadlineStamped fx = do
   let key = newQualifiedWorkflowName "budgeted"
@@ -880,7 +913,7 @@ checkDeadlineStamped (result, stamped, deadline) = do
 
 -- | The same budget with no worker behind it records no deadline yet: the
 -- row stays as the enqueue left it.
-scenarioNoDeadlineYet :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioNoDeadlineYet :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                       => QueueFixture m -> m (Maybe Duration, Maybe Timestamp)
 scenarioNoDeadlineYet fx = do
   let key = newQualifiedWorkflowName "queued"
@@ -910,7 +943,7 @@ checkNoDeadlineYet (stamped, deadline) = do
 
 -- | The partition key and the priority the enqueue carried are recorded on
 -- the row.
-scenarioPartitionRow :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioPartitionRow :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                      => QueueFixture m -> m (Maybe WorkflowRecord)
 scenarioPartitionRow fx = do
   let key = newQualifiedWorkflowName "partitioned"
@@ -942,7 +975,7 @@ checkPartitionRow found = case found of
 
 -- | Without a priority the row stores the sentinel, and a delayed enqueue
 -- carries neither a deduplication id nor a partition key.
-scenarioSentinel :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioSentinel :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                  => QueueFixture m -> m (Maybe WorkflowRecord)
 scenarioSentinel fx = do
   let key = newQualifiedWorkflowName "plain"
@@ -973,7 +1006,7 @@ checkSentinel found = case found of
 
 -- | Past what the priority column holds, the enqueue is refused before
 -- anything is written: a bad enqueue costs a round trip, not a row.
-scenarioBadEnqueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioBadEnqueue :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                    => QueueFixture m -> m (Either (Error EngineOnly) Text, [WorkflowRecord])
 scenarioBadEnqueue fx = do
   let key = newQualifiedWorkflowName "checked"
@@ -1004,7 +1037,7 @@ checkBadEnqueue (started, listed) = do
 
 -- | A stored internal-queue row cannot redefine the internal queue: the
 -- engine ignores the stored limits and still runs the workflow.
-scenarioInternalRow :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioInternalRow :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                     => QueueFixture m -> m (Either String Int)
 scenarioInternalRow fx = do
   let key = newQualifiedWorkflowName "internal"
@@ -1029,7 +1062,7 @@ checkInternalRow result = unless (result == Right 9) $ Left ("expected the inter
 
 -- | A queue registered after the launch is still dequeued from: the
 -- supervisor picks up queues it did not start with.
-scenarioLateQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioLateQueue :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                   => QueueFixture m -> m (Either String Int)
 scenarioLateQueue fx = do
   let key = newQualifiedWorkflowName "late"
@@ -1051,7 +1084,7 @@ checkLateQueue result = unless (result == Right 1) $ Left ("expected the late qu
 -- | A queue this process never registered is still dequeued from: the
 -- worker set comes from the table, never from what this instance
 -- registered. The row is written straight to the database.
-scenarioGhostQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioGhostQueue :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                    => QueueFixture m -> m (Either String Int)
 scenarioGhostQueue fx = do
   let key = newQualifiedWorkflowName "ghost"
@@ -1076,7 +1109,7 @@ checkGhostQueue result = unless (result == Right 2) $ Left ("expected the ghost 
 -- parent's instant, and the child carries no timeout of its own. The child
 -- sits on a queue nothing polls: the assertion is about what the enqueue
 -- wrote, so the row has to stay as the enqueue left it.
-scenarioInheritedDeadline :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioInheritedDeadline :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                           => QueueFixture m -> m (Maybe Timestamp, Maybe Timestamp, Maybe Duration)
 scenarioInheritedDeadline fx = do
   let childKey = newQualifiedWorkflowName "child"
@@ -1133,7 +1166,7 @@ pollUntil remaining cond
 -- | A queue's worker concurrency runs that many at once in one process:
 -- three gated bodies, two running together, the peak never above the
 -- budget.
-scenarioWorkerConcurrency :: forall m. (MonadMVar m, MonadSTM m, MonadDelay m, MonadTime m)
+scenarioWorkerConcurrency ::  forall m. (MonadMVar m, MonadSTM m, MonadDelay m, MonadTime m)
                           => QueueFixture m -> m (Bool, Int)
 scenarioWorkerConcurrency fx = do
   gate <- newTVarIO False
@@ -1187,7 +1220,7 @@ checkWorkerConcurrency (reachedTwo, high) = do
 -- | Listen queues narrow what this process dequeues: the listened queue
 -- runs, the unlistened one stays ENQUEUED for a peer that does listen to
 -- it. The leaf staffs the supervisor with @Just [fastQueue]@.
-scenarioListenNarrow :: forall m. (MonadMVar m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioListenNarrow ::  forall m. (MonadMVar m, MonadTime m, MonadTimer m)
                      => QueueFixture m -> m (Either String Int, Maybe WorkflowStatus)
 scenarioListenNarrow fx = do
   let key = newQualifiedWorkflowName "either"
@@ -1227,7 +1260,7 @@ checkListenNarrow (fast, slow) = do
 -- | An empty listen set dequeues from no registered queue — but the
 -- internal queue still runs, proving the loop is alive. The leaf staffs
 -- the supervisor with @Just []@.
-scenarioListenNone :: forall m. (MonadMVar m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioListenNone ::  forall m. (MonadMVar m, MonadTime m, MonadTimer m)
                    => QueueFixture m -> m (Either String Int, Maybe WorkflowStatus)
 scenarioListenNone fx = do
   let key = newQualifiedWorkflowName "nothing"
@@ -1263,7 +1296,7 @@ checkListenNone (internal, ignored) = do
 
 -- | Listen queues never exclude the internal queue: under a filter naming
 -- only another queue, the internal workflow still runs.
-scenarioListenInternal :: forall m. (MonadMVar m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioListenInternal ::  forall m. (MonadMVar m, MonadTime m, MonadTimer m)
                        => QueueFixture m -> m (Either String Int)
 scenarioListenInternal fx = do
   let key = newQualifiedWorkflowName "internal"
@@ -1286,7 +1319,7 @@ checkListenInternal internal = unless (internal == Right 4) $ Left ("expected th
 
 -- | A delayed enqueue waits before it is dequeued: comfortably inside the
 -- delay and after several supervisor sweeps, no worker may have taken it.
-scenarioDelayed :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioDelayed :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                 => QueueFixture m -> m (Maybe WorkflowStatus, Int, Either String Int)
 scenarioDelayed fx = do
   ran <- newTVarIO (0 :: Int)
@@ -1321,7 +1354,7 @@ checkDelayed (status, early, finished) = do
 
 -- | A deduplication id admits one waiting workflow: the second enqueue is
 -- refused naming the key, the first runs, and finishing releases the key.
-scenarioDedup :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioDedup :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
               => QueueFixture m -> m (Text, Either String Int, Bool)
 scenarioDedup fx = do
   let key = newQualifiedWorkflowName "deduped"
@@ -1335,16 +1368,18 @@ scenarioDedup fx = do
   exec <- fx.qfLaunch
   _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
   -- Delayed, so the first workflow is still holding the key when the
-  -- second arrives.
-  let held = (queueRequestNew queueName) {deduplicationId = Just "order-42", delay = Just (secondsDuration 3)}
+  -- second arrives. The second names a different partition: the key is
+  -- held across the whole queue, as Rust's partitioned dedup index does.
+  let held = (queueRequestNew queueName) {deduplicationId = Just "order-42", partitionKey = Just "p1", delay = Just (secondsDuration 3)}
+      heldElsewhere = (queueRequestNew queueName) {deduplicationId = Just "order-42", partitionKey = Just "p2"}
   first <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId firstText), startQueue = Just held}) Nothing >>= orCrash
-  secondRun <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just held}) Nothing
+  secondRun <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId secondText), startQueue = Just heldElsewhere}) Nothing
   refusal <- case secondRun of
     Left err -> pure (Text.pack (displayException (err :: Error EngineOnly)))
     Right _ -> pure "a second workflow took a held deduplication key"
   firstResult <- handleResult first
   -- Finishing released the key, so the same one is enqueueable again.
-  third <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((queueRequestNew queueName) {deduplicationId = Just "order-42"})}) Nothing
+  third <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId thirdText), startQueue = Just ((queueRequestNew queueName) {deduplicationId = Just "order-42", partitionKey = Just "p1"})}) Nothing
   fx.qfShutdown
   pure (refusal, decodedInt firstResult, either (const False) (const True) third)
 
@@ -1357,7 +1392,7 @@ checkDedup (refusal, first, third) = do
 -- | ReturnExisting joins the workflow holding the key: the second handle
 -- resolves to the first workflow, writes no row of its own, and both
 -- handles read the one run.
-scenarioJoin :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioJoin :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
              => QueueFixture m -> m (Text, Text, Maybe WorkflowRecord, Either String Int, Either String Int, Text, Text)
 scenarioJoin fx = do
   let key = newQualifiedWorkflowName "deduped"
@@ -1394,7 +1429,7 @@ checkJoin (joined, firstId, loser, first, second, third, thirdId) = do
 -- | Priority orders the backlog lower first: enqueued before the queue is
 -- registered — no worker exists for a queue with no row — the backlog
 -- runs lowest-priority-number first once registration starts the worker.
-scenarioPriority :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioPriority :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                  => QueueFixture m -> m [Text]
 scenarioPriority fx = do
   order <- newTVarIO []
@@ -1425,7 +1460,7 @@ checkPriority ran = unless (ran == ["none", "high", "mid", "low"]) $ Left ("expe
 
 -- | Updating a queue changes what a running worker honours: one at a time
 -- to begin with, three abreast after the update lands.
-scenarioUpdateHonoured :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioUpdateHonoured :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                        => QueueFixture m -> m (Int, Int)
 scenarioUpdateHonoured fx = do
   active <- newTVarIO (0 :: Int)
@@ -1467,7 +1502,7 @@ checkUpdateHonoured (firstPeak, lastPeak) = do
 
 -- | A partitioned queue runs one workflow per key at a time while distinct
 -- keys overlap.
-scenarioPartitioned :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioPartitioned :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                     => QueueFixture m -> m (Int, Int)
 scenarioPartitioned fx = do
   live <- newTVarIO Map.empty
@@ -1514,7 +1549,7 @@ checkPartitioned (keyPeak, overlap) = do
   unless (overlap == 2) $ Left ("expected both keys overlapped, got: " <> show overlap)
 
 -- | A counted partitioned queue runs its limit per key.
-scenarioCountedPartitioned :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioCountedPartitioned :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                            => QueueFixture m -> m Int
 scenarioCountedPartitioned fx = do
   live <- newTVarIO Map.empty
@@ -1559,7 +1594,7 @@ checkCountedPartitioned keyPeak = unless (keyPeak == 2) $ Left ("expected two pe
 -- claim takes is skipped at dispatch and the walk's counts stand alone.
 -- Staging runs through the executor (after its launch registers the
 -- version) so the claims below read as the latest version.
-stageWalkBacklog :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+stageWalkBacklog ::  forall m. (MonadMVar m)
                  => Connection m -> Text -> NewQueue -> Int -> m QueueRecord
 stageWalkBacklog conn suffix new count = do
   _ <- runSystemDB conn.connSysdb (\db -> SysDB.upsertQueue db new UpdateExisting) >>= either (error . show) pure
@@ -1577,7 +1612,7 @@ stageWalkBacklog conn suffix new count = do
 -- | One row on @key@, claimed at once: a start from elsewhere that the
 -- walk must reckon with. The claim presents the launched version, which
 -- the launch registered as latest.
-claimWalkRow :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+claimWalkRow ::  forall m. (MonadMVar m)
              => Connection m -> Identity -> Text -> Text -> Text -> m Dequeued
 claimWalkRow conn identity queueName key suffix = do
   let wid = "walk-started-" <> key <> "-" <> suffix
@@ -1595,7 +1630,7 @@ claimWalkRow conn identity queueName key suffix = do
 -- | One poll of the named queue through the engine's own walk, with no
 -- supervisor polling behind it (the leaf listens to nothing), so the
 -- only claims are the walk's own.
-pollWalk :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+pollWalk :: forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
          => QueueFixture m -> Executor m -> QueueRecord -> m Polled
 pollWalk fx executor record = do
   running <- newRunning
@@ -1606,7 +1641,7 @@ pollWalk fx executor record = do
 -- | A walk with the queue-wide concurrency spent visits no partition: the
 -- room is read once up front, and none means the partitions are never
 -- even listed.
-scenarioWalkSpentConcurrency :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioWalkSpentConcurrency ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => QueueFixture m -> m Polled
 scenarioWalkSpentConcurrency fx = do
   executor <- fx.qfLaunch
@@ -1621,13 +1656,13 @@ scenarioWalkSpentConcurrency fx = do
 checkWalkSpentConcurrency :: Polled -> Either String ()
 checkWalkSpentConcurrency polled = do
   unless (polled.polledClaims == 0) $ Left ("expected no partition visited, got: " <> show polled.polledClaims)
-  unless (polled.polledContention == False) $ Left "expected no contention"
+  unless (polled.polledContention == Nothing) $ Left "expected no contention"
   unless (null polled.polledClaimed) $ Left ("expected nothing claimed, got: " <> show polled.polledClaimed)
 
 -- | A spent queue-wide rate limit ends the walk on its first claim: the
 -- pending count cannot see a rate limit, so one claim is paid to learn
 -- it, and since it spans every partition the rest are not visited.
-scenarioWalkSpentRateLimit :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioWalkSpentRateLimit ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                            => QueueFixture m -> m Polled
 scenarioWalkSpentRateLimit fx = do
   executor <- fx.qfLaunch
@@ -1648,7 +1683,7 @@ checkWalkSpentRateLimit polled = do
 -- | A full partition does not end the walk: its own limit says nothing
 -- about the next key, so the walk visits it and still claims every other
 -- partition.
-scenarioWalkFullPartition :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioWalkFullPartition ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                           => QueueFixture m -> m Polled
 scenarioWalkFullPartition fx = do
   executor <- fx.qfLaunch
@@ -1669,7 +1704,7 @@ checkWalkFullPartition polled = do
   unless (length polled.polledClaimed == 2) $ Left ("expected the two open partitions claimed, got: " <> show polled.polledClaimed)
 
 -- | The walk stops once the queue-wide room it read up front is claimed.
-scenarioWalkSpentRoom :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioWalkSpentRoom ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                       => QueueFixture m -> m Polled
 scenarioWalkSpentRoom fx = do
   executor <- fx.qfLaunch
@@ -1685,7 +1720,7 @@ checkWalkSpentRoom polled = do
 
 -- | Another application's queue is not dequeued from: several reconciles'
 -- worth of waiting, the body never runs and the row stays ENQUEUED.
-scenarioPeerQueue :: forall m. (MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioPeerQueue :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
                   => QueueFixture m -> m (Int, Maybe WorkflowStatus)
 scenarioPeerQueue fx = do
   ran <- newTVarIO (0 :: Int)
@@ -1719,7 +1754,7 @@ checkPeerQueue (early, status) = do
 -- while every row eventually succeeds. A gate holds the runs until the peak
 -- in-flight count pins the cap, and the settled statuses pin completion.
 -- Returns the peak in-flight count with the settled statuses.
-scenarioWorkerBudgetExhausted :: forall m. (MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioWorkerBudgetExhausted ::  forall m. (MonadAsync m, MonadMVar m, MonadTimer m)
                               => QueueFixture m -> m (Int, [WorkflowStatus], [Maybe WorkflowStatus])
 scenarioWorkerBudgetExhausted fx = do
   gate <- newTVarIO False
@@ -1771,7 +1806,7 @@ checkWorkerBudgetExhausted (high, waiting, statuses) = do
 -- it: the attempts are spent behind the queue's back, so the claim that
 -- takes the row counts one more and the dispatch parks it. Promoted from
 -- the live-only twin; each stack plants the attempts its own way.
-scenarioDispatchPark :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioDispatchPark ::  forall m. (MonadAsync m, MonadMask m, MonadMVar m, MonadTime m, MonadTimer m)
                      => QueueFixture m -> m (Int, Maybe WorkflowStatus, Int64)
 scenarioDispatchPark fx = do
   runs <- newTVarIO (0 :: Int)

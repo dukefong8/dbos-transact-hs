@@ -68,11 +68,58 @@ import Data.Aeson (Value (..), eitherDecodeStrict')
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Int (Int64)
 import Data.Text.Encoding (encodeUtf8)
+import Data.Int (Int32)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (AttributeUpdate (..), Fork (..), ForkCallRefusal (..), ForkOptions, ForkPoint (..), QueueName (..), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Timestamp, WorkflowDelay (..), WorkflowFilter, WorkflowId (..), WorkflowOwner, WorkflowRecord, VersionInfo (..), cancelStepName, deleteStepName, forkNew, forkOptionProblems, forkProblems, forkStepName, internalQueueName, listStepsStepName, listWorkflowsStepName, refuseInvalidForks, resumeStepName, rewindOptionProblems, rewindStepName, setWorkflowDelayStepName, sysRewindOptions, updateWorkflowAttributesStepName, validateAttributes, validateAttributeUpdate)
+import DBOS.SystemDB.Types
+  ( AttributeUpdate (..),
+    Fork (..),
+    ForkCallRefusal (..),
+    ForkOptions,
+    ForkPoint (..),
+    QueueName (..),
+    RewindOptions (..),
+    Serialization (..),
+    SerializedWorkflowValue (..),
+    StepRecord (..),
+    Timestamp,
+    WorkflowDelay (..),
+    WorkflowFilter,
+    WorkflowId (..),
+    DeleteCaller (..),
+    StepCaller (..),
+    WorkflowOwner,
+    WorkflowRecord,
+    VersionInfo (..),
+    cancelStepName,
+    deleteStepName,
+    forkNew,
+    forkOptionProblems,
+    forkProblems,
+    forkStepName,
+    internalQueueName,
+    listStepsStepName,
+    listWorkflowsStepName,
+    refuseInvalidForks,
+    resumeStepName,
+    rewindOptionProblems,
+    rewindStepName,
+    setWorkflowDelayStepName,
+    sysRewindOptions,
+    updateWorkflowAttributesStepName,
+    validateAttributes,
+    validateAttributeUpdate
+  )
+import DBOS.Transact.Checkpoint (StepDurability (..), checkHere, placeCall)
 import DBOS.Transact.Connection (Connection (..), runSystemDB, withConnection)
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), stepCtxStatus, workflowId, workflowOwner)
+import DBOS.Transact.Context
+  ( StepCtx (stepCtxWorkflow),
+    WorkflowCtx (wctxConn),
+    stepCtxBoundary,
+    stepCtxStatus,
+    workflowId,
+    workflowOwner
+  )
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, pollingHandle)
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
@@ -91,7 +138,7 @@ data ManagementEvent
   | WorkflowsResumed { managementRequested :: Int, managementResumed :: Int }
   | WorkflowForked { managementForkedId :: Text }
   | WorkflowsForked { managementForked :: Int }
-  | WorkflowRewound { managementRewoundId :: Text, managementRewindCut :: Int, managementRewindQueue :: Text }
+  | WorkflowRewound { managementRewoundId :: Text, managementRewindCut :: Int32, managementRewindQueue :: Text }
   | WorkflowsDeleted { managementDeleted :: Word64 }
   | WorkflowDelayMoveAsked { managementWorkflowId :: Text }
   | WorkflowAttributesReplaceAsked { managementWorkflowId :: Text }
@@ -139,29 +186,41 @@ cancelWorkflows conn workflowIds cancelChildren fromWorkflow = do
     -- Mirrors @cancel_all@: what moved, not what was asked for — silence
     -- when nothing moved.
     Right cancelled -> do
-      if null cancelled
-        then pure ()
-        else runTracer conn.connTracer (WorkflowsCancelled (length cancelled))
+      announceCancelled conn cancelled
       pure (Right cancelled)
 
--- | Cancels workflows as a step of the calling workflow: the call takes a
--- step id, runs once, and replays its recorded ids. Same leaf rule as
--- every in-workflow call — inside a step body it runs plainly.
-cancelWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+-- | Mirrors @cancel_all@: what moved, not what was asked for — silence
+-- when nothing moved, on both the fresh and the replayed path.
+announceCancelled :: Monad m => Connection m -> [WorkflowId] -> m ()
+announceCancelled conn cancelled =
+  unless (null cancelled) (runTracer conn.connTracer (WorkflowsCancelled (length cancelled)))
+
+-- | Cancels workflows as a step of the calling workflow: the caller check,
+-- the refusal, and the cascade share the backend's transaction, so a crash
+-- cannot cancel a tree without its checkpoint. Same leaf rule as every
+-- in-workflow call — inside a step body it runs plainly.
+cancelWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
-cancelWorkflowsInWorkflow wctx workflowIds cancelChildren =
-  runStepWith
-    stepOptionsDefault
-    wctx
-    cancelStepName
-    (\_ -> cancelWorkflows conn workflowIds cancelChildren (Just (workflowId wctx)))
+cancelWorkflowsInWorkflow wctx workflowIds cancelChildren = do
+  placement <- placeCall wctx
+  case checkHere placement cancelStepName (Just (stepCtxBoundary wctx)) of
+    Left err -> pure (Left err)
+    Right DurabilityPlain -> cancelWorkflows conn workflowIds cancelChildren (Just (workflowId wctx))
+    Right (DurabilityRecorded wctx' stepId') -> do
+      let caller = Just (StepCaller (workflowOwner wctx') stepId')
+      result <- withConnection conn (\db -> SystemDB.cancelWorkflows db workflowIds cancelChildren caller (Just (workflowId wctx')))
+      case result of
+        Left err -> pure (Left err)
+        Right cancelled -> do
+          announceCancelled conn cancelled
+          pure (Right cancelled)
   where
     conn = wctx.wctxConn
 
 -- | Cancels one workflow as a step of the calling workflow: the singular
 -- of 'cancelWorkflowsInWorkflow', for a body that manages one row.
 -- Mirrors Rust @cancel_workflow@.
-cancelWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+cancelWorkflowInWorkflow :: (MonadDelay m, MonadAsync m)
                          => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 cancelWorkflowInWorkflow wctx workflowId = void <$> cancelWorkflowsInWorkflow wctx [workflowId] False
 
@@ -175,26 +234,42 @@ resumeWorkflows conn workflowIds queueName fromWorkflow = do
     -- had already finished still counts as requested, so this announces
     -- unconditionally.
     Right resumed -> do
-      runTracer conn.connTracer (WorkflowsResumed (length workflowIds) (length resumed))
+      announceResume conn workflowIds resumed
       pure (Right resumed)
 
--- | Resumes workflows as a step of the calling workflow. Same leaf rule
--- as every in-workflow call.
-resumeWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+-- | Mirrors @resume_all@: what moved against what was asked — an id that
+-- had already finished still counts as requested, so this announces
+-- unconditionally on both the fresh and the replayed path.
+announceResume :: Monad m => Connection m -> [WorkflowId] -> [WorkflowId] -> m ()
+announceResume conn requested resumed =
+  runTracer conn.connTracer (WorkflowsResumed (length requested) (length resumed))
+
+-- | Resumes workflows as a step of the calling workflow: the caller
+-- check, the existence read, and the resume write share the backend's
+-- transaction, so a crash cannot resume without its checkpoint. Same leaf
+-- rule as every in-workflow call.
+resumeWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
-resumeWorkflowsInWorkflow wctx workflowIds queueName =
-  runStepWith
-    stepOptionsDefault
-    wctx
-    resumeStepName
-    (\_ -> resumeWorkflows conn workflowIds queueName (Just (workflowId wctx)))
+resumeWorkflowsInWorkflow wctx workflowIds queueName = do
+  placement <- placeCall wctx
+  case checkHere placement resumeStepName (Just (stepCtxBoundary wctx)) of
+    Left err -> pure (Left err)
+    Right DurabilityPlain -> resumeWorkflows conn workflowIds queueName (Just (workflowId wctx))
+    Right (DurabilityRecorded wctx' stepId') -> do
+      let caller = Just (StepCaller (workflowOwner wctx') stepId')
+      result <- withConnection conn (\db -> SystemDB.resumeWorkflows db workflowIds queueName caller (Just (workflowId wctx')))
+      case result of
+        Left err -> pure (Left err)
+        Right resumed -> do
+          announceResume conn workflowIds resumed
+          pure (Right resumed)
   where
     conn = wctx.wctxConn
 
 -- | Resumes one workflow as a step of the calling workflow and hands back
 -- its handle: the singular of 'resumeWorkflowsInWorkflow'. Mirrors Rust
 -- @resume_workflow@.
-resumeWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+resumeWorkflowInWorkflow :: (MonadDelay m, MonadAsync m)
                          => WorkflowCtx exec m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 resumeWorkflowInWorkflow wctx workflowId queue = do
   resumed <- resumeWorkflowsInWorkflow wctx [workflowId] queue
@@ -209,10 +284,10 @@ deleteWorkflows conn workflowIds deleteChildren =
 
 -- | Deletes workflows naming the calling workflow's owner, so the backend
 -- refuses a target set containing the caller itself and fences the removal
--- on the caller's token. The engine's in-workflow entry passes the owner of
--- the context the call was checkpointed under.
+-- on the caller's token. The optional step is the engine's durable
+-- checkpoint; the in-step leaf passes only the owner.
 deleteWorkflowsWithCaller :: Monad m
-                          => Connection m -> [WorkflowId] -> Bool -> Maybe WorkflowOwner -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
+                          => Connection m -> [WorkflowId] -> Bool -> Maybe DeleteCaller -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflowsWithCaller conn workflowIds deleteChildren owner = do
   result <- withConnection conn (\db -> SystemDB.deleteWorkflows db workflowIds deleteChildren owner)
   case result of
@@ -230,29 +305,30 @@ deleteWorkflowsWithCaller conn workflowIds deleteChildren owner = do
 -- like every system-database failure — so a replay refuses again rather
 -- than replaying a delete. Inside a step body the call runs plainly with
 -- no caller, by the leaf rule.
-deleteWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+deleteWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
-deleteWorkflowsInWorkflow wctx workflowIds deleteChildren =
-  runStepWith
-    stepOptionsDefault
-    wctx
-    deleteStepName
-    ( \sctx -> case stepCtxStatus sctx of
-        Just _ ->
-          deleteWorkflowsWithCaller
-            conn
-            workflowIds
-            deleteChildren
-            (Just (workflowOwner sctx.stepCtxWorkflow))
-        Nothing -> deleteWorkflows conn workflowIds deleteChildren
-    )
+deleteWorkflowsInWorkflow wctx workflowIds deleteChildren = do
+  placement <- placeCall wctx
+  case checkHere placement deleteStepName (Just (stepCtxBoundary wctx)) of
+    Left err -> pure (Left err)
+    Right DurabilityPlain ->
+      -- The leaf rule: the fence still applies, nothing is recorded.
+      deleteWorkflowsWithCaller conn workflowIds deleteChildren (Just (DeleteCaller (workflowOwner wctx) Nothing))
+    Right (DurabilityRecorded wctx' stepId') -> do
+      let caller = DeleteCaller (workflowOwner wctx') (Just stepId')
+      result <- withConnection conn (\db -> SystemDB.deleteWorkflows db workflowIds deleteChildren (Just caller))
+      case result of
+        Left err -> pure (Left err)
+        Right deleted -> do
+          unless (deleted == 0) (runTracer conn.connTracer (WorkflowsDeleted deleted))
+          pure (Right deleted)
   where
     conn = wctx.wctxConn
 
 -- | Deletes one workflow as a step of the calling workflow, children
 -- skipped: the singular of 'deleteWorkflowsInWorkflow'. Mirrors Rust
 -- @delete_workflow@.
-deleteWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+deleteWorkflowInWorkflow :: (MonadDelay m, MonadAsync m)
                          => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 deleteWorkflowInWorkflow wctx workflowId = void <$> deleteWorkflowsInWorkflow wctx [workflowId] False
 
@@ -312,17 +388,28 @@ checkForkFromArgs workflowIds point options = case perFork of
 -- under a second id. Arguments are refused before the step id is taken,
 -- so a refused call spends nothing. Same leaf rule as every in-workflow
 -- call.
-forkWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+forkWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                         => WorkflowCtx exec m -> [Fork] -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkWorkflowsInWorkflow wctx forks options =
   case checkForkArgs forks options of
     Left err -> pure (Left err)
-    Right () ->
-      runStepWith
-        stepOptionsDefault
-        wctx
-        forkStepName
-        (\_ -> forkWorkflows conn forks options)
+    Right () -> do
+      placement <- placeCall wctx
+      case checkHere placement forkStepName (Just (stepCtxBoundary wctx)) of
+        Left err -> pure (Left err)
+        -- Inside a step body the leaf rule runs the call plainly: no id, -- no record.
+        Right DurabilityPlain -> forkWorkflows conn forks options
+        -- The caller step and the fork rows share the backend's
+        -- transaction, so a crash cannot leave forks without their
+        -- checkpoint. The ids are minted once, before that transaction.
+        Right (DurabilityRecorded wctx' stepId') -> do
+          let caller = Just (StepCaller (workflowOwner wctx') stepId')
+          result <- withConnection conn (\db -> SystemDB.forkWorkflows db forks options caller)
+          case result of
+            Left err -> pure (Left err)
+            Right forked -> do
+              announceFork conn forked
+              pure (Right forked)
   where
     conn = wctx.wctxConn
 
@@ -330,7 +417,7 @@ forkWorkflowsInWorkflow wctx forks options =
 -- the new workflow's handle. @Nothing@ forks from the top, @Just point@
 -- from a chosen step. The singular of the fork bulk forms. Mirrors Rust
 -- @fork_workflow@.
-forkWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+forkWorkflowInWorkflow :: (MonadDelay m, MonadAsync m)
                        => WorkflowCtx exec m -> WorkflowId -> Maybe ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 forkWorkflowInWorkflow wctx workflowId from options = do
   forked <- case from of
@@ -394,24 +481,32 @@ rewindWorkflows conn target options = case checkRewindOptions options of
         runTracer conn.connTracer (WorkflowRewound widText options.rewindStartStep queue)
         pure (Right ())
 
--- | Rewinds a workflow as a step of the calling workflow: the engine
--- step owns the checkpoint, so the system-database call runs without a
--- caller of its own — recording in both places would collide on the step
--- id, the same reason forks pass no caller. A recovered caller replays
--- the recorded step rather than rewinding the target a second time.
--- Arguments are refused before the step id is taken. Same leaf rule as
--- every in-workflow call.
-rewindWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+-- | Rewinds a workflow as a step of the calling workflow: the caller
+-- check, the rewind, and the caller's step record share the backend's
+-- transaction, so a crash cannot rewind the target without its
+-- checkpoint. A recovered caller replays the recorded step rather than
+-- rewinding a second time. Arguments are refused before the step id is
+-- taken. Same leaf rule as every in-workflow call.
+rewindWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 rewindWorkflowsInWorkflow wctx target options =
   case checkRewindOptions options of
     Left err -> pure (Left err)
-    Right () ->
-      runStepWith
-        stepOptionsDefault
-        wctx
-        rewindStepName
-        (\_ -> rewindWorkflows conn target options)
+    Right () -> do
+      placement <- placeCall wctx
+      case checkHere placement rewindStepName (Just (stepCtxBoundary wctx)) of
+        Left err -> pure (Left err)
+        Right DurabilityPlain -> rewindWorkflows conn target options
+        Right (DurabilityRecorded wctx' stepId') -> do
+          let caller = Just (StepCaller (workflowOwner wctx') stepId')
+          result <- withConnection conn (\db -> SystemDB.rewindWorkflow db target options.rewindStartStep (sysRewindOptions options) caller)
+          case result of
+            Left err -> pure (Left err)
+            Right () -> do
+              let WorkflowId widText = target
+                  QueueName queue = fromMaybe internalQueueName (QueueName <$> options.rewindQueueName)
+              runTracer conn.connTracer (WorkflowRewound widText options.rewindStartStep queue)
+              pure (Right ())
   where
     conn = wctx.wctxConn
 
@@ -426,7 +521,7 @@ retrieveWorkflowInWorkflow wctx (WorkflowId workflowText) =
 -- | Rewinds one workflow as a step of the calling workflow and hands back
 -- its handle: the singular of 'rewindWorkflowsInWorkflow'. Mirrors Rust
 -- @rewind_workflow@.
-rewindWorkflowInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+rewindWorkflowInWorkflow :: (MonadDelay m, MonadAsync m)
                          => WorkflowCtx exec m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (WorkflowHandle m e))
 rewindWorkflowInWorkflow wctx workflowId options = do
   rewound <- rewindWorkflowsInWorkflow wctx workflowId options
@@ -437,17 +532,24 @@ rewindWorkflowInWorkflow wctx workflowId options = do
 -- | Forks from a point as a step of the calling workflow. Arguments are
 -- refused before the step id is taken. Same leaf rule as every
 -- in-workflow call.
-forkFromInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+forkFromInWorkflow :: (MonadDelay m, MonadAsync m)
                    => WorkflowCtx exec m -> [WorkflowId] -> ForkPoint -> ForkOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 forkFromInWorkflow wctx workflowIds point options =
   case checkForkFromArgs workflowIds point options of
     Left err -> pure (Left err)
-    Right () ->
-      runStepWith
-        stepOptionsDefault
-        wctx
-        forkStepName
-        (\_ -> forkFrom conn workflowIds point options)
+    Right () -> do
+      placement <- placeCall wctx
+      case checkHere placement forkStepName (Just (stepCtxBoundary wctx)) of
+        Left err -> pure (Left err)
+        Right DurabilityPlain -> forkFrom conn workflowIds point options
+        Right (DurabilityRecorded wctx' stepId') -> do
+          let caller = Just (StepCaller (workflowOwner wctx') stepId')
+          result <- withConnection conn (\db -> SystemDB.forkFrom db workflowIds point options caller)
+          case result of
+            Left err -> pure (Left err)
+            Right forked -> do
+              announceFork conn forked
+              pure (Right forked)
   where
     conn = wctx.wctxConn
 
@@ -684,13 +786,7 @@ data StepInfo = StepInfo
 stepInfoFromRecord :: ListWorkflowStepsOptions -> StepRecord -> StepInfo
 stepInfoFromRecord options record =
   StepInfo
-    { stepInfoWorkflowId = record.stepRecordWorkflowId,
-      stepInfoId = record.stepRecordStepId,
-      stepInfoName = record.stepRecordStepName,
-      stepInfoOutcome = outcome,
-      stepInfoChild = record.stepRecordChildWorkflowId,
-      stepInfoStartedAt = record.stepRecordStartedAt,
-      stepInfoCompletedAt = record.stepRecordCompletedAt
+    { stepInfoWorkflowId = record.stepRecordWorkflowId, stepInfoId = fromIntegral record.stepRecordStepId, stepInfoName = record.stepRecordStepName, stepInfoOutcome = outcome, stepInfoChild = record.stepRecordChildWorkflowId, stepInfoStartedAt = record.stepRecordStartedAt, stepInfoCompletedAt = record.stepRecordCompletedAt
     }
   where
     outcome

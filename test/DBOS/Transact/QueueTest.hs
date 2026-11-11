@@ -192,7 +192,7 @@ tests =
   testGroup
     "Workflow queues"
     [ leaf getBackend (const Nothing) "queue options default to no limits and poll once a second" scenarioQueueDefaults checkQueueDefaults,
-      leaf getBackend (const Nothing) "a legacy-partitioned row re-scopes its limits" scenarioLegacyRescope checkLegacyRescope,
+      leaf getBackend (const Nothing) "a legacy-partitioned row keeps its column scopes" scenarioLegacyRescope checkLegacyRescope,
       leaf getBackend (const Nothing) "a registered queue updates, lists and deletes through the instance" scenarioCrud checkCrud,
       -- IO only: the fixture rewrites the row through raw SQL into the
       -- pre-109 shape (input moved into the status column, payload-table
@@ -298,7 +298,7 @@ tests =
       leaf getBackend (const Nothing) "a per-process limit may equal the fleet limit" scenarioEqualLimits checkEqualLimits,
       leaf getBackend (const Nothing) "the fleet limit has two spellings, setting both is refused" scenarioConcurrencySpellings checkConcurrencySpellings,
       leaf getBackend (const Nothing) "an update names one spelling at a time" scenarioConcurrencyUpdate checkConcurrencyUpdate,
-      leaf getBackend (const Nothing) "adding a per-partition limit to a legacy row is refused" scenarioLegacyUpdateRefused checkLegacyUpdateRefused,
+      leaf getBackend (const Nothing) "adding a per-partition limit to a legacy row succeeds" scenarioLegacyUpdateRefused checkLegacyUpdateRefused,
       leaf getBackend (const Nothing) "a queue registered after launch is dequeued from" scenarioLateQueue checkLateQueue,
       leaf getBackend (const Nothing) "a queue this process never registered is dequeued from" scenarioGhostQueue checkGhostQueue,
       leaf getBackend (const Nothing) "an inherited deadline reaches a queued child" scenarioInheritedDeadline checkInheritedDeadline,

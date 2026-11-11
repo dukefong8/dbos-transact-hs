@@ -51,6 +51,8 @@ import DBOS.SystemDB
     Topic (..),
     VersionInfo (..),
     WorkflowOwner (..),
+    StepCaller (..),
+    DeleteCaller (..),
     WrittenBy (..),
     WorkflowDelay (..),
     WorkflowFilter (..),
@@ -268,7 +270,7 @@ versionTests =
                   modifyTVar
                     mem.memSteps
                     ( Map.insert
-                        ("wf-gap", step)
+                        ("wf-gap", fromIntegral step)
                         StepRecord
                           { stepRecordWorkflowId = WorkflowId "wf-gap",
                             stepRecordStepId = step,
@@ -302,7 +304,7 @@ queueTests =
   testGroup
     "Queues"
     [ testCase "upsertQueue reports a write" $ do
-        run (upsertQueue backend (newQueue "q") UpdateExisting) @?= Right True,
+        fmap fst (run (upsertQueue backend (newQueue "q") UpdateExisting)) @?= Right True,
       testCase "startQueuedWorkflows answers a claimed id" $ do
         fmap (.dequeuedWorkflowIds) (run (startQueuedWorkflows backend mockQueueRecord "exec" "0.0.0" Nothing 0 0 "tok-mock")) @?= Right [WorkflowId "mock-queued"],
       testCase "getQueuePartitions answers a partition" $ do
@@ -476,6 +478,27 @@ memTests =
           Left (ConflictingWorkflow {}) -> pure ()
           other -> fail ("expected ConflictingWorkflow, got: " <> show other)
         kept @?= Just "{\"n\":2}",
+      -- Twin of the live debounce fence: a caller whose token is not the
+      -- row's owner refuses before the bounce.
+      testCase "a bounce refuses a caller that does not own the workflow" $ do
+        refused <- runMem $ do
+          mem <- newMemDB
+          _ <- orFailSim =<< initWorkflow mem (newWorkflow "wf-debounce-fence") Nothing WorkflowIdReturnExisting
+          let bounce =
+                DebounceRequest
+                  { debounceRequestWorkflow = newQualifiedWorkflowName "bouncer",
+                    debounceRequestQueueName = "qf",
+                    debounceRequestDeduplicationId = "kf",
+                    debounceRequestPeriod = secondsDuration 1,
+                    debounceRequestInputs = Nothing,
+                    debounceRequestSerialization = Nothing,
+                    debounceRequestAppName = Nothing
+                  }
+              stale = StepCaller (WorkflowOwner (WorkflowId "wf-debounce-fence") "some-other-execution") 7
+          debounceDelayedWorkflow mem bounce (Just stale)
+        case refused of
+          Left (WorkflowConflict {workflowId}) -> workflowId @?= "wf-debounce-fence"
+          other -> fail ("expected WorkflowConflict, got: " <> show other),
       -- Twin of the live rejecting-insert arms: under Reject a row another
       -- caller created is refused whatever its status, writing nothing; a
       -- retry staging a lost acknowledgement under the same token finds
@@ -762,7 +785,7 @@ memTests =
               mem
               [WorkflowId "wf-target"]
               False
-              (Just (WorkflowOwner {ownerWorkflowId = WorkflowId "wf-caller", ownerToken = "someone-else"}))
+              (Just (DeleteCaller (WorkflowOwner {ownerWorkflowId = WorkflowId "wf-caller", ownerToken = "someone-else"}) Nothing))
           targetRow <- orFailSim =<< getWorkflow mem (WorkflowId "wf-target")
           pure (refused, targetRow)
         case refused of
@@ -845,6 +868,7 @@ memTests =
           pure (recovered, row)
         recovered @?= [WorkflowId "wf-r"]
         row.workflowRecordStatus @?= Enqueued
+        row.workflowRecordOwnerXid @?= Nothing
         row.workflowRecordQueueName @?= Just "recovery-q",
       testCase "a send wakes a parked recv" $ do
         result <- runMem $ do

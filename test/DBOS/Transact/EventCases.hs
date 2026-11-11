@@ -27,6 +27,7 @@ module DBOS.Transact.EventCases
     scenarioGetEventTimed,
     scenarioCheckpointedRead,
     scenarioRefusedSet,
+    scenarioEncodeBeforeClaim,
     scenarioCapturedRead,
     scenarioReplayNoRepublish,
     scenarioRecoveryKeepsFirst,
@@ -36,6 +37,7 @@ module DBOS.Transact.EventCases
     checkGetEventTimed,
     checkCheckpointedRead,
     checkRefusedSet,
+    checkEncodeBeforeClaim,
     checkCapturedRead,
     checkReplayNoRepublish,
     checkRecoveryKeepsFirst,
@@ -46,6 +48,7 @@ module DBOS.Transact.EventCases
 where
 
 import DBOS.Prelude
+import Data.Aeson (ToJSON (..))
 import Data.Word (Word64)
 import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
@@ -93,7 +96,7 @@ import DBOS.Transact.Connection
     newConnection,
     runSystemDB,
   )
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow))
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), testOwner)
 
 -- | How a tree instantiation builds its world: fresh unlaunched instances
 -- (plus a second one for the cross-instance refusal), the stack-specific
@@ -181,7 +184,7 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
           listed <- runSystemDB sysdb (\db -> listSteps db wid True Nothing Nothing Nothing)
           case listed of
             Left err -> throwIO (userError (show err))
-            Right rows -> pure [(row.stepRecordStepId, row.stepRecordStepName) | row <- rows],
+            Right rows -> pure [(fromIntegral row.stepRecordStepId, row.stepRecordStepName) | row <- rows],
         efStepAbsent = \wid step name -> do
           found <- runSystemDB sysdb (\db -> SystemDB.checkStep db wid step name)
           case found of
@@ -204,14 +207,14 @@ mkEventFixture config otherConfig identity otherIdentity connApp nameScheme genI
 
 -- | Engine-only driver alias: the recovery and order cases read through
 -- this, so the error channel pins to 'EngineOnly' once.
-runRef :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+runRef ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
        => Executor m -> WorkflowRef m EngineOnly -> RunOptions -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runRef = runWorkflowRef
 
 -- | A wait that polls for a published event instead of sleeping through it.
 -- Under IOSim the timeout is virtual, so a hung wait fails fast; live it
 -- throws after fifty polls, which tasty reports as a failure.
-waitForEvent :: (MonadMVar m, MonadDelay m, MonadTime m, MonadThrow m)
+waitForEvent ::  (MonadMVar m, MonadDelay m, MonadTime m, MonadThrow m)
              => DBOS m -> WorkflowId -> Text -> m ()
 waitForEvent dbos wid key = go (50 :: Int)
   where
@@ -224,7 +227,7 @@ waitForEvent dbos wid key = go (50 :: Int)
 
 -- | The recovery body: publishes the offered value (or "republished" when
 -- the offer is already taken), then parks until released.
-progressBody :: forall exec m. (MonadMVar m, MonadSTM m)
+progressBody ::  forall exec m. (MonadMVar m, MonadSTM m)
              => StrictMVar m Text ->
                 StrictMVar m () ->
                 () ->
@@ -238,7 +241,7 @@ progressBody offer release () wctx = do
     Right () -> takeMVar release >> pure (Right 7)
 
 -- | Reads through the other instance: refused, never combined.
-readerBody :: forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+readerBody ::  forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
            => DBOS m ->
               () ->
               WorkflowCtx exec m ->
@@ -248,7 +251,7 @@ readerBody other () wctx = do
   built.pendingRun
 
 -- | The same read from inside a step: plain, nothing checkpointed.
-inStepReaderBody :: forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+inStepReaderBody ::  forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
                  => DBOS m ->
                     () ->
                     WorkflowCtx exec m ->
@@ -587,6 +590,28 @@ checkRefusedSet :: (Text, Int, Int) -> Either String ()
 checkRefusedSet (op, before, after) = do
   checkEq ("set_event" :: Text) op
   checkEq (before + 1) after
+
+-- | A value whose encoder throws must not spend a step id: encoding happens
+-- before placement, as the oracle's @place_set_event@ does.
+data ThrowingValue = ThrowingValue
+
+instance ToJSON ThrowingValue where
+  toJSON _ = error "encode boom"
+
+scenarioEncodeBeforeClaim :: forall m. (MonadSTM m, MonadCatch m)
+                          => EventFixture m ->
+                             m (Int, Bool)
+scenarioEncodeBeforeClaim fx = do
+  conn <- fx.efConn
+  withWorkflow conn fx.efIdentity (WorkflowId "encode-before-claim") Nothing (testOwner (WorkflowId "encode-before-claim")) $ \wctx -> do
+    attempted <- try (setEvent wctx "key" ThrowingValue) :: m (Either SomeException (Either (Error EngineOnly) ()))
+    after <- nextStepId wctx
+    pure (after, either (const True) (const False) attempted)
+
+checkEncodeBeforeClaim :: (Int, Bool) -> Either String ()
+checkEncodeBeforeClaim (after, threw) = do
+  unless (after == 0) $ Left ("expected the encoder to spend no step id, got: " <> show after)
+  unless threw $ Left "expected the encoder to throw"
 
 -- | The captured read sees the value and moves no ids beyond the probe.
 checkCapturedRead :: (Maybe Int, Int, Int) -> Either String ()

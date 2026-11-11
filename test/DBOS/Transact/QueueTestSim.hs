@@ -287,7 +287,7 @@ tests =
       testGroup
         "Workflow queues"
         [ simCase (simQueueFixture (const Nothing)) "queue options default to no limits and poll once a second" scenarioQueueDefaults checkQueueDefaults noTrace,
-          simCase (simQueueFixture (const Nothing)) "a legacy-partitioned row re-scopes its limits" scenarioLegacyRescope checkLegacyRescope noTrace,
+          simCase (simQueueFixture (const Nothing)) "a legacy-partitioned row keeps its column scopes" scenarioLegacyRescope checkLegacyRescope noTrace,
           simLeaf (const Nothing) "the internal queue name is reserved" scenarioReserved checkReserved,
           simLeaf (const Nothing) "registering before launch is refused" scenarioUnlaunched checkUnlaunched,
           simLeaf (const Nothing) "incoherent limits are refused before they reach the row" scenarioIncoherent checkIncoherent,
@@ -300,7 +300,7 @@ tests =
           simLeaf (const Nothing) "a queue carries a rate limit, always prioritised" scenarioRateLimit checkRateLimit,
           simLeaf (const Nothing) "per-partition limits partition a queue" scenarioPartitionLimits checkPartitionLimits,
           simLeaf (const Nothing) "re-registering updates the stored limits" scenarioReregister checkReregister,
-          simLeaf (const Nothing) "adding a per-partition limit to a legacy row is refused" scenarioLegacyUpdateRefused checkLegacyUpdateRefused,
+          simLeaf (const Nothing) "adding a per-partition limit to a legacy row succeeds" scenarioLegacyUpdateRefused checkLegacyUpdateRefused,
           simLeaf (const Nothing) "a registered queue updates, lists and deletes through the instance" scenarioCrud checkCrud,
           simLeaf (const Nothing) "a dequeue stamps the deadline an enqueue left open" scenarioDeadlineStamped checkDeadlineStamped,
           simLeaf (const Nothing) "an explicit timeout on a queued workflow records no deadline yet" scenarioNoDeadlineYet checkNoDeadlineYet,

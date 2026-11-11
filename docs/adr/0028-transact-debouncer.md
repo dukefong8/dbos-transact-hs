@@ -127,3 +127,5 @@ reusing the shared rule's wording). The "no stored-id counterpart" and
 a per-call serialization choice stays out (inputs carry their own tag).
 The bounce errors the loop meets now map through `refusedArgument` on
 this operation, as the oracle's loop does.
+
+Amended 2026-11-11 (Rust 0.6.0 decision): the in-workflow bounce follows Rust 0.6.0's `StepCaller`, not the v0.5.0 tuple. `debounceDelayedWorkflow` takes `Maybe StepCaller`; `debounceInWorkflow` supplies the caller's owner token and step, and the bounce transaction begins with the owner-locked check (`check_owner_on`) before the step read, so a hand-off or a cancelled caller refuses the bounce and its step record. The client lane stays token-free (`Nothing`). Schedules remain on the unfenced helper because that surface is still deferred (ADR-0036). The earlier notes that attributed debounce's unfenced caller to ADR-0036 were wrong and are corrected here.

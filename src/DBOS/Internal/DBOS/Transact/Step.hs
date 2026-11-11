@@ -12,6 +12,7 @@ module DBOS.Transact.Step
     runStep,
     runNestedStep,
     runStepWith,
+    replayStep,
     pendingStep,
     pendingStepWith,
     stepOptionsDefault,
@@ -26,7 +27,7 @@ import Data.Text (pack)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), durationAsMillis, secondsDuration, timestampNow)
+import DBOS.SystemDB.Types (AwaitedOutcome (..), Duration, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), durationAsMillis, durationFromSecs, durationSeconds, durationMicros, secondsDuration, timestampNow)
 import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Transact.Config (serializerName)
 import DBOS.Transact.Connection (Connection (..))
@@ -63,6 +64,7 @@ data WorkflowEvent
   | StepOutputRecorded { recordedStepName :: Text, recordedStepId :: Int }
   | StepErrorRecorded { recordedStepName :: Text, recordedStepId :: Int }
   | StepPreempted { preemptedStepName :: Text, preemptedStepId :: Int }
+  | StepPreemptionUnreadable { preemptionStepName :: Text, preemptionStepId :: Int, preemptionDetail :: Text }
   | StepValueUnreadable { unreadableStepName :: Text, unreadableStepId :: Int, unreadableSerialization :: Text }
   | StepAttemptTimedOut { timedOutStepName :: Text, timedOutStepId :: Int, timedOutAfterMs :: Integer }
   | WorkflowStartErrorReplayed { workflowStartErrorParent :: Text, workflowStartErrorStep :: Int, workflowStartErrorDetail :: Text }
@@ -90,6 +92,7 @@ instance LogEvent WorkflowEvent where
   eventSeverity StepOutputRecorded {}           = SeverityDebug
   eventSeverity StepErrorRecorded {}            = SeverityDebug
   eventSeverity StepPreempted {}                = SeverityDebug
+  eventSeverity StepPreemptionUnreadable {}     = SeverityWarning
   eventSeverity StepValueUnreadable {}          = SeverityWarning
   eventSeverity StepAttemptTimedOut {}          = SeverityDebug
   eventSeverity WorkflowStartErrorReplayed {}   = SeverityDebug
@@ -121,6 +124,8 @@ instance LogEvent WorkflowEvent where
     "the step failed; its error is recorded step_id=" <> showText stepId' <> " step_name=" <> name
   renderEvent (StepPreempted name stepId') =
     "the workflow was cancelled elsewhere; the step is preempted and records nothing step_name=" <> name <> " step_id=" <> showText stepId'
+  renderEvent (StepPreemptionUnreadable name stepId' detail) =
+    "could not read the workflow status for a preemptible step; it will not be preempted step_name=" <> name <> " step_id=" <> showText stepId' <> " error=" <> detail
   renderEvent (StepValueUnreadable name stepId' tag) =
     "a recorded step value holds a serialization this process cannot read step_id=" <> showText stepId' <> " step_name=" <> name <> " serialization=" <> tag
   renderEvent (WorkflowStartErrorReplayed parentId parentStepId detail) =
@@ -238,23 +243,24 @@ runNestedStep sctx name body = do
 -- where the recorded error deserializes back into the error the step
 -- reported.
 replayStep :: (FromJSON value, FromJSON e) => Text -> Int -> StepRecord -> Either (TransactError.Error e) value
-replayStep name stepId record =
+replayStep name _stepId record =
   case record.stepRecordChildWorkflowId of
     Just (WorkflowId childText) -> Left (TransactError.StepFailed name ("unexpected child workflow checkpoint: " <> childText))
     Nothing -> case record.stepRecordError of
       Just errorText -> case TransactError.decodeErrorText errorText of
         Right err -> Left err
         Left _ -> Left (TransactError.StepFailed name errorText)
-      Nothing -> case record.stepRecordOutput of
-        Nothing -> Left (TransactError.StepFailed name ("recorded step " <> pack (show stepId) <> " has no output"))
-        Just output ->
-          case
-              decodeWorkflowValue
-                "result"
-                (Just (SerializedWorkflowValue output (Serialization <$> record.stepRecordSerialization)))
-            of
-            Left err    -> Left (codecFailure err)
-            Right value -> Right value
+      Nothing ->
+        -- A NULL output column is the recorded unit result, not a missing
+        -- one: the oracle decodes it as JSON @null@. Keep the same codec
+        -- path, with no payload to hand it.
+        case
+            decodeWorkflowValue
+              "result"
+              ((\output -> SerializedWorkflowValue output (Serialization <$> record.stepRecordSerialization)) <$> record.stepRecordOutput)
+          of
+          Left err    -> Left (codecFailure err)
+          Right value -> Right value
   where
     codecFailure err = case codecUnknownTag err of
       Just tag -> TransactError.fromSerializationError (Serialization.UnknownSerialization {name = tag})
@@ -314,13 +320,12 @@ instance Show (StepOptions e) where
 -- the cap rather than aborting. Mirrors @StepOptions::backoff@.
 stepBackoff :: StepOptions e -> Int -> Duration
 stepBackoff options failures =
-  let Duration interval = options.interval
-      Duration cap = options.maxInterval
-      grown = realToFrac interval * (options.backoffRate ** fromIntegral failures)
-      capSeconds = realToFrac cap
-   in if isNaN grown || isInfinite grown || grown < 0 || grown >= capSeconds
-        then options.maxInterval
-        else Duration (realToFrac grown)
+  let grown = durationSeconds options.interval * (options.backoffRate ** fromIntegral failures)
+   in case durationFromSecs grown of
+        -- A nonsensical rate (negative, NaN, infinite) or a wait at or past
+        -- the cap saturates to the cap rather than aborting.
+        Just duration | duration < options.maxInterval -> duration
+        _ -> options.maxInterval
 
 -- | 'runStep' with the oracle's retry seam: the body returns its
 -- failure as a value, the options decide whether it is worth retrying, each
@@ -472,21 +477,71 @@ driveStepWith options wctx name placement body =
           let status =
                 stepStatusAt stepId' (fromIntegral attempt) (fromIntegral attempts)
           result <-
-            withStep wctx' marker status $ \sctx -> case options.timeout of
-              Nothing -> body sctx
-              Just limit -> do
-                task <- async (body sctx)
-                finished <- race (threadDelay (durationMicros limit)) (wait task)
-                case finished of
-                  -- The token fires before the body is dropped, as in the
-                  -- oracle: work watching it stops first, then the task dies.
-                  Left () -> do
+            withStep wctx' marker status $ \sctx -> do
+              let timedOut task limit = do
+                    -- The token fires before the body is dropped, as in the
+                    -- oracle: work watching it stops first, then the task dies.
                     token <- cancellationToken sctx
                     cancelToken token
                     cancel task
                     runTracer wctx'.wctxTracer (StepAttemptTimedOut name stepId' (durationAsMillis limit))
                     pure (Left (TransactError.StepTimeout {step = name, timeout = limit}))
-                  Right value -> pure value
+                  preempted task = do
+                    token <- cancellationToken sctx
+                    cancelToken token
+                    cancel task
+                    runTracer wctx'.wctxTracer (StepPreempted name stepId')
+                    pure
+                      ( Left
+                          ( TransactError.fromSystemDB
+                              (SystemDBError.WorkflowCancelled {workflowId = workflowId wctx'})
+                          )
+                      )
+                  withObserver task observer = do
+                    finished <- race (wait task) (wait observer)
+                    case finished of
+                      -- The body is the preferred arm: a body that finished
+                      -- at the same instant keeps its outcome. The observer
+                      -- is cancelled here because 'race' only cancels the
+                      -- losing wait, not the async behind it.
+                      Left value -> cancel observer >> pure value
+                      Right () -> preempted task
+                  withObserverAndTimeout task observer limit = do
+                    finished <- race (race (wait task) (wait observer)) (threadDelay (durationMicros limit))
+                    case finished of
+                      Left (Left value) -> cancel observer >> pure value
+                      Left (Right ()) -> preempted task
+                      Right () -> do
+                        -- The timer won the wait, but the oracle polls the
+                        -- body before the expiry: one that finished at the
+                        -- same instant keeps its outcome rather than being
+                        -- recorded as a timeout.
+                        atExpiry <- poll task
+                        case atExpiry of
+                          Just (Right value) -> cancel observer >> pure value
+                          _ -> timedOut task limit >>= \outcome -> cancel observer >> pure outcome
+                  withoutObserver limit = do
+                    task <- async (body sctx)
+                    finished <- race (wait task) (threadDelay (durationMicros limit))
+                    case finished of
+                      Left value -> pure value
+                      -- As above: a body that completed by the time the
+                      -- timer arm runs wins the tie.
+                      Right () -> do
+                        atExpiry <- poll task
+                        case atExpiry of
+                          Just (Right value) -> pure value
+                          _ -> timedOut task limit
+              if options.preemptible
+                then do
+                  task <- async (body sctx)
+                  observer <- async observeCancellation
+                  case options.timeout of
+                    Nothing -> withObserver task observer
+                    Just limit -> withObserverAndTimeout task observer limit
+                else case options.timeout of
+                  Nothing -> body sctx
+                  Just limit -> withoutObserver limit
           case result of
             Right value -> pure (Right value)
             Left err
@@ -521,6 +576,30 @@ driveStepWith options wctx name placement body =
           pure $ case found of
             Right (Just WorkflowRecord {workflowRecordStatus = status}) -> status == Cancelled
             _                                                           -> False
-
-durationMicros :: Duration -> Int
-durationMicros (Duration interval) = round (interval * 1000000)
+        -- A preemptible step watches the workflow for its whole life, not
+        -- only before an attempt: it waits on its own row's settlement, as
+        -- the oracle's @await_workflow_result@ observer does, and only a
+        -- cancellation fires it. A terminal outcome that is not a
+        -- cancellation (or a read the retry policy will not retry) means
+        -- there is nothing to preempt for, so the observer parks and lets
+        -- the attempt finish on its own terms.
+        observeCancellation = do
+          waited <-
+            withSystemDB wctx' $ \db ->
+              SystemDB.awaitWorkflowResult
+                db
+                (WorkflowId (workflowId wctx'))
+                wctx'.wctxConn.connOutcomePollInterval
+                True
+          case waited of
+            Right AwaitedCancelled -> pure ()
+            Right _ -> park
+            Left err -> do
+              runTracer wctx'.wctxTracer (StepPreemptionUnreadable name stepId' (SystemDBError.renderError err))
+              park
+        -- A timer, not an empty STM retry: GHC delivers
+        -- 'BlockedIndefinitelyOnSTM' to an STM transaction that can never
+        -- succeed, and this thread is meant to stay blocked until the step
+        -- ends. A delay is interruptible, so cancelling the observer still
+        -- ends the park.
+        park = forever (threadDelay 60000000)

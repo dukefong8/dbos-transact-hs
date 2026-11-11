@@ -42,6 +42,7 @@ import DBOS.Transact.StepRetryCases
     checkTokenQuiet,
     scenarioPlainNotPreemptible,
     scenarioPreemptible,
+    scenarioObserverPreempts,
     scenarioRetryDeclined,
     scenarioRetryDefault,
     scenarioRetryExhausted,
@@ -134,5 +135,6 @@ tests =
             leaf "a completed step leaves its token alone" scenarioTokenQuiet checkTokenQuiet,
             leaf "the cancellation token fires before the body is dropped" scenarioTokenFirst checkTokenFirst,
             leaf "a dropped step fires its cancellation token" scenarioTokenDrop checkTokenDrop,
-            leaf "a preemptible step stops and records no outcome" scenarioPreemptible checkPreemptible
+            leaf "a preemptible step stops and records no outcome" scenarioPreemptible checkPreemptible,
+            leaf "a preemptible step with no timeout is stopped by the observer" scenarioObserverPreempts checkPreemptible
           ]

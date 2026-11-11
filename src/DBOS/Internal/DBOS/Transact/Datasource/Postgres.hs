@@ -51,7 +51,13 @@ import Pqi.Ffi qualified as Pqi
 data AppDataSource = AppDataSource
   { appSessionPool :: Pool.Pool,
     appSettings    :: ConnSettings.Settings,
-    appSchema      :: Text
+    appSchema      :: Text,
+    -- | Raw transaction connections are opened outside the pool (the
+    -- transaction scope must outlive individual statements), so this
+    -- permit holds them to @maxConnections@. The pool is sized at
+    -- @maxConnections@ too, so the deployment's server budget is the sum:
+    -- see 'acquireAppDataSourceIn'.
+    appConnPermits :: StrictTVar IO Int
   }
 
 -- | Open the pool over the default @dbos@ checkpoint schema. Never
@@ -77,6 +83,13 @@ acquireAppDataSourceIn schema url maxConnections = do
   if validSchemaName schema
     then pure ()
     else throwIO (invalidInput "schema" ("not a usable schema name: " <> schema))
+  -- Two paths, each bounded by @maxConnections@: the pool serves the short
+  -- sessions (pre-checks, verification) and the raw path holds one
+  -- connection for a whole transaction. Sizing them from one budget is not
+  -- an option: a transaction body may start or await a nested execution
+  -- that transacts too, so the raw path needs the full width or the parent
+  -- waits on a child that can never run. A deployment's server budget must
+  -- therefore cover @2 * max_connections@ (plus nesting headroom).
   let settings = ConnSettings.connectionString url
   pool <-
     Pool.acquire
@@ -89,7 +102,8 @@ acquireAppDataSourceIn schema url maxConnections = do
             PoolConfig.staticConnectionSettings settings
           ]
       )
-  pure (AppDataSource pool settings schema)
+  permits <- newTVarIO (max 1 maxConnections)
+  pure (AppDataSource pool settings schema permits)
 
 -- | A schema name that is safe to interpolate as a quoted identifier.
 validSchemaName :: Text -> Bool
@@ -271,25 +285,37 @@ toDataSource app =
             )
         Right conn -> pure conn
 
+    -- | One raw transaction connection at a time per configured slot;
+    -- the pool has its own slots and never takes this permit.
+    withConnPermit :: AppDataSource -> IO a -> IO a
+    withConnPermit source = bracket_ acquire release
+      where
+        acquire = atomically $ do
+          permits <- readTVar source.appConnPermits
+          check (permits > 0)
+          writeTVar source.appConnPermits (permits - 1)
+        release = atomically (modifyTVar source.appConnPermits (+ 1))
+
     -- | One attempt on a held connection: BEGIN, the body, COMMIT. An
     -- @Error@ escaping here — a connection that cannot be acquired, say —
     -- returns as 'Left' so the runner classifies it; @TxConflict@ is not an
     -- @Error@ and still passes through to the runner's adopt path.
     transactionAttempt :: forall a. TransactionConfig -> (Tx IO -> IO a) -> IO (Either BackendError a)
     transactionAttempt config action =
-      bracket acquireConn Connection.release $ \conn -> do
-        began <- Connection.use conn (Session.script (beginSql config.txIsolation config.txReadOnly))
-        case began of
-          Left se -> pure (Left (sessionErr (Pool.SessionUsageError se)))
-          Right () -> do
-            outcome <- try (action (Tx (txRunner conn)))
-            case outcome of
-              Left sysErr -> rollbackQuiet conn >> pure (Left (unwrapBackend sysErr))
-              Right value -> do
-                done <- Connection.use conn (Session.script "COMMIT")
-                case done of
-                  Left se  -> pure (Left (sessionErr (Pool.SessionUsageError se)))
-                  Right () -> pure (Right value)
+      withConnPermit app $
+        bracket acquireConn Connection.release $ \conn -> do
+          began <- Connection.use conn (Session.script (beginSql config.txIsolation config.txReadOnly))
+          case began of
+            Left se -> pure (Left (sessionErr (Pool.SessionUsageError se)))
+            Right () -> do
+              outcome <- try (action (Tx (txRunner conn)))
+              case outcome of
+                Left sysErr -> rollbackQuiet conn >> pure (Left (unwrapBackend sysErr))
+                Right value -> do
+                  done <- Connection.use conn (Session.script "COMMIT")
+                  case done of
+                    Left se  -> pure (Left (sessionErr (Pool.SessionUsageError se)))
+                    Right () -> pure (Right value)
     rollbackQuiet :: Connection.Connection -> IO ()
     rollbackQuiet conn = do
       _ <- Connection.use conn (Session.script "ROLLBACK")

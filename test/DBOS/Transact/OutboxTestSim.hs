@@ -112,7 +112,7 @@ mkSimDs storeVar =
         store <- readTVarIO storeVar
         pure (Right (fst <$> Map.lookup (widText, step) store.simCommits)),
       dsDeleteCheckpoints = \(WorkflowId widText) step -> do
-        atomically (modifyTVar storeVar (\store -> store {simCommits = Map.filterWithKey (\(w, s) _ -> w /= widText || s < step) store.simCommits}))
+        atomically (modifyTVar storeVar (\store -> store {simCommits = Map.filterWithKey (\(w, s) _ -> w /= widText || s < fromIntegral step) store.simCommits}))
         pure (Right ())
     }
 

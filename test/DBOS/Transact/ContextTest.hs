@@ -92,7 +92,15 @@ import DBOS.Transact
   logWarn,
   secondsDuration,
   workflowId)
-import DBOS.Transact.Logger (AppLog (..), LogEvent (..), LogSeverity (..), SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Transact.Logger
+  ( AppLog (..),
+    LogEvent (..),
+    LogSeverity (..),
+    SomeTracer (..),
+    acquireLoggerBackend,
+    ioTracer,
+    nullTracer
+  )
 import DBOS.Transact.LoggerTest (callbackBackend, renderedLines)
 import Data.IORef (newIORef)
 import Data.Text (unpack)
@@ -583,7 +591,7 @@ checkLogLines rendered = go rendered appLogLines
 -- directly rather than through a row lock — every child write locks the
 -- parent row first, so a lock-based probe could not tell the token's wait
 -- from the outcome write's own.
-scenarioStartsToken :: (MonadSTM m, MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadThrow m, MonadDelay m)
+scenarioStartsToken :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m)
                     => Fixture m -> m Bool
 scenarioStartsToken fx = do
   ctx <- fx.fixtureMkCtx "wf-starts"

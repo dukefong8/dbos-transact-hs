@@ -322,11 +322,9 @@ scenarioExecFirstWinner fx = do
 -- empty set.
 checkExecFirstEmpty :: Either (Error EngineOnly) WorkflowId -> Either String ()
 checkExecFirstEmpty outcome = case outcome of
-  Left (SystemDatabase err) -> case err of
-    SysDB.InvalidInput {field, detail} -> do
-      unless (field == "workflow_ids") $ Left ("expected the workflow_ids field, got: " <> show field)
-      unless (detail == "must name at least one workflow to wait for") $ Left ("expected the empty-set detail, got: " <> show detail)
-    otherErr -> Left ("expected InvalidInput, got: " <> show otherErr)
+  Left (InvalidArgument operation detail) -> do
+    unless (operation == "select_workflow") $ Left ("expected the select channel, got: " <> show operation)
+    unless (detail == "no workflow ids to wait for") $ Left ("expected the empty-set detail, got: " <> show detail)
   other -> Left ("expected the empty first-wait refused, got: " <> show other)
 
 -- | The empty all-wait completes at once.

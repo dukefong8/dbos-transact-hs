@@ -23,13 +23,46 @@ import Data.Vector.Fusion.Stream.Monadic qualified as Vector
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (Duration, EncodedValue (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), WorkflowRecord (WorkflowRecord, workflowRecordStatus), WorkflowStatus (..), WrittenBy (..), addTimeout, durationAsMillis, isStreamClosed, millisDuration, portableJsonSerialization, readStreamStepName, secondsDuration, streamClosedSentinel, timestampNow)
+import DBOS.SystemDB.Types
+  ( Duration,
+    EncodedValue (..),
+    Outcome (..),
+    Serialization (..),
+    SerializedWorkflowValue (..),
+    StepTiming (..),
+    WorkflowId (..),
+    WorkflowRecord (WorkflowRecord, workflowRecordStatus),
+    WorkflowStatus (..),
+    WrittenBy (..),
+    addTimeout,
+    durationAsMillis,
+    isStreamClosed,
+    millisDuration,
+    portableJsonSerialization,
+    readStreamStepName,
+    secondsDuration,
+    streamClosedSentinel,
+    timestampNow
+  )
 import DBOS.SystemDB.Types qualified as Types
 import DBOS.Transact.Checkpoint (StepPlacement (..), placeCall)
 import DBOS.Transact.Connection (Connection (..), runSystemDB)
 import DBOS.Transact.Context (WorkflowCtx, ownerToken, stepId, withSystemDB, workflowId)
-import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText, fromExecution, fromSerializationError)
-import DBOS.Transact.Serialization (SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Transact.Error
+  ( EngineOnly,
+    Error (..),
+    decodeErrorText,
+    encodeErrorText,
+    fromExecution,
+    fromSerializationError
+  )
+import DBOS.Transact.Serialization
+  ( SerializationError,
+    codecErrorText,
+    codecUnknownTag,
+    decodeWorkflowValue,
+    encodeWorkflowValue
+  )
 import DBOS.Transact.Serialization qualified as Serialization
 
 data ReadStreamOptions = ReadStreamOptions
@@ -73,7 +106,7 @@ readStreamFrom wctx wid key initialOffset options =
 -- caller whose cancellation could end the wait. Mirrors Rust
 -- @Client::read_stream@, which shares @StreamReader@ with the workflow
 -- reader and differs only in what it passes as the source.
-readStreamOutside :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+readStreamOutside :: (FromJSON value, MonadMVar m, MonadTime m, MonadDelay m)
                   => Connection m -> WorkflowId -> Text -> Int -> ReadStreamOptions -> m (StreamReader (Error EngineOnly) m value)
 readStreamOutside conn = readStreamWith (pure ClientConnection) (runSystemDB conn.connSysdb) Nothing
 
@@ -81,7 +114,7 @@ readStreamOutside conn = readStreamWith (pure ClientConnection) (runSystemDB con
 -- to reach the system database, and the caller whose cancellation ends a
 -- wait ('Nothing' from a client). The rest of the pull — buffering,
 -- replay, recording, the close sentinel — the placement itself decides.
-readStreamWith :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+readStreamWith :: (FromJSON value, MonadMVar m, MonadTime m, MonadDelay m)
                => m (StepPlacement exec m)
                -> (forall a. (forall db. SystemDB.SystemDB db m => db -> m a) -> m a)
                -> Maybe WorkflowId

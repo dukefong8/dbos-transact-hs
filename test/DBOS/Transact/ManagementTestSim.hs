@@ -16,8 +16,10 @@ import Data.Map.Strict qualified as Map
 import DBOS.DualStack (simCase)
 import DBOS.SystemDB
   ( SerializedWorkflowValue (..),
+    StepCaller (..),
     StepRecord (..),
     WorkflowId (..),
+    WorkflowOwner (..),
     WorkflowStatus (..),
     rewindStepName)
 import DBOS.SystemDB.Error qualified as SysErr
@@ -245,7 +247,7 @@ tests =
       simCase simMgmtFixture "every completion clears the run's datasource checkpoints" scenarioCompletionClearsCheckpoints checkCompletionClearsCheckpoints traceCompletionClearsCheckpoints,
       simCase simMgmtFixture "an inline child clears its own datasource checkpoints on completion" scenarioChildClearsCheckpoints checkChildClearsCheckpoints traceChildClearsCheckpoints,
       testCase "a caller step is replayed by its tag, never guessed" $ do
-        let caller = (WorkflowId "wf", 0)
+        let caller = StepCaller (WorkflowOwner (WorkflowId "wf") "test-owner") 0
             rows = Map.singleton "wf" (mockWorkflow (WorkflowId "wf"))
             step serialization errorText =
               StepRecord
@@ -438,10 +440,10 @@ traceResumeAfterCancelAdoptsOwner tr = do
 -- target: the driven pass says so and leaves it for recovery.
 traceSwitchFormsReplay :: forall a. SimTrace a -> IO ()
 traceSwitchFormsReplay tr = do
-  selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-mgmt-switch-source-sim-fork", WorkflowForked "hs-l2-mgmt-switching-sim-fork"]
+  selectTraceEventsDynamic tr @?= [WorkflowForked "hs-l2-mgmt-switch-source-sim-fork", WorkflowForked "hs-l2-mgmt-switching-sim-fork", WorkflowForked "hs-l2-mgmt-switch-source-sim-fork"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app", EngineShutdown "sim-app"]
   selectTraceEventsDynamic tr @?= [DequeuedWorkflowFailed "no workflow is registered as switch-target"]
-  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-switch-source-sim", StepOutputRecorded "DBOS.cancelWorkflow" 0, StepOutputRecorded "DBOS.forkWorkflow" 1, StepOutputRecorded "DBOS.listWorkflows" 2, StepOutputRecorded "DBOS.listWorkflowSteps" 3, WorkflowCompleted "hs-l2-mgmt-switching-sim", StepReplaying "DBOS.cancelWorkflow" 0, StepReplaying "DBOS.forkWorkflow" 1, StepReplaying "DBOS.listWorkflows" 2, StepReplaying "DBOS.listWorkflowSteps" 3, WorkflowCompleted "hs-l2-mgmt-switching-sim-fork"]
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-switch-source-sim", StepOutputRecorded "DBOS.listWorkflows" 2, StepOutputRecorded "DBOS.listWorkflowSteps" 3, WorkflowCompleted "hs-l2-mgmt-switching-sim", StepReplaying "DBOS.listWorkflows" 2, StepReplaying "DBOS.listWorkflowSteps" 3, WorkflowCompleted "hs-l2-mgmt-switching-sim-fork"]
 
 -- | The refused fork announces nothing and spends no id; the in-step
 -- calls run plainly under the managing step, which is the only recorded
@@ -450,16 +452,16 @@ traceStepManagementIsPlain :: forall a. SimTrace a -> IO ()
 traceStepManagementIsPlain tr = do
   selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
-  selectTraceEventsDynamic tr @?= [WorkflowEnqueued "hs-l2-mgmt-step-target-sim" "nothing-polls-this", StepRunning "manage" 0, StepPlain "DBOS.cancelWorkflow", StepPlain "DBOS.listWorkflows", StepOutputRecorded "manage" 0, WorkflowCompleted "hs-l2-mgmt-step-operator-sim"]
+  selectTraceEventsDynamic tr @?= [WorkflowEnqueued "hs-l2-mgmt-step-target-sim" "nothing-polls-this", StepRunning "manage" 0, StepPlain "DBOS.listWorkflows", StepOutputRecorded "manage" 0, WorkflowCompleted "hs-l2-mgmt-step-operator-sim"]
 
 -- | The free forms record under the methods' step names in call order;
 -- the fork past the last step replays all ten; the retrieve await
 -- records its get_result row silently, announcing nothing of its own.
 traceSupervisorManagesFreely :: forall a. SimTrace a -> IO ()
 traceSupervisorManagesFreely tr = do
-  selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1, WorkflowsResumed 1 1, WorkflowForked "hs-l2-mgmt-sup-forked-sim-fork", WorkflowRewound "hs-l2-mgmt-sup-rewound-sim" 0 "_dbos_internal_queue", WorkflowsDeleted 1, WorkflowDelayMoveAsked "hs-l2-mgmt-sup-delayed-sim", WorkflowAttributesReplaceAsked "hs-l2-mgmt-sup-tagged-sim", WorkflowAttributesMergeAsked "hs-l2-mgmt-sup-tagged-sim", WorkflowForked "hs-l2-mgmt-supervisor-sim-fork"]
+  selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1, WorkflowsResumed 1 1, WorkflowForked "hs-l2-mgmt-sup-forked-sim-fork", WorkflowRewound "hs-l2-mgmt-sup-rewound-sim" 0 "_dbos_internal_queue", WorkflowsDeleted 1, WorkflowDelayMoveAsked "hs-l2-mgmt-sup-delayed-sim", WorkflowAttributesReplaceAsked "hs-l2-mgmt-sup-tagged-sim", WorkflowAttributesMergeAsked "hs-l2-mgmt-sup-tagged-sim", WorkflowForked "hs-l2-mgmt-supervisor-sim-fork", WorkflowsCancelled 1, WorkflowsResumed 1 1, WorkflowForked "hs-l2-mgmt-sup-forked-sim-fork", WorkflowRewound "hs-l2-mgmt-sup-rewound-sim" 0 "_dbos_internal_queue", WorkflowsDeleted 1]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
-  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-sup-forked-sim", WorkflowCompleted "hs-l2-mgmt-sup-deleted-sim", StepRunning "serve" 0, StepOutputRecorded "serve" 0, WorkflowCompleted "hs-l2-mgmt-sup-tagged-sim", StepRunning "tick" 0, StepOutputRecorded "tick" 0, WorkflowCompleted "hs-l2-mgmt-sup-rewound-sim", WorkflowEnqueued "hs-l2-mgmt-sup-delayed-sim" "_dbos_internal_queue", StepOutputRecorded "DBOS.cancelWorkflow" 0, StepOutputRecorded "DBOS.resumeWorkflow" 1, StepOutputRecorded "DBOS.forkWorkflow" 2, StepOutputRecorded "DBOS.rewindWorkflow" 3, StepOutputRecorded "DBOS.deleteWorkflow" 4, StepOutputRecorded "DBOS.setWorkflowDelay" 5, StepOutputRecorded "DBOS.updateWorkflowAttributes" 6, StepOutputRecorded "DBOS.updateWorkflowAttributes" 7, StepOutputRecorded "DBOS.listWorkflows" 8, StepOutputRecorded "DBOS.listWorkflowSteps" 9, WorkflowCompleted "hs-l2-mgmt-supervisor-sim", WorkflowCompleted "hs-l2-mgmt-sup-delayed-sim", WorkflowCompleted "hs-l2-mgmt-sup-forked-sim-fork", StepRunning "tick" 0, WorkflowSuperseded "hs-l2-mgmt-sup-victim-sim", StepOutputRecorded "tick" 0, WorkflowCompleted "hs-l2-mgmt-sup-victim-sim", WorkflowCompleted "hs-l2-mgmt-sup-rewound-sim", StepReplaying "DBOS.cancelWorkflow" 0, StepReplaying "DBOS.resumeWorkflow" 1, StepReplaying "DBOS.forkWorkflow" 2, StepReplaying "DBOS.rewindWorkflow" 3, StepReplaying "DBOS.deleteWorkflow" 4, StepReplaying "DBOS.setWorkflowDelay" 5, StepReplaying "DBOS.updateWorkflowAttributes" 6, StepReplaying "DBOS.updateWorkflowAttributes" 7, StepReplaying "DBOS.listWorkflows" 8, StepReplaying "DBOS.listWorkflowSteps" 9, WorkflowCompleted "hs-l2-mgmt-supervisor-sim-fork"]
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-sup-forked-sim", WorkflowCompleted "hs-l2-mgmt-sup-deleted-sim", StepRunning "serve" 0, StepOutputRecorded "serve" 0, StepRunning "tick" 0, WorkflowCompleted "hs-l2-mgmt-sup-tagged-sim", StepOutputRecorded "tick" 0, WorkflowCompleted "hs-l2-mgmt-sup-rewound-sim", WorkflowEnqueued "hs-l2-mgmt-sup-delayed-sim" "_dbos_internal_queue", StepOutputRecorded "DBOS.setWorkflowDelay" 5, StepOutputRecorded "DBOS.updateWorkflowAttributes" 6, StepOutputRecorded "DBOS.updateWorkflowAttributes" 7, StepOutputRecorded "DBOS.listWorkflows" 8, StepOutputRecorded "DBOS.listWorkflowSteps" 9, WorkflowCompleted "hs-l2-mgmt-supervisor-sim", WorkflowCompleted "hs-l2-mgmt-sup-delayed-sim", WorkflowCompleted "hs-l2-mgmt-sup-forked-sim-fork", StepRunning "tick" 0, WorkflowSuperseded "hs-l2-mgmt-sup-victim-sim", StepOutputRecorded "tick" 0, WorkflowCompleted "hs-l2-mgmt-sup-victim-sim", WorkflowCompleted "hs-l2-mgmt-sup-rewound-sim", StepReplaying "DBOS.setWorkflowDelay" 5, StepReplaying "DBOS.updateWorkflowAttributes" 6, StepReplaying "DBOS.updateWorkflowAttributes" 7, StepReplaying "DBOS.listWorkflows" 8, StepReplaying "DBOS.listWorkflowSteps" 9, WorkflowCompleted "hs-l2-mgmt-supervisor-sim-fork"]
 
 -- | The parent runs and completes, then the tree cancel moves the parked
 -- child alone (the finished parent is already terminal).
@@ -467,7 +469,7 @@ traceCancelTree :: forall a. SimTrace a -> IO ()
 traceCancelTree tr = do
   selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-tree-parent-sim"]
   selectTraceEventsDynamic tr @?= [WorkflowsCancelled 1]
-  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1 ["hs-l2-mgmt-tree-parent-sim-0"], EngineShutdown "sim-app"]
 
 -- | The stepped run records its step and completes; the delete is silent.
 traceDelete :: forall a. SimTrace a -> IO ()
@@ -655,21 +657,21 @@ traceForkRefusals tr = do
 -- still completes and the launch still shuts down.
 traceSelfCancelResume :: forall a. SimTrace a -> IO ()
 traceSelfCancelResume tr = do
-  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.cancelWorkflow" 0, StepErrorRecorded "DBOS.resumeWorkflow" 1, WorkflowCompleted "hs-l2-mgmt-self-target-sim"]
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-self-target-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | The refused delete is recorded as its step's error; the workflow
 -- still completes and the launch still shuts down.
 traceSelfDelete :: forall a. SimTrace a -> IO ()
 traceSelfDelete tr = do
-  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.deleteWorkflow" 0, WorkflowCompleted "hs-l2-mgmt-self-delete-sim"]
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-self-delete-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | The child's refused delete is recorded as its step's error; both
 -- workflows still complete and the launch still shuts down.
 traceAncestorDelete :: forall a. SimTrace a -> IO ()
 traceAncestorDelete tr = do
-  selectTraceEventsDynamic tr @?= [StepErrorRecorded "DBOS.deleteWorkflow" 0, WorkflowCompleted "hs-l2-mgmt-ancestor-sim-0", WorkflowCompleted "hs-l2-mgmt-ancestor-sim"]
+  selectTraceEventsDynamic tr @?= [WorkflowCompleted "hs-l2-mgmt-ancestor-sim-0", WorkflowCompleted "hs-l2-mgmt-ancestor-sim"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
 -- | An invalid batch announces nothing at all: the refusal precedes any

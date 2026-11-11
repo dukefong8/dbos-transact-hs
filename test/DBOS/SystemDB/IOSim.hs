@@ -33,10 +33,10 @@ where
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim)
 import Data.Int (Int64)
-import Data.Aeson (Value (..), eitherDecodeStrict, encode)
+import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecodeStrict, encode)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
-import Data.Text.Encoding (decodeUtf8)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.List (foldl', nub, partition, sort, sortOn)
 import Data.Maybe (listToMaybe)
 import Data.Map.Strict (Map)
@@ -82,6 +82,10 @@ import DBOS.SystemDB
     Serialization (..),
     SerializedWorkflowValue (..),
     StepRecord (..),
+    cancelStepName,
+    deleteStepName,
+    forkStepName,
+    resumeStepName,
     StepTiming (..),
     AwaitedStream (..),
     StreamRead (..),
@@ -94,6 +98,8 @@ import DBOS.SystemDB
     WorkflowDelay (..),
     WorkflowFilter (..),
     WorkflowId (..),
+    DeleteCaller (..),
+    StepCaller (..),
     WorkflowIdReusePolicy (..),
     WorkflowInitResult (..),
     QualifiedWorkflowName,
@@ -261,7 +267,7 @@ instance SystemDB MockSystemDB (IOSim s) where
   listApplicationVersions = \cases _ -> pure (Right [mockVersion])
   getLatestApplicationVersion = \cases _ _ -> pure (Right (Just mockVersion))
   promoteApplicationVersion = \cases _ _ _ -> pure (Right ())
-  upsertQueue = \cases _ _ _ -> pure (Right True)
+  upsertQueue = \cases _ queue _ -> pure (Right (True, mockQueue queue.newQueueName))
   startQueuedWorkflows = \cases _ _ _ _ _ _ _ _ -> pure (Right (Dequeued [mockQueuedId] Nothing))
   countPendingQueueWorkflows = \cases _ _ -> pure (Right 0)
   getQueuePartitions = \cases _ _ -> pure (Right [mockPartition])
@@ -768,7 +774,7 @@ memInitWorkflowAs db new caller reusePolicy creator = do
     memChildEntry call childId =
       StepRecord
         { stepRecordWorkflowId = call.initCallerParentWorkflowId,
-          stepRecordStepId = call.initCallerStepId,
+          stepRecordStepId = fromIntegral call.initCallerStepId,
           stepRecordStepName = call.initCallerStepName,
           stepRecordOutput = Nothing,
           stepRecordError = Nothing,
@@ -858,6 +864,133 @@ mergeAttributeObjects stored additions =
     new = case asObject additions of
       Just object -> object
       Nothing -> KeyMap.empty
+
+-- | The cancel transaction body: the tree walk, the refusals, and the
+-- writes in one STM commit, as the live backend's transaction.
+memCancelFresh :: MemSystemDB s -> [WorkflowId] -> Bool -> Maybe Text -> IOSim s (Either Error [WorkflowId])
+memCancelFresh db cancelIds withChildren fromWorkflow = atomically $ do
+  rows <- readTVar db.memRows
+  -- Transitive descendants, like the backend's level walk: one level
+  -- would leave a grandchild tree half-cancelled.
+  let requested = [wid | WorkflowId wid <- cancelIds]
+      targets
+        | withChildren = nub (requested <> concatMap (memChildTree rows) requested)
+        | otherwise = requested
+      (moved, rows') = Map.mapAccumWithKey move [] rows
+      -- A workflow cannot cancel itself, nor the tree it is inside:
+      -- refused before anything moves, as the SQL cancel refuses.
+      refused = (fromWorkflow >>= (\callerId -> refuseSelfTarget callerId requested "cancel"))
+        <|> case (fromWorkflow, withChildren) of
+          (Just callerId, True)
+            | callerId `elem` targets, callerId `notElem` requested ->
+                Just (InvalidInput {field = "workflow_ids", detail = "workflow " <> callerId <> " cannot cancel the tree of " <> memRootContaining rows requested callerId <> ", which contains it"})
+            | otherwise -> Nothing
+          _ -> Nothing
+      move acc wid row
+        -- Mirrors the SQL guard: anything but a finished row moves.
+        | wid `elem` targets && row.workflowRecordStatus `notElem` [Success, Error, Cancelled] =
+            ( WorkflowId wid : acc,
+              row
+                { workflowRecordStatus = Cancelled,
+                  workflowRecordOwnerXid = Nothing,
+                  workflowRecordQueueName = Nothing,
+                  workflowRecordDeduplicationId = Nothing,
+                  workflowRecordStartedAt = Nothing,
+                  workflowRecordCompletedAt = Nothing
+                }
+            )
+        | otherwise = (acc, row)
+  case refused of
+    Just err -> pure (Left err)
+    Nothing -> do
+      writeTVar db.memRows rows'
+      modifyTVar db.memDedup (dropMemHolds rows [wid | WorkflowId wid <- moved])
+      pure (Right moved)
+
+-- | The resume transaction body: the self-target refusal, the existence
+-- read, and the guarded update, as the live backend's transaction.
+memResumeFresh :: MemSystemDB s -> [WorkflowId] -> Maybe Text -> Maybe Text -> IOSim s (Either Error [WorkflowId])
+memResumeFresh db resumeIds resumeQueue fromWorkflow = do
+  -- A workflow cannot resume itself: refused inside the caller's
+  -- transaction, so a recordable refusal is checkpointed, as the SQL
+  -- resume does.
+  case fromWorkflow >>= \callerId -> refuseSelfTarget callerId [wid | WorkflowId wid <- resumeIds] "resume" of
+    Just err -> pure (Left err)
+    Nothing -> do
+      rows <- readTVarIO db.memRows
+      let missing = [wid | WorkflowId wid <- resumeIds, Map.notMember wid rows]
+      case missing of
+        _ : _ -> pure (Left (NonExistentWorkflow {workflowIds = missing}))
+        [] -> atomically $ do
+          let QueueName internal = internalQueueName
+              (moved, rows') = Map.mapAccumWithKey move [] rows
+              move acc wid row
+                | WorkflowId wid `elem` resumeIds && row.workflowRecordStatus `notElem` [Success, Error] =
+                    ( WorkflowId wid : acc,
+                      row
+                        { workflowRecordStatus = Enqueued,
+                          workflowRecordQueueName = resumeQueue <|> Just internal,
+                          workflowRecordRecoveryAttempts = 0,
+                          workflowRecordDeadline = Nothing,
+                          workflowRecordOwnerXid = Nothing,
+                          workflowRecordDeduplicationId = Nothing,
+                          workflowRecordStartedAt = Nothing,
+                          workflowRecordCompletedAt = Nothing
+                        }
+                    )
+                | otherwise = (acc, row)
+          writeTVar db.memRows rows'
+          pure (Right moved)
+
+-- | The delete transaction body: self/ancestor refusals, the caller fence,
+-- and the removal in one STM commit.
+memDeleteFresh :: MemSystemDB s -> [WorkflowId] -> Bool -> Maybe DeleteCaller -> IOSim s (Either Error Word64)
+memDeleteFresh db ids deleteChildren caller = atomically $ do
+  rows <- readTVar db.memRows
+  let owner = (.deleteCallerOwner) <$> caller
+  -- A workflow cannot delete itself, and cannot delete an ancestor
+  -- whose tree it is inside: refused before anything runs, as the SQL
+  -- delete is, so the workflow never runs on with no row.
+  case owner >>= selfDelete (targets rows) of
+    Just err -> pure (Left err)
+    Nothing ->
+      -- A step running the delete opens with its ownership check: a stale
+      -- execution removes nothing. Client and engine deletes skip it. The row
+      -- checked is named by the same value the fence reads its token from.
+      case owner of
+        Just o ->
+          case Map.lookup (widTextOf o.ownerWorkflowId) rows of
+            Just row | row.workflowRecordStatus == Cancelled -> pure (Left (WorkflowCancelled {workflowId = widTextOf o.ownerWorkflowId}))
+            Just row | row.workflowRecordOwnerXid == Just o.ownerToken -> remove rows
+            _ -> pure (Left (WorkflowConflict {workflowId = widTextOf o.ownerWorkflowId}))
+        Nothing -> remove rows
+  where
+    targets rows =
+      let direct = [t | WorkflowId t <- ids]
+          extra = if deleteChildren then concatMap (descendants rows) direct else []
+       in nub (sort (direct <> extra))
+    descendants rows parent =
+      [t | WorkflowId t <- children] <> concatMap (descendants rows) [t | WorkflowId t <- children]
+      where children = [row.workflowRecordId | row <- Map.elems rows, row.workflowRecordParentWorkflowId == Just (WorkflowId parent)]
+    selfDelete keys o
+      | let WorkflowId callerId = o.ownerWorkflowId, callerId `elem` keys =
+          Just
+            ( invalidInput
+                "workflow_ids"
+                ( "workflow " <> callerId <> " cannot delete itself: the step checkpoint for the delete "
+                    <> "is written in the same transaction and would outlive the row it references"
+                )
+            )
+      | otherwise = Nothing
+    remove current = do
+      let keys = targets current
+          gone = length (filter (`Map.member` current) keys)
+      writeTVar db.memRows (foldr Map.delete current keys)
+      modifyTVar db.memSteps (Map.filterWithKey (\(wid, _) _ -> wid `notElem` keys))
+      -- Deleted rows take their holds with them, as deleting drops the
+      -- SQL index entries.
+      modifyTVar db.memDedup (dropMemHolds current keys)
+      pure (Right (fromIntegral gone))
 
 instance SystemDB (MemSystemDB s) (IOSim s) where
   databaseTime db = do
@@ -1008,147 +1141,108 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           parked = [WorkflowId widText | widText <- requested, Just row <- [Map.lookup widText rows], row.workflowRecordStatus == Pending, row.workflowRecordRecoveryAttempts >= minRecoveryAttempts]
       writeTVar db.memRows rows'
       pure (Right parked)
-  cancelWorkflows db ids withChildren _ fromWorkflow = atomically $ do
-    rows <- readTVar db.memRows    -- Transitive descendants, like the backend's per-id traverse through
-    -- 'descendantsSession': one level would leave a grandchild tree
-    -- half-cancelled.
-    let requested = [wid | WorkflowId wid <- ids]
-        targets
-          | withChildren = nub (requested <> concatMap (memChildTree rows) requested)
-          | otherwise = requested
-        (moved, rows') = Map.mapAccumWithKey move [] rows
-        -- A workflow cannot cancel itself, nor the tree it is inside:
-        -- refused before anything moves, as the SQL cancel refuses.
-        refused = (fromWorkflow >>= (\callerId -> refuseSelfTarget callerId requested "cancel"))
-          <|> case (fromWorkflow, withChildren) of
-            (Just callerId, True)
-              | callerId `elem` targets, callerId `notElem` requested ->
-                  Just (InvalidInput {field = "workflow_ids", detail = "workflow " <> callerId <> " cannot cancel the tree of " <> memRootContaining rows requested callerId <> ", which contains it"})
-              | otherwise -> Nothing
-            _ -> Nothing
-        move acc wid row
-          -- Mirrors the SQL guard: anything but a finished row moves.
-          | wid `elem` targets && row.workflowRecordStatus `notElem` [Success, Error, Cancelled] =
-              ( WorkflowId wid : acc,
-                row
-                  { workflowRecordStatus = Cancelled,
-                    workflowRecordOwnerXid = Nothing,
-                    workflowRecordQueueName = Nothing,
-                    workflowRecordDeduplicationId = Nothing,
-                    workflowRecordStartedAt = Nothing,
-                    workflowRecordCompletedAt = Nothing
-                  }
-              )
-          | otherwise = (acc, row)
-    case refused of
-      Just err -> pure (Left err)
-      Nothing -> do
-        writeTVar db.memRows rows'
-        modifyTVar db.memDedup (dropMemHolds rows [wid | WorkflowId wid <- moved])
-        pure (Right moved)
-  resumeWorkflows db ids queue _ fromWorkflow
+  -- The no-caller path keeps the single transaction it always had: the
+  -- plain callers are latency-sensitive and a pre-check would widen the
+  -- window before the write.
+  cancelWorkflows db ids withChildren Nothing fromWorkflow
     | null ids = pure (Right [])
-    -- A workflow cannot resume itself: refused before anything runs,
-    -- as the SQL resume refuses.
-    | Just err <- fromWorkflow >>= (\callerId -> refuseSelfTarget callerId [wid | WorkflowId wid <- ids] "resume") =
-        pure (Left err)
-    | otherwise = do
-        rows <- readTVarIO db.memRows
-        let missing = [wid | WorkflowId wid <- ids, Map.notMember wid rows]
-        rows <- readTVarIO db.memRows
-        rows <- readTVarIO db.memRows
-        let missing = [wid | WorkflowId wid <- ids, Map.notMember wid rows]
-        case missing of
-          _ : _ -> pure (Left (NonExistentWorkflow {workflowIds = missing}))
-          [] -> atomically $ do
-            let QueueName internal = internalQueueName
-                (moved, rows') = Map.mapAccumWithKey move [] rows
-                move acc wid row
-                  | WorkflowId wid `elem` ids && row.workflowRecordStatus `notElem` [Success, Error] =
-                      ( WorkflowId wid : acc,
-                        row
-                          { workflowRecordStatus = Enqueued,
-                            workflowRecordQueueName = queue <|> Just internal,
-                            workflowRecordRecoveryAttempts = 0,
-                            workflowRecordDeadline = Nothing,
-                            workflowRecordOwnerXid = Nothing,
-                            workflowRecordDeduplicationId = Nothing,
-                            workflowRecordStartedAt = Nothing,
-                            workflowRecordCompletedAt = Nothing
-                          }
-                      )
-                  | otherwise = (acc, row)
-            writeTVar db.memRows rows'
+    | otherwise = memCancelFresh db ids withChildren fromWorkflow
+  cancelWorkflows db ids withChildren (Just c) fromWorkflow = do
+    let callerWid = c.stepCallerOwner.ownerWorkflowId
+        callerStep = c.stepCallerStep
+    rows <- readTVarIO db.memRows
+    steps <- readTVarIO db.memSteps
+    case verifyCallerStep cancelStepName (Just c) rows steps of
+      CallerReplayed _ -> memReplayCaller db (callerWid, callerStep)
+      CallerRefused err -> pure (Left err)
+      _ -> do
+        result <- memCancelFresh db ids withChildren fromWorkflow
+        now <- memDbNow db
+        case result of
+          Left err
+            | shouldRecord err -> do
+                atomically $ recordCallerJson db cancelStepName callerWid callerStep now (Left err :: Either Error [WorkflowId])
+                pure (Left err)
+          Right moved -> do
+            atomically $ recordCallerJson db cancelStepName callerWid callerStep now (Right moved)
             pure (Right moved)
-  deleteWorkflows db ids deleteChildren owner = atomically $ do
-    rows <- readTVar db.memRows
-    -- A workflow cannot delete itself, and cannot delete an ancestor
-    -- whose tree it is inside: refused before anything runs, as the SQL
-    -- delete is, so the workflow never runs on with no row.
-    case owner >>= selfDelete (targets rows) of
-      Just err -> pure (Left err)
-      Nothing ->
-        -- A step running the delete opens with its ownership check: a stale
-        -- execution removes nothing. Client and engine deletes skip it. The row
-        -- checked is named by the same value the fence reads its token from.
-        case owner of
-          Just o ->
-            case Map.lookup (widTextOf o.ownerWorkflowId) rows of
-              Just row | row.workflowRecordStatus == Cancelled -> pure (Left (WorkflowCancelled {workflowId = widTextOf o.ownerWorkflowId}))
-              Just row | row.workflowRecordOwnerXid == Just o.ownerToken -> remove rows
-              _ -> pure (Left (WorkflowConflict {workflowId = widTextOf o.ownerWorkflowId}))
-          Nothing -> remove rows
-    where
-      targets rows =
-        let direct = [t | WorkflowId t <- ids]
-            extra = if deleteChildren then concatMap (descendants rows) direct else []
-         in nub (sort (direct <> extra))
-      descendants rows parent =
-        [t | WorkflowId t <- children] <> concatMap (descendants rows) [t | WorkflowId t <- children]
-        where children = [row.workflowRecordId | row <- Map.elems rows, row.workflowRecordParentWorkflowId == Just (WorkflowId parent)]
-      selfDelete keys o
-        | let WorkflowId callerId = o.ownerWorkflowId, callerId `elem` keys =
-            Just
-              ( invalidInput
-                  "workflow_ids"
-                  ( "workflow " <> callerId <> " cannot delete itself: the step checkpoint for the delete "
-                      <> "is written in the same transaction and would outlive the row it references"
-                  )
-              )
-        | otherwise = Nothing
-      remove current = do
-        let keys = targets current
-            gone = length (filter (`Map.member` current) keys)
-        writeTVar db.memRows (foldr Map.delete current keys)
-        modifyTVar db.memSteps (Map.filterWithKey (\(wid, _) _ -> wid `notElem` keys))
-        -- Deleted rows take their holds with them, as deleting drops the
-        -- SQL index entries.
-        modifyTVar db.memDedup (dropMemHolds current keys)
-        pure (Right (fromIntegral gone))
-  forkWorkflows db forks options _
-    | null forks = pure (Right [])
+          Left err -> pure (Left err)
+  resumeWorkflows db ids queue Nothing fromWorkflow
+    | null ids = pure (Right [])
+    | otherwise = memResumeFresh db ids queue fromWorkflow
+  resumeWorkflows db ids queue (Just c) fromWorkflow = do
+    let callerWid = c.stepCallerOwner.ownerWorkflowId
+        callerStep = c.stepCallerStep
+    rows <- readTVarIO db.memRows
+    steps <- readTVarIO db.memSteps
+    case verifyCallerStep resumeStepName (Just c) rows steps of
+      CallerReplayed _ -> memReplayCaller db (callerWid, callerStep)
+      CallerRefused err -> pure (Left err)
+      _ -> do
+        result <- memResumeFresh db ids queue fromWorkflow
+        now <- memDbNow db
+        case result of
+          Left err
+            | shouldRecord err -> do
+                atomically $ recordCallerJson db resumeStepName callerWid callerStep now (Left err :: Either Error [WorkflowId])
+                pure (Left err)
+          Right moved -> do
+            atomically $ recordCallerJson db resumeStepName callerWid callerStep now (Right moved)
+            pure (Right moved)
+          Left err -> pure (Left err)
+  deleteWorkflows db ids deleteChildren Nothing =
+    memDeleteFresh db ids deleteChildren Nothing
+  deleteWorkflows db ids deleteChildren (Just c) = do
+    rows <- readTVarIO db.memRows
+    steps <- readTVarIO db.memSteps
+    let owner = c.deleteCallerOwner
+        ownerId = owner.ownerWorkflowId
+    case c.deleteCallerStep of
+      Nothing -> memDeleteFresh db ids deleteChildren (Just c)
+      Just step -> do
+        let key = StepCaller owner step
+        case verifyCallerStep deleteStepName (Just key) rows steps of
+          CallerReplayed _ -> memReplayCaller db (ownerId, step)
+          CallerRefused err -> pure (Left err)
+          _ -> do
+            result <- memDeleteFresh db ids deleteChildren (Just c)
+            now <- memDbNow db
+            case result of
+              Left err
+                | shouldRecord err -> do
+                    atomically $ recordCallerJson db deleteStepName ownerId step now (Left err :: Either Error Word64)
+                    pure (Left err)
+              Right deleted -> do
+                atomically $ recordCallerJson db deleteStepName ownerId step now (Right deleted)
+                pure (Right deleted)
+              Left err -> pure (Left err)
+  forkWorkflows db forks options caller
+    | null forks && isNothing caller = pure (Right [])
     | otherwise =
         -- No batch rules here either: the oracle's @fork_workflows@ runs
         -- only the option and per-fork checks, as the live backend does.
         case (forkOptionsValidate options, traverse forkValidate forks) of
           (Left err, _) -> pure (Left err)
           (_, Left err) -> pure (Left err)
-          (Right (), Right _) -> memFork db [(fork.forkSourceId, fork.forkForkedId, fork.forkStartStep) | fork <- forks] options
-  forkFrom db ids point options _
-    | null ids = pure (Right [])
+          (Right (), Right _) ->
+            memForkCall db caller
+              (memFork db [(fork.forkSourceId, fork.forkForkedId, fromIntegral fork.forkStartStep) | fork <- forks] options)
+  forkFrom db ids point options caller
+    | null ids && isNothing caller = pure (Right [])
     | otherwise = case (forkOptionsValidate options, traverse (forkValidate . synthesized) sources) of
     (Left err, _) -> pure (Left err)
     (_, Left err) -> pure (Left err)
     (Right (), Right _) -> do
       steps <- readTVarIO db.memSteps
-      memFork db [(source, Nothing, memStartStep point source steps) | WorkflowId source <- ids] options
+      memForkCall db caller
+        (memFork db [(source, Nothing, memStartStep point source steps) | WorkflowId source <- ids] options)
     where
       sources = [source | WorkflowId source <- ids]
       givenStep = case point of
         ForkStep step -> step
         _ -> 0
       synthesized source = Fork source Nothing givenStep
-      memStartStep (ForkStep step) _ _ = step
+      memStartStep (ForkStep step) _ _ = fromIntegral step
       -- Mirrors the SQL 'COALESCE(MAX ... FILTER (WHERE error IS NOT NULL),
       -- MAX ...)': the failed step, falling back to the last step.
       memStartStep ForkLastFailure source steps =
@@ -1161,7 +1255,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
       memNamedStep source name steps = maximum (-1 : [sid | ((wid, sid), record) <- Map.toList steps, wid == source, record.stepRecordStepName == name])
   rewindWorkflow db (WorkflowId wid) cut sysOpts caller = case sysRewindValidate cut sysOpts of
     Left err -> pure (Left err)
-    Right () -> memRewind db wid cut sysOpts caller
+    Right () -> memRewind db wid (fromIntegral cut) sysOpts caller
   checkStep db (WorkflowId wid) stepId name = do
     steps <- readTVarIO db.memSteps
     -- A row recorded under another name is the old code's step, refused
@@ -1200,7 +1294,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
             entry =
               StepRecord
                 { stepRecordWorkflowId = WorkflowId wid,
-                  stepRecordStepId = stepId,
+                  stepRecordStepId = fromIntegral stepId,
                   stepRecordStepName = name,
                   stepRecordOutput = case outcome of OutcomeOutput output -> output; _ -> memPriorOutput prior,
                   stepRecordError = case outcome of OutcomeError message -> Just message; _ -> Nothing,
@@ -1245,7 +1339,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               Nothing ->
                 StepRecord
                   { stepRecordWorkflowId = parent,
-                    stepRecordStepId = stepId,
+                    stepRecordStepId = fromIntegral stepId,
                     stepRecordStepName = name,
                     stepRecordOutput = Nothing,
                     stepRecordError = Nothing,
@@ -1285,6 +1379,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
           row
             { workflowRecordStatus = Enqueued,
               workflowRecordStartedAt = Nothing,
+              workflowRecordOwnerXid = Nothing,
               workflowRecordQueueName = case row.workflowRecordQueueName of
                 Just queue | not (Text.null queue) -> Just queue
                 _ -> Just recoveryQueue
@@ -1411,10 +1506,10 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
               streams <- readTVar db.memStreams
               let streamKey' = (widText, key)
                   entries = fromMaybe [] (Map.lookup streamKey' streams)
-                  entry = StreamRecord {streamKey = key, streamOffset = length entries, streamValue = value, streamSerialization = serialization, streamStepId = stepId}
+                  entry = StreamRecord {streamKey = key, streamOffset = fromIntegral (length entries), streamValue = value, streamSerialization = serialization, streamStepId = fromIntegral stepId}
               writeTVar db.memStreams (Map.insert streamKey' (entries <> [entry]) streams)
               when (writtenBy == Workflow) $ do
-                let record = StepRecord {stepRecordWorkflowId = wid, stepRecordStepId = stepId, stepRecordStepName = stepName, stepRecordOutput = Nothing, stepRecordError = Nothing, stepRecordChildWorkflowId = Nothing, stepRecordSerialization = Nothing, stepRecordStartedAt = Just now, stepRecordCompletedAt = Just now}
+                let record = StepRecord {stepRecordWorkflowId = wid, stepRecordStepId = fromIntegral stepId, stepRecordStepName = stepName, stepRecordOutput = Nothing, stepRecordError = Nothing, stepRecordChildWorkflowId = Nothing, stepRecordSerialization = Nothing, stepRecordStartedAt = Just now, stepRecordCompletedAt = Just now}
                 writeTVar db.memSteps (Map.insert (widText, stepId) record steps)
               pure (Right ())
         _ -> pure (Left (WorkflowConflict {workflowId = widText}))
@@ -1650,12 +1745,13 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     application <- readTVar db.memAppName
     let existing = Map.lookup queue.newQueueName queues
     case existing of
-      Just _ | onExisting == LeaveExisting -> pure (Right False)
+      Just record | onExisting == LeaveExisting -> pure (Right (False, record))
       _ -> do
         -- The SQL upsert falls back to the backend's application when the
         -- request names none, so a registered queue is never unclaimed.
-        writeTVar db.memQueues (Map.insert queue.newQueueName (memQueueRecord queue {newQueueAppName = queue.newQueueAppName <|> application}) queues)
-        pure (Right (isNothing existing))
+        let record = memQueueRecord queue {newQueueAppName = queue.newQueueAppName <|> application}
+        writeTVar db.memQueues (Map.insert queue.newQueueName record queues)
+        pure (Right (isNothing existing, record))
   -- The claim: worker/concurrency budgets from the queue's limits (rate
   -- limits are not modelled — Mem keeps no dequeue history, so a rate
   -- stop never fires here), candidates in priority/created order,
@@ -1879,7 +1975,7 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
             entry =
               StepRecord
                 { stepRecordWorkflowId = parent,
-                  stepRecordStepId = stepId,
+                  stepRecordStepId = fromIntegral stepId,
                   stepRecordStepName = getResultStepName,
                   stepRecordOutput = case outcome of OutcomeOutput output -> output; _ -> prior >>= (.stepRecordOutput),
                   stepRecordError = case outcome of OutcomeError message -> Just message; _ -> Nothing,
@@ -2042,7 +2138,7 @@ memInsertStep db wid stepId name output serialization now = do
   let entry =
         StepRecord
           { stepRecordWorkflowId = wid,
-            stepRecordStepId = stepId,
+            stepRecordStepId = fromIntegral stepId,
             stepRecordStepName = name,
             stepRecordOutput = output,
             stepRecordError = Nothing,
@@ -2208,7 +2304,7 @@ memTimeout micros action = timeout @(IOSim s) micros action
 -- otherwise the bounce runs (extend the matching DELAYED debounced row, or
 -- report its holder, or report the key free) and the caller step records
 -- the JSON outcome beside it, all in one STM transaction.
-memDebounce :: MemSystemDB s -> DebounceRequest -> Maybe (WorkflowId, Int) -> IOSim s (Either Error Debounce)
+memDebounce :: MemSystemDB s -> DebounceRequest -> Maybe StepCaller -> IOSim s (Either Error Debounce)
 memDebounce db request caller = case debounceValidate request of
   Left err -> pure (Left err)
   Right () -> do
@@ -2219,17 +2315,27 @@ memDebounce db request caller = case debounceValidate request of
       rows <- readTVar db.memRows
       steps <- readTVar db.memSteps
       case caller of
-        Just (callerWid, callerStep)
-          | Just stored <- Map.lookup (widTextOf callerWid, callerStep) steps ->
-              pure (memReplayDebounce callerWid callerStep stored)
-        _ -> do
+        Just c ->
+          -- The owner check comes before the step read, as in the backend:
+          -- a hand-off or a cancelled caller refuses the bounce.
+          case verifyCallerStep debounceStepName (Just c) rows steps of
+            CallerRefused err -> pure (Left err)
+            _ -> case Map.lookup (widTextOf c.stepCallerOwner.ownerWorkflowId, c.stepCallerStep) steps of
+              Just stored -> pure (memReplayDebounce c.stepCallerOwner.ownerWorkflowId c.stepCallerStep stored)
+              Nothing -> do
+                let (bounced, rows') = memBounce scope request now rows
+                writeTVar db.memRows rows'
+                writeTVar db.memSteps
+                  ( Map.insert
+                      (widTextOf c.stepCallerOwner.ownerWorkflowId, c.stepCallerStep)
+                      (memDebounceStep c.stepCallerOwner.ownerWorkflowId c.stepCallerStep now bounced)
+                      steps
+                  )
+                pure (Right bounced)
+        Nothing -> do
           let (bounced, rows') = memBounce scope request now rows
           writeTVar db.memRows rows'
-          case caller of
-            Nothing -> pure (Right bounced)
-            Just (callerWid, callerStep) -> do
-              writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) (memDebounceStep callerWid callerStep now bounced) steps)
-              pure (Right bounced)
+          pure (Right bounced)
 
 -- | The bounce itself, as pure row surgery: extend the one DELAYED
 -- debounced row holding the key (the period from the clock, capped at its
@@ -2295,7 +2401,7 @@ memDebounceStep :: WorkflowId -> Int -> Timestamp -> Debounce -> StepRecord
 memDebounceStep callerWid callerStep now bounced =
   StepRecord
     { stepRecordWorkflowId = callerWid,
-      stepRecordStepId = callerStep,
+      stepRecordStepId = fromIntegral callerStep,
       stepRecordStepName = debounceStepName,
       stepRecordOutput = Just (decodeUtf8 (LBS.toStrict (encode bounced))),
       stepRecordError = Nothing,
@@ -2337,17 +2443,28 @@ memReplayDebounce (WorkflowId widText) stepId stored = case stored.stepRecordOut
 -- under another name), the same replay decoding, and the same freshness.
 -- The expected name is the step the call replays: 'rewindStepName' for a
 -- rewind, the send's own name for a send.
-verifyCallerStep :: Text -> Maybe (WorkflowId, Int) -> Map Text WorkflowRecord -> Map (Text, Int) StepRecord -> CallerStep
-verifyCallerStep expectedName caller rows steps = case caller of
+verifyCallerStep :: Text -> Maybe StepCaller -> Map Text WorkflowRecord -> Map (Text, Int) StepRecord -> CallerStep
+verifyCallerStep expectedName caller =
+  verifyCallerStepAt expectedName
+    ((\(c) -> (widTextOf c.stepCallerOwner.ownerWorkflowId, c.stepCallerStep, Just c.stepCallerOwner.ownerToken)) <$> caller)
+
+-- | The unfenced form for the send path, which carries no owner token.
+verifyCallerStepUnfenced :: Text -> Maybe (WorkflowId, Int) -> Map Text WorkflowRecord -> Map (Text, Int) StepRecord -> CallerStep
+verifyCallerStepUnfenced expectedName caller =
+  verifyCallerStepAt expectedName ((\ (WorkflowId wid, step) -> (wid, step, Nothing)) <$> caller)
+
+verifyCallerStepAt :: Text -> Maybe (Text, Int, Maybe Text) -> Map Text WorkflowRecord -> Map (Text, Int) StepRecord -> CallerStep
+verifyCallerStepAt expectedName caller rows steps = case caller of
   Nothing -> CallerAbsent
-  Just (callerWid, callerStep) ->
-    let callerText = widTextOf callerWid
-     in case Map.lookup callerText rows of
-          Nothing -> CallerRefused (NonExistentWorkflow {workflowIds = [callerText]})
-          Just callerRow
-            | callerRow.workflowRecordStatus == Cancelled ->
-                CallerRefused (WorkflowCancelled {workflowId = callerText})
-            | otherwise -> case Map.lookup (callerText, callerStep) steps of
+  Just (callerText, callerStep, maybeToken) ->
+    case Map.lookup callerText rows of
+      Nothing -> CallerRefused (NonExistentWorkflow {workflowIds = [callerText]})
+      Just callerRow
+        | callerRow.workflowRecordStatus == Cancelled ->
+            CallerRefused (WorkflowCancelled {workflowId = callerText})
+        | Just token <- maybeToken, callerRow.workflowRecordOwnerXid /= Just token ->
+            CallerRefused (WorkflowConflict {workflowId = callerText})
+        | otherwise -> case Map.lookup (callerText, callerStep) steps of
                 Nothing -> CallerFresh
                 Just record -> case record.stepRecordStepName of
                   name | name /= expectedName ->
@@ -2405,7 +2522,7 @@ memSend db stepName messages serialization caller owner sendToForks = do
               Just row | row.workflowRecordStatus == Cancelled -> Left (WorkflowCancelled {workflowId = widTextOf o.ownerWorkflowId})
               Just row | row.workflowRecordOwnerXid == Just o.ownerToken -> Right ()
               _ -> Left (WorkflowConflict {workflowId = widTextOf o.ownerWorkflowId})
-      case (owned, verifyCallerStep stepName caller rows steps) of
+      case (owned, verifyCallerStepUnfenced stepName caller rows steps) of
         (Left conflict, _) -> pure (Left conflict)
         (_, CallerRefused err) -> pure (Left err)
         (_, CallerReplayed _) -> pure (Right ())
@@ -2476,7 +2593,7 @@ memSend db stepName messages serialization caller owner sendToForks = do
               let entry =
                     StepRecord
                     { stepRecordWorkflowId = callerWid,
-                      stepRecordStepId = callerStep,
+                      stepRecordStepId = fromIntegral callerStep,
                       stepRecordStepName = stepName,
                       stepRecordOutput = Nothing,
                       stepRecordError = Nothing,
@@ -2501,7 +2618,7 @@ memSend db stepName messages serialization caller owner sendToForks = do
 -- shape stays. Stored statuses are the ADT itself, so the unknown-spelling
 -- refusal has no sim path; consumed rows with no recorded step are kept,
 -- as live keeps rows whose @consumed_by_function_id@ stayed null.
-memRewind :: MemSystemDB s -> Text -> Int -> SysRewindOptions -> Maybe (WorkflowId, Int) -> IOSim s (Either Error ())
+memRewind :: MemSystemDB s -> Text -> Int -> SysRewindOptions -> Maybe StepCaller -> IOSim s (Either Error ())
 memRewind db wid cut sysOpts caller = do
   now <- memDbNow db
   atomically $ do
@@ -2531,7 +2648,7 @@ memRewind db wid cut sysOpts caller = do
                   ]
                 events' = foldr (\(key, value) acc -> Map.insert key value acc) (foldr Map.delete events [(wid, key) | key <- cutKeys]) restored
                 isClose entry =
-                  entry.streamStepId >= cut
+                  entry.streamStepId >= fromIntegral cut
                     && isStreamClosed entry.streamValue entry.streamSerialization
                 streams' = Map.mapWithKey (\(w, _) entries -> if w == wid then filter (not . isClose) entries else entries) streams
                 steps' = Map.filterWithKey (\(w, step) _ -> w /= wid || step < cut) steps
@@ -2569,8 +2686,10 @@ memRewind db wid cut sysOpts caller = do
             writeTVar db.memNotifications (Map.insert wid kept notifications)
             writeTVar db.memRows (Map.insert wid row' rows)
             let finalSteps = case caller of
-                  Just (callerWid, callerStep) ->
-                    Map.insert (widTextOf callerWid, callerStep) (memCallerEntry callerWid callerStep now (Right ())) steps'
+                  Just c ->
+                    let callerWid = c.stepCallerOwner.ownerWorkflowId
+                        callerStep = c.stepCallerStep
+                     in Map.insert (widTextOf callerWid, callerStep) (memCallerEntry callerWid callerStep now (Right ())) steps'
                   Nothing -> steps'
             writeTVar db.memSteps finalSteps
             pure (Right ())
@@ -2579,7 +2698,9 @@ memRewind db wid cut sysOpts caller = do
     -- live does: recordable failures commit a failure step for the
     -- caller, anything else returns unrecorded.
     refuseWith steps now err = case caller of
-      Just (callerWid, callerStep) | shouldRecord err -> do
+      Just c | shouldRecord err -> do
+        let callerWid = c.stepCallerOwner.ownerWorkflowId
+            callerStep = c.stepCallerStep
         writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) (memCallerEntry callerWid callerStep now (Left err)) steps)
         pure (Left err)
       _ -> pure (Left err)
@@ -2588,7 +2709,7 @@ memRewind db wid cut sysOpts caller = do
     memCallerEntry callerWid callerStep now outcome =
       StepRecord
         { stepRecordWorkflowId = callerWid,
-          stepRecordStepId = callerStep,
+          stepRecordStepId = fromIntegral callerStep,
           stepRecordStepName = rewindStepName,
           stepRecordOutput = either (const Nothing) (const (Just "null")) outcome,
           stepRecordError = either (Just . memErrorJson) (const Nothing) outcome,
@@ -2599,6 +2720,76 @@ memRewind db wid cut sysOpts caller = do
         }
     memErrorJson :: Error -> Text
     memErrorJson = encodePortableError
+
+-- | Runs a fork body under the caller's checkpoint: the caller check, the
+-- fork rows, and the caller's step commit in one STM commit, as the live
+-- backend's transaction does. A control refusal is not recorded, matching
+-- @should_record@.
+memForkCall :: MemSystemDB s -> Maybe StepCaller -> IOSim s (Either Error [WorkflowId]) -> IOSim s (Either Error [WorkflowId])
+memForkCall db caller work = case caller of
+  Nothing -> work
+  Just c -> do
+    let callerWid = c.stepCallerOwner.ownerWorkflowId
+        callerStep = c.stepCallerStep
+    rows <- readTVarIO db.memRows
+    steps <- readTVarIO db.memSteps
+    case verifyCallerStep forkStepName (Just c) rows steps of
+      CallerRefused err -> pure (Left err)
+      CallerReplayed _ -> memReplayCaller db (callerWid, callerStep)
+      _ -> do
+        result <- work
+        case result of
+          Left err | not (shouldRecord err) -> pure (Left err)
+          _ -> do
+            now <- memDbNow db
+            atomically $ recordCallerJson db forkStepName callerWid callerStep now result
+            pure result
+
+-- | The value a recorded management step holds: the JSON output on
+-- success, the structured error on a recordable failure.
+memReplayJsonStep :: FromJSON a => StepRecord -> Either Error a
+memReplayJsonStep record = case record.stepRecordError of
+  Just text -> case decodePortableError text of
+    Right err -> Left err
+    Left message -> Left (Malformed ("unreadable recorded step error: " <> message))
+  Nothing -> case (record.stepRecordOutput, record.stepRecordSerialization) of
+    (Just text, Just tag) | tag == portableJsonSerialization ->
+      case eitherDecodeStrict (encodeUtf8 text) of
+        Right value -> Right value
+        Left _ -> Left (Malformed "unreadable recorded step output")
+    _ -> Left (Malformed "the recorded step has no output")
+
+-- | Replays a recorded caller step's JSON output, or reports the recorded
+-- failure. The caller pair is the row's key; the verifier already proved
+-- the step is there and named for this call.
+memReplayCaller :: FromJSON a => MemSystemDB s -> (WorkflowId, Int) -> IOSim s (Either Error a)
+memReplayCaller db (callerWid, callerStep) = do
+  steps <- readTVarIO db.memSteps
+  pure $ case Map.lookup (widTextOf callerWid, callerStep) steps of
+    Just record -> memReplayJsonStep record
+    Nothing -> Left (Malformed "the recorded caller step vanished")
+
+-- | The caller's step row for a management call: the JSON value on
+-- success, the structured error on a recordable failure.
+recordCallerJson :: ToJSON a => MemSystemDB s -> Text -> WorkflowId -> Int -> Timestamp -> Either Error a -> STM (IOSim s) ()
+recordCallerJson db stepName callerWid callerStep now result = do
+  steps <- readTVar db.memSteps
+  writeTVar db.memSteps (Map.insert (widTextOf callerWid, callerStep) entry steps)
+  where
+    entry =
+      StepRecord
+        { stepRecordWorkflowId = callerWid,
+          stepRecordStepId = fromIntegral callerStep,
+          stepRecordStepName = stepName,
+          stepRecordOutput = case result of
+            Right value -> Just (decodeUtf8 (LBS.toStrict (encode value)))
+            Left _      -> Nothing,
+          stepRecordError = either (Just . encodePortableError) (const Nothing) result,
+          stepRecordChildWorkflowId = Nothing,
+          stepRecordSerialization = Just portableJsonSerialization,
+          stepRecordStartedAt = Just now,
+          stepRecordCompletedAt = Just now
+        }
 
 memQueueRecord :: NewQueue -> QueueRecord
 memQueueRecord queue =

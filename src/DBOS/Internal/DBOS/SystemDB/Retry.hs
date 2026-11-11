@@ -14,6 +14,7 @@
 module DBOS.SystemDB.Retry
   ( RetryPolicy (..),
     defaultRetryPolicy,
+    withoutConflictReplay,
     shouldRetry,
     jitter,
     withRetry,
@@ -26,7 +27,7 @@ import DBOS.Prelude
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), Error (..), renderError)
-import DBOS.SystemDB.Types (Duration (..), durationAsMillis, secondsDuration)
+import DBOS.SystemDB.Types (Duration, durationAsMillis, millisDuration, scaleDuration, secondsDuration)
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
 import System.Log.FastLogger (ToLogStr (..))
 
@@ -36,7 +37,12 @@ import System.Log.FastLogger (ToLogStr (..))
 -- already imports — so the backend and the notifier announce through it
 -- without a cycle.
 data SysdbEvent
-  = SysdbRetryAttempt { sysdbOperation :: Text, sysdbAttempt :: Integer, sysdbDelayMs :: Integer, sysdbDetail :: Text }
+  = SysdbRetryAttempt { sysdbOperation :: Text, sysdbAttempt :: !Integer, sysdbDelayMs :: Integer, sysdbDetail :: Text }
+  | -- | A lost transaction conflict being replayed. Below the ceiling this
+    -- is ordinary contention and reads at DEBUG; at the ceiling the call
+    -- has been losing for seconds, so it reads at WARN like a connection
+    -- retry. Mirrors the oracle's conflict branch.
+    SysdbRetryConflict { sysdbOperation :: Text, sysdbAttempt :: !Integer, sysdbDelayMs :: Integer, sysdbDetail :: Text, sysdbLoud :: Bool }
   | SysdbUnexpectedChannel { sysdbChannel :: Text }
   | SysdbQueueMismatch { sysdbWorkflowId :: Text }
   | SysdbNotifierStopped
@@ -46,6 +52,7 @@ data SysdbEvent
 
 instance LogEvent SysdbEvent where
   eventSeverity SysdbRetryAttempt {}      = SeverityWarning
+  eventSeverity SysdbRetryConflict {sysdbLoud = loud} = if loud then SeverityWarning else SeverityDebug
   eventSeverity SysdbUnexpectedChannel {} = SeverityWarning
   eventSeverity SysdbQueueMismatch {}     = SeverityWarning
   eventSeverity SysdbNotifierStopped      = SeverityDebug
@@ -53,6 +60,16 @@ instance LogEvent SysdbEvent where
   eventSeverity SysdbClockUnreadable {}   = SeverityWarning
   renderEvent (SysdbRetryAttempt operation attempt delayMs detail) =
     "system database operation failed; retrying operation="
+      <> operation
+      <> " attempt="
+      <> showText attempt
+      <> " delay_ms="
+      <> showText delayMs
+      <> " error="
+      <> detail
+  renderEvent (SysdbRetryConflict operation attempt delayMs detail loud) =
+    (if loud then "system database operation failed; retrying " else "system database operation lost a transaction conflict; replaying ")
+      <> "operation="
       <> operation
       <> " attempt="
       <> showText attempt
@@ -84,9 +101,14 @@ instance ToLogStr SysdbEvent where
 -- minute, no attempt limit, connection failures blocked on rather than
 -- reported.
 data RetryPolicy = RetryPolicy
-  { retryPolicyInitialBackoff        :: Duration,
-    retryPolicyMaxBackoff            :: Duration,
-    retryPolicyRetryConnectionErrors :: Bool
+  { retryPolicyInitialBackoff         :: Duration,
+    retryPolicyMaxBackoff             :: Duration,
+    retryPolicyRetryConnectionErrors  :: Bool,
+    -- | Whether a transaction conflict is replayed rather than returned.
+    -- A caller with its own answer to losing a race turns this off.
+    retryPolicyRetryConflicts         :: Bool,
+    retryPolicyConflictInitialBackoff :: Duration,
+    retryPolicyConflictMaxBackoff     :: Duration
   }
   deriving stock (Eq, Show)
 
@@ -96,19 +118,28 @@ defaultRetryPolicy =
   RetryPolicy
     { retryPolicyInitialBackoff = secondsDuration 1,
       retryPolicyMaxBackoff = secondsDuration 60,
-      retryPolicyRetryConnectionErrors = True
+      retryPolicyRetryConnectionErrors = True,
+      retryPolicyRetryConflicts = True,
+      retryPolicyConflictInitialBackoff = millisDuration 50,
+      retryPolicyConflictMaxBackoff = secondsDuration 2
     }
 
--- | Whether this failure should be retried. Transient contention is
--- always retried, whatever the policy says; a connection failure is
--- retried unless the policy opts out; everything else — including answers
--- like 'ConflictingWorkflow', which would loop forever — is returned at
--- once.
+-- | The policy a caller with its own answer to losing a race uses: the
+-- first conflict reaches it instead of being slept off underneath it.
+-- Connection retries keep whatever the policy says.
+withoutConflictReplay :: RetryPolicy -> RetryPolicy
+withoutConflictReplay policy =
+  policy {retryPolicyRetryConflicts = False}
+
+-- | Whether this failure should be retried. A transaction conflict follows
+-- its own switch; a connection failure follows its own; everything else —
+-- including answers like 'ConflictingWorkflow', which would loop forever —
+-- is returned at once.
 shouldRetry :: RetryPolicy -> Error -> Bool
 shouldRetry policy err =
   case err of
     Backend backend -> case backend.backendKind of
-      Transient  -> True
+      Transient  -> policy.retryPolicyRetryConflicts
       Connection -> policy.retryPolicyRetryConnectionErrors
       Permanent  -> False
     _ -> False
@@ -118,8 +149,8 @@ shouldRetry policy err =
 -- comes back at the same instant. Pure, so a test can pin it; production
 -- feeds it 'uuidEntropy'.
 jitter :: Word32 -> Duration -> Duration
-jitter bits (Duration backoff) =
-  Duration (backoff * (0.5 + fromIntegral bits / 4294967296))
+jitter bits backoff =
+  fromMaybe backoff (scaleDuration (0.5 + fromIntegral bits / 4294967296) backoff)
 
 -- | Runs @work@ until it succeeds or fails for a reason that will not
 -- pass. There is no attempt limit, matching every other implementation:
@@ -133,9 +164,10 @@ withRetry :: MonadDelay m
              m Word32 ->
              m (Either Error a) ->
              m (Either Error a)
-withRetry policy operation tracer nextEntropy work = go policy.retryPolicyInitialBackoff (0 :: Integer)
+withRetry policy operation tracer nextEntropy work =
+  go policy.retryPolicyInitialBackoff policy.retryPolicyConflictInitialBackoff (0 :: Integer)
   where
-    go backoff attempt = do
+    go backoff conflictBackoff attempt = do
       result <- work
       case result of
         Right value -> pure (Right value)
@@ -143,13 +175,28 @@ withRetry policy operation tracer nextEntropy work = go policy.retryPolicyInitia
           | not (shouldRetry policy err) -> pure (Left err)
           | otherwise -> do
               bits <- nextEntropy
-              let delay = jitter bits backoff
+              let kind = case err of
+                    Backend backend -> backend.backendKind
+                    _               -> Permanent
+                  (delay, nextBackoff, nextConflictBackoff, event) = case kind of
+                    Transient ->
+                      let loud = conflictBackoff >= policy.retryPolicyConflictMaxBackoff
+                       in ( jitter bits conflictBackoff,
+                            backoff,
+                            min (double conflictBackoff) policy.retryPolicyConflictMaxBackoff,
+                            \delayMs -> SysdbRetryConflict operation (attempt + 1) delayMs (renderError err) loud
+                          )
+                    _ ->
+                      ( jitter bits backoff,
+                        min (double backoff) policy.retryPolicyMaxBackoff,
+                        conflictBackoff,
+                        \delayMs -> SysdbRetryAttempt operation (attempt + 1) delayMs (renderError err)
+                      )
                   delayMs = durationAsMillis delay
-                  nextAttempt = attempt + 1
-              runTracer tracer (SysdbRetryAttempt operation nextAttempt delayMs (renderError err))
+              runTracer tracer (event delayMs)
               threadDelay (fromInteger (delayMs * 1000))
-              go (min (double backoff) policy.retryPolicyMaxBackoff) nextAttempt
-    double (Duration backoff) = Duration (backoff * 2)
+              go nextBackoff nextConflictBackoff (attempt + 1)
+    double backoff = fromMaybe backoff (scaleDuration 2 backoff)
 
 -- | Production entropy for 'jitter': the first word of a fresh v4 UUID,
 -- the same source the oracle draws from.

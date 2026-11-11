@@ -391,7 +391,7 @@ checkRecoveredTakesOldPath (outcome, names) = do
 -- 1 can be recorded while 0 is not. A patch at 0 takes the old path
 -- there, and records nothing in the gap. Mirrors Rust
 -- @a_patch_in_a_gap_below_a_recorded_step_takes_the_old_path@.
-scenarioPlantedGap :: forall m. (MonadSTM m, MonadTime m, MonadCatch m) => PatchFixture m -> m (Either (Error EngineOnly) Int, [Maybe Text])
+scenarioPlantedGap :: forall m. (MonadSTM m, MonadTime m) => PatchFixture m -> m (Either (Error EngineOnly) Int, [Maybe Text])
 scenarioPlantedGap fx = do
   let PatchFixture {pfRunBody = runBody} = fx
   wid <- fx.pfFreshWorkflowId
@@ -444,7 +444,7 @@ checkDeprecatedOnOldHistory result = case result of
 -- @a_patch_is_added_nested_deprecated_and_removed@ without its fork tails:
 -- forks copy step rows name-blind on both backends, so the sequential
 -- replays here plus the fork suites cover them.
-scenarioProgression :: (MonadThrow m, MonadSTM m, MonadTime m, MonadCatch m) => PatchFixture m -> m (Int, Int, Int, Int, Int, Int, (Bool, Int), Int)
+scenarioProgression :: (MonadSTM m, MonadTime m, MonadCatch m) => PatchFixture m -> m (Int, Int, Int, Int, Int, Int, (Bool, Int), Int)
 scenarioProgression fx = do
   let PatchFixture {pfRunBody = runBody} = fx
   v1Wid <- fx.pfFreshWorkflowId

@@ -30,6 +30,7 @@ import DBOS.Transact.EventCases
     checkPublishReplay,
     checkRecoveryKeepsFirst,
     checkRefusedSet,
+    checkEncodeBeforeClaim,
     checkReplayNoRepublish,
     checkWrongInstance,
     mkEventFixture,
@@ -39,6 +40,7 @@ import DBOS.Transact.EventCases
     scenarioPublishReplay,
     scenarioRecoveryKeepsFirst,
     scenarioRefusedSet,
+    scenarioEncodeBeforeClaim,
     scenarioReplayNoRepublish,
     scenarioWrongInstance,
   )
@@ -108,6 +110,7 @@ tests =
         [ liveCase (liveEventFixture getBackend (ioTracer . fst <$> getLogger)) "a workflow can publish and replay an event" scenarioPublishReplay checkPublishReplay,
           liveCase (liveEventFixture getBackend (ioTracer . fst <$> getLogger)) "a reading workflow is checkpointed and a reading step is not" scenarioCheckpointedRead checkCheckpointedRead,
           liveCase (liveEventFixture getBackend (ioTracer . fst <$> getLogger)) "a refused set event spends no step id" scenarioRefusedSet checkRefusedSet,
+          liveCase (liveEventFixture getBackend (ioTracer . fst <$> getLogger)) "an encoder that throws spends no step id" scenarioEncodeBeforeClaim checkEncodeBeforeClaim,
           liveCase (liveEventFixture getBackend (ioTracer . fst <$> getLogger)) "a getEvent through a captured parent is plain and moves no ids" scenarioCapturedRead checkCapturedRead,
           liveCase (liveEventFixture getBackend (ioTracer . fst <$> getLogger)) "a replayed set event does not republish" scenarioReplayNoRepublish checkReplayNoRepublish,
           liveCase (liveEventFixture getBackend (ioTracer . fst <$> getLogger)) "progress events survive recovery without republishing" scenarioRecoveryKeepsFirst checkRecoveryKeepsFirst,

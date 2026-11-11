@@ -81,12 +81,61 @@ import Data.Map.Strict qualified as Map
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.SystemDB.Types (AppScope, Duration, EncodedValue (..), EventRecord (..), Fork, ForkOptions, ForkPoint, IdempotencyKey, RewindOptions (..), EncodedSendMessage (..), NewWorkflow (..), Serialization (..), SerializedWorkflowValue (..), StepRecord, Timestamp (..), durationAsMillis, forkNew, Topic, VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult, QualifiedWorkflowName, qualifiedName, qualifiedClassName, qualifiedConfigName, WorkflowRecord (..), WorkflowStatus, defaultWorkflowFilter, newWorkflow, renderQualifiedWorkflowName, secondsDuration)
-import DBOS.Transact.Serialization (CodecError (..), SerializationError, WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, unWorkflowInput)
+import DBOS.SystemDB.Types
+  ( AppScope,
+    Duration,
+    EncodedValue (..),
+    EventRecord (..),
+    Fork,
+    ForkOptions,
+    ForkPoint,
+    IdempotencyKey,
+    RewindOptions (..),
+    EncodedSendMessage (..),
+    NewWorkflow (..),
+    Serialization (..),
+    SerializedWorkflowValue (..),
+    StepRecord,
+    Timestamp (..),
+    durationAsMillis,
+    forkNew,
+    Topic,
+    VersionInfo (..),
+    WorkflowDelay (..),
+    WorkflowFilter (..),
+    WorkflowId (..),
+    WorkflowIdReusePolicy (..),
+    WorkflowInitResult,
+    QualifiedWorkflowName,
+    qualifiedName,
+    qualifiedClassName,
+    qualifiedConfigName,
+    WorkflowRecord (..),
+    WorkflowStatus,
+    defaultWorkflowFilter,
+    newWorkflow,
+    renderQualifiedWorkflowName,
+    secondsDuration
+  )
+import DBOS.Transact.Serialization
+  ( CodecError (..),
+    SerializationError,
+    WorkflowInput (..),
+    codecErrorText,
+    codecUnknownTag,
+    decodeWorkflowValue,
+    unWorkflowInput
+  )
 import DBOS.Transact.Serialization qualified as Serialization
 import DBOS.Transact.Config (Config (..), serializerName)
 import DBOS.Transact.Config qualified as Config
-import DBOS.Transact.Connection (Connection (..), releaseConnection, acquireConnection, generatedWorkflowId, withConnection)
+import DBOS.Transact.Connection
+  ( Connection (..),
+    releaseConnection,
+    acquireConnection,
+    generatedWorkflowId,
+    withConnection
+  )
 import DBOS.Transact.Context (WorkflowCtx)
 import DBOS.Transact.Dequeue (dequeuePass, superviseForever)
 import DBOS.Transact.Error qualified as TransactError
@@ -96,12 +145,55 @@ import DBOS.Transact.Logger (SomeTracer, acquireLoggerBackend, ioTracer, runTrac
 import DBOS.Transact.Management qualified as Management
 import DBOS.Transact.Management (ManagementEvent (..), StepInfo)
 import DBOS.Transact.Recovery (EngineEvent (..), reenqueueForRecovery)
-import DBOS.Transact.Datasource (DataSource (..), DataSourceRegistry, clearDatasourceCheckpoints, freezeDataSourceRegistry, newDataSourceRegistry, snapshotDatasources, thawDataSourceRegistry)
+import DBOS.Transact.Datasource
+  ( DataSource (..),
+    DataSourceRegistry,
+    clearDatasourceCheckpoints,
+    freezeDataSourceRegistry,
+    newDataSourceRegistry,
+    snapshotDatasources,
+    thawDataSourceRegistry
+  )
 import DBOS.Transact.Datasource qualified as Datasource (registerDataSource)
-import DBOS.Transact.Registry (Registry, Snapshot, bindRegistryInstance, lookupSnapshotWorkflow, newRegistry, snapshotRegistry, snapshotSize, thawRegistry)
+import DBOS.Transact.Registry
+  ( Registry,
+    Snapshot,
+    bindRegistryInstance,
+    lookupSnapshotWorkflow,
+    newRegistry,
+    snapshotRegistry,
+    snapshotSize,
+    thawRegistry
+  )
 import DBOS.Transact.TimeoutSweep (spawnTimeoutSweep)
-import DBOS.Transact.Workflow (EnqueueOptions (..), ErasedWorkflow, RunOptions (..), StartOptions, Submitted (..), Tasks, WorkflowRef, abortAll, newTasks, runRegisteredWorkflow, runningTasks, spawnTracked, waitAllUntil)
-import DBOS.Transact.Workflow qualified as Workflow (EnqueueOptions (..), enqueueWorkflow, initOrJoin, queueRequest, registerTypedWorkflow, registerWorkflowRef, runWorkflowRef, startWorkflow, storedPriority, timeoutBudget, validateEnqueueOptions)
+import DBOS.Transact.Workflow
+  ( EnqueueOptions (..),
+    ErasedWorkflow,
+    RunOptions (..),
+    StartOptions,
+    Submitted (..),
+    Tasks,
+    WorkflowRef,
+    abortAll,
+    newTasks,
+    runRegisteredWorkflow,
+    runningTasks,
+    spawnTracked,
+    waitAllUntil
+  )
+import DBOS.Transact.Workflow qualified as Workflow
+  ( EnqueueOptions (..),
+    enqueueWorkflow,
+    initOrJoin,
+    queueRequest,
+    registerTypedWorkflow,
+    registerWorkflowRef,
+    runWorkflowRef,
+    startWorkflow,
+    storedPriority,
+    timeoutBudget,
+    validateEnqueueOptions
+  )
 
 -- | An instance is the application's stable configuration and registry;
 -- its executor slot is empty until launch and may be filled again after a
@@ -226,7 +318,11 @@ launchWithEnvironment dbos environment =
   withMVar dbos.dbos_lifecycle $ \_ -> do
     existing <- readMVar dbos.dbos_executor
     case existing of
-      Just executor -> pure (Right executor)
+      Just executor -> do
+        -- Idempotent launch: warn and hand back the running executor rather
+        -- than failing a caller who was merely defensive.
+        runTracer executor.conn.connTracer (EngineAlreadyLaunched executor.identity.identityAppName)
+        pure (Right executor)
       Nothing -> case Config.validateConfig dbos.dbos_config of
         Left err -> pure (Left err)
         Right () -> case resolve dbos.dbos_config environment of
@@ -234,7 +330,10 @@ launchWithEnvironment dbos environment =
           Right resolved -> do
             snapshot <- snapshotRegistry dbos.dbos_registry
             freezeDataSourceRegistry dbos.dbos_datasources
-            (backend, releaseFastLogger) <- acquireLoggerBackend
+            -- A logger acquisition failure must reopen the datasource
+            -- registry, or every later registration would report
+            -- AlreadyLaunched on an instance that never launched.
+            (backend, releaseFastLogger) <- acquireLoggerBackend `onException` thawDataSourceRegistry dbos.dbos_datasources
             let tracer = ioTracer backend
             started <- startExecutor dbos.dbos_config resolved snapshot dbos.dbos_datasources tracer releaseFastLogger `onException` (releaseFastLogger >> thawRegistry dbos.dbos_registry >> thawDataSourceRegistry dbos.dbos_datasources)
             case started of
@@ -257,7 +356,7 @@ launchWithEnvironment dbos environment =
 -- With the default options this waits for nothing: every running
 -- workflow is cancelled at once and stays @PENDING@, as 'shutdown' always
 -- did. Mirrors Rust @DBOS::shutdown@.
-shutdown :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m, MonadCatch m) => DBOS m -> m ()
+shutdown :: (MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m, MonadCatch m) => DBOS m -> m ()
 shutdown dbos = shutdownWith dbos shutdownOptionsDefault
 
 -- | Stops the executor and closes the system database, first waiting up to
@@ -270,7 +369,7 @@ shutdown dbos = shutdownWith dbos shutdownOptionsDefault
 -- into it. Idempotent, and a second call made while the first is waiting
 -- returns once the first has finished (both serialize on the lifecycle
 -- lock). Mirrors Rust @DBOS::shutdown_with@.
-shutdownWith :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m, MonadCatch m) => DBOS m -> ShutdownOptions -> m ()
+shutdownWith :: (MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m, MonadCatch m) => DBOS m -> ShutdownOptions -> m ()
 shutdownWith dbos options = do
   -- The teardown runs as a task of its own, so a caller that stops
   -- waiting leaves it to finish rather than cutting the shutdown short
@@ -278,18 +377,18 @@ shutdownWith dbos options = do
   -- waiter: a dropped wait must not reopen the lifecycle while the
   -- teardown still holds it, or a second shutdown would tear down twice
   -- and a relaunch would be wiped when the first teardown takes the
-  -- executor it just installed. The box always fills: a throw in the
-  -- teardown reaches the waiter instead of hanging it.
-  box <- newEmptyMVar
-  _ <- forkIO (do result <- try (tearDownIfLaunched dbos options); putMVar box result)
-  outcome <- takeMVar box
+  -- executor it just installed. The async wrapper delivers the result
+  -- whether the teardown returns, throws, or is cancelled; the waiter
+  -- reads it from the task, so there is no box to leave empty.
+  task <- async (tearDownIfLaunched dbos options)
+  outcome <- waitCatch task
   either throwIO pure (outcome :: Either SomeException ())
 
 -- | Takes the lifecycle lock and tears down the installed executor, if
 -- any: the lock lives in the teardown task rather than its waiter, so a
 -- dropped wait neither reopens the lifecycle early nor lets a second
 -- shutdown or a relaunch interleave with the teardown still running.
-tearDownIfLaunched :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => DBOS m -> ShutdownOptions -> m ()
+tearDownIfLaunched :: (MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => DBOS m -> ShutdownOptions -> m ()
 tearDownIfLaunched dbos options = withMVar dbos.dbos_lifecycle $ \_ -> do
   current <- readMVar dbos.dbos_executor
   case current of
@@ -302,7 +401,7 @@ tearDownIfLaunched dbos options = withMVar dbos.dbos_lifecycle $ \_ -> do
 -- call back into this instance — to send, to start a child — and an
 -- instance that already said it was not launched would fail it with an
 -- error its body could record as its outcome. Mirrors Rust @tear_down@.
-tearDown :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => DBOS m -> Executor m -> ShutdownOptions -> m ()
+tearDown :: (MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => DBOS m -> Executor m -> ShutdownOptions -> m ()
 tearDown dbos executor options = do
   stop executor options.shutdownWorkflowCompletionTimeout
   modifyMVar_ dbos.dbos_executor (const (pure Nothing))
@@ -321,7 +420,7 @@ tearDown dbos executor options = do
 -- dequeue whose claim has committed starts what it claimed, and that
 -- workflow drains with the rest. A zero timeout waits for nothing.
 -- Mirrors Rust @Executor::stop@.
-stop :: (MonadMVar m, MonadFork m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => Executor m -> Duration -> m ()
+stop :: (MonadMVar m, MonadFork m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => Executor m -> Duration -> m ()
 stop executor timeout = do
   atomically (writeTVar executor.stopping True)
   let draining = timeout /= secondsDuration 0
@@ -343,13 +442,13 @@ stop executor timeout = do
         runTracer executor.conn.connTracer (EngineWorkflowsCut (length abandoned) abandoned)
     else
       unless (null abandoned) $
-        runTracer executor.conn.connTracer (EngineCancelledRunning (length abandoned))
+        runTracer executor.conn.connTracer (EngineCancelledRunning (length abandoned) abandoned)
 
 -- | Waits for the running workflows to finish on their own, up to the
 -- deadline, saying once a second which ones are still waited on. Waits
 -- only: what is left is cancelled by 'stop' after this returns. Mirrors
 -- Rust @Executor::drain@.
-drain :: (MonadMVar m, MonadSTM m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => Executor m -> Word64 -> m ()
+drain :: (MonadMVar m, MonadAsync m, MonadDelay m, MonadMonotonicTimeNSec m) => Executor m -> Word64 -> m ()
 drain executor deadline = do
   now <- getMonotonicTimeNSec
   let reportAt = min (now + fromInteger (durationAsMillis drainReportInterval * 1000000)) deadline
@@ -377,7 +476,7 @@ deadlineNs timeout = do
   now <- getMonotonicTimeNSec
   pure (now + fromInteger (durationAsMillis timeout * 1000000))
 
-runWorkflow :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
+runWorkflow :: forall m e. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
             => Executor m -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflow executor key workflowId input = do
   outcome <-
@@ -395,14 +494,14 @@ runWorkflow executor key workflowId input = do
 
 -- | Starts the referenced workflow via the launched executor: what
 -- @WorkflowRef::start_with@ becomes when the call site holds a reference.
-startWorkflow :: (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+startWorkflow :: (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
               => Executor m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startWorkflow executor ref options input =
   Workflow.startWorkflow executor.workflowTasks executor.conn executor.identity executor.workflows ref options (unWorkflowInput <$> input) executor.datasources
 
 -- | Runs the referenced workflow via the launched executor and waits: a
 -- start followed by an await under the same id.
-runWorkflowRef :: forall m e. (MonadFork m, MonadMask m, MonadMVar m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
+runWorkflowRef :: forall m e. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m, FromJSON e)
                => Executor m -> WorkflowRef m e -> RunOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 runWorkflowRef executor ref options input = do
   outcome <-
@@ -471,7 +570,7 @@ enqueueWorkflowByName dbos name options input =
           Right (SubmittedJoined holder) -> Right holder
           Left err                       -> Left (TransactError.refusedStart (Just options.queueName) err)
 
-dequeueWorkflows :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+dequeueWorkflows :: (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                  => DBOS m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeueWorkflows dbos = do
   withExecutor dbos "dequeue workflows" $ \executor ->
@@ -874,7 +973,7 @@ launchOnWithQueues dbos conn identity listen = do
 -- already bound the registry and installed the executor; the repeats below
 -- keep this tail self-contained for the IO builder path, which does
 -- neither — both operations are idempotent.)
-launchExecutor :: (MonadMVar m, MonadFork m, MonadMask m, MonadAsync m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+launchExecutor :: (MonadMVar m, MonadFork m, MonadMask m, MonadAsync m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                => DBOS m -> Executor m -> m (Either (TransactError.Error TransactError.EngineOnly) (Executor m))
 launchExecutor dbos executor = do
   prepared <- prepare executor.conn executor.identity

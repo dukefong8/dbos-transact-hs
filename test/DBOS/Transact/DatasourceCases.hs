@@ -194,7 +194,7 @@ mkFakeDs = do
             dsStepName = \wid step -> Right . Map.lookup (widText wid, step) <$> readTVarIO names,
             dsDeleteCheckpoints = \wid step -> atomically $ do
               existing <- readTVar rows
-              writeTVar rows (Map.filterWithKey (\(w, s) _ -> not (w == widText wid && s >= step)) existing)
+              writeTVar rows (Map.filterWithKey (\(w, s) _ -> not (w == widText wid && s >= fromIntegral step)) existing)
               pure (Right ())
           }
   pure (FakeDs source rows names runs transients drops conflict)

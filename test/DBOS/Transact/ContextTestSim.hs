@@ -11,6 +11,7 @@ module DBOS.Transact.ContextTestSim (tests) where
 import DBOS.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic, selectTraceEventsSay)
 import DBOS.DualStack (simCase)
+import DBOS.IOSimTracer (runSimCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (simConnectionWith)
@@ -22,6 +23,7 @@ import DBOS.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.Context
   ( WorkflowCtx (wctxTracer),
     firstStepStatus,
+    insideAStep,
     newWorkflowCtx,
     newWorkflowState,
     testOwner,
@@ -30,7 +32,7 @@ import DBOS.Transact.Context
     withStep,
     withTracer
   )
-import DBOS.Transact.Connection (Connection)
+import DBOS.Transact.Connection (Connection, ExecutionIdentity (..))
 import DBOS.Transact.Connection
   ( nextExecutionIdentity
   )
@@ -92,7 +94,7 @@ import DBOS.Transact.ContextTest
     scenarioWorkflowId,
   )
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, (@?=))
+import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 simIdentity :: Identity
 simIdentity =
@@ -151,11 +153,23 @@ tests =
       simCase (pure simFixture) "concurrent contexts are isolated from each other" scenarioConcurrentIsolation checkConcurrentIsolation traceContextSilent,
       simCase (pure simFixture) "separate executions own independent step counters" scenarioExecCounters checkExecCounters traceContextSilent,
       simCase (pure simFixture) "a step view reads its status with the workflow id" scenarioStepView checkStepView traceContextSilent,
+      testCase "a killed step restores the depth" $ do
+        (restored, _) <- runSimCase $ do
+          ctx <- simFixture.fixtureMkCtx "wf-kill"
+          marker <- nextWorkflowMarker ctx
+          worker <- forkIO (withStep ctx marker (firstStepStatus 0) (\_ -> threadDelay 1000000))
+          threadDelay 1000
+          killThread worker
+          threadDelay 1000
+          not <$> insideAStep ctx
+        restored @?= True,
       simCase (pure simFixture) "raceCancel returns the value when the token stays quiet" scenarioRaceCompletes checkRaceCompletes traceContextSilent,
       simCase (pure simFixture) "a starts token holds the outcome wait until it is given back" scenarioStartsToken checkStartsToken traceContextSilent,
       simCase (pure simFixture) "raceCancel reports cancellation when the token has fired" scenarioRaceCancelled checkRaceCancelled traceContextSilent,
       simCase (pure simFixture) "a body logs through its context" scenarioAppLog checkTraceOnly traceAppLog,
-      simCase (pure simFixture) "a context announces through its tracer" (const demoTrace) checkCoopFlag traceAnnounce
+      simCase (pure simFixture) "a context announces through its tracer" (const demoTrace) checkCoopFlag traceAnnounce,
+      testCase "execution identities from different connections differ" $
+        (ExecutionIdentity "conn-a" 0 /= ExecutionIdentity "conn-b" 0) @?= True
     ]
 
 -- | Context scenarios touch no engine paths, so the trace carries no

@@ -28,9 +28,11 @@ module DBOS.Transact.Queue
   )
 where
 
+import Data.Int (Int32)
 import DBOS.Prelude
 import Data.Text qualified as Text
 import DBOS.SystemDB.Class qualified as SystemDB
+import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types
   ( Change (..),
     AppScope (..),
@@ -41,13 +43,11 @@ import DBOS.SystemDB.Types
     VersionInfo (..),
     QueueUpdate (..),
     RateLimit (..),
-    ResolvedLimits (..),
     Duration,
     defaultQueueUpdate,
     internalQueueName,
     newQueue,
     queueIsLegacyPartitioned,
-    queueResolvedLimits,
     secondsDuration,
     durationIsZero,
   )
@@ -149,16 +149,30 @@ data QueueConflict
 
 queueFromRecord :: QueueRecord -> Queue
 queueFromRecord record =
-  let limits = queueResolvedLimits record
-   in Queue
-        { name = record.queueRecordName,
-          concurrency = limits.resolvedConcurrency,
-          workerConcurrency = limits.resolvedWorkerConcurrency,
-          rateLimit = limits.resolvedRateLimit,
-          partitionConcurrency = limits.resolvedPartitionConcurrency,
-          partitionWorkerConcurrency = limits.resolvedPartitionWorkerConcurrency,
-          partitionRateLimit = limits.resolvedPartitionRateLimit,
-          pollingInterval = record.queueRecordPollingInterval
+  Queue
+    { name = record.queueRecordName,
+      concurrency = record.queueRecordConcurrency,
+      workerConcurrency = record.queueRecordWorkerConcurrency,
+      rateLimit = record.queueRecordRateLimit,
+      partitionConcurrency = record.queueRecordPartitionConcurrency,
+      partitionWorkerConcurrency = record.queueRecordPartitionWorkerConcurrency,
+      partitionRateLimit = record.queueRecordPartitionRateLimit,
+      pollingInterval = record.queueRecordPollingInterval
+    }
+
+-- | The registration view of a stored record, for the in-lock validator.
+-- The record has one fleet-limit spelling, so it fills the supported one.
+queueOptionsOfRecord :: QueueRecord -> QueueOptions
+queueOptionsOfRecord record =
+  let receipt = queueFromRecord record
+   in defaultQueueOptions
+        { globalConcurrency = receipt.concurrency,
+          workerConcurrency = receipt.workerConcurrency,
+          pollingInterval = receipt.pollingInterval,
+          rateLimit = receipt.rateLimit,
+          partitionConcurrency = receipt.partitionConcurrency,
+          partitionWorkerConcurrency = receipt.partitionWorkerConcurrency,
+          partitionRateLimit = receipt.partitionRateLimit
         }
 
 queueIsPartitioned :: Queue -> Bool
@@ -273,6 +287,7 @@ validateQueueOptions queueName options =
       _ -> Nothing
     positive field = \case
       Just value | value < 1 -> Just (field, "must be at least 1, got " <> Text.pack (show value))
+      Just value | value > maxInt32 -> Just (field, fitsInt32Detail value)
       _ -> Nothing
     -- A queue-wide limit of 0 pauses the queue; only a negative one is
     -- refused. The per-partition and rate limits stay 'positive' above: a
@@ -281,7 +296,13 @@ validateQueueOptions queueName options =
     -- in the detail so the refusal names the limit exactly.
     nonnegative field = \case
       Just value | value < 0 -> Just (field, "`" <> field <> "` must not be negative, got " <> Text.pack (show value))
+      Just value | value > maxInt32 -> Just (field, fitsInt32Detail value)
       _ -> Nothing
+    -- The limit columns are signed 32-bit integers. A wider value would
+    -- truncate on write, so it is refused here, where Rust's i32 fields
+    -- make it unrepresentable at the call.
+    maxInt32 = fromIntegral (maxBound :: Int32)
+    fitsInt32Detail value = "must fit in a signed 32-bit integer, got " <> Text.pack (show value)
     ordered field outer innerValue outerValue =
       case (innerValue, outerValue) of
         (Just inner, Just outer') | inner > outer' ->
@@ -316,7 +337,7 @@ registerQueue dbos queueName options conflict
             inserted <- withConnection executor.conn (\db -> SystemDB.upsertQueue db new policy)
             case inserted of
               Left err -> pure (Left err)
-              Right _ -> queueRecord executor queueName
+              Right (_, record) -> pure (Right (queueFromRecord record))
 
 queue :: (MonadMVar m)
       => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe Queue))
@@ -330,7 +351,10 @@ listQueues :: (MonadMVar m)
 listQueues dbos = do
   withExecutor dbos "list queues" $ \executor -> do
     result <- withConnection executor.conn (\db -> SystemDB.listQueues db (Named [executor.identity.identityAppName]))
-    pure (fmap (map queueFromRecord) result)
+    -- The engine's own queue is not one anybody registered: a stored row
+    -- for it must not appear in the operator-visible list.
+    let QueueName internalName = internalQueueName
+    pure (fmap (map queueFromRecord . filter (\record -> record.queueRecordName /= internalName)) result)
 
 -- | A change naming both fleet-limit spellings is refused with Python's
 -- message, before the merge: the write would otherwise collapse the pair
@@ -358,34 +382,28 @@ updateQueue dbos queueName change
         Left err -> pure (Left err)
         Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
         Right (Just record) -> do
-          -- A legacy-partitioned row cannot take a per-partition limit:
-          -- its queue-wide limits already are its per-partition ones, so
-          -- adding a second set would leave two answers in one row.
-          -- Asked of the row as stored, not as merged: clearing the last
-          -- partition limit leaves a legacy-looking row, and refusing
-          -- that would make un-partitioning impossible.
-          let touchesPartition =
-                change.partitionConcurrency /= Leave
-                  || change.partitionWorkerConcurrency /= Leave
-                  || change.partitionRateLimit /= Leave
-          if touchesPartition && queueIsLegacyPartitioned record
-            then
-              pure
-                ( Left
-                    ( TransactError.ErrorConfig
-                        ( "queue `" <> queueName <> "`: this queue is registered with the deprecated `partition_queue` flag, under which its queue-wide limits already apply per partition; re-register it with the per-partition limits instead"
-                        )
-                    )
-                )
-            else do
-              let currentQueue = queueFromRecord record
-                  desired = queueOptionsAfterChange change currentQueue
-              case validateQueueOptions queueName desired of
-                Left err -> pure (Left err)
-                Right () -> do
-                  let update = queueChangeToUpdate change currentQueue
-                  updated <- withConnection executor.conn (\db -> SystemDB.updateQueue db queueName update (\_ _ -> Right ()))
-                  pure (queueFromRecord <$> updated)
+          -- The stored flag is not a compatibility gate: every limit
+          -- applies at the scope its column names, so a partition-touching
+          -- update is ordinary, even on a row some older writer stamped
+          -- with the deprecated flag.
+          let currentQueue = queueFromRecord record
+              desired = queueOptionsAfterChange change currentQueue
+          case validateQueueOptions queueName desired of
+            Left err -> pure (Left err)
+            Right () -> do
+              let update = queueChangeToUpdate change currentQueue
+                  -- The seam locks the row, merges, then validates the
+                  -- merged record inside that lock. The caller-side check
+                  -- above is a fast path; this one is what keeps two
+                  -- operators' interleaved limits coherent.
+                  validateMerged _ merged =
+                    case validateQueueOptions queueName (queueOptionsOfRecord merged) of
+                      Right () -> Right ()
+                      Left (TransactError.ErrorConfig detail) ->
+                        Left (SystemDBError.InvalidInput {field = "queue", detail})
+                      Left _ -> Right ()
+              updated <- withConnection executor.conn (\db -> SystemDB.updateQueue db queueName update validateMerged)
+              pure (queueFromRecord <$> updated)
 
 deleteQueue :: (MonadMVar m)
             => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
@@ -409,15 +427,6 @@ reserved queueName =
                 ("the queue name `" <> queueName <> "` is reserved for the engine's internal queue")
             )
       | otherwise -> Nothing
-
-queueRecord :: (Monad m)
-            => Executor m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Queue)
-queueRecord executor queueName = do
-  result <- withConnection executor.conn (\db -> SystemDB.getQueue db queueName)
-  pure $ case result of
-    Left err -> Left err
-    Right Nothing -> Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` was not returned after registration"))
-    Right (Just record) -> Right (queueFromRecord record)
 
 resolveConflict :: (Monad m)
                 => Executor m -> QueueConflict -> m (Either (TransactError.Error TransactError.EngineOnly) OnExistingQueue)

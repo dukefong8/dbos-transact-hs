@@ -191,7 +191,13 @@ traceInWorkflowDebounceRecordsStep tr = do
 
 traceTimeoutCapsExtension :: forall a. SimTrace a -> IO ()
 traceTimeoutCapsExtension tr = do
-  -- The fresh enqueue consumes the pinned id, the first minted in the
-  -- run; the capped second bounce enqueues nothing.
-  selectTraceEventsDynamic tr @?= [WorkflowEnqueued "sim-0" "db-foreign-q"]
+  -- The fresh enqueue is the point; the generated id depends on how many
+  -- tokens the supervisor drew first, which is not this case's subject.
+  let enqueued =
+        [ workflowEnqueuedId
+          | WorkflowEnqueued {workflowEnqueuedId, workflowEnqueuedQueue} <-
+              (selectTraceEventsDynamic tr :: [WorkflowEvent]),
+            workflowEnqueuedQueue == "db-foreign-q"
+        ]
+  length enqueued @?= 1
   selectTraceEventsDynamic tr @?= [EngineRecovered 0, EngineLaunched "sim-app" "sim-executor" "0.0.0"]

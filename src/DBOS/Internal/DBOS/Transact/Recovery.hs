@@ -23,7 +23,8 @@ data EngineEvent
   | EngineVersionStale { engineVersion :: Text, engineLatestVersion :: Text }
   | EngineNoWorkflows
   | EngineRecovered { engineRecoveredCount :: Int }
-  | EngineCancelledRunning { engineCancelledCount :: Int }
+  | EngineAlreadyLaunched { engineAlreadyAppName :: Text }
+  | EngineCancelledRunning { engineCancelledCount :: Int, engineCancelledIds :: [Text] }
   | EngineDrainWaiting { engineDrainCount :: Int, engineDrainIds :: [Text] }
   | EngineProducersCut { engineCutProducers :: [Text] }
   | EngineWorkflowsCut { engineCutCount :: Int, engineCutIds :: [Text] }
@@ -36,12 +37,15 @@ instance LogEvent EngineEvent where
   eventSeverity EngineNoWorkflows         = SeverityWarning
   eventSeverity (EngineRecovered 0)       = SeverityDebug
   eventSeverity EngineRecovered {}        = SeverityInfo
+  eventSeverity EngineAlreadyLaunched {}  = SeverityWarning
   eventSeverity EngineCancelledRunning {} = SeverityInfo
   eventSeverity EngineDrainWaiting {}     = SeverityInfo
   eventSeverity EngineProducersCut {}     = SeverityWarning
   eventSeverity EngineWorkflowsCut {}     = SeverityWarning
   renderEvent (EngineLaunched app exec ver) =
     "DBOS launched app_name=" <> app <> " executor_id=" <> exec <> " app_version=" <> ver
+  renderEvent (EngineAlreadyLaunched app) =
+    "DBOS was already launched app_name=" <> app
   renderEvent (EngineShutdown app) = "DBOS shut down app_name=" <> app
   renderEvent (EngineVersionStale ver latest) =
     "this executor is not running the latest registered application version: it will "
@@ -55,8 +59,8 @@ instance LogEvent EngineEvent where
     "no workflows to recover"
   renderEvent (EngineRecovered count) =
     "re-enqueued workflows a previous run left PENDING workflows=" <> showText count
-  renderEvent (EngineCancelledRunning count) =
-    "cancelled workflows still running; they stay PENDING cancelled=" <> showText count
+  renderEvent (EngineCancelledRunning count ids) =
+    "cancelled workflows still running; they stay PENDING cancelled=" <> showText count <> " workflow_ids=" <> showText ids
   renderEvent (EngineDrainWaiting count ids) =
     "waiting for workflows to finish before shutting down workflows=" <> showText count <> " ids=" <> showText ids
   renderEvent (EngineProducersCut producers) =

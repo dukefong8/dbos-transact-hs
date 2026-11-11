@@ -26,7 +26,7 @@ module DBOS.Transact.Checkpoint
 where
 
 import DBOS.Prelude
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), insideAStep, nextStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
+import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), insideAStep, isSameExecution, nextStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
 import DBOS.Transact.Connection (Connection (..), Owner (..))
 import DBOS.Transact.Error (Error (..))
 
@@ -163,7 +163,7 @@ checkHere :: StepPlacement exec m -> Text -> Maybe (StepCtx exec m) -> Either (E
 checkHere placement step ambient =
   case (placement, ambient) of
     (Recorded wctx stepId', Just here)
-      | workflowId here.stepCtxWorkflow == workflowId wctx && stepId here == Nothing ->
+      | isSameExecution here.stepCtxWorkflow wctx && stepId here == Nothing ->
           Right (DurabilityRecorded wctx stepId')
     (PlacementInsideStep built, Just here)
       | sameStepBody built here ->
@@ -177,7 +177,7 @@ checkHere placement step ambient =
     (PlacementInsideStep built, Just here)
       | stepMarker built == Nothing
       , stepMarker here == Nothing
-      , workflowId built.stepCtxWorkflow == workflowId here.stepCtxWorkflow ->
+      , isSameExecution built.stepCtxWorkflow here.stepCtxWorkflow ->
           Right DurabilityPlain
     (Outside, Nothing) -> Right DurabilityPlain
     (ClientConnection, _) -> Right DurabilityPlain
@@ -196,7 +196,7 @@ checkHere placement step ambient =
     sameStepBody built here =
       case (stepMarker built, stepMarker here) of
         (Just outer, Just inner) ->
-          outer == inner && workflowId here.stepCtxWorkflow == workflowId built.stepCtxWorkflow
+          outer == inner && isSameExecution here.stepCtxWorkflow built.stepCtxWorkflow
         _ -> False
 
 -- | How to describe the place a call is standing, given the context there.

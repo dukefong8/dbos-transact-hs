@@ -42,6 +42,7 @@ import DBOS.Transact.StepRetryCases
     checkTokenQuiet,
     scenarioPlainNotPreemptible,
     scenarioPreemptible,
+    scenarioObserverPreempts,
     scenarioRetryDeclined,
     scenarioRetryDefault,
     scenarioRetryExhausted,
@@ -124,7 +125,8 @@ tests =
       simCase simStepFixture "a completed step leaves its token alone" scenarioTokenQuiet checkTokenQuiet traceTokenQuiet,
       simCase simStepFixture "the cancellation token fires before the body is dropped" scenarioTokenFirst checkTokenFirst traceTokenFirst,
       simCase simStepFixture "a dropped step fires its cancellation token" scenarioTokenDrop checkTokenDrop traceTokenDrop,
-      simCase simStepFixture "a preemptible step stops and records no outcome" scenarioPreemptible checkPreemptible tracePreemptible
+      simCase simStepFixture "a preemptible step stops and records no outcome" scenarioPreemptible checkPreemptible tracePreemptible,
+      simCase simStepFixture "a preemptible step with no timeout is stopped by the observer" scenarioObserverPreempts checkPreemptible traceObserverPreempts
     ]
 
 -- * Typed-event assertions (sim-only): the exact 'WorkflowEvent' record
@@ -228,13 +230,19 @@ traceTokenDrop :: SimTrace a -> IO ()
 traceTokenDrop tr =
   traceEvents tr @?= []
 
--- | The 50ms timeout fires while the body is parked, the retry starts,
--- and the cancellation preempts it: interruption announced, nothing
--- recorded.
+-- | The cancellation observer catches the parked body during the first
+-- attempt: the attempt is preempted, the control signal ends the step, and
+-- nothing is recorded. The timeout never fires.
 tracePreemptible :: SimTrace a -> IO ()
 tracePreemptible tr =
   traceEvents tr
-    @?= [ StepAttemptTimedOut "preemptible" 0 50,
-          StepRetrying "preemptible" 0 1 3 1 (Text.pack (displayException (StepTimeout "preemptible" (millisDuration 50) :: (Error EngineOnly)))),
-          StepPreempted "preemptible" 0
+    @?= [ StepPreempted "preemptible" 0,
+          StepControlEnded "preemptible" 0 1
+        ]
+
+traceObserverPreempts :: SimTrace a -> IO ()
+traceObserverPreempts tr =
+  traceEvents tr
+    @?= [ StepPreempted "observed" 0,
+          StepControlEnded "observed" 0 1
         ]

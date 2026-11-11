@@ -82,6 +82,7 @@ import DBOS.Transact.WorkflowCases
     startErrorCase,
     WfFixture (..),
     scenarioRegisteredRecordsResult,
+    scenarioRunRefRejectsWithoutId,
     scenarioJoinTakesId,
     scenarioFreshJoinPolls,
     scenarioQueuedStartPolls,
@@ -134,6 +135,7 @@ import DBOS.Transact.WorkflowCases
     scenarioEnqueueByNameDeadlines,
     scenarioEnqueueByNameRefusedNoStep,
     checkRegisteredResult,
+    checkRunRefRejectsWithoutId,
     checkJoinTakesId,
     checkFreshJoinPolls,
     checkQueuedStartPolls,
@@ -189,6 +191,7 @@ import DBOS.Transact.WorkflowCases
     taskFinishedNotRegistered,
     taskRefusedAfterSweep,
     taskEmptySweep,
+    taskFinishRacingSweep,
     taskEarlyFinishNotSwept,
     taskWaitAllUntilDeadline,
     taskRunningNamesTasks,
@@ -205,6 +208,7 @@ tests =
   testGroup
     "Workflow execution"
     [ liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a registered workflow starts and records its result" scenarioRegisteredRecordsResult checkRegisteredResult,
+      liveCase (liveWfFixture getBackend (ioTracer . fst <$> getLogger)) "a run refusing its reuse policy without an id writes nothing" scenarioRunRefRejectsWithoutId checkRunRefRejectsWithoutId,
       -- IO only: crash-and-relaunch recovery sweep (MemSystemDB delegates
       -- reenqueueForRecovery to the canned mock; see ADR-0020).
       testCase "a recovery run replays completed steps after a body interruption" $ do
@@ -243,7 +247,7 @@ tests =
           assertEqual "the step ran before interruption" 1 =<< readIORef bodyCalls
           shutdown dbos
           writeIORef shouldCrash False
-          _ <- launchExec dbos isolatedEnvironment
+          exec2 <- launchExec dbos isolatedEnvironment
           settled <- timeout 10000000 (waitForWorkflow dbos workflowId)
           case settled of
             Just (Right (AwaitedSucceeded (Just output) serialization)) -> do
@@ -252,7 +256,7 @@ tests =
               assertEqual "recovery completes the same workflow" (Right 42) decoded
             other -> fail (show other)
           assertEqual "the replay adopts the recorded step" 1 =<< readIORef bodyCalls
-          adopted <- runWf exec key (WorkflowId workflowText) (Just (encodeWorkflowInput (21 :: Int)))
+          adopted <- runWf exec2 key (WorkflowId workflowText) (Just (encodeWorkflowInput (21 :: Int)))
           case adopted of
             Right (Just stored) -> do
               let decoded = decodeWorkflowValue "result" (Just stored) :: Either CodecError Int
@@ -350,7 +354,7 @@ tests =
           history <- listSteps backend (WorkflowId parentText) False Nothing Nothing Nothing
           case history of
             Left err -> fail (show err)
-            Right found -> assertEqual "the history is 0.5's" expected (map (\record -> (record.stepRecordStepId, record.stepRecordStepName)) found)
+            Right found -> assertEqual "the history is 0.5's" expected (map (\record -> (fromIntegral record.stepRecordStepId, record.stepRecordStepName)) found)
           _ <- launchExec dbos isolatedEnvironment
           reentered <- timeout 15000000 (takeMVar reached)
           case reentered of
@@ -368,7 +372,7 @@ tests =
           replayed <- listSteps backend (WorkflowId parentText) False Nothing Nothing Nothing
           case replayed of
             Left err -> fail (show err)
-            Right found -> assertEqual "the replay recorded nothing new" expected (map (\record -> (record.stepRecordStepId, record.stepRecordStepName)) found),
+            Right found -> assertEqual "the replay recorded nothing new" expected (map (\record -> (fromIntegral record.stepRecordStepId, record.stepRecordStepName)) found),
       -- IO only: same recovery sweep as above.
       testCase "an unregistered workflow is skipped and the rest recover" $ do
         fresh <- UUID.V4.nextRandom
@@ -832,6 +836,7 @@ tasksTests =
       testCase "a task that finished on its own is not left in the registry" (taskFinishedNotRegistered @IO waitFinished >>= (@?= 0)),
       testCase "a task arriving after the sweep is aborted on arrival" (taskRefusedAfterSweep @IO >>= (@?= False)),
       testCase "an empty sweep returns at once" (taskEmptySweep @IO >>= (@?= 0)),
+      testCase "a body that just finished is not reported as cancelled" (taskFinishRacingSweep @IO >>= (@?= 0)),
       -- IO only: real preemption, not cooperation.
       testCase "a spawn refused after abort fills its channel instead of hanging" $ do
         -- Closed-arrival kill lands before the child ever runs; each

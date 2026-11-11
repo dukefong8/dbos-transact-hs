@@ -79,7 +79,7 @@ data DebouncerFixture m = DebouncerFixture
 -- | Drives the executor's listened queues once, returning what was claimed.
 -- Throws on a database failure; an empty claim is fine (the supervisor may
 -- have taken the row first — claims are atomic, outcomes identical).
-driveQueue :: (MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+driveQueue ::  (MonadAsync m, MonadMVar m, MonadFork m, MonadMask m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
            => DBOS m -> m [WorkflowId]
 driveQueue dbos = do
   driven <- dequeueWorkflows dbos
@@ -91,7 +91,7 @@ driveQueue dbos = do
 -- returns its id; the row runs once its delay passes with those inputs.
 -- Returns the creation status, dedup key, debounced flag, deadline
 -- presence, then the settled status, outputs, and run count.
-scenarioFirstDebounceDelays :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioFirstDebounceDelays ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                             => DebouncerFixture m ->
                                m (Maybe WorkflowStatus, Maybe Text, Bool, Bool, Maybe WorkflowStatus, [Text], Int)
 scenarioFirstDebounceDelays fx = do
@@ -127,7 +127,7 @@ checkFirstDebounceDelays (atCreate, key, isDebounced, hasDeadline, settled, outp
 -- release on the deadline exactly: the init resolves both against one
 -- clock reading and caps the release at the deadline. Returns the
 -- release and the deadline side by side.
-scenarioDebouncedCapAtCreation :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDebouncedCapAtCreation ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                => DebouncerFixture m ->
                                   m (Maybe Timestamp, Maybe Timestamp)
 scenarioDebouncedCapAtCreation fx = do
@@ -153,7 +153,7 @@ checkDebouncedCapAtCreation (release, deadline)
 -- | A pinned id names the fresh row: the call that enqueues with an id
 -- the store does not know takes it, and the row reads DELAYED under it.
 -- Returns whether the created id is the offered one, with the row status.
-scenarioPinnedIdNamesFreshRow :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioPinnedIdNamesFreshRow ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => DebouncerFixture m ->
                                 m (Bool, Maybe WorkflowStatus)
 scenarioPinnedIdNamesFreshRow fx = do
@@ -181,7 +181,7 @@ checkPinnedIdNamesFreshRow (pinned, status) = do
 -- the same id is refused before anything is written. Mirrors Rust
 -- @a_pinned_id_reused_after_its_workflow_ran_is_a_conflict_not_a_join@.
 -- Returns the first cycle's terminal status plus the second verdict.
-scenarioPinnedIdReusedAcrossCycles :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioPinnedIdReusedAcrossCycles ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                    => DebouncerFixture m ->
                                       m (Maybe WorkflowStatus, Either (Error EngineOnly) ())
 scenarioPinnedIdReusedAcrossCycles fx = do
@@ -210,7 +210,7 @@ checkPinnedIdReusedAcrossCycles (settled, verdict) = do
 -- argument refusals to this operation before anything is written: no row
 -- is created. Mirrors Rust @refuse_durations@. Returns the three
 -- verdicts.
-scenarioDebounceDurationsRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDebounceDurationsRefused ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                 => DebouncerFixture m ->
                                    m ( Either (Error EngineOnly) (),
                                        Either (Error EngineOnly) (),
@@ -254,7 +254,7 @@ checkDebounceDurationsRefused (zeroPeriod, hugePeriod, zeroTimeout) = do
 -- zero budget, an empty queue and an empty app name. Mirrors the app half
 -- of Rust @what_a_debouncer_cannot_act_on_is_refused@. Returns the three
 -- verdicts.
-scenarioDebouncerCannotAct :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDebouncerCannotAct ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                            => DebouncerFixture m ->
                               m ( Either (Error EngineOnly) (),
                                   Either (Error EngineOnly) (),
@@ -298,7 +298,7 @@ checkDebouncerCannotAct (zeroBudget, emptyQueue, badApp) = do
 -- @a_cancelled_debounced_workflow_frees_its_key@. Returns the cancelled
 -- status, the fresh status, whether the ids differ, and whether the fresh
 -- row holds the key.
-scenarioCancelledDebounceFreesKey :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioCancelledDebounceFreesKey ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                   => DebouncerFixture m ->
                                      m (Maybe WorkflowStatus, Maybe WorkflowStatus, Bool, Bool)
 scenarioCancelledDebounceFreesKey fx = do
@@ -341,7 +341,7 @@ checkCancelledDebounceFreesKey (cancelled, fresh, differ, held)
 -- | A debounce inside a step is refused: steps record their own work,
 -- and a debounce is a workflow-level call. Mirrors Rust
 -- @a_debounce_inside_a_step_is_refused@. Returns the refused operation.
-scenarioDebounceInsideStepRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioDebounceInsideStepRefused ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                  => DebouncerFixture m ->
                                     m Text
 scenarioDebounceInsideStepRefused fx = do
@@ -365,7 +365,7 @@ checkDebounceInsideStepRefused operation
 -- delay, as the oracle's @place@ validates the queue request without it.
 -- Returns the refused operation and detail. Mirrors Rust @place@'s
 -- validation order.
-scenarioInWorkflowBadPeriodRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioInWorkflowBadPeriodRefused ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                   => DebouncerFixture m ->
                                      m Text
 scenarioInWorkflowBadPeriodRefused fx = do
@@ -390,7 +390,7 @@ checkInWorkflowBadPeriodRefused refusal = do
 -- Rust @a_key_collision_between_two_workflows_is_refused@ and pins the
 -- collision refusal ADR-0042 relies on. Returns whether the bounce was
 -- refused.
-scenarioKeyCollisionRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioKeyCollisionRefused ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                            => DebouncerFixture m ->
                               m Bool
 scenarioKeyCollisionRefused fx = do
@@ -422,7 +422,7 @@ checkKeyCollisionRefused refused
 -- inputs, and returns the same user id; one run carries the last inputs.
 -- Returns whether both handles agree, the delays, then the settled
 -- status, outputs, and run count.
-scenarioSecondDebounceCoalesces :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioSecondDebounceCoalesces ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                 => DebouncerFixture m ->
                                    m (Bool, Maybe Timestamp, Maybe Timestamp, Maybe WorkflowStatus, [Text], Int)
 scenarioSecondDebounceCoalesces fx = do
@@ -464,7 +464,7 @@ checkSecondDebounceCoalesces (sameId, delay1, delay2, settled, outputs, runs)
 -- | A foreign holder (a plain queued row on the same key) refuses the
 -- debounce instead of joining it: no user row, no run. Returns the
 -- refusal and the run count.
-scenarioForeignHolderRefused :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioForeignHolderRefused ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => DebouncerFixture m ->
                                 m (Bool, Bool, Int)
 scenarioForeignHolderRefused fx = do
@@ -495,7 +495,7 @@ checkForeignHolderRefused (named, refused, runs)
 -- the user row still runs once with those inputs. Returns the parent
 -- status, whether its steps name the bounce, then the user status,
 -- outputs, and run count.
-scenarioInWorkflowDebounceRecordsStep :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioInWorkflowDebounceRecordsStep ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                                       => DebouncerFixture m ->
                                          m (Maybe WorkflowStatus, Bool, Maybe WorkflowStatus, [Text], Int)
 scenarioInWorkflowDebounceRecordsStep fx = do
@@ -533,7 +533,7 @@ checkInWorkflowDebounceRecordsStep (parentStatus, namesBounce, userStatus, outpu
 -- supervisor's transition sweep releases due rows on every queue, which
 -- would clear the key the second bounce must find.
 -- Returns the stamped deadline and the second delay.
-scenarioTimeoutCapsExtension :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+scenarioTimeoutCapsExtension ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                              => DebouncerFixture m ->
                                 m (Maybe Timestamp, Maybe Timestamp)
 scenarioTimeoutCapsExtension fx = do

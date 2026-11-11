@@ -27,6 +27,7 @@ module DBOS.Transact.StepRetryCases
     scenarioTokenFirst,
     scenarioTokenDrop,
     scenarioPreemptible,
+    scenarioObserverPreempts,
     checkRetryThird,
     checkRetryExhausted,
     checkRetryDefault,
@@ -345,6 +346,24 @@ scenarioPreemptible fx = do
       body _ = putMVar started () >> takeMVar gate >> pure (Right (7 :: Int))
       options = stepOptionsDefault {preemptible = True, maxAttempts = 3, interval = millisDuration 1, timeout = Just (millisDuration 50)}
   worker <- async (runStepScope fx wid $ \wctx -> runStepWith options wctx "preemptible" body)
+  takeMVar started
+  fx.srfCancel [wid]
+  outcome <- wait worker
+  steps <- fx.srfListSteps wid
+  pure (outcome, steps)
+
+-- | A preemptible step with no timeout is stopped by the observer alone:
+-- the cancellation wait on its own row, not an attempt boundary, ends it.
+scenarioObserverPreempts :: forall m. (MonadTime m, MonadDelay m, MonadCatch m, MonadAsync m, MonadMVar m)
+                         => StepRetryFixture m -> m (Either (Error EngineOnly) Int, [StepRecord])
+scenarioObserverPreempts fx = do
+  wid <- fx.srfFreshWorkflowId
+  gate <- newEmptyMVar
+  started <- newEmptyMVar
+  let body :: forall exec. StepCtx exec m -> m (Either (Error EngineOnly) Int)
+      body _ = putMVar started () >> takeMVar gate >> pure (Right (7 :: Int))
+      options = stepOptionsDefault {preemptible = True}
+  worker <- async (runStepScope fx wid $ \wctx -> runStepWith options wctx "observed" body)
   takeMVar started
   fx.srfCancel [wid]
   outcome <- wait worker

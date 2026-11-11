@@ -37,7 +37,7 @@ ghcid-wait:
 		printf 'ghcid.txt\n' | entr -n -p -z true; \
 	done; \
 	sleep 1; \
-	if grep -qE "error: \[GHC-|FAIL" ghcid.txt; then echo "GATE RED: reload is red — read ghcid.txt"; exit 1; fi; \
+	if grep -qE "error: \[GHC-|FAIL|[0-9]+ out of [0-9]+ tests failed" ghcid.txt; then echo "GATE RED: reload is red — read ghcid.txt"; exit 1; fi; \
 	tail -3 ghcid.txt
 
 

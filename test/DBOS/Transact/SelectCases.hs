@@ -80,7 +80,7 @@ scenarioFreshWinner fx = do
       _ -> pure (-1)
   case rows of
     [StepRecord {stepRecordStepId = stepId, stepRecordStepName = name, stepRecordOutput = output}] ->
-      pure (isFresh, 1, stepId, name, output, winner)
+      pure (isFresh, 1, fromIntegral stepId, name, output, winner)
     _ -> pure (isFresh, length rows, -1, "", Nothing, winner)
 
 -- | A winner outside the branches that exist now is refused, naming this
@@ -108,7 +108,7 @@ scenarioStaleWinner fx = do
 -- | A control signal is not a race decision: cancellations and
 -- interruptions read as control, failures and values do not. Pure: no
 -- backend, no fixture.
-scenarioControlError :: (Maybe (Error EngineOnly), Bool, Maybe (Error EngineOnly), Maybe (Error EngineOnly), Maybe (Error EngineOnly))
+scenarioControlError :: (Maybe (Error EngineOnly), Bool, Maybe (Error EngineOnly), Maybe (Error EngineOnly), Maybe (Error EngineOnly), Maybe (Error EngineOnly))
 scenarioControlError =
   ( controlError (Left (Interrupted {workflowId = "wf"})),
     case controlError (Left (SystemDatabase (SysDB.WorkflowCancelled {workflowId = "wf"}))) of
@@ -116,7 +116,10 @@ scenarioControlError =
       Nothing -> False,
     controlError (Left (StepFailed "s" "boom")),
     controlError (Left (AwaitedWorkflowCancelled {workflowId = "child"})),
-    controlError (Right (7 :: Int))
+    controlError (Right (7 :: Int)),
+    -- A recordable typed refusal is the race's answer, not control: the
+    -- winning branch records it and the workflow fails with it.
+    controlError (Left (SystemDatabase (SysDB.InvalidInput {field = "queue_name", detail = "must be absent rather than empty"})))
   )
 
 -- * Checks
@@ -147,11 +150,12 @@ checkStaleWinner (isFresh, refused) = do
 
 -- | Control signals read as control; failures, cancellations-awaited, and
 -- values do not.
-checkControlError :: (Maybe (Error EngineOnly), Bool, Maybe (Error EngineOnly), Maybe (Error EngineOnly), Maybe (Error EngineOnly)) -> Either String ()
-checkControlError (interrupted, cancelled, failed, awaited, value) = do
+checkControlError :: (Maybe (Error EngineOnly), Bool, Maybe (Error EngineOnly), Maybe (Error EngineOnly), Maybe (Error EngineOnly), Maybe (Error EngineOnly)) -> Either String ()
+checkControlError (interrupted, cancelled, failed, awaited, value, recordable) = do
   unless (interrupted == Just (Interrupted {workflowId = "wf"})) $
     Left ("expected the interruption to be control, got: " <> show interrupted)
   unless cancelled $ Left "expected a cancellation to be control"
   unless (failed == Nothing) $ Left ("expected a failure not to be control, got: " <> show failed)
   unless (awaited == Nothing) $ Left ("expected an awaited cancellation not to be control, got: " <> show awaited)
   unless (value == Nothing) $ Left ("expected a value not to be control, got: " <> show value)
+  unless (recordable == Nothing) $ Left ("expected a recordable refusal not to be control, got: " <> show recordable)

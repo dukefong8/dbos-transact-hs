@@ -87,7 +87,7 @@ data HandleFixture m = HandleFixture
 -- 'Identity', connection app name, id naming, and id/entropy generators,
 -- plus its 'SomeSystemDB' and 'SomeTracer'. Live passes Postgres +
 -- FastLogger; sim passes 'MemSystemDB' + the sim carrier.
-mkHandleFixture :: forall m. (MonadMVar m, MonadSTM m, MonadThrow m)
+mkHandleFixture ::  forall m. (MonadMVar m, MonadSTM m, MonadThrow m)
                 => Config ->
                    Identity ->
                    Text ->
@@ -135,7 +135,7 @@ mkHandleFixture config identity connApp nameScheme genId genEntropy sysdb tracer
         tracer
 
 -- | Register the doubling body both retrieval cases run.
-registerDouble :: forall m. (MonadMVar m, MonadSTM m, MonadCatch m, MonadTime m) => DBOS m -> m ()
+registerDouble ::  forall m. (MonadMVar m, MonadSTM m, MonadCatch m, MonadTime m) => DBOS m -> m ()
 registerDouble dbos = do
   let key = newQualifiedWorkflowName "double"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
@@ -148,19 +148,19 @@ registerDouble dbos = do
 -- | Engine-only driver aliases: every scenario reads through these, so the
 -- error channel pins to 'EngineOnly' once instead of at each call site.
 -- Local copies are deliberate: this module carries only the aliases it uses.
-runWf :: forall m. (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+runWf ::  forall m. (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
       => Executor m -> QualifiedWorkflowName -> WorkflowId -> Maybe WorkflowInput -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 runWf = runWorkflow
 
-retrieveWf :: forall m. (MonadMVar m)
+retrieveWf ::  forall m. (MonadMVar m)
            => DBOS m -> WorkflowId -> m (Either (Error EngineOnly) (WorkflowHandle m EngineOnly))
 retrieveWf = retrieveWorkflow
 
-resultWf :: forall m. (MonadDelay m, MonadTime m, MonadMVar m, MonadThrow m)
+resultWf ::  forall m. (MonadDelay m, MonadTime m, MonadMVar m, MonadThrow m)
          => WorkflowHandle m EngineOnly -> m (Either (Error EngineOnly) (Maybe SerializedWorkflowValue))
 resultWf = handleResult
 
-statusWf :: forall m. (MonadMVar m)
+statusWf ::  forall m. (MonadMVar m)
          => WorkflowHandle m EngineOnly -> m (Either (Error EngineOnly) (Maybe WorkflowStatus))
 statusWf = handleStatus
 

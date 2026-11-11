@@ -13,6 +13,7 @@ import Data.Int (Int64)
 import DBOS.SystemDB.Error
   ( Error (..),
   )
+import Data.Int (Int32)
 import DBOS.SystemDB.Types as Types
 
 -- | The system database backend both the engine and the tests program
@@ -76,22 +77,28 @@ class Monad m => SystemDB db m where
   -- Divergence note (2026-10-27): this refusal follows Rust (#115); the
   -- TypeScript and Python oracles allow a workflow to cancel itself. Rust
   -- wins by default where the oracles disagree, so the refusal stands.
-  cancelWorkflows :: db -> [WorkflowId] -> Bool -> Maybe (WorkflowId, Int) -> Maybe Text -> m (Either Error [WorkflowId])
-  resumeWorkflows :: db -> [WorkflowId] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe Text -> m (Either Error [WorkflowId])
-  -- The deleter presents its owner when it runs as a step: a stale
-  -- execution deletes nothing. Client and engine paths pass 'Nothing'.
+  cancelWorkflows :: db -> [WorkflowId] -> Bool -> Maybe StepCaller -> Maybe Text -> m (Either Error [WorkflowId])
+  resumeWorkflows :: db -> [WorkflowId] -> Maybe Text -> Maybe StepCaller -> Maybe Text -> m (Either Error [WorkflowId])
   -- The deleter presents its owner when it runs as a step: a stale
   -- execution deletes nothing. Client and engine paths pass 'Nothing'.
   -- One value, not a caller plus a separate token: the row refused for
   -- being the caller's own and the row the fence locks are then provably
-  -- the same, and a mismatched pair cannot be written down.
-  deleteWorkflows :: db -> [WorkflowId] -> Bool -> Maybe WorkflowOwner -> m (Either Error Word64)
-  -- Deferred (2026-10-27): fork, forkFrom, rewind, and debounce keep the
-  -- unfenced caller step — no engine path presents one (the delete entry is
-  -- the sole reachable Just-caller site), so there is nothing to fence yet.
-  forkWorkflows :: db -> [Fork] -> ForkOptions -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
-  forkFrom :: db -> [WorkflowId] -> ForkPoint -> ForkOptions -> Maybe (WorkflowId, Int) -> m (Either Error [WorkflowId])
-  rewindWorkflow :: db -> WorkflowId -> Int -> SysRewindOptions -> Maybe (WorkflowId, Int) -> m (Either Error ())
+  -- the same, and a mismatched pair cannot be written down. The optional
+  -- step is the leaf rule: a delete inside a step body fences but records
+  -- nothing, one the engine calls as a durable step does both.
+  deleteWorkflows :: db -> [WorkflowId] -> Bool -> Maybe DeleteCaller -> m (Either Error Word64)
+  -- Every management caller is a 'StepCaller': the execution, its step,
+  -- and its owner token. The token fences the call before the work, so a
+  -- hand-off or a cancelled caller refuses it. The caller check, the work,
+  -- and the caller's step record share one transaction, and fork ids are
+  -- minted before the retried region so a retry cannot fork twice.
+  -- Debounce takes the same 'StepCaller' (its surface is live and follows
+  -- Rust 0.6.0's owner fence, ADR-0028). Schedules still present a plain
+  -- pair because that surface is deferred (ADR-0036), so they use the
+  -- unfenced caller path.
+  forkWorkflows :: db -> [Fork] -> ForkOptions -> Maybe StepCaller -> m (Either Error [WorkflowId])
+  forkFrom :: db -> [WorkflowId] -> ForkPoint -> ForkOptions -> Maybe StepCaller -> m (Either Error [WorkflowId])
+  rewindWorkflow :: db -> WorkflowId -> Int32 -> SysRewindOptions -> Maybe StepCaller -> m (Either Error ())
   -- The owner rides separately from the caller step: a workflow or step
   -- send presents it and is fenced on the sending execution; a client or
   -- engine send passes 'Nothing' and skips the fence. Mirrors Rust
@@ -122,7 +129,10 @@ class Monad m => SystemDB db m where
   listApplicationVersions :: db -> m (Either Error [VersionInfo])
   getLatestApplicationVersion :: db -> Maybe Text -> m (Either Error (Maybe VersionInfo))
   promoteApplicationVersion :: db -> Text -> Maybe Text -> m (Either Error ())
-  upsertQueue :: db -> NewQueue -> OnExistingQueue -> m (Either Error Bool)
+  -- | Whether the row was created, and the row as the write committed it.
+  -- The row comes from the same transaction, so a peer's update cannot
+  -- slip between the write and the receipt.
+  upsertQueue :: db -> NewQueue -> OnExistingQueue -> m (Either Error (Bool, QueueRecord))
   startQueuedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Text -> Int64 -> Int64 -> Text -> m (Either Error Dequeued)
   countPendingQueueWorkflows :: db -> Text -> m (Either Error Int64)
   getQueuePartitions :: db -> Text -> m (Either Error [Text])
@@ -130,7 +140,7 @@ class Monad m => SystemDB db m where
   getQueue :: db -> Text -> m (Either Error (Maybe QueueRecord))
   listQueues :: db -> AppScope -> m (Either Error [QueueRecord])
   updateQueue :: db -> Text -> QueueUpdate -> (QueueRecord -> QueueRecord -> Either Error ()) -> m (Either Error QueueRecord)
-  debounceDelayedWorkflow :: db -> DebounceRequest -> Maybe (WorkflowId, Int) -> m (Either Error Debounce)
+  debounceDelayedWorkflow :: db -> DebounceRequest -> Maybe StepCaller -> m (Either Error Debounce)
   getDeduplicationKeyHolder :: db -> Text -> Text -> m (Either Error (Maybe WorkflowId))
   deleteQueue :: db -> Text -> m (Either Error ())
   createSchedule :: db -> NewSchedule -> Maybe (WorkflowId, Int) -> m (Either Error ())

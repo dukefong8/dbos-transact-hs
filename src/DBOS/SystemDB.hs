@@ -18,6 +18,7 @@ module DBOS.SystemDB
     -- * Retry (retry.rs)
     RetryPolicy (..),
     defaultRetryPolicy,
+    withoutConflictReplay,
     shouldRetry,
     jitter,
     withRetry,
@@ -48,5 +49,6 @@ import DBOS.SystemDB.Retry
     shouldRetry,
     uuidEntropy,
     withRetry,
+    withoutConflictReplay,
   )
 import DBOS.SystemDB.Types as Types

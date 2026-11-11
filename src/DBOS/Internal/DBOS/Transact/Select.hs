@@ -207,14 +207,8 @@ recordSelect recording winner = case recording.recordingPlacement of
 -- it under its own id, so recording it as the winner is faithful.
 controlError :: Either (TransactError.Error TransactError.EngineOnly) a -> Maybe (TransactError.Error TransactError.EngineOnly)
 controlError outcome = case outcome of
-  Left err | isControl err -> Just err
+  Left err | isJust (TransactError.controlOf err) -> Just err
   _ -> Nothing
-  where
-    isControl err = case err of
-      TransactError.Interrupted {} -> True
-      TransactError.WorkflowCancelled {} -> True
-      TransactError.SystemDatabase {} -> True
-      _ -> False
 
 -- | One arm of a race: the pending branch that claimed a step, and what to
 -- run with its outcome if it wins. The result type is existential because

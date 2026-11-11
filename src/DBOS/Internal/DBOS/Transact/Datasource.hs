@@ -66,12 +66,13 @@ where
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (pack)
 import Data.Text qualified as Text
+import Data.Int (Int32)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
 import DBOS.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderError)
 import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..), newQualifiedWorkflowName)
-import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, withStep, withSystemDB, workflowId)
+import DBOS.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, withStep, withSystemDB, workflowId)
 import DBOS.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText, fromRegistryError, fromSerializationError)
 import DBOS.Transact.Identity (Identity (..))
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
@@ -166,7 +167,7 @@ data DataSource m = DataSource
     dsStepName          :: WorkflowId -> Int -> m (Either BackendError (Maybe Text)),
     -- | Delete checkpoints from a step onward: completion cleanup and
     -- rewind. Best effort like the oracle — a leftover row is harmless.
-    dsDeleteCheckpoints :: WorkflowId -> Int -> m (Either BackendError ())
+    dsDeleteCheckpoints :: WorkflowId -> Int32 -> m (Either BackendError ())
   }
 
 -- | Transactional-step announcements: what the runner says as it checks,
@@ -303,11 +304,20 @@ attemptTransaction ds wctx config body tracer wid stepName stepId n waitMs = do
       case bodyOutcome of
         Left err -> do
           wrote <- recordUnlessReadOnly (\t -> recordError t wid stepName stepId (encodeErrorText err)) tx
-          if wrote then pure (Left err) else throwIO TxConflict
+          if wrote
+            then do
+              unless config.txReadOnly ensureOwned
+              pure (Left err)
+            else throwIO TxConflict
         Right value -> do
           wrote <- recordUnlessReadOnly (\t -> recordOutput t wid stepName stepId (encodeWorkflowValue value).serializedText) tx
-          if wrote then pure (Right value) else throwIO TxConflict)
+          if wrote
+            then do
+              unless config.txReadOnly ensureOwned
+              pure (Right value)
+            else throwIO TxConflict)
   case outcome of
+    Left (TxOwnerUnreadable err) -> pure (Left (SystemDatabase err))
     Left TxConflict -> adoptTransaction ds wctx tracer wid stepName stepId
     Right (Left err) -> handleBackend err
     -- A read-only attempt announces nothing: no checkpoint was written, so
@@ -321,6 +331,20 @@ attemptTransaction ds wctx config body tracer wid stepName stepId n waitMs = do
           pure answer
   where
     WorkflowId widText = wid
+    -- The checkpoint and the body's writes commit together, so ownership
+    -- is settled before the commit: a loss rolls both back and lets the
+    -- adopt path decide. A read that failed is not a loss — the adopt path
+    -- would find our own checkpoint gone and call it a missing winner — so
+    -- it rolls back and surfaces the system-database error, which the
+    -- retry policy may treat as transient.
+    ensureOwned = do
+      ruling <- checkOwner wctx wid
+      case ruling of
+        Right Nothing -> pure ()
+        Right (Just _) -> throwIO TxConflict
+        Left (SystemDatabase err) -> throwIO (TxOwnerUnreadable err)
+        -- 'checkOwner' wraps every failure in 'SystemDatabase'.
+        Left _ -> throwIO TxConflict
     handleBackend err
       | isRetriable err = do
           runTracer tracer (TransactionSerializationRetry widText stepName stepId n (round waitMs) err.backendMessage)
@@ -329,12 +353,11 @@ attemptTransaction ds wctx config body tracer wid stepName stepId n waitMs = do
       | otherwise = pure (Left (controlErr err))
 
 -- | Adopt the recorded outcome after losing the race — unless another
--- executor owns the workflow, in which case stop without recording so
--- the owner keeps it. Python's @_still_owns@: no comparable owner means
--- assume ownership. The port compares what the context carries (its
--- executor) against the row: a missing or unowned row adopts; a row held
--- by another executor rethrows, since per-execution tokens would provably
--- differ there too. Same-executor races adopt (join, don't fail).
+-- execution owns the workflow, in which case stop without recording so
+-- the owner keeps it. The comparison is the per-execution owner token,
+-- not the executor id: a recovery re-run on the same executor is a
+-- different execution, and a same-executor race must stop rather than
+-- adopt. A null row token is not this execution's either.
 adoptTransaction :: (FromJSON a, FromJSON e, MonadSTM m, MonadDelay m)
                  => DataSource m -> WorkflowCtx exec m -> SomeTracer m -> WorkflowId -> Text -> Int -> m (Either (Error e) a)
 adoptTransaction ds wctx tracer wid@(WorkflowId widText) stepName stepId = do
@@ -349,8 +372,18 @@ adoptTransaction ds wctx tracer wid@(WorkflowId widText) stepName stepId = do
       case rechecked of
         Left err -> pure (Left (controlErr err))
         Right (Just recorded) -> do
-          runTracer tracer (TransactionConflictAdopted widText stepName stepId)
-          pure (replayRecorded stepName recorded)
+          -- The pre-check compares the recorded name before the body runs;
+          -- the row this conflict adopted appeared after that check, so
+          -- compare it here too. A renamed transaction must not replay the
+          -- other build's step.
+          let DataSource {dsStepName = nameAt} = ds
+          recordedName <- nameAt wid stepId
+          case recordedName of
+            Left err -> pure (Left (controlErr err))
+            Right (Just other) | other /= stepName -> pure (Left (unexpectedTransaction wid stepName stepId other))
+            _ -> do
+              runTracer tracer (TransactionConflictAdopted widText stepName stepId)
+              pure (replayRecorded stepName recorded)
         _ -> pure (Left (controlErr missingWinner))
 
 -- | 'Nothing' means adopt; 'Just owner' names the foreign executor the
@@ -362,10 +395,10 @@ checkOwner wctx wid = do
     Left err -> Left (SystemDatabase err)
     Right Nothing -> Right Nothing
     Right (Just row) -> case row.workflowRecordOwnerXid of
-      Nothing -> Right Nothing
-      Just _ -> case row.workflowRecordExecutorId of
-        Just owner | owner /= wctx.wctxIdentity.identityExecutorId -> Right (Just owner)
-        _                                                          -> Right Nothing
+      -- The per-execution token, not the executor id: a recovery re-run
+      -- on the same executor is a different execution and must not pass.
+      Just kept | kept == ownerToken wctx -> Right Nothing
+      _ -> Right (Just (fromMaybe "unknown" row.workflowRecordExecutorId))
 
 -- | Another executor owns the workflow: stop without recording, so the
 -- owner keeps it. A control signal, never an outcome.
@@ -374,7 +407,7 @@ ownershipMoved (WorkflowId widText) owner =
   SystemDatabase
     ( SystemDBError.Backend
         ( BackendError
-            { backendMessage = "workflow " <> widText <> " is owned by executor " <> owner,
+            { backendMessage = "workflow " <> widText <> " is owned by another execution on executor " <> owner,
               backendSqlState = Nothing,
               backendKind = Permanent
             }
@@ -384,8 +417,15 @@ ownershipMoved (WorkflowId widText) owner =
 -- | Internal: our checkpoint lost the race. Thrown inside the attempt
 -- to roll its application writes back, caught by the attempt driver to
 -- adopt the winner. Never escapes the runner and never reaches callers.
-data TxConflict = TxConflict
-  deriving stock (Eq, Show)
+data TxConflict
+  = -- | Our checkpoint lost the race.
+    TxConflict
+  | -- | The ownership fence could not be read. Distinct from a loss: the
+    -- attempt is rolled back and the system-database error is returned, so
+    -- a transient blip cannot surface as an adopted row that was never
+    -- written.
+    TxOwnerUnreadable SystemDBError.Error
+  deriving stock (Show)
 
 instance Exception TxConflict
 
@@ -423,7 +463,9 @@ controlErr :: BackendError -> Error e
 controlErr err = SystemDatabase (SystemDBError.Backend err)
 
 -- | Failures worth another attempt: the connection and transient kinds by
--- name, plus the SQLSTATE serialization class for rows that carry no kind.
+-- name, plus the two exact serialization-conflict codes for rows that carry
+-- no kind. Class @40@ is not a retry set: @40002@ is a refusal and @40003@
+-- may already have committed.
 -- Matches the primary oracle's retry set (Rust retries conflict and
 -- connection kinds; Python additionally retries idle-in-transaction
 -- disconnects, which stay permanent here like Rust — decided 2026-10-14
@@ -435,7 +477,7 @@ isRetriable :: BackendError -> Bool
 isRetriable err = err.backendKind `elem` [Connection, Transient] || isSerializationClass
   where
     isSerializationClass = case err.backendSqlState of
-      Just code -> "40" `Text.isPrefixOf` code
+      Just code -> code == "40001" || code == "40P01"
       Nothing   -> False
 
 -- | A conflict with no recorded row to adopt: unreachable by construction

@@ -23,10 +23,10 @@ import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
 import DBOS.Transact.Logger (nullTracer)
 import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowInput)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 tests :: TestTree
-tests = testGroup "Shutdown" [testCase "a draining shutdown lets a running workflow finish" drainingLetsRunningFinish, testCase "nothing is dequeued once shutdown begins" nothingDequeuedOnceStopping, testCase "a workflow that outlasts the timeout is cancelled and recovered" outlastedIsCancelledAndRecovered, testCase "dropping the shutdown future does not cut the shutdown short" droppedShutdownStillFinishes]
+tests = testGroup "Shutdown" [testCase "a draining shutdown lets a running workflow finish" drainingLetsRunningFinish, testCase "nothing is dequeued once shutdown begins" nothingDequeuedOnceStopping, testCase "a workflow that outlasts the timeout is cancelled and recovered" outlastedIsCancelledAndRecovered, testCase "dropping the shutdown future does not cut the shutdown short" droppedShutdownStillFinishes, testCase "a wait after shutdown fails permanently instead of polling" postCloseWaitFailsPermanently]
 
 -- | How long a case waits for a workflow it expects to settle. Nothing
 -- legitimate takes this long, so a hang fails instead of holding the
@@ -161,6 +161,30 @@ drainingLetsRunningFinish = do
     case childRow of
       Just row -> row.workflowRecordStatus @?= Success
       Nothing -> fail "the drained child has no row"
+
+-- | A handle kept across shutdown fails at once instead of polling a
+-- released pool: the closed handle is a permanent backend error, which is
+-- the port's @PoolClosed => Permanent@. The workflow parks, so its row
+-- stays PENDING and a live poll would never settle.
+postCloseWaitFailsPermanently :: IO ()
+postCloseWaitFailsPermanently = do
+  suffix <- newTag
+  withDBOS suffix Nothing $ \dbos -> do
+    let parked :: forall exec. () -> WorkflowCtx exec IO -> IO (Either (Error EngineOnly) Int)
+        parked _ _ = threadDelay 30000000 >> pure (Right 0)
+    ref <- registerWorkflowRef dbos (newQualifiedWorkflowName "parked") parked >>= either (fail . show) pure
+    exec <- launch dbos >>= either (fail . show) pure
+    let widText = "hs-shutdown-closed-" <> suffix
+    started <- startWorkflow exec ref (startOptionsDefault {startWorkflowId = Just (WorkflowId widText)}) (Just (encodeWorkflowInput ()))
+    _ <- either (fail . show) pure (started :: Either (Error EngineOnly) (WorkflowHandle IO EngineOnly))
+    handle <- retrieveWorkflow dbos (WorkflowId widText) >>= either (fail . show) pure
+    shutdown dbos
+    result <- timeout 5000000 (handleResult (handle :: WorkflowHandle IO EngineOnly)) >>= maybe (fail "a post-shutdown wait hung") pure
+    case result of
+      Left (SystemDatabase (SystemDB.Backend err)) -> do
+        err.backendKind @?= SystemDB.Permanent
+        assertBool "the refusal names the closed handle" ("closed" `Text.isInfixOf` err.backendMessage)
+      other -> fail ("expected a permanent closed-handle refusal, got: " <> show other)
 
 -- | Once shutdown has begun, a workflow put on a queue stays there: the
 -- dequeue loop has stopped, though the instance is still launched and the

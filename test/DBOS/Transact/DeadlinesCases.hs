@@ -39,7 +39,15 @@ module DBOS.Transact.DeadlinesCases
 where
 
 import DBOS.Prelude
-import DBOS.SystemDB (Duration, Timestamp, WorkflowId (..), WorkflowStatus (..), millisDuration, secondsDuration, timestampFromEpochMs)
+import DBOS.SystemDB
+  ( Duration,
+    Timestamp,
+    WorkflowId (..),
+    WorkflowStatus (..),
+    millisDuration,
+    secondsDuration,
+    timestampFromEpochMs
+  )
 import DBOS.Transact.Serialization (decodeWorkflowValue, CodecError (..))
 import DBOS.Transact
   (
@@ -226,7 +234,7 @@ checkBeatenDeadline (first, second, status) = do
 -- deadline and no execution running it reads CANCELLED once a launched
 -- executor's sweep passes, with no local timer involved. Returns the
 -- polled status; the bounded poll fails loudly when no sweep runs.
-scenarioSweepCancelsAbandoned :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadTime m, MonadTimer m, MonadMonotonicTimeNSec m, MonadMask m, MonadDelay m) => DeadlinesFixture m -> m (Maybe WorkflowStatus)
+scenarioSweepCancelsAbandoned :: forall m. (MonadAsync m, MonadMVar m, MonadFork m, MonadMonotonicTimeNSec m, MonadMask m, MonadDelay m) => DeadlinesFixture m -> m (Maybe WorkflowStatus)
 scenarioSweepCancelsAbandoned fx = do
   (dbos, wid) <- fx.dfSetup
   fx.dfPlantExpired wid

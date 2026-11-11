@@ -10,9 +10,28 @@ module DBOS.Transact.Sleep (sleepStep, pendingSleep, sleepPlain, SleepEvent (..)
 import Data.Int (Int64)
 import DBOS.Prelude
 import DBOS.SystemDB.Class qualified as SystemDB
-import DBOS.SystemDB.Types (Duration, WorkflowId (..), durationAsMillis, durationToMs, sleepStepName, wakeArrives)
-import DBOS.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
-import DBOS.Transact.Context (WorkflowCtx (wctxTracer), ownerToken, stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.SystemDB.Types
+  ( Duration,
+    WorkflowId (..),
+    durationAsMillis,
+    durationToMs,
+    sleepStepName,
+    wakeArrives
+  )
+import DBOS.Transact.Checkpoint
+  ( PendingStep (..),
+    StepDurability (..),
+    StepPlacement (..),
+    checkHere,
+    placeCall
+  )
+import DBOS.Transact.Context
+  ( WorkflowCtx (wctxTracer),
+    ownerToken,
+    stepCtxBoundary,
+    withSystemDB,
+    workflowId
+  )
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import System.Log.FastLogger (ToLogStr (..))
@@ -38,7 +57,7 @@ instance LogEvent SleepEvent where
 instance ToLogStr SleepEvent where
   toLogStr = toLogStr . renderLine
 
-sleepStep :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMonotonicTimeNSec m)
+sleepStep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m)
           => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sleepStep wctx duration =
   -- The duration is checked first, so a refusal claims no id — and only
@@ -51,7 +70,7 @@ sleepStep wctx duration =
 -- the call so a replay rebuilds the same slot, and the wait runs when the
 -- pending value is awaited or raced. The pre-check runs first for the
 -- same reason as 'sleepStep': a refused sleep moves no counter.
-pendingSleep :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMonotonicTimeNSec m)
+pendingSleep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m)
              => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ())))
 pendingSleep wctx duration =
   TransactError.refusing (TransactError.refusedArgument "sleep") (durationToMs "duration" duration) $ \_ -> do
@@ -60,7 +79,7 @@ pendingSleep wctx duration =
 
 -- | Drives a placed sleep: a plain wait inside a step or outside a
 -- workflow, otherwise the recorded wake-time wait under the claimed id.
-driveSleep :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMonotonicTimeNSec m)
+driveSleep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m)
            => WorkflowCtx exec m -> Duration -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 driveSleep wctx duration placement =
   case checkHere placement sleepStepName (Just (stepCtxBoundary wctx)) of

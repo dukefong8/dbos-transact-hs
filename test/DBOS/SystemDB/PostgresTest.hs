@@ -6,6 +6,8 @@ import DBOS.Prelude
 import DBOS.SystemDB.Error (decodePortableError)
 import DBOS.SystemDB
   ( AppScope (..),
+    DeleteCaller (..),
+    StepCaller (..),
     AttributeUpdate (..),
     WakeTime (..),
     AwaitedOutcome (..),
@@ -562,6 +564,10 @@ classifyTests =
     [ testCase "serialization and deadlock failures are transient" $ do
         kindOf (serverUsage "40001" "could not serialize access") @?= Transient
         kindOf (serverUsage "40P01" "deadlock detected") @?= Transient,
+      testCase "other class-40 failures are permanent" $ do
+        kindOf (serverUsage "40002" "integrity constraint violation: foreign key") @?= Permanent
+        kindOf (serverUsage "40003" "statement completion unknown") @?= Permanent
+        kindOf (serverUsage "40P02" "deadlock") @?= Permanent,
       testCase "connection-class codes are connection failures" $ do
         kindOf (serverUsage "08000" "connection exception") @?= Connection
         kindOf (serverUsage "08006" "connection failure") @?= Connection
@@ -753,7 +759,19 @@ lifecycleTests getBackend =
         pushing <- isPushing env.psdbNotifier
         assertBool "pushing after activate" pushing
         _ <- close env
-        pure ()
+        pure (),
+      -- The handle's own flag, on a fresh pool: every later session is a
+      -- permanent refusal rather than a query against a released pool.
+      testCase "a released handle refuses later sessions permanently" $ do
+        config <- configFromEnv
+        env <- acquirePostgresSystemDB config nullTracer
+        releasePostgresSystemDB env
+        outcome <- runSession env "after_close" migrationVersionSession
+        case outcome of
+          Left (Backend err) -> do
+            err.backendKind @?= Permanent
+            assertBool "the refusal names the closed handle" ("closed" `Text.isInfixOf` err.backendMessage)
+          other -> fail ("expected a permanent closed-handle refusal, got: " <> show other)
     ]
 
 -- | The idle-transaction timeout connect sets: each variant read back
@@ -1143,12 +1161,13 @@ workflowTests getBackend =
         let caller = base <> "-caller"
             target = base <> "-target"
             callerStep = 0
+            callerKey = Just (StepCaller (WorkflowOwner (WorkflowId caller) (fixtureOwner caller)) callerStep)
         withBackend getBackend $ \env -> do
           -- A fresh caller and an active target: the refusal is recordable,
           -- so the rewind writes the caller's step.
           _ <- runSession env "fixture" (seedPayloadRow caller "PENDING" (Nothing, Nothing, Nothing) (Nothing, Nothing, Nothing))
           _ <- runSession env "fixture" (seedPayloadRow target "ENQUEUED" (Nothing, Nothing, Nothing) (Nothing, Nothing, Nothing))
-          first <- rewindWorkflow env (WorkflowId target) 0 (SysRewindOptions Nothing Nothing Nothing) (Just (WorkflowId caller, callerStep))
+          first <- rewindWorkflow env (WorkflowId target) 0 (SysRewindOptions Nothing Nothing Nothing) callerKey
           first @?= Left (WorkflowNotRewindable {workflowId = target, status = "ENQUEUED"})
           steps <- listSteps env (WorkflowId caller) True Nothing Nothing Nothing
           case steps of
@@ -1162,11 +1181,11 @@ workflowTests getBackend =
                 Nothing -> fail "expected the caller error to be recorded"
             other -> fail ("expected one caller step, got: " <> show other)
           -- The recorded portable error replays as itself.
-          second <- rewindWorkflow env (WorkflowId target) 0 (SysRewindOptions Nothing Nothing Nothing) (Just (WorkflowId caller, callerStep))
+          second <- rewindWorkflow env (WorkflowId target) 0 (SysRewindOptions Nothing Nothing Nothing) callerKey
           second @?= Left (WorkflowNotRewindable {workflowId = target, status = "ENQUEUED"})
           -- A tag this build cannot read is refused, never decoded.
           _ <- runSession env "fixture" (Session.script ("update dbos.operation_outputs set serialization = 'pickle' where workflow_uuid = '" <> caller <> "' and function_id = 0"))
-          third <- rewindWorkflow env (WorkflowId target) 0 (SysRewindOptions Nothing Nothing Nothing) (Just (WorkflowId caller, callerStep))
+          third <- rewindWorkflow env (WorkflowId target) 0 (SysRewindOptions Nothing Nothing Nothing) callerKey
           third @?= Left (UnknownSerialization {name = "pickle"}),
       testCase "returns Nothing for a missing id" $ do
         wid <- freshWorkflowId
@@ -1750,7 +1769,7 @@ queueTests getBackend =
         let name = "q-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
           created <- upsertQueue env (newQueue name) UpdateExisting
-          created @?= Right True
+          fmap fst created @?= Right True
           found <- getQueue env name
           case found of
             Right (Just record) -> record.queueRecordName @?= name
@@ -1763,9 +1782,9 @@ queueTests getBackend =
         let name = "q-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
           first <- upsertQueue env (newQueue name) UpdateExisting
-          first @?= Right True
+          fmap fst first @?= Right True
           second <- upsertQueue env (newQueue name) UpdateExisting
-          second @?= Right False,
+          fmap fst second @?= Right False,
       testCase "listing queues scopes but reading one does not" $ do
         unique <- freshWorkflowId
         let name = "q-" <> Text.take 8 unique
@@ -2169,12 +2188,30 @@ queueTests getBackend =
         withBackend getBackend $ \env -> do
           _ <- insertFixtureChecked env (defaultFixture parent)
           _ <- insertFixtureChecked env (ownedFixture unique) {fixtureName = Just "bouncer", fixtureQueue = Just name, fixtureDeduplicationId = Just key, fixtureStatus = "DELAYED", fixtureIsDebounced = True, fixtureDelayUntil = Just 1000}
-          first <- debounceDelayedWorkflow env (bounceRequest name key) (Just (WorkflowId parent, 7))
+          let caller = Just (StepCaller (WorkflowOwner (WorkflowId parent) (fixtureOwner parent)) 7)
+          first <- debounceDelayedWorkflow env (bounceRequest name key) caller
           first @?= Right (Debounced {debounceWorkflowId = unique})
           -- The row is gone, so a second run can only answer from the step.
           _ <- deleteFixture env unique
-          replayed <- debounceDelayedWorkflow env (bounceRequest name key) (Just (WorkflowId parent, 7))
-          replayed @?= Right (Debounced {debounceWorkflowId = unique})
+          replayed <- debounceDelayedWorkflow env (bounceRequest name key) caller
+          replayed @?= Right (Debounced {debounceWorkflowId = unique}),
+      testCase "a bounce refuses a caller that does not own the workflow" $ do
+        parent <- freshWorkflowId
+        unique <- freshWorkflowId
+        let name = "q-" <> Text.take 8 unique
+            key = "dedup-" <> Text.take 8 unique
+            stale = Just (StepCaller (WorkflowOwner (WorkflowId parent) "some-other-execution") 7)
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture parent)
+          _ <- insertFixtureChecked env (ownedFixture unique) {fixtureName = Just "bouncer", fixtureQueue = Just name, fixtureDeduplicationId = Just key, fixtureStatus = "DELAYED", fixtureIsDebounced = True, fixtureDelayUntil = Just 1000}
+          refused <- debounceDelayedWorkflow env (bounceRequest name key) stale
+          case refused of
+            Left (WorkflowConflict {workflowId}) -> workflowId @?= parent
+            other -> fail ("expected WorkflowConflict, got: " <> show other)
+          listed <- listSteps env (WorkflowId parent) False Nothing Nothing Nothing
+          case listed of
+            Right steps -> steps @?= []
+            Left err -> fail ("expected the caller's steps, got: " <> show err)
     ]
 
 -- | The registered record for a queue this test just created.
@@ -2538,6 +2575,14 @@ renameTests getBackend =
 -- internal queue, pointed back at its source — and, for a start step past
 -- the beginning, the source's history copied forward up to that step.
 -- Mirrors @fork_workflows@ and @fork_from@.
+-- | How many rows name a source as their fork origin.
+countForksStatement :: Statement.Statement Text Int64
+countForksStatement =
+  Statement.preparable
+    "select count(*) from dbos.workflow_status where forked_from = $1"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.int8)))
+
 forkTests :: IO PostgresSystemDB -> TestTree
 forkTests getBackend =
   testGroup
@@ -2622,6 +2667,29 @@ forkTests getBackend =
           case forked of
             Left (NonExistentWorkflow {workflowIds = ids}) -> ids @?= [missing]
             other -> fail ("expected NonExistentWorkflow, got: " <> show other),
+      -- The caller's fork rows and its step record commit together. A
+      -- replay under the same step returns the recorded ids instead of
+      -- forking again, which is what makes crash recovery idempotent.
+      testCase "a caller's fork records its step and reuses the ids on replay" $ do
+        source <- freshWorkflowId
+        caller <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture source) {fixtureStatus = "SUCCESS"}
+          _ <- insertFixtureChecked env (defaultFixture caller)
+          let callerKey = Just (StepCaller (WorkflowOwner (WorkflowId caller) (fixtureOwner caller)) 7)
+          first <- forkWorkflows env [forkNew source] defaultForkOptions callerKey
+          case first of
+            Left err -> fail ("expected the first fork, got: " <> show err)
+            Right [forkedId] -> do
+              replayed <- forkWorkflows env [forkNew source] defaultForkOptions callerKey
+              replayed @?= Right [forkedId]
+              forks <- runSession env "fixture" (Session.statement source countForksStatement)
+              forks @?= Right 1
+              steps <- listSteps env (WorkflowId caller) False Nothing Nothing Nothing
+              case steps of
+                Right rows -> map (.stepRecordStepName) rows @?= ["DBOS.forkWorkflow"]
+                other -> fail ("expected the caller step, got: " <> show other)
+            other -> fail ("expected one fork, got: " <> show other),
       testCase "a source with no steps has no fork point" $ do
         source <- freshWorkflowId
         withBackend getBackend $ \env -> do
@@ -2806,6 +2874,58 @@ lifecycleWriteTests getBackend =
           case stayed of
             Right (Just record) -> record.workflowRecordStatus @?= Cancelled
             other -> fail ("expected the row to stay cancelled, got: " <> show other),
+      -- A cancelled caller is refused by the transactional step check,
+      -- and the refusal is a control signal: nothing is recorded.
+      testCase "a cancelled caller's cancel is refused without a step" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture unique) {fixtureStatus = "CANCELLED"}
+          refused <- cancelWorkflows env [WorkflowId unique] False (Just (StepCaller (WorkflowOwner (WorkflowId unique) (fixtureOwner unique)) 5)) Nothing
+          case refused of
+            Left (WorkflowCancelled {}) -> pure ()
+            other -> fail ("expected WorkflowCancelled, got: " <> show other)
+          steps <- listSteps env (WorkflowId unique) True Nothing Nothing Nothing
+          steps @?= Right [],
+      -- The caller's resume step and the resume commit together, and a
+      -- replay under the same step returns the recorded ids rather than
+      -- resuming the row twice.
+      testCase "a caller's resume records its step and reuses it on replay" $ do
+        target <- freshWorkflowId
+        caller <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture target) {fixtureStatus = "CANCELLED"}
+          _ <- insertFixtureChecked env (defaultFixture caller)
+          let callerKey = Just (StepCaller (WorkflowOwner (WorkflowId caller) (fixtureOwner caller)) 3)
+          first <- resumeWorkflows env [WorkflowId target] (Just "q") callerKey Nothing
+          case first of
+            Left err -> fail ("expected the first resume, got: " <> show err)
+            Right [resumedId] -> do
+              replayed <- resumeWorkflows env [WorkflowId target] (Just "q") callerKey Nothing
+              replayed @?= Right [resumedId]
+              steps <- listSteps env (WorkflowId caller) False Nothing Nothing Nothing
+              case steps of
+                Right rows -> map (.stepRecordStepName) rows @?= ["DBOS.resumeWorkflow"]
+                other -> fail ("expected the caller step, got: " <> show other)
+            other -> fail ("expected one resumed id, got: " <> show other),
+      -- A recordable refusal under a caller is checkpointed, so the replay
+      -- returns the refusal instead of running the work again.
+      testCase "a caller's self-resume is recorded as its step's error" $ do
+        unique <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          -- The caller must still be runnable: a cancelled caller is refused
+          -- before the work, as Rust's owner check refuses it.
+          _ <- insertFixtureChecked env (defaultFixture unique)
+          let callerKey = Just (StepCaller (WorkflowOwner (WorkflowId unique) (fixtureOwner unique)) 5)
+          refused <- resumeWorkflows env [WorkflowId unique] Nothing callerKey (Just unique)
+          case refused of
+            Left (InvalidInput {}) -> pure ()
+            other -> fail ("expected InvalidInput, got: " <> show other)
+          steps <- listSteps env (WorkflowId unique) True Nothing Nothing Nothing
+          case steps of
+            Right [row] -> do
+              row.stepRecordStepName @?= "DBOS.resumeWorkflow"
+              assertBool "the refusal is recorded in the error column" (maybe False (const True) row.stepRecordError)
+            other -> fail ("expected one recorded refusal, got: " <> show other),
       testCase "a cancel cascade reaching the caller names the tree" $ do
         unique <- freshWorkflowId
         let root = unique <> "-root"
@@ -2856,6 +2976,25 @@ lifecycleWriteTests getBackend =
           deleted @?= Right 2
           gone <- getWorkflow env (WorkflowId child)
           gone @?= Right Nothing,
+      -- The caller's delete and its step commit together; a replay
+      -- returns the recorded count without removing anything twice.
+      testCase "a caller's delete records its step and reuses it on replay" $ do
+        target <- freshWorkflowId
+        caller <- freshWorkflowId
+        withBackend getBackend $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture target)
+          _ <- insertFixtureChecked env (defaultFixture caller)
+          let callerKey = DeleteCaller (WorkflowOwner {ownerWorkflowId = WorkflowId caller, ownerToken = fixtureOwner caller}) (Just 3)
+          first <- deleteWorkflows env [WorkflowId target] False (Just callerKey)
+          first @?= Right 1
+          gone <- getWorkflow env (WorkflowId target)
+          gone @?= Right Nothing
+          replayed <- deleteWorkflows env [WorkflowId target] False (Just callerKey)
+          replayed @?= Right 1
+          steps <- listSteps env (WorkflowId caller) True Nothing Nothing Nothing
+          case steps of
+            Right rows -> map (.stepRecordStepName) rows @?= ["DBOS.deleteWorkflow"]
+            other -> fail ("expected the caller step, got: " <> show other),
       testCase "deleting a workflow removes its payloads and steps" $ do
         unique <- freshWorkflowId
         withBackend getBackend $ \env -> do
@@ -2878,7 +3017,7 @@ lifecycleWriteTests getBackend =
               env
               [WorkflowId target]
               False
-              (Just (WorkflowOwner {ownerWorkflowId = WorkflowId callerRow, ownerToken = "someone-else"}))
+              (Just (DeleteCaller (WorkflowOwner {ownerWorkflowId = WorkflowId callerRow, ownerToken = "someone-else"}) Nothing))
           case refused of
             Left (WorkflowConflict {}) -> pure ()
             other -> fail ("expected WorkflowConflict, got: " <> show other)
@@ -3047,7 +3186,7 @@ messageTests getBackend =
                   Left conflict -> Tx.condemn >> pure (Left conflict)
                   Right () ->
                     Right
-                      <$> Statements.recvTx (Statements.RecvParams destination step "approval" 0 0)
+                      <$> Statements.recvTx Nothing False (Statements.RecvParams destination step "approval" 0 0)
           tookFirst <- runTake 1
           case tookFirst of
             Right (Right (Statements.RecvTook message)) -> message @?= Statements.EncodedValueRaw "one" Nothing
@@ -3672,6 +3811,7 @@ recoveryTests getBackend =
               record.workflowRecordStatus @?= Enqueued
               record.workflowRecordQueueName @?= Just "_dbos_internal_queue"
               record.workflowRecordStartedAt @?= Nothing
+              record.workflowRecordOwnerXid @?= Nothing
             other -> fail ("expected record, got: " <> show other)
           untouched <- getWorkflow env (WorkflowId alive)
           case untouched of

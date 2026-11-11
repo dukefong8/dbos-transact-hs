@@ -56,7 +56,14 @@ where
 import DBOS.Prelude
 import Data.Word (Word64)
 import Data.List (nub)
-import DBOS.SystemDB (StepRecord (..), WorkflowId (..), recvStepName, sendBulkStepName, sendStepName, sleepStepName)
+import DBOS.SystemDB
+  ( StepRecord (..),
+    WorkflowId (..),
+    recvStepName,
+    sendBulkStepName,
+    sendStepName,
+    sleepStepName
+  )
 import DBOS.SystemDB qualified as SysDB
 import DBOS.Transact
   ( EngineOnly,
@@ -248,7 +255,7 @@ scenarioCapturedRecv fx = do
 
 -- | A batch delivers every message and checkpoints once: both receives
 -- read in order, two rows arrive, one bulk step stands for the batch.
-scenarioBulkSend :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioBulkSend :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m)
                  => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text), Int, Maybe StepRecord)
 scenarioBulkSend fx = do
   (source, destination) <- fx.mfFreshPair "bulk"
@@ -269,7 +276,7 @@ scenarioBulkSend fx = do
   pure (sent, first, second, count, checkpoint)
 
 -- | An empty bulk send still takes its step.
-scenarioBulkEmpty :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioBulkEmpty :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m)
                   => MessageFixture m -> m (Either (Error EngineOnly) (), Maybe StepRecord)
 scenarioBulkEmpty fx = do
   (source, _) <- fx.mfFreshPair "bulk-empty"
@@ -460,7 +467,7 @@ checkBulkEmpty (sent, checkpoint) = do
 -- | Two deliveries in one batch carry distinct notification ids: the stored
 -- id is unique per row live (the message uuid), so the sim must not mint
 -- one counter value twice.
-scenarioBatchNotifyUnique :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m, MonadMonotonicTimeNSec m)
+scenarioBatchNotifyUnique :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m)
                           => MessageFixture m -> m (Either (Error EngineOnly) (), [Text])
 scenarioBatchNotifyUnique fx = do
   (source, destination) <- fx.mfFreshPair "batch-notify-unique"

@@ -19,10 +19,9 @@ import DBOS.SystemDB.Error (BackendError (..), Error (..), renderError)
 import DBOS.SystemDB.Types
   ( AppScope (..),
     Dequeued (..),
-    Duration (..),
+    Duration,
     QueueName (..),
     QueueRecord (..),
-    ResolvedLimits (..),
     Serialization (..),
     SerializedWorkflowValue (..),
     WorkflowFilter (..),
@@ -32,8 +31,9 @@ import DBOS.SystemDB.Types
     WorkflowStatus (Pending),
     defaultWorkflowFilter,
     internalQueueName,
-    queueResolvedLimits,
-    resolvedIsPartitioned,
+    queueHasPartitionLimits,
+    durationMicros,
+    scaleDuration,
     secondsDuration,
     spansPartitions,
     timestampNow,
@@ -59,6 +59,7 @@ import DBOS.Transact.Workflow
     sleepUnlessStopping,
     spawnTracked,
     tasksSpawner,
+    runningTasks
   )
 
 -- | Queue-worker events: the dequeue sweep, worker lifecycle, and
@@ -206,19 +207,33 @@ runningPartitionCount running queue partition =
 -- 'Nothing' for unlimited. Local by construction: worker concurrency is
 -- the limit a process can answer without asking the database. A
 -- per-partition worker limit of zero pauses this worker outright.
-workerBudget :: ResolvedLimits -> Int -> Maybe Int
-workerBudget limits running
-  | maybe False (<= 0) limits.resolvedPartitionWorkerConcurrency = Just 0
-  | otherwise = (\cap -> max 0 (cap - running)) <$> limits.resolvedWorkerConcurrency
+workerBudget :: QueueRecord -> Int -> Maybe Int
+workerBudget queue running
+  | maybe False (<= 0) queue.queueRecordPartitionWorkerConcurrency = Just 0
+  | otherwise = (\cap -> max 0 (cap - running)) <$> queue.queueRecordWorkerConcurrency
 
 -- | What one poll of a queue met: the contention that ended it, if
 -- any, how many claim transactions it ran — one per partition visited,
 -- when it walked them — and the ids those claims took. Mirrors Rust
 -- @Polled@.
+-- | The contention a failed dequeue met. By exact SQLSTATE, as the oracle's
+-- @Contention@: @55P03@ is a peer holding the lock and is over in
+-- milliseconds, so backing off only leaves work unclaimed; @40001@ is a
+-- serialization loss whose contenders keep colliding, so it backs off.
+-- @40P01@ is deliberately not contention: nothing in the dequeue expects a
+-- deadlock, so it is a real error.
+data Contention
+  = LockNotAvailable
+  | SerializationFailure
+  deriving stock (Eq, Show)
+
+-- | Whether this contention should lengthen the polling interval.
+backsOff :: Contention -> Bool
+backsOff SerializationFailure = True
+backsOff LockNotAvailable     = False
+
 data Polled = Polled
-  { polledContention :: Bool,
-    polledClaims     :: Int,
-    polledClaimed    :: [WorkflowId]
+  { polledContention :: Maybe Contention, polledClaims     :: Int, polledClaimed    :: [WorkflowId]
   }
   deriving stock (Eq, Show)
 
@@ -226,10 +241,10 @@ data Polled = Polled
 -- contention it met, if any, and how many claims it took to get there.
 -- Announcements go through the connection's tracer. Mirrors Rust
 -- @poll_once@.
-pollOnce :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+pollOnce :: (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
          => Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Tasks m -> Running m -> QueueRecord -> DataSourceRegistry m -> m Polled
 pollOnce conn identity workflows tasks running queue datasources = do
-  if not (resolvedIsPartitioned limits)
+  if not (queueHasPartitionLimits queue)
     then do
       local <- runningCount running queueName
       -- One token per claim: every row this claim takes is owned by it.
@@ -241,15 +256,15 @@ pollOnce conn identity workflows tasks running queue datasources = do
           pure (Polled contended 1 [])
         Right dequeued -> do
           dispatchClaimed conn identity workflows tasks running queue Nothing dequeued.dequeuedWorkflowIds ownerToken datasources
-          pure (Polled False 1 dequeued.dequeuedWorkflowIds)
+          pure (Polled Nothing 1 dequeued.dequeuedWorkflowIds)
     else do
       alreadyRunning <- runningCount running queueName
-      case workerBudget limits alreadyRunning of
-        Just 0 -> pure (Polled False 0 [])
-        _ | limits.resolvedPartitionConcurrency == Just 1
-              && limits.resolvedConcurrency == Nothing
-              && limits.resolvedRateLimit == Nothing
-              && limits.resolvedPartitionRateLimit == Nothing -> do
+      case workerBudget queue alreadyRunning of
+        Just 0 -> pure (Polled Nothing 0 [])
+        _ | queue.queueRecordPartitionConcurrency == Just 1
+              && queue.queueRecordConcurrency == Nothing
+              && queue.queueRecordRateLimit == Nothing
+              && queue.queueRecordPartitionRateLimit == Nothing -> do
               ownerToken <- generatedWorkflowId conn
               swept <-
                 runSystemDB
@@ -260,7 +275,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
                         queue
                         identity.identityExecutorId
                         identity.identityAppVersion
-                        (fromIntegral <$> workerBudget limits alreadyRunning)
+                        (fromIntegral <$> workerBudget queue alreadyRunning)
                         ownerToken
                   )
               case swept of
@@ -272,7 +287,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
                   -- say which; each claimed row carries its own key, so the
                   -- tally is credited from the rows themselves.
                   dispatchClaimed conn identity workflows tasks running queue Nothing ids ownerToken datasources
-                  pure (Polled False 1 ids)
+                  pure (Polled Nothing 1 ids)
         _ -> do
           -- The room left under the queue's global concurrency, across
           -- every executor: 'Nothing' when it carries none. One count
@@ -280,7 +295,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
           -- promise — each claim below counts again in its own
           -- transaction, so a peer that spends the room in the meantime
           -- costs this walk a claim, not an overrun.
-          room <- case limits.resolvedConcurrency of
+          room <- case queue.queueRecordConcurrency of
             Nothing -> pure (Right Nothing)
             Just cap -> do
               pending <- runSystemDB conn.connSysdb (\db -> SystemDB.countPendingQueueWorkflows db queueName)
@@ -293,7 +308,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
               -- Not even listed: with the queue full, every partition
               -- would claim nothing.
               if globalRoom == Just 0
-                then pure (Polled False 0 [])
+                then pure (Polled Nothing 0 [])
                 else do
                   partitions <- runSystemDB conn.connSysdb (\db -> SystemDB.getQueuePartitions db queueName)
                   case partitions of
@@ -303,9 +318,8 @@ pollOnce conn identity workflows tasks running queue datasources = do
                     Right keys -> do
                       seed <- conn.connEntropy
                       (claims, ids) <- walk (shuffled (fromIntegral seed) keys) alreadyRunning 0 globalRoom 0 []
-                      pure (Polled False claims ids)
+                      pure (Polled Nothing claims ids)
   where
-    limits = queueResolvedLimits queue
     queueName = queue.queueRecordName
     startClaim ownerToken partitionKey localRunning partitionLocalRunning =
       runSystemDB
@@ -323,7 +337,7 @@ pollOnce conn identity workflows tasks running queue datasources = do
         )
     walk [] _ _ _ claims ids = pure (claims, ids)
     walk (partition : rest) alreadyRunning claimedHere globalRoom claims ids
-      | workerBudget limits (alreadyRunning + claimedHere) == Just 0 = pure (claims, ids)
+      | workerBudget queue (alreadyRunning + claimedHere) == Just 0 = pure (claims, ids)
       | roomSpent = pure (claims, ids)
       | otherwise = do
           local <- runningPartitionCount running queueName partition
@@ -368,21 +382,27 @@ pollOnce conn identity workflows tasks running queue datasources = do
 
 -- | Turns a failed dequeue into the "was it contention" answer the caller
 -- backs off on. A peer mid-dequeue is the system working, not a failure.
-reportDequeueError :: Monad m => SomeTracer m -> Error -> m Bool
-reportDequeueError tracer err
-  | isContention err = do
-      runTracer tracer DequeueBackoff
-      pure True
-  | otherwise = do
-      runTracer tracer (DequeueFailed (renderError err))
-      pure False
+reportDequeueError :: Monad m => SomeTracer m -> Error -> m (Maybe Contention)
+reportDequeueError tracer err = case contentionOf err of
+  Just contention -> do
+    runTracer tracer DequeueBackoff
+    pure (Just contention)
+  Nothing -> do
+    runTracer tracer (DequeueFailed (renderError err))
+    pure Nothing
 
 -- | Whether a failed dequeue means a peer was mid-dequeue rather than
 -- something being wrong. @55P03@ by code, not by class: a @NOWAIT@
 -- conflict is @lock_not_available@ and never reaches the retry layer.
+contentionOf :: Error -> Maybe Contention
+contentionOf (Backend backend) = case backend.backendSqlState of
+  Just "55P03" -> Just LockNotAvailable
+  Just "40001" -> Just SerializationFailure
+  _            -> Nothing
+contentionOf _ = Nothing
+
 isContention :: Error -> Bool
-isContention (Backend backend) = backend.backendSqlState == Just "55P03"
-isContention _ = False
+isContention = isJust . contentionOf
 
 -- | Fisher-Yates, so a walk visits partitions in a different order each
 -- poll: a worker whose budget runs out part way through would otherwise
@@ -435,7 +455,7 @@ admission status recoveryAttempts
 -- tally before the dispatch so the next iteration's counts include it even
 -- if this one is still starting. Walked in claim order, not in the order
 -- the read came back, because claim order is what priority is for.
-dispatchClaimed :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+dispatchClaimed :: (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                 => Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Tasks m -> Running m -> QueueRecord -> Maybe Text -> [WorkflowId] -> Text -> DataSourceRegistry m -> m ()
 dispatchClaimed conn identity workflows tasks running queue partition claimed ownerToken datasources
   | null claimed = pure ()
@@ -480,47 +500,46 @@ dispatchClaimed conn identity workflows tasks running queue partition claimed ow
                     Just key -> Just key
                     Nothing -> row.workflowRecordQueuePartitionKey
               slot <- claimSlot running queue.queueRecordName partition'
-              -- The admission check is the dispatch: the claim counted this
-              -- attempt, so the row read here carries the count the park
-              -- guard enforces. A lone port that parks rows its peers leave
-              -- alone is the worse divergence, so the cap is the shared
-              -- constant, never a per-call argument. Mirrors @dequeue.rs@
-              -- dispatch.
-              case admission row.workflowRecordStatus row.workflowRecordRecoveryAttempts of
-                NotPending -> do
+              -- The name and the registry come first: a row no launch
+              -- recognises is left where it is, never parked, because the
+              -- recovery cap is shared with the other SDKs. Admission is
+              -- last, after the claim has counted this attempt. Mirrors
+              -- @dequeue.rs@ @dispatch@.
+              case workflowRecordQualifiedName row of
+                Nothing -> do
                   releaseSlot slot
-                  runTracer conn.connTracer (DequeuedRowSettled workflowText (workflowStatusText row.workflowRecordStatus))
-                Park -> do
-                  releaseSlot slot
-                  parked <- runSystemDB conn.connSysdb (\db -> SystemDB.deadLetterWorkflows db [workflowId] row.workflowRecordRecoveryAttempts)
-                  case parked of
-                    Left err -> runTracer conn.connTracer (DequeuedWorkflowFailed (renderError err))
-                    -- An empty park means the row moved on between the read
-                    -- and the guard (a resume reset its count): left alone,
-                    -- as the guard requires. Only a row the guard took is
-                    -- announced.
-                    Right (_ : _) -> runTracer conn.connTracer (DequeuedBudgetSpent workflowText row.workflowRecordRecoveryAttempts maxRecoveryAttempts)
-                    Right [] -> pure ()
-                Run -> do
-                  case workflowRecordQualifiedName row of
+                  runTracer conn.connTracer (DequeuedRowSkipped workflowText)
+                Just key ->
+                  case lookupSnapshotWorkflow key workflows of
                     Nothing -> do
                       releaseSlot slot
-                      runTracer conn.connTracer (DequeuedRowSkipped workflowText)
-                    Just key -> do
-                      -- Reconstruct the call the row describes and spawn it:
-                      -- the claim already read everything needed, so no
-                      -- init re-submits the row. The claim's token travels
-                      -- with the execution, which presents it on every
-                      -- write it makes. A row without a name skips like a
-                      -- nameless one: the oracle's @WorkflowRecord::qualified_name@
-                      -- treats an empty name as no name either. Mirrors
-                      -- @dequeue.rs@ @dispatch@.
-                      let input = (\raw -> SerializedWorkflowValue raw (Serialization <$> row.workflowRecordSerialization)) <$> row.workflowRecordInput
-                      case lookupSnapshotWorkflow key workflows of
-                        Nothing -> do
+                      runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError (TransactError.NotRegistered key :: TransactError.Error TransactError.EngineOnly)))
+                    Just workflow ->
+                      -- A lone port that parks rows its peers leave alone is
+                      -- the worse divergence, so the cap is the shared
+                      -- constant, never a per-call argument.
+                      case admission row.workflowRecordStatus row.workflowRecordRecoveryAttempts of
+                        NotPending -> do
                           releaseSlot slot
-                          runTracer conn.connTracer (DequeuedWorkflowFailed (TransactError.renderTransactError (TransactError.NotRegistered key :: TransactError.Error TransactError.EngineOnly)))
-                        Just workflow -> do
+                          runTracer conn.connTracer (DequeuedRowSettled workflowText (workflowStatusText row.workflowRecordStatus))
+                        Park -> do
+                          releaseSlot slot
+                          parked <- runSystemDB conn.connSysdb (\db -> SystemDB.deadLetterWorkflows db [workflowId] row.workflowRecordRecoveryAttempts)
+                          case parked of
+                            Left err -> runTracer conn.connTracer (DequeuedWorkflowFailed (renderError err))
+                            -- An empty park means the row moved on between
+                            -- the read and the guard (a resume reset its
+                            -- count): left alone, as the guard requires.
+                            -- Only a row the guard took is announced.
+                            Right (_ : _) -> runTracer conn.connTracer (DequeuedBudgetSpent workflowText row.workflowRecordRecoveryAttempts maxRecoveryAttempts)
+                            Right [] -> pure ()
+                        Run -> do
+                          -- Reconstruct the call the row describes and spawn
+                          -- it: the claim already read everything needed, so
+                          -- no init re-submits the row. The claim's token
+                          -- travels with the execution, which presents it on
+                          -- every write it makes.
+                          let input = (\raw -> SerializedWorkflowValue raw (Serialization <$> row.workflowRecordSerialization)) <$> row.workflowRecordInput
                           gate <- newMVar False
                           let releaseOnce = modifyMVar_ gate (\done -> if done then pure True else releaseSlot slot >> pure True)
                           spawned <-
@@ -592,7 +611,7 @@ internalQueueRecord =
 -- begun, so a claim that has committed is dispatched and drained with the
 -- rest. The dispatch set runs what is claimed; the producer set owns this
 -- loop itself.
-pollQueue :: (MonadFork m, MonadMask m, MonadMVar m, MonadAsync m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+pollQueue :: (MonadFork m, MonadMask m, MonadMVar m, MonadAsync m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
           => Tasks m -> StrictTVar m Bool -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> StrictTVar m (Map Text QueueRecord) -> Running m -> Text -> DataSourceRegistry m -> m ()
 pollQueue flows stopping conn identity workflows queues running name datasources = go (secondsDuration 1)
   where
@@ -613,11 +632,11 @@ pollQueue flows stopping conn identity workflows queues running name datasources
                 ceiling = max floorInterval maxPollingInterval
                 clamped = max floorInterval (min ceiling interval)
             polled <- pollOnce conn identity workflows flows running queue datasources
-            let contended = polled.polledContention
+            let contended = maybe False backsOff polled.polledContention
                 next =
                   if contended
-                    then min (scaleDuration backoffFactor clamped) ceiling
-                    else max (scaleDuration scalebackFactor clamped) floorInterval
+                    then min (fromMaybe clamped (scaleDuration backoffFactor clamped)) ceiling
+                    else max (fromMaybe clamped (scaleDuration scalebackFactor clamped)) floorInterval
             bits <- conn.connEntropy
             keepGoing <- sleepDuration stopping (jitter bits next)
             when keepGoing (go next)
@@ -626,16 +645,15 @@ pollQueue flows stopping conn identity workflows queues running name datasources
 -- per queue, and sleep a second. A producer loop: the supervisor and its
 -- workers stop between passes once shutdown has begun. The dispatch set
 -- runs what is claimed.
-superviseForever :: (MonadFork m, MonadMask m, MonadMVar m, MonadAsync m, MonadDelay m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+superviseForever :: (MonadFork m, MonadMask m, MonadMVar m, MonadAsync m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
                  => Tasks m -> Tasks m -> StrictTVar m Bool -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Maybe [Text] -> DataSourceRegistry m -> m ()
 superviseForever producers flows stopping conn identity workflows listenQueues datasources = do
   queues <- newTVarIO Map.empty
-  workers <- newTVarIO Map.empty
   warnedInternal <- newTVarIO False
   running <- newRunning
-  loop queues workers running warnedInternal
+  loop queues running warnedInternal
   where
-    loop queues workers running warnedInternal = do
+    loop queues running warnedInternal = do
       transitioned <- runSystemDB conn.connSysdb (\db -> SystemDB.transitionDelayedWorkflows db)
       case transitioned of
         Left err ->
@@ -643,35 +661,26 @@ superviseForever producers flows stopping conn identity workflows listenQueues d
         Right 0 -> pure ()
         Right moved -> runTracer conn.connTracer (DelayedWorkflowsEnqueued moved)
       names <- refreshQueueSet conn identity queues warnedInternal listenQueues
-      current <- readTVarIO workers
-      let desired = Set.fromList names
-          kept = Map.filterWithKey (\queueName _ -> queueName `Set.member` desired) current
-      atomically (writeTVar workers kept)
+      -- The task registry is the worker registry: 'spawnTracked' registers
+      -- a worker synchronously and its departure hook removes it. A worker
+      -- still listed is alive, so there is no second map to lose an update
+      -- in, and a dead worker is respawned on the next tick.
+      living <- Set.fromList <$> runningTasks producers
       forM_ names $ \name ->
-        unless (Map.member name kept) $ do
-          spawned <-
-            spawnTracked
-              producers
-              ("queue " <> name)
-              ( finally
-                  (pollQueue flows stopping conn identity workflows queues running name datasources)
-                  (atomically (modifyTVar workers (Map.delete name)))
-              )
-          -- A closed registry refuses the worker without forking, so there
-          -- is nothing to track: the supervisor itself is being aborted,
-          -- and its next loop (or its own kill) ends the supervision.
-          case spawned of
-            Nothing -> pure ()
-            Just tid -> atomically (modifyTVar workers (Map.insert name tid))
+        unless (("queue " <> name) `Set.member` living) $ do
+          -- A closed registry refuses the worker without forking; the
+          -- supervisor is being aborted and its next loop ends it.
+          _ <- spawnTracked producers ("queue " <> name) (pollQueue flows stopping conn identity workflows queues running name datasources)
+          pure ()
       keepGoing <- sleepDuration stopping supervisorInterval
-      when keepGoing (loop queues workers running warnedInternal)
+      when keepGoing (loop queues running warnedInternal)
 
 -- | One pass of the sweep outside the supervisor: a fresh tally, one poll
 -- per queue, and the ids it claimed. Dispatch is concurrent; the caller
 -- only learns what was claimed. A stored internal-queue row is skipped like
 -- the supervisor skips it: the synthetic record's no-limit cadence always
 -- wins, and the row's presence is said out loud.
-dequeuePass :: (MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
+dequeuePass :: (MonadAsync m, MonadFork m, MonadMask m, MonadMVar m, MonadTimer m, MonadMonotonicTimeNSec m, MonadTime m)
             => Tasks m -> Connection m -> Identity -> Snapshot m (ErasedWorkflow m) -> Maybe [Text] -> DataSourceRegistry m -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 dequeuePass tasks conn identity workflows listenQueues datasources = do
   passStart <- getCurrentTime
@@ -715,18 +724,15 @@ listensTo (Just names) record = record.queueRecordName `elem` names
 -- | Spreads a wait over the dequeue jitter band, so a fleet that started
 -- together stops polling in lockstep.
 jitter :: Word32 -> Duration -> Duration
-jitter bits (Duration interval) =
+jitter bits interval =
   let factor = jitterLow + (jitterHigh - jitterLow) * (fromIntegral bits / (fromIntegral (maxBound :: Word32) + 1))
-   in Duration (interval * realToFrac factor)
-
-scaleDuration :: Double -> Duration -> Duration
-scaleDuration factor (Duration interval) = Duration (interval * realToFrac factor)
+   in fromMaybe interval (scaleDuration factor interval)
 
 delayDuration :: MonadDelay m => Duration -> m ()
-delayDuration (Duration interval) = threadDelay (round (interval * 1000000))
+delayDuration interval = threadDelay (durationMicros interval)
 
 -- | 'delayDuration' that ends early once shutdown has begun, reporting
 -- whether it slept the whole wait. Producer loops wait through this
 -- rather than 'delayDuration', so they stop between passes.
-sleepDuration :: (MonadSTM m, MonadAsync m, MonadDelay m) => StrictTVar m Bool -> Duration -> m Bool
-sleepDuration stopping (Duration interval) = sleepUnlessStopping stopping (round (interval * 1000000))
+sleepDuration :: (MonadAsync m, MonadDelay m) => StrictTVar m Bool -> Duration -> m Bool
+sleepDuration stopping interval = sleepUnlessStopping stopping (durationMicros interval)

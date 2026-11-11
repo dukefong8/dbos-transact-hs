@@ -348,18 +348,24 @@ nextAttempt status =
 data StepScope m = StepScope
   { scopeMarker       :: StepMarker,
     scopeStatus       :: StepStatus,
-    scopeCancellation :: StrictTVar m Bool
+    scopeCancellation :: StrictTVar m Bool,
+    -- | Set once the normal path has restored the shared depth. The
+    -- exception handler checks it, so a kill landing between the restore
+    -- and the return from the body does not decrement a second time.
+    scopeRestored     :: StrictTVar m Bool
   }
 
 -- | A scope for one attempt, with a fresh cancellation token.
 newStepScope :: MonadSTM m => StepMarker -> StepStatus -> m (StepScope m)
 newStepScope marker status = do
   token <- newTVarIO False
+  restored <- newTVarIO False
   pure
     StepScope
       { scopeMarker = marker,
         scopeStatus = status,
-        scopeCancellation = token
+        scopeCancellation = token,
+        scopeRestored = restored
       }
 
 -- | The id of the step body this context is inside, or 'Nothing' in the
@@ -508,23 +514,30 @@ newWorkflowCtx conn identity state =
 -- | Run one attempt under the narrowed view. Bumps the shared depth on
 -- entry and restores it on every exit; abandoning the attempt
 -- (cancellation, timeout kill, dropped future) fires the token, as the
--- oracle's drop guard does, completing it leaves the token quiet. Cancel
--- and unbump in one transaction so the token fires and the depth restores
--- together, never one without the other. Restored explicitly rather than
--- through 'finally' so this keeps its 'MonadCatch' constraint — no
--- 'MonadMask' cascade through the step API. The residual window (an async
--- kill landing between the body's return and the restore below) leaks
--- safe: a stuck depth degrades later calls to plain rather than
--- corrupting any position. The scope lives on the view handed to the body
--- alone, so it goes out of scope with the body however the body ends.
+-- oracle's drop guard does, completing it leaves the token quiet. The
+-- handler covers the increment as well as the body, so a kill cannot land
+-- between them; the scope's restore flag makes the handler idempotent, so
+-- a kill after the normal restore does not decrement a second time. Cancel
+-- and unbump stay in one transaction. This keeps the 'MonadCatch'
+-- constraint, with no 'MonadMask' cascade through the step API.
 withStep :: (MonadSTM m, MonadCatch m)
          => WorkflowCtx exec m -> StepMarker -> StepStatus -> (StepCtx exec m -> m a) -> m a
 withStep wctx marker status body = do
   scope <- newStepScope marker status
-  atomically (modifyTVar wctx.wctxState.stepDepthRef (+ 1))
-  outcome <- body (StepCtx wctx (Just scope)) `onException` atomically (writeTVar scope.scopeCancellation True >> modifyTVar wctx.wctxState.stepDepthRef (subtract 1))
-  atomically (modifyTVar wctx.wctxState.stepDepthRef (subtract 1))
-  pure outcome
+  let restore = atomically $ do
+        restored <- readTVar scope.scopeRestored
+        unless restored $ do
+          writeTVar scope.scopeCancellation True
+          modifyTVar wctx.wctxState.stepDepthRef (subtract 1)
+      finish = atomically $ do
+        writeTVar scope.scopeRestored True
+        modifyTVar wctx.wctxState.stepDepthRef (subtract 1)
+      attempt = do
+        atomically (modifyTVar wctx.wctxState.stepDepthRef (+ 1))
+        value <- body (StepCtx wctx (Just scope))
+        finish
+        pure value
+  attempt `onException` restore
 
 -- | Allocate the next step id in this execution. Only 'WorkflowCtx' can
 -- spend the counter — the narrowed view exposes no allocator.

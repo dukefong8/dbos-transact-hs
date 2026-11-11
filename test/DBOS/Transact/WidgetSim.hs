@@ -164,7 +164,7 @@ mkWidgetDs store =
         commits <- readTVarIO store.wsCommits
         pure (Right (fst <$> Map.lookup (widText, step) commits)),
       dsDeleteCheckpoints = \(WorkflowId widText) step -> do
-        atomically (modifyTVar store.wsCommits (Map.filterWithKey (\(w, s) _ -> w /= widText || s < step)))
+        atomically (modifyTVar store.wsCommits (Map.filterWithKey (\(w, s) _ -> w /= widText || s < fromIntegral step)))
         pure (Right ())
     }
 

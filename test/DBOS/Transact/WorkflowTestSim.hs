@@ -76,6 +76,7 @@ import DBOS.Transact.WorkflowCases
     checkPanic,
     checkPlainStepAtStart,
     checkRegisteredResult,
+    checkRunRefRejectsWithoutId,
     checkDerivedChildAdopted,
     checkAssignedChildAdopted,
     checkRootNoParent,
@@ -133,6 +134,7 @@ import DBOS.Transact.WorkflowCases
     scenarioPanic,
     scenarioPlainStepAtStart,
     scenarioRegisteredRecordsResult,
+    scenarioRunRefRejectsWithoutId,
     scenarioDerivedChildAdopted,
     scenarioAssignedChildAdopted,
     scenarioRootNoParent,
@@ -148,6 +150,7 @@ import DBOS.Transact.WorkflowCases
     taskAbortAllWaits,
     taskEarlyFinishNotSwept,
     taskEmptySweep,
+    taskFinishRacingSweep,
     taskFinishedNotRegistered,
     taskRefusedAfterSweep,
     taskRunningNamesTasks,
@@ -165,6 +168,7 @@ tests =
     "Workflow execution (Sim)"
     AllFinish
     [ simCase simWfFixture "a registered workflow starts and records its result" scenarioRegisteredRecordsResult checkRegisteredResult traceRegisteredResult,
+      simCase simWfFixture "a run refusing its reuse policy without an id writes nothing" scenarioRunRefRejectsWithoutId checkRunRefRejectsWithoutId traceRunRefRejectsWithoutId,
       -- IO only: crash-and-relaunch recovery sweep (MemSystemDB delegates
       -- reenqueueForRecovery to the canned mock; see ADR-0020).
       testCase "a recovery run replays completed steps after a body interruption" (pure ()),
@@ -274,6 +278,10 @@ tasksSimTests =
         let simRun :: forall s. IOSim s Int
             simRun = taskEmptySweep @(IOSim s)
         (@?= 0) (runSimOrThrow simRun),
+      testCase "a body that just finished is not reported as cancelled" $ do
+        let simRun :: forall s. IOSim s Int
+            simRun = taskFinishRacingSweep @(IOSim s)
+        (@?= 0) (runSimOrThrow simRun),
       -- IO only: real preemption, not cooperation.
       testCase "a spawn refused after abort fills its channel instead of hanging" (pure ()),
       testCase "a task finishing before registration is not swept as aborted" $ do
@@ -331,6 +339,11 @@ traceRegisteredResult tr = do
   selectTraceEventsDynamic tr @?= [StepRunning "double" 0, StepOutputRecorded "double" 0, WorkflowCompleted "sim-wf-double"]
   selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
 
+traceRunRefRejectsWithoutId :: forall a. SimTrace a -> IO ()
+traceRunRefRejectsWithoutId tr = do
+  (selectTraceEventsDynamic tr :: [WorkflowEvent]) @?= []
+  selectTraceEventsDynamic tr @?= [EngineShutdown "sim-app"]
+
 traceJoinTakesId :: forall a. SimTrace a -> IO ()
 traceJoinTakesId tr = do
   selectTraceEventsDynamic tr @?= [WorkflowAlreadyOwned "sim-join-start", WorkflowCompleted "sim-join-start"]
@@ -384,7 +397,7 @@ traceStepsTaken tr = do
 -- announces the cancelled task and then itself.
 traceShutdownCancels :: forall a. SimTrace a -> IO ()
 traceShutdownCancels tr = do
-  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1 ["sim-shutdown-run-id"], EngineShutdown "sim-app"]
   selectTraceEventsDynamic tr @?= ([] :: [WorkflowEvent])
 
 -- The released run finishes and completes.
@@ -460,7 +473,7 @@ traceQueuedStartClaimedByNextPass tr = do
   selectTraceEventsDynamic tr
     @?= [ WorkflowEnqueued "sim-claim-window" "claim-window-q-sim-claim-window"
         ]
-  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1, EngineShutdown "sim-app"]
+  selectTraceEventsDynamic tr @?= [EngineCancelledRunning 1 ["sim-claim-window"], EngineShutdown "sim-app"]
 
 -- The squatter's row is deleted, then the single fork of the conflicting
 -- parent is announced; the replay returns the recorded error.

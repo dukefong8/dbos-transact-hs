@@ -23,6 +23,7 @@ import DBOS.SystemDB
     renderError,
     shouldRetry,
     withRetry,
+    withoutConflictReplay,
   )
 import DBOS.SystemDB.Retry (SysdbEvent (..))
 import DBOS.Transact.Logger (nullTracer)
@@ -50,7 +51,14 @@ classificationTests =
       testCase "opting out covers connection failures only" $ do
         let policy = defaultRetryPolicy {retryPolicyRetryConnectionErrors = False}
         (shouldRetry policy <$> [connectionError, transientError])
+          @?= [False, True],
+      testCase "the conflict switch is independent of the connection switch" $ do
+        let noConflicts = withoutConflictReplay defaultRetryPolicy
+            noConnections = withoutConflictReplay (defaultRetryPolicy {retryPolicyRetryConnectionErrors = False})
+        (shouldRetry noConflicts <$> [transientError, connectionError])
           @?= [False, True]
+        (shouldRetry noConnections <$> [transientError, connectionError])
+          @?= [False, False]
     ]
 
 jitterTests :: TestTree
@@ -108,8 +116,8 @@ simTests =
           Right (Left err) -> fail ("retry returned an error: " <> show err)
           Right (Right attempts) -> attempts @?= 3
         let traced = selectTraceEventsDynamic (runSimTrace simAction) :: [SysdbEvent]
-        traced @?= [ SysdbRetryAttempt "test" 1 500 (renderError transientError),
-                     SysdbRetryAttempt "test" 2 1000 (renderError transientError)
+        traced @?= [ SysdbRetryConflict "test" 1 25 (renderError transientError) False,
+                     SysdbRetryConflict "test" 2 50 (renderError transientError) False
                    ]
     ]
 
@@ -129,7 +137,13 @@ fastPolicy :: IO RetryPolicy
 fastPolicy = do
   backoff <- expectJust "durationFromMs 1" (durationFromMs 1)
   ceiling' <- expectJust "durationFromMs 4" (durationFromMs 4)
-  pure defaultRetryPolicy {retryPolicyInitialBackoff = backoff, retryPolicyMaxBackoff = ceiling'}
+  pure
+    defaultRetryPolicy
+      { retryPolicyInitialBackoff = backoff,
+        retryPolicyMaxBackoff = ceiling',
+        retryPolicyConflictInitialBackoff = backoff,
+        retryPolicyConflictMaxBackoff = ceiling'
+      }
 
 failUntil :: IORef Int -> Int -> Error -> IO (Either Error Int)
 failUntil calls threshold err = do

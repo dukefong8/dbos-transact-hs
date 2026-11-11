@@ -100,7 +100,10 @@ data Owner
 -- Rust uses the address of the execution's context; here it is a counter
 -- minted per execution, which is equality-only in exactly the same way and
 -- needs no IO-only @Unique@.
-newtype ExecutionIdentity = ExecutionIdentity Int
+-- | An execution's identity within a connection. The instance id rides
+-- with the counter because two connections both start at zero; comparing
+-- only the counter would call unrelated executions equal.
+data ExecutionIdentity = ExecutionIdentity Text Int
   deriving stock (Eq, Show)
 
 -- | A connection to the system database and the settings every call
@@ -120,6 +123,13 @@ data Connection m = Connection
     connExecutionCounter    :: StrictTVar m Int,
     connGenerateWorkflowId  :: m Text,
     connEntropy             :: m Word32,
+    -- | Whether this connection acquired the backend it carries and must
+    -- therefore close it. A connection built over a caller-supplied
+    -- backend (the suite's shared handle, a peer's pool) is a borrowing
+    -- wrapper: releasing it must leave the backend open for its owner.
+    -- Mirrors Rust's @Arc<Connection>@ ownership: only the acquiring
+    -- instance closes the pool.
+    connOwnsBackend         :: Bool,
     connTracer              :: SomeTracer m
   }
 
@@ -143,6 +153,7 @@ newConnection sysdb serializer appName pollInterval owner instanceId generate en
         connExecutionCounter = counter,
         connGenerateWorkflowId = generate,
         connEntropy = entropy,
+        connOwnsBackend = False,
         connTracer = tracer
       }
 
@@ -153,7 +164,7 @@ nextExecutionIdentity conn = do
     current <- readTVar conn.connExecutionCounter
     writeTVar conn.connExecutionCounter (current + 1)
     pure current
-  pure (ExecutionIdentity n)
+  pure (ExecutionIdentity conn.connInstanceId n)
 
 -- | Mint a workflow id for a caller that named none.
 generatedWorkflowId ::  Connection m -> m Text
@@ -173,16 +184,20 @@ acquireConnection config identity tracer =
       -- The workflow-id generator is this connection's only UUID source; one
       -- draw names the connection itself.
       instanceId <- uuidWorkflowId
-      newConnection
-        (SomeSystemDB backend)
-        config.configSerializer
-        (Just identity.identityAppName)
-        (outcomePollInterval config)
-        OwnerApplication
-        instanceId
-        uuidWorkflowId
-        uuidEntropy
-        tracer
+      conn <-
+        newConnection
+          (SomeSystemDB backend)
+          config.configSerializer
+          (Just identity.identityAppName)
+          (outcomePollInterval config)
+          OwnerApplication
+          instanceId
+          uuidWorkflowId
+          uuidEntropy
+          tracer
+      -- This connection acquired the backend, so it is the surface that
+      -- closes it; a test fixture wrapping a shared backend must not.
+      pure conn {connOwnsBackend = True}
 
 -- | The production id generator: a fresh v4 UUID, as the oracle mints.
 uuidWorkflowId :: IO Text
@@ -192,8 +207,10 @@ uuidWorkflowId = Text.pack . UUID.toString <$> UUID.V4.nextRandom
 -- on this type rather than on its holders because the connection is what is
 -- being closed: the executor reaches it after stopping its workflows, the
 -- client with nothing to stop first.
-releaseConnection :: Connection m -> m ()
-releaseConnection conn = runSystemDB conn.connSysdb SystemDB.close
+releaseConnection :: (Applicative m) => Connection m -> m ()
+releaseConnection conn
+  | conn.connOwnsBackend = runSystemDB conn.connSysdb SystemDB.close
+  | otherwise = pure ()
 
 backendConfig :: Config -> Identity -> Postgres.Config
 backendConfig config identity =

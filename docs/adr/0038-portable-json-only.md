@@ -47,6 +47,18 @@ The port has one payload encoding, and it writes it everywhere:
   as portable (arguments unwrap the envelope). Any other tag is
   `CodecUnknownSerialization`: an unreadable encoding is reported, never
   guessed.
+
+### 2026-11-10 note: typed cross-SDK error replay
+
+F27 in `docs/oracle-validation-findings-2026-11-10.md` records that Rust's
+`PortableError` writes `name = "dbos::<Variant>"` and untagged snake_case
+`data`, while this port writes the bare constructor name and its tagged
+envelope in `data`. The wire shape stays as decided above. A Rust reader gets
+the `name`/`message` text; a Haskell reader of a Rust record gets
+`name: message` instead of the typed constructor. Changing the encoder would
+invalidate recorded replay rows, so typed cross-SDK error replay is not a goal
+of this port. If it becomes one, add a decoder that accepts both shapes before
+changing what the port writes.
 - **No format selection.** There is no `SerializationFormat`, no per-call
   format argument, and no separate portable enqueue. `Config.Serializer` keeps
   one constructor, `PortableJson`. The oracle's native/per-format machinery is

@@ -99,8 +99,10 @@ keyFor channel payload
 -- generation counter is the same one-slot buffer — a wake that lands before
 -- the wait is still seen, and two wakes before a wait collapse into one.
 data Waiter = Waiter
-  { waiterGeneration :: Int,
-    waiterSubscribers :: Int
+  { -- | Strict for the same reason as 'TaskState.live': a hot key woken
+    -- many times would otherwise build a thunk chain only 'notified' forces.
+    waiterGeneration :: !Int,
+    waiterSubscribers :: !Int
   }
   deriving stock (Eq, Show)
 

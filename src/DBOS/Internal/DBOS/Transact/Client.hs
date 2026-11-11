@@ -87,18 +87,118 @@ import DBOS.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.SystemDB.Retry (uuidEntropy)
-import DBOS.SystemDB.Types (AppScope (..), Change (..), Duration, EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), IdleTransactionTimeout (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), QualifiedWorkflowName, qualifiedName, qualifiedClassName, qualifiedConfigName, WorkflowRecord (..), WorkflowStatus, durationIsZero, idleTimeoutValidate, newWorkflow, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
-import DBOS.Transact.Config (Serializer (..), systemDatabaseUrlEnv, defaultOutcomePollInterval, serializerName)
-import DBOS.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, withConnection)
+import DBOS.SystemDB.Types
+  ( AppScope (..),
+    Change (..),
+    Duration,
+    EncodedValue (..),
+    Fork (..),
+    ForkOptions (..),
+    IdempotencyKey (..),
+    IdleTransactionTimeout (..),
+    NewQueue (..),
+    NewWorkflow (..),
+    OnExistingQueue (..),
+    PollingConcurrency (PollingDefault),
+    RewindOptions (..),
+    EncodedSendMessage (..),
+    Serialization (..),
+    SerializedWorkflowValue (..),
+    StepRecord (..),
+    Topic (..),
+    VersionInfo (..),
+    WorkflowDelay,
+    WorkflowFilter (..),
+    WorkflowId (..),
+    WorkflowIdReusePolicy (..),
+    QualifiedWorkflowName,
+    qualifiedName,
+    qualifiedClassName,
+    qualifiedConfigName,
+    WorkflowRecord (..),
+    WorkflowStatus,
+    durationIsZero,
+    idleTimeoutValidate,
+    newWorkflow,
+    queueIsLegacyPartitioned,
+    sysRewindOptions,
+    timestampNow,
+    validateNewWorkflow,
+    validateSendKeys
+  )
+import DBOS.Transact.Config
+  ( Serializer (..),
+    systemDatabaseUrlEnv,
+    defaultOutcomePollInterval,
+    serializerName
+  )
+import DBOS.Transact.Connection
+  ( Connection (..),
+    Owner (..),
+    SomeSystemDB (..),
+    generatedWorkflowId,
+    newConnection,
+    releaseConnection,
+    withConnection
+  )
 import DBOS.Transact.Error qualified as TransactError
 import DBOS.Transact.Handle (WorkflowHandle, WorkflowHandle (workflowId), pollingHandle)
 import DBOS.Transact.Identity (refuseAppName, validateAppName)
 import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, latestAppVersion, listAppVersions, mergeWorkflowAttributes, promoteAppVersion, promoteAppVersionFor, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
-import DBOS.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
-import DBOS.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
+import DBOS.Transact.Management
+  ( ListWorkflowStepsOptions (..),
+    StepInfo,
+    checkRewindOptions,
+    defaultListWorkflowStepsOptions,
+    latestAppVersion,
+    listAppVersions,
+    mergeWorkflowAttributes,
+    promoteAppVersion,
+    promoteAppVersionFor,
+    setWorkflowDelay,
+    stepInfoFromRecord,
+    updateWorkflowAttributes
+  )
+import DBOS.Transact.Queue
+  ( Queue,
+    QueueChange (partitionConcurrency, partitionWorkerConcurrency, partitionRateLimit),
+    QueueConflict (..),
+    QueueOptions,
+    changeBothSet,
+    queueChangeToUpdate,
+    queueFromRecord,
+    queueOptionsAfterChange,
+    queueOptionsToNewQueue,
+    reserved,
+    validateQueueOptions
+  )
+import DBOS.Transact.Serialization
+  ( CodecError (..),
+    WorkflowInput (..),
+    codecErrorText,
+    codecUnknownTag,
+    decodeWorkflowValue,
+    encodeAttributes,
+    unWorkflowInput
+  )
 import DBOS.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
-import DBOS.Transact.Workflow (DuplicationPolicy (..), EnqueueOptions (..), QueueRequest (..), Submitted (..), Timeout (..), enqueueOptionsNew, queueRequest, queueRequestNew, initOrJoin, refuseEmptyQueueName, refuseNamelessWorkflow, storedPriority, timeoutBudget, validateEnqueueOptions, validateStart)
+import DBOS.Transact.Workflow
+  ( DuplicationPolicy (..),
+    EnqueueOptions (..),
+    QueueRequest (..),
+    Submitted (..),
+    Timeout (..),
+    enqueueOptionsNew,
+    queueRequest,
+    queueRequestNew,
+    initOrJoin,
+    refuseEmptyQueueName,
+    refuseNamelessWorkflow,
+    storedPriority,
+    timeoutBudget,
+    validateEnqueueOptions,
+    validateStart
+  )
 import Hasql.Transaction qualified as Tx
 import System.Environment (lookupEnv)
 
@@ -211,7 +311,7 @@ connectClient config =
             -- A client connection is named too, though no reference is
             -- ever registered on it: the id keeps the shape uniform.
             instanceId <- uuidWorkflowId
-            conn <-
+            borrowed <-
               newConnection
                 (SomeSystemDB systemDB)
                 config.serializer
@@ -222,6 +322,9 @@ connectClient config =
                 uuidWorkflowId
                 uuidEntropy
                 nullTracer
+            -- connectClient acquired the pool, so closing the client
+            -- closes it; a Client built over a shared backend does not.
+            let conn = borrowed {connOwnsBackend = True}
             pure (Right (Client conn (Just (ClientTxRunner (Postgres.runTransaction systemDB)))))
   where
     backendConfig =
@@ -250,7 +353,7 @@ connectClient config =
 -- as unreachable — pinned by the client test. Second, there is no @DBOS
 -- client closed@ announcement: the client carries @nullTracer@, so there is
 -- no channel to announce through, unlike the engine's shutdown.
-closeClient ::  Client m -> m ()
+closeClient :: (Applicative m) => Client m -> m ()
 closeClient client = releaseConnection client.conn
 
 -- | Run caller-composed statements on the system database in one
@@ -624,14 +727,9 @@ clientRegisterQueue client queueName options conflict = case reserved queueName 
     upsert policy = do
       let new = (queueOptionsToNewQueue queueName options) {newQueueAppName = client.conn.connAppName}
       inserted <- withConnection client.conn (\db -> SystemDB.upsertQueue db new policy)
-      case inserted of
-        Left err -> pure (Left err)
-        Right _ -> do
-          result <- withConnection client.conn (\db -> SystemDB.getQueue db queueName)
-          pure $ case result of
-            Left err -> Left err
-            Right Nothing -> Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` was not returned after registration"))
-            Right (Just record) -> Right (queueFromRecord record)
+      pure $ case inserted of
+        Left err -> Left err
+        Right (_, record) -> Right (queueFromRecord record)
 
 -- | The queue registered under a name from outside, or 'Nothing'.
 clientRetrieveQueue :: Monad m
@@ -740,12 +838,12 @@ clientListWorkflows client filters = do
 -- | Read one value's stream from the beginning, from outside the
 -- application. Nothing is checkpointed: a client has no workflow to record
 -- a read against. Mirrors Rust @Client::read_stream@.
-clientReadStream :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+clientReadStream :: (FromJSON value, MonadMVar m, MonadTime m, MonadDelay m)
                  => Client m -> WorkflowId -> Text -> ReadStreamOptions -> m (StreamReader (TransactError.Error TransactError.EngineOnly) m value)
 clientReadStream client workflowId key options = readStreamOutside client.conn workflowId key 0 options
 
 -- | 'clientReadStream', starting at an offset rather than the beginning.
-clientReadStreamFrom :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+clientReadStreamFrom :: (FromJSON value, MonadMVar m, MonadTime m, MonadDelay m)
                      => Client m -> WorkflowId -> Text -> Int -> ReadStreamOptions -> m (StreamReader (TransactError.Error TransactError.EngineOnly) m value)
 clientReadStreamFrom client = readStreamOutside client.conn
 

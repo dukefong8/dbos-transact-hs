@@ -10,7 +10,7 @@ import Data.Aeson qualified as Aeson
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.Time.Clock.System (SystemTime (..))
-import DBOS.SystemDB (ApplicationRowCounts (..), AppScope (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkCallRefusal (..), ForkOptions (..), IdleTransactionTimeout (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QualifiedWorkflowName, QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ResolvedLimits (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, idleTimeoutDefault, idleTimeoutMax, idleTimeoutMillis, idleTimeoutOptionNames, idleTimeoutValidate, initialStatus, instanceQualifiedWorkflowName, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodQualifiedWorkflowName, millisDuration, newQueue, newSchedule, newWorkflow, newQualifiedWorkflowName, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, patchMarkerPrefix, portableJsonSerialization, qualifiedClassName, qualifiedConfigName, qualifiedName, qualifiedWorkflowNameFromRow, queueHasPartitionLimits, queueIsLegacyPartitioned, queueResolvedLimits, readStreamStepName, recvStepName, refuseInvalidForks, renameFromApplication, renderApplicationName, renderQualifiedWorkflowName, resolvedIsPartitioned, resumeScheduleStepName, resumeStepName, rewindStepName, saturateTimeout, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
+import DBOS.SystemDB (ApplicationRowCounts (..), AppScope (..), Change (..), DebounceRequest (..), Error (..), Fork (..), ForkCallRefusal (..), ForkOptions (..), IdleTransactionTimeout (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), Outcome (..), QualifiedWorkflowName, QueueRecord (..), QueueUpdate (..), RateLimit (..), RenameBatching (..), RenameFrom (..), ScheduleFilter (..), ScheduleStatus (..), ScheduleUpdate (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowOwner (..), DatabaseTime (..), StepRecord (..), WorkflowRecord (..), addTimeout, applyQueueUpdate, cancelStepName, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, defaultChange, defaultForkOptions, defaultQueueUpdate, defaultRenameBatchSize, defaultRenameBatching, defaultScheduleFilter, defaultScheduleUpdate, defaultWorkflowFilter, Duration, databaseTimeNow, databaseTimeReaches, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationFromMs, durationFromSecs, durationIsZero, durationSince, durationToMs, forkNew, forkOptionsValidate, forkValidate, forkStepName, getEventStepName, getResultStepName, getScheduleStepName, idleTimeoutDefault, idleTimeoutMax, idleTimeoutMillis, idleTimeoutOptionNames, idleTimeoutValidate, initialStatus, instanceQualifiedWorkflowName, invalidInput, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, isValidApplicationName, listSchedulesStepName, listStepsStepName, listWorkflowsStepName, methodQualifiedWorkflowName, millisDuration, newQueue, newSchedule, newWorkflow, newQualifiedWorkflowName, outcomeStatus, parseApplicationName, parseScheduleStatus, pauseScheduleStepName, patchMarkerPrefix, portableJsonSerialization, qualifiedClassName, qualifiedConfigName, qualifiedName, qualifiedWorkflowNameFromRow, queueHasPartitionLimits, queueIsLegacyPartitioned, readStreamStepName, recvStepName, refuseInvalidForks, renameFromApplication, renderApplicationName, renderQualifiedWorkflowName, resumeScheduleStepName, resumeStepName, rewindStepName, saturateTimeout, scaleDuration, scheduleStatusText, secondsDuration, selectStepStepName, selectStepName, sendBulkStepName, sendStepName, setEventStepName, setWorkflowDelayStepName, sleepStepName, streamClosedSentinel, timestampFromEpochMs, timestampFromIso8601, timestampFromSystemTime, timestampNow, timestampToEpochMs, timestampToIso8601, timestampToSystemTime, updateScheduleStepName, updateWorkflowAttributesStepName, upsertScheduleStepName, urlSetsIdleTimeout, validateNewWorkflow, writeStreamStepName, zeroRowCounts)
 import DBOS.Transact
   (
   IdempotencyKey (..),
@@ -32,6 +32,7 @@ tests =
     "SystemDB Types"
     [ timestampTests,
       durationTests,
+      databaseTimeTests,
       iso8601Tests,
       newWorkflowTests,
       qualifiedNameTests,
@@ -169,6 +170,26 @@ durationTests =
         (durationAsMillis <$> durationFromMs 0) @?= Just 0
         (durationAsMillis <$> durationFromSecs 0.0) @?= Just 0
         (durationAsMillis <$> durationFromSecs (-0.0)) @?= Just 0,
+      testCase "zero is exact, not the millisecond floor" $ do
+        case durationFromSecs 0.0005 of
+          Nothing -> fail "expected a positive sub-millisecond duration"
+          Just subMs -> do
+            durationIsZero subMs @?= False
+            durationAsMillis subMs @?= 0
+        durationIsZero (secondsDuration 0) @?= True,
+      testCase "a negative duration is refused at every constructor" $ do
+        -- Opaque by type: a negative span cannot be built, so it cannot
+        -- reach a storage or deadline boundary either.
+        case (Aeson.fromJSON (Aeson.Number (-5)) :: Aeson.Result Duration) of
+          Aeson.Error _ -> pure ()
+          other -> fail ("expected the JSON duration to be refused, got: " <> show other)
+        durationFromMs (-5) @?= Nothing
+        durationFromSecs (-0.005) @?= Nothing,
+      testCase "scaling a duration refuses a negative or non-finite factor" $ do
+        scaleDuration 2 (secondsDuration 1) @?= Just (secondsDuration 2)
+        scaleDuration (-1) (secondsDuration 1) @?= Nothing
+        scaleDuration (0 / 0) (secondsDuration 1) @?= Nothing
+        scaleDuration (1 / 0) (secondsDuration 1) @?= Nothing,
       testCase "a deadline is a start plus a timeout" $ do
         timeout <- expectJust "durationFromSecs 30" (durationFromSecs 30)
         addTimeout (timestampFromEpochMs 1700000000000) timeout
@@ -195,6 +216,26 @@ durationTests =
         huge <- expectJust "durationFromSecs 1e16" (durationFromSecs 1e16)
         saturateTimeout (timestampFromEpochMs 1700000000000) huge
           @?= timestampFromEpochMs (maxBound :: Int64)
+    ]
+
+databaseTimeTests :: TestTree
+databaseTimeTests =
+  testGroup
+    "DatabaseTime"
+    [ testCase "a reading behind the instant waits the difference" $ do
+        let clock = DatabaseTime {databaseTimeEpochMs = 1000, databaseTimeReadAt = 50}
+        databaseTimeReaches clock (timestampFromEpochMs 2000) @?= 50 + 1000 * 1000000,
+      testCase "an instant behind the reading waits at once" $ do
+        let clock = DatabaseTime {databaseTimeEpochMs = 2000, databaseTimeReadAt = 50}
+        databaseTimeReaches clock (timestampFromEpochMs 1000) @?= 50,
+      testCase "extreme skew saturates instead of wrapping" $ do
+        let low = DatabaseTime {databaseTimeEpochMs = maxBound, databaseTimeReadAt = maxBound}
+        databaseTimeReaches low (timestampFromEpochMs minBound) @?= maxBound
+        let high = DatabaseTime {databaseTimeEpochMs = minBound, databaseTimeReadAt = 0}
+        databaseTimeReaches high (timestampFromEpochMs maxBound) @?= maxBound,
+      testCase "now never wraps when the monotonic clock is behind the reading" $ do
+        now <- databaseTimeNow (DatabaseTime {databaseTimeEpochMs = 1000, databaseTimeReadAt = maxBound})
+        timestampToEpochMs now @?= 1000
     ]
 
 expectJust :: String -> Maybe a -> IO a
@@ -224,6 +265,13 @@ iso8601Tests =
           @?= Just 1786492800123
         (timestampFromIso8601 <$> ["", "2026-08-12", "2026-08-12T00:00", "not-a-date-at-all", "2026-13-01T00:00:00Z", "2026-08-12T24:00:00Z", "2026-08-12T00:00:00", "2026-08-12T00:00:00+0130"])
           @?= [Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing],
+      testCase "reads the RFC3339 spellings the oracle accepts" $ do
+        let expected = Just (timestampFromEpochMs 1786492800000)
+        (timestampFromIso8601 <$> ["2026-08-12t00:00:00Z", "2026-08-12T00:00:00z", "2026-08-12 00:00:00Z", "2026-08-12X00:00:00Z"])
+          @?= replicate 4 expected
+        timestampFromIso8601 "2026-08-12T00:00:00+01" @?= Nothing
+        timestampFromIso8601 "2026-08-12T00:00:00+0130" @?= Nothing
+        timestampFromIso8601 "2026-08-12T00:00:00" @?= Nothing,
       testCase "formatting and parsing are inverses" $
         (timestampFromIso8601 . timestampToIso8601 . timestampFromEpochMs <$> [0, -1, 1786492800000, 1709209845123, 951827445999, -2203977600000])
           @?= (Just . timestampFromEpochMs <$> [0, -1, 1786492800000, 1709209845123, 951827445999, -2203977600000])
@@ -252,9 +300,11 @@ newWorkflowTests =
       testCase "rejects an empty workflow name" $
         validateNewWorkflow ((newWorkflow "wf") {newWorkflowName = Just ""})
           @?= Left (invalidInput "name" "must not be empty"),
-      testCase "rejects option fields that are empty rather than absent" $
+      testCase "rejects option fields that are empty rather than absent" $ do
         validateNewWorkflow ((newWorkflow "wf") {newWorkflowClassName = Just ""})
-          @?= Left (invalidInput "class_name" "must be absent rather than empty"),
+          @?= Left (invalidInput "class_name" "must be absent rather than empty")
+        validateNewWorkflow ((newWorkflow "wf") {newWorkflowConfigName = Just ""})
+          @?= Left (invalidInput "config_name" "must be absent rather than empty"),
       testCase "rejects a zero delay and a zero timeout" $ do
         noWait <- expectJust "durationFromMs 0" (durationFromMs 0)
         validateNewWorkflow ((newWorkflow "wf") {newWorkflowDelay = Just noWait})
@@ -333,7 +383,35 @@ workflowRecordTests =
               record.workflowRecordPriority,
               record.workflowRecordCreatedAt
             )
-              @?= (Enqueued, Just "demo-queue", 0, timestampFromEpochMs 1700000000000)
+              @?= (Enqueued, Just "demo-queue", 0, timestampFromEpochMs 1700000000000),
+      testCase "a checkpoint written before a field existed still decodes" $ do
+        let encoded =
+              Aeson.encode
+                ( Aeson.object
+                    [ "workflowRecordId" Aeson..= ("wf-old" :: Text),
+                      "workflowRecordStatus" Aeson..= ("PENDING" :: Text)
+                    ]
+                )
+        case Aeson.eitherDecode encoded :: Either String WorkflowRecord of
+          Left err -> fail ("expected a decode, got: " <> err)
+          Right record -> do
+            record.workflowRecordPriority @?= 0
+            record.workflowRecordCreatedAt @?= timestampFromEpochMs 0
+            record.workflowRecordStatus @?= Pending,
+      testCase "a step checkpoint defaults its optional fields" $ do
+        let encoded =
+              Aeson.encode
+                ( Aeson.object
+                    [ "stepRecordWorkflowId" Aeson..= ("wf" :: Text),
+                      "stepRecordStepId" Aeson..= (0 :: Int),
+                      "stepRecordStepName" Aeson..= ("s" :: Text)
+                    ]
+                )
+        case Aeson.eitherDecode encoded :: Either String StepRecord of
+          Left err -> fail ("expected a decode, got: " <> err)
+          Right record -> do
+            record.stepRecordOutput @?= Nothing
+            record.stepRecordChildWorkflowId @?= Nothing
     ]
 
 engineTests :: TestTree
@@ -430,7 +508,7 @@ queueTests =
         let queue = newQueue "q"
          in (queue.newQueueName, queue.newQueuePollingInterval, queue.newQueueConcurrency, queue.newQueuePriorityEnabled)
               @?= ("q", secondsDuration 1, Nothing, False),
-      testCase "a legacy-partitioned row re-scopes its limits" $
+      testCase "a legacy-partitioned row keeps its column scopes" $
         let legacy =
               QueueRecord
                 { queueRecordName = "q",
@@ -448,16 +526,8 @@ queueTests =
          in do
               queueHasPartitionLimits legacy @?= False
               queueIsLegacyPartitioned legacy @?= True
-              queueResolvedLimits legacy
-                @?= ResolvedLimits
-                  { resolvedConcurrency = Nothing,
-                    resolvedWorkerConcurrency = Nothing,
-                    resolvedRateLimit = Nothing,
-                    resolvedPartitionConcurrency = Just 3,
-                    resolvedPartitionWorkerConcurrency = Just 2,
-                    resolvedPartitionRateLimit = Just (RateLimit 10 (secondsDuration 60))
-                  }
-              resolvedIsPartitioned (queueResolvedLimits legacy) @?= True,
+              (legacy.queueRecordConcurrency, legacy.queueRecordWorkerConcurrency, legacy.queueRecordRateLimit)
+                @?= (Just 3, Just 2, Just (RateLimit 10 (secondsDuration 60))),
       testCase "a modern row keeps both scopes" $
         let modern =
               QueueRecord
@@ -476,7 +546,7 @@ queueTests =
          in do
               queueHasPartitionLimits modern @?= True
               queueIsLegacyPartitioned modern @?= False
-              queueResolvedLimits modern @?= ResolvedLimits (Just 3) Nothing Nothing (Just 1) Nothing Nothing,
+              (modern.queueRecordConcurrency, modern.queueRecordPartitionConcurrency) @?= (Just 3, Just 1),
       testCase "an empty update changes nothing" $ do
         isQueueUpdateEmpty defaultQueueUpdate @?= True
         isQueueUpdateEmpty (defaultQueueUpdate {queueUpdateConcurrency = Set Nothing}) @?= False,
