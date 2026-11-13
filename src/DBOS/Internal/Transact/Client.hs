@@ -95,7 +95,7 @@ import DBOS.Internal.Transact.Handle (WorkflowHandle (workflowId), pollingHandle
 import DBOS.Internal.Transact.Identity (refuseAppName, validateAppName)
 import DBOS.Internal.Transact.Logger (nullTracer)
 import DBOS.Internal.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, latestAppVersion, listAppVersions, mergeWorkflowAttributes, promoteAppVersion, promoteAppVersionFor, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
-import DBOS.Internal.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionRateLimit, partitionWorkerConcurrency), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsToNewQueue, queueUpdateError, reserved, validateMergedQueue, validateQueueOptions)
+import DBOS.Internal.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionRateLimit, partitionWorkerConcurrency), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsToNewQueue, queueUpdateError, reserved, validateMergedQueue, validateQueueOptions, warnIfPartitioned)
 import DBOS.Internal.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
 import DBOS.Internal.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
 import DBOS.Internal.Transact.Workflow (DuplicationPolicy (..), EnqueueOptions (..), QueueRequest (..), Submitted (..), Timeout (..), enqueueOptionsNew, initOrJoin, queueRequest, queueRequestNew, refuseEmptyQueueName, refuseNamelessWorkflow, storedPriority, timeoutBudget, validateEnqueueOptions, validateStart)
@@ -627,10 +627,20 @@ clientRegisterQueue client queueName options conflict = case reserved queueName 
   where
     upsert policy = do
       let new = (queueOptionsToNewQueue queueName options) {newQueueAppName = client.conn.connAppName}
-      inserted <- withConnection client.conn (\db -> SystemDB.upsertQueue db new policy)
-      pure $ case inserted of
-        Left err          -> Left err
-        Right (_, record) -> Right (queueFromRecord record)
+      -- The before row for the partition warning, read ahead of the
+      -- upsert as the engine path does. Same race note as there:
+      -- warning-only either way.
+      stored <- withConnection client.conn (\db -> SystemDB.getQueue db queueName)
+      case stored of
+        Left err -> pure (Left err)
+        Right previous -> do
+          inserted <- withConnection client.conn (\db -> SystemDB.upsertQueue db new policy)
+          case (previous, inserted) of
+            (_, Left err) -> pure (Left err)
+            (Just before, Right (_, record)) -> do
+              warnIfPartitioned client.conn.connTracer before record
+              pure (Right (queueFromRecord record))
+            (Nothing, Right (_, record)) -> pure (Right (queueFromRecord record))
 
 -- | The queue registered under a name from outside, or 'Nothing'.
 clientRetrieveQueue :: Monad m
@@ -655,13 +665,15 @@ clientUpdateQueue client queueName change = case reserved queueName of
       case stored of
         Left err -> pure (Left err)
         Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
-        Right (Just record) -> do
-          let currentQueue = queueFromRecord record
+        Right (Just stored) -> do
+          let currentQueue = queueFromRecord stored
               update = queueChangeToUpdate change currentQueue
           updated <- withConnection client.conn (\db -> SystemDB.updateQueue db queueName update (validateMergedQueue queueName))
-          pure $ case updated of
-            Left err -> Left (queueUpdateError err)
-            Right record -> Right (queueFromRecord record)
+          case updated of
+            Left err -> pure (Left (queueUpdateError err))
+            Right written -> do
+              warnIfPartitioned client.conn.connTracer stored written
+              pure (Right (queueFromRecord written))
 
 -- | Remove a queue's registration from outside. Removing one that is not
 -- registered is not an error.

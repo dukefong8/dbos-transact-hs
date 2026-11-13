@@ -22,7 +22,7 @@
 module DBOS.Transact.QueueTestSim (tests) where
 
 import DBOS.Internal.Prelude
-import Control.Monad.IOSim (IOSim, SimEventType (..), SimTrace, selectTraceEvents)
+import Control.Monad.IOSim (IOSim, SimEventType (..), SimTrace, selectTraceEvents, selectTraceEventsDynamic)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.DualStack (simCase)
@@ -44,6 +44,7 @@ import DBOS.SystemDB
     startQueuedWorkflows,
     upsertQueue,
   )
+import DBOS.Internal.Transact.Dequeue (QueueEvent (..))
 import DBOS.SystemDB.IOSim (MemSystemDB (memRows), memLaunchOnWith, memSetApplication, newMemDB, newMemDBWithApplication, simInstance)
 import DBOS.Transact (shutdown)
 import DBOS.Transact.QueueCases
@@ -81,6 +82,7 @@ import DBOS.Transact.QueueCases
     checkQueueDefaults,
     checkRateLimit,
     checkReregister,
+    checkReregisterPartitioned,
     checkReserved,
     checkSentinel,
     checkPausedZero,
@@ -123,6 +125,7 @@ import DBOS.Transact.QueueCases
     scenarioQueueDefaults,
     scenarioRateLimit,
     scenarioReregister,
+    scenarioReregisterPartitioned,
     scenarioReserved,
     scenarioSentinel,
     scenarioPausedZero,
@@ -134,7 +137,7 @@ import DBOS.Transact.QueueCases
     scenarioWalkSpentRoom,
   )
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup, testGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 -- * Staging
 
@@ -282,7 +285,15 @@ tests =
             printSimTrace tr
             foreignClaim @?= Right (Dequeued [] Nothing)
             owner @?= Right (Dequeued [WorkflowId "scoped"] Nothing)
-            executor @?= Just "owner"
+            executor @?= Just "owner",
+          testCase "registering a partitioned queue over an unpartitioned one warns" $ do
+            (outcome, tr) <- runSimCase $ do
+              fixture <- simQueueFixture (const Nothing)
+              scenarioReregisterPartitioned fixture
+            printSimTrace tr
+            either fail pure (checkReregisterPartitioned outcome)
+            let warned = selectTraceEventsDynamic tr :: [QueueEvent]
+            assertBool ("expected a partition warning, got: " <> show warned) (QueuePartitioned "hs-l2-reregister-part-q-sim" `elem` warned)
         ],
       testGroup
         "Workflow queues"
@@ -300,6 +311,7 @@ tests =
           simLeaf (const Nothing) "a queue carries a rate limit, always prioritised" scenarioRateLimit checkRateLimit,
           simLeaf (const Nothing) "per-partition limits partition a queue" scenarioPartitionLimits checkPartitionLimits,
           simLeaf (const Nothing) "re-registering updates the stored limits" scenarioReregister checkReregister,
+          simLeaf (const Nothing) "re-registering with a per-partition limit partitions the stored row" scenarioReregisterPartitioned checkReregisterPartitioned,
           simLeaf (const Nothing) "adding a per-partition limit to a legacy row succeeds" scenarioLegacyUpdateRefused checkLegacyUpdateRefused,
           simLeaf (const Nothing) "a registered queue updates, lists and deletes through the instance" scenarioCrud checkCrud,
           simLeaf (const Nothing) "a dequeue stamps the deadline an enqueue left open" scenarioDeadlineStamped checkDeadlineStamped,

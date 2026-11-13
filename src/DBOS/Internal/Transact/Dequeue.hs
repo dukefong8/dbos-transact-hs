@@ -45,6 +45,8 @@ data QueueEvent
   | DelayedTransitionFailed { queueDetail :: Text }
   | DelayedWorkflowsEnqueued { queueMoved :: Word64 }
   | DequeuePassSlow { queueSwept :: Int, queueClaimed :: Int, queueElapsedMs :: Integer }
+  | ContendedPartitionSkipped { queuePartition :: Text }
+  | QueuePartitioned { queuePartitionedName :: Text }
   deriving stock (Eq, Show)
 
 instance LogEvent QueueEvent where
@@ -62,6 +64,8 @@ instance LogEvent QueueEvent where
   eventSeverity DelayedTransitionFailed {}    = SeverityWarning
   eventSeverity DelayedWorkflowsEnqueued {}   = SeverityDebug
   eventSeverity DequeuePassSlow {}            = SeverityWarning
+  eventSeverity ContendedPartitionSkipped {}  = SeverityDebug
+  eventSeverity QueuePartitioned {}           = SeverityWarning
 
   renderEvent (QueueWorkerStopping queue) = "the queue " <> queue <> " is no longer registered; stopping its worker"
   renderEvent DequeueBackoff = "a peer is mid-dequeue; backing off"
@@ -90,6 +94,10 @@ instance LogEvent QueueEvent where
       <> showText claimed
       <> ", elapsed_ms "
       <> showText elapsedMs
+  renderEvent (ContendedPartitionSkipped partition) =
+    "a peer is mid-dequeue on partition " <> partition <> "; skipping it"
+  renderEvent (QueuePartitioned name) =
+    "the queue " <> name <> " is now partitioned; any workflow already enqueued on it without a partition key will never be dequeued, so drain it before partitioning it or re-enqueue such workflows with a key"
 
 instance ToLogStr QueueEvent where
   toLogStr = toLogStr . renderLine
@@ -324,8 +332,11 @@ pollOnce conn identity workflows tasks running queue datasources = do
           case claimed of
             Left err
               -- A peer holds this partition's rows. Skipping just this key
-              -- is the point of walking them separately.
-              | isContention err -> walk rest alreadyRunning claimedHere globalRoom claims' ids
+              -- is the point of walking them separately; the skip is
+              -- announced, as the oracle names the contended partition.
+              | isContention err -> do
+                  runTracer conn.connTracer (ContendedPartitionSkipped partition)
+                  walk rest alreadyRunning claimedHere globalRoom claims' ids
               | otherwise -> do
                   _ <- reportDequeueError conn.connTracer err
                   walk rest alreadyRunning claimedHere globalRoom claims' ids

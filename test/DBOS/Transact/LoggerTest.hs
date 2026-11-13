@@ -56,6 +56,10 @@ tests =
         renderEvent (DequeuedBudgetSpent "wf-9" 102 100) @?= ("the dequeued workflow wf-9 exceeded its recovery attempts and is parked (102 > 100)" :: Text),
       testCase "a contended dequeue announces its backoff" $ do
         renderEvent DequeueBackoff @?= ("a peer is mid-dequeue; backing off" :: Text),
+      testCase "a skipped partition names the contender" $ do
+        renderEvent (ContendedPartitionSkipped "eu") @?= ("a peer is mid-dequeue on partition eu; skipping it" :: Text),
+      testCase "a newly partitioned queue names the stranded backlog" $ do
+        renderEvent (QueuePartitioned "orders") @?= ("the queue orders is now partitioned; any workflow already enqueued on it without a partition key will never be dequeued, so drain it before partitioning it or re-enqueue such workflows with a key" :: Text),
       testCase "a slow pass reports its sweep, claims and elapsed time" $ do
         renderEvent (DequeuePassSlow 16050 1 98231) @?= ("a dequeue pass took longer than a second: queues 16050, claimed 1, elapsed_ms 98231" :: Text),
       testCase "a line names its event's constructor, nullary ones included" $ do

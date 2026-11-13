@@ -465,6 +465,24 @@ tableRowCount env table wid = do
     Left err -> fail ("row count failed: " <> show err)
     Right count -> pure count
 
+-- | One recorded step's application name, raw SQL the way the payload
+-- readers read the columns the row types do not carry. The oracle binds
+-- the backend's application name on every step write, so a step recorded
+-- under a named backend must read that name back.
+stepAppName :: PostgresSystemDB -> Text -> Int -> IO (Maybe (Maybe Text))
+stepAppName env wid step = do
+  result <-
+    runSession env "fixture" $
+      Session.statement (wid, step) $
+        Statement.preparable
+          "select o.application_name from dbos.operation_outputs o where o.workflow_uuid = $1 and o.function_id = $2"
+          (contramap fst (Encoders.param (Encoders.nonNullable Encoders.text))
+            <> contramap (fromIntegral . snd) (Encoders.param (Encoders.nonNullable Encoders.int4)))
+          (Decoders.rowMaybe (Decoders.column (Decoders.nullable Decoders.text)))
+  case result of
+    Left err -> fail ("application-name read failed: " <> show err)
+    Right value -> pure value
+
 -- | Deletes a fixture row by id, so a replay test can prove the answer came
 -- from the recorded step and not from a second look at the row.
 deleteFixture :: PostgresSystemDB -> Text -> IO ()
@@ -3186,7 +3204,7 @@ messageTests getBackend =
                   Left conflict -> Tx.condemn >> pure (Left conflict)
                   Right () ->
                     Right
-                      <$> Statements.recvTx Nothing False (Statements.RecvParams destination step "approval" 0 0)
+                      <$> Statements.recvTx Nothing False (Statements.RecvParams destination step "approval" 0 0 Nothing)
           tookFirst <- runTake 1
           case tookFirst of
             Right (Right (Statements.RecvTook message)) -> message @?= Statements.EncodedValueRaw "one" Nothing
@@ -3197,6 +3215,17 @@ messageTests getBackend =
             other -> fail ("expected the empty take to miss unrecorded, got: " <> show other)
           step <- checkStep env (WorkflowId destination) 2 "DBOS.recv"
           step @?= Right Nothing,
+      testCase "recorded message steps bind the backend's application name" $ do
+        destination <- freshWorkflowId
+        withBackendAs getBackend (Just "s13-probe") $ \env -> do
+          _ <- insertFixtureChecked env (defaultFixture destination)
+          let owner = Just (WorkflowOwner {ownerWorkflowId = WorkflowId destination, ownerToken = fixtureOwner destination})
+          _ <- sendMessage env (messageTo (WorkflowId destination) (Topic "approval") (SerializedWorkflowValue "yes" Nothing)) Nothing (Just (WorkflowId destination, 0)) owner False
+          _ <- recv env (WorkflowId destination) 1 2 (Just "approval") (millisDuration 0) (fixtureOwner destination)
+          sendApp <- stepAppName env destination 0
+          recvApp <- stepAppName env destination 1
+          sendApp @?= Just (Just "s13-probe")
+          recvApp @?= Just (Just "s13-probe"),
       testCase "a stale token's recv take is refused and the message stays parked" $ do
         destination <- freshWorkflowId
         withBackend getBackend $ \env -> do

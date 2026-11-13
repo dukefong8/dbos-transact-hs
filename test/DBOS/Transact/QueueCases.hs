@@ -43,6 +43,8 @@ module DBOS.Transact.QueueCases
     checkPartitionLimits,
     scenarioReregister,
     checkReregister,
+    scenarioReregisterPartitioned,
+    checkReregisterPartitioned,
     scenarioLegacyUpdateRefused,
     checkLegacyUpdateRefused,
     decodedInt,
@@ -747,6 +749,28 @@ checkReregister (second, stored) = do
   case stored of
     Just receipt -> unless (receipt.concurrency == Just 7) $ Left ("expected the updated row, got: " <> show receipt.concurrency)
     other -> Left ("expected the updated row, got: " <> show other)
+
+-- | Re-registering an unpartitioned queue with a per-partition limit
+-- partitions it: the stored row carries the new limit.
+scenarioReregisterPartitioned ::  forall m. (MonadSTM m, MonadMVar m)
+                   => QueueFixture m -> m (Either (Error EngineOnly) Queue, Maybe Queue)
+scenarioReregisterPartitioned fx = do
+  _ <- fx.qfLaunch
+  let queueName = "hs-l2-reregister-part-q-" <> Text.take 12 fx.qfSuffix
+  _ <- registerQueue fx.qfDBOS queueName defaultQueueOptions UpdateIfLatestVersion >>= either (error . show) pure
+  second <- registerQueue fx.qfDBOS queueName (defaultQueueOptions {partitionConcurrency = Just 1}) UpdateIfLatestVersion
+  stored <- queue fx.qfDBOS queueName >>= either (error . show) pure
+  fx.qfShutdown
+  pure (second, stored)
+
+checkReregisterPartitioned :: (Either (Error EngineOnly) Queue, Maybe Queue) -> Either String ()
+checkReregisterPartitioned (second, stored) = do
+  case second of
+    Right receipt -> unless (receipt.partitionConcurrency == Just 1) $ Left ("expected the re-registered partition limit 1, got: " <> show receipt.partitionConcurrency)
+    other -> Left ("expected the re-registration accepted, got: " <> show other)
+  case stored of
+    Just receipt -> unless (receipt.partitionConcurrency == Just 1) $ Left ("expected the partitioned row, got: " <> show receipt.partitionConcurrency)
+    other -> Left ("expected the partitioned row, got: " <> show other)
 
 -- | A legacy partitioned row resolves through the facade, and adding a
 -- per-partition limit to it is refused as the deprecated flag.

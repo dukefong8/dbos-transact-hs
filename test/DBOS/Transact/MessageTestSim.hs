@@ -6,9 +6,8 @@
 -- receives take, replays read their recordings, and the fan-out reaches
 -- forks. Scenarios and checks are shared; this module owns the sim
 -- factory and the sim-only extra — the typed 'WorkflowEvent' record,
--- which only the bulk-send step announces (single sends and receives
--- checkpoint without a runner, exactly as the oracle's silent
--- @message.rs@).
+-- which no message path announces: sends, bulk sends, and receives all
+-- checkpoint without a runner, exactly as the oracle's silent @message.rs@.
 module DBOS.Transact.MessageTestSim (tests) where
 
 import DBOS.Internal.Transact.Step (WorkflowEvent (..))
@@ -28,6 +27,7 @@ import DBOS.Transact.MessageCases
     checkBulkEmpty,
     checkBatchNotifyUnique,
     checkBulkSend,
+    checkBulkReplay,
     checkCapturedRecv,
     checkCapturedSend,
     checkFanOut,
@@ -45,6 +45,7 @@ import DBOS.Transact.MessageCases
     scenarioBulkEmpty,
     scenarioBatchNotifyUnique,
     scenarioBulkSend,
+    scenarioBulkReplay,
     scenarioCapturedRecv,
     scenarioCapturedSend,
     scenarioFanOut,
@@ -176,28 +177,34 @@ tests =
       simCase simMessageFixture "a recv through a captured parent is refused" scenarioCapturedRecv checkCapturedRecv traceMessageSilent,
       simCase simMessageFixture "a batch delivers every message and checkpoints once" scenarioBulkSend checkBulkSend traceBulkSend,
       simCase simMessageFixture "an empty bulk send still takes its step" scenarioBulkEmpty checkBulkEmpty traceBulkEmpty,
+      simCase simMessageFixture "a replayed batch sends nothing again" scenarioBulkReplay checkBulkReplay traceBulkSend,
       simCase simMessageFixture "one batch mints a distinct notification id per delivery" scenarioBatchNotifyUnique checkBatchNotifyUnique traceBulkSend
     ]
 
 -- * Typed-event assertions (sim-only)
 
--- | Single sends and receives checkpoint without a runner and stay
--- silent, exactly as the oracle's untraced message paths.
+-- | Single sends, bulk sends, and receives checkpoint without a runner and
+-- stay silent, exactly as the oracle's untraced message paths: the batch's
+-- step record commits in the same system-database transaction as its
+-- messages, with no runner around it.
 traceMessageSilent :: SimTrace a -> IO ()
 traceMessageSilent tr =
-  assertBool "no workflow event may fire outside a bulk send" (null (selectTraceEventsDynamic tr :: [WorkflowEvent]))
+  assertBool "no workflow event may fire on a message path" (null (selectTraceEventsDynamic tr :: [WorkflowEvent]))
 
 -- | The probe step announces its start and its recorded output.
 traceStepSend :: SimTrace a -> IO ()
 traceStepSend tr =
   assertBool "the probe step must announce" (selectTraceEventsDynamic tr == [StepRunning "probe" 0, StepOutputRecorded "probe" 0])
 
--- | The batch checkpoints once under its bulk step.
+-- | The batch checkpoints once under its bulk step, silently: the step
+-- record is written by the send transaction itself, with no runner to
+-- announce it. The assertion stays a distinct name so the batch cases keep
+-- their own trace hook.
 traceBulkSend :: SimTrace a -> IO ()
 traceBulkSend tr =
-  assertBool "the batch must checkpoint once" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.sendBulk" 0])
+  assertBool "the batch must checkpoint silently" (null (selectTraceEventsDynamic tr :: [WorkflowEvent]))
 
--- | The empty batch still takes its step.
+-- | The empty batch still takes its step, silently for the same reason.
 traceBulkEmpty :: SimTrace a -> IO ()
 traceBulkEmpty tr =
-  assertBool "the empty batch must take its step" (selectTraceEventsDynamic tr == [StepOutputRecorded "DBOS.sendBulk" 0])
+  assertBool "the empty batch must take its step silently" (null (selectTraceEventsDynamic tr :: [WorkflowEvent]))

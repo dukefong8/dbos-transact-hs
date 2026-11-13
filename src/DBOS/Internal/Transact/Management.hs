@@ -115,6 +115,7 @@ import DBOS.Internal.Transact.Connection (Connection (..), runSystemDB, withConn
 import DBOS.Internal.Transact.Context
   ( StepCtx (stepCtxWorkflow),
     WorkflowCtx (wctxConn),
+    driveScope,
     stepCtxBoundary,
     stepCtxStatus,
     stepId,
@@ -204,7 +205,8 @@ cancelWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflowsInWorkflow wctx workflowIds cancelChildren = do
   placement <- placeCall wctx
-  case checkHere placement cancelStepName (Just (stepCtxBoundary wctx)) of
+  here <- driveScope wctx
+  case checkHere placement cancelStepName (Just here) of
     Left err -> pure (Left err)
     Right DurabilityPlain -> cancelWorkflows conn workflowIds cancelChildren (Just (workflowId wctx))
     Right (DurabilityRecorded wctx' stepId') -> do
@@ -253,7 +255,8 @@ resumeWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflowsInWorkflow wctx workflowIds queueName = do
   placement <- placeCall wctx
-  case checkHere placement resumeStepName (Just (stepCtxBoundary wctx)) of
+  here <- driveScope wctx
+  case checkHere placement resumeStepName (Just here) of
     Left err -> pure (Left err)
     Right DurabilityPlain -> resumeWorkflows conn workflowIds queueName (Just (workflowId wctx))
     Right (DurabilityRecorded wctx' stepId') -> do
@@ -310,7 +313,8 @@ deleteWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflowsInWorkflow wctx workflowIds deleteChildren = do
   placement <- placeCall wctx
-  case checkHere placement deleteStepName (Just (stepCtxBoundary wctx)) of
+  here <- driveScope wctx
+  case checkHere placement deleteStepName (Just here) of
     Left err -> pure (Left err)
     Right DurabilityPlain ->
       -- The leaf rule: the fence still applies, nothing is recorded.
@@ -396,7 +400,8 @@ forkWorkflowsInWorkflow wctx forks options =
     Left err -> pure (Left err)
     Right () -> do
       placement <- placeCall wctx
-      case checkHere placement forkStepName (Just (stepCtxBoundary wctx)) of
+      here <- driveScope wctx
+      case checkHere placement forkStepName (Just here) of
         Left err -> pure (Left err)
         -- Inside a step body the leaf rule runs the call plainly: no id, -- no record.
         Right DurabilityPlain -> forkWorkflows conn forks options
@@ -495,7 +500,8 @@ rewindWorkflowsInWorkflow wctx target options =
     Left err -> pure (Left err)
     Right () -> do
       placement <- placeCall wctx
-      case checkHere placement rewindStepName (Just (stepCtxBoundary wctx)) of
+      here <- driveScope wctx
+      case checkHere placement rewindStepName (Just here) of
         Left err -> pure (Left err)
         Right DurabilityPlain -> rewindWorkflows conn target options
         Right (DurabilityRecorded wctx' stepId') -> do
@@ -540,7 +546,8 @@ forkFromInWorkflow wctx workflowIds point options =
     Left err -> pure (Left err)
     Right () -> do
       placement <- placeCall wctx
-      case checkHere placement forkStepName (Just (stepCtxBoundary wctx)) of
+      here <- driveScope wctx
+      case checkHere placement forkStepName (Just here) of
         Left err -> pure (Left err)
         Right DurabilityPlain -> forkFrom conn workflowIds point options
         Right (DurabilityRecorded wctx' stepId') -> do
@@ -586,7 +593,7 @@ delayOperation = "delay a workflow"
 
 -- | Moves a delayed workflow's release as a step of the calling workflow.
 -- Same leaf rule as every in-workflow call.
-setWorkflowDelayInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+setWorkflowDelayInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                            => WorkflowCtx exec m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 setWorkflowDelayInWorkflow wctx workflowId delay =
   runStepWith stepOptionsDefault wctx setWorkflowDelayStepName $ \sctx ->
@@ -638,7 +645,7 @@ updateWorkflowAttributesAs conn workflowId update asked caller = do
 -- is taken — attributes that cannot be encoded are a call that never
 -- happens — as the oracle encodes before it places. Same leaf rule as every
 -- in-workflow call.
-updateWorkflowAttributesInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+updateWorkflowAttributesInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                                    => WorkflowCtx exec m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 updateWorkflowAttributesInWorkflow wctx workflowId attributes =
   case validateAttributes attributes of
@@ -653,7 +660,7 @@ updateWorkflowAttributesInWorkflow wctx workflowId attributes =
 -- workflow. Recorded under the same step name as a replacement, as the
 -- oracle records both under one. The encoding happens before the step id
 -- is taken, as above.
-mergeWorkflowAttributesInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+mergeWorkflowAttributesInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                                   => WorkflowCtx exec m -> WorkflowId -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 mergeWorkflowAttributesInWorkflow wctx workflowId attributes =
   case validateAttributeUpdate (Merge attributes) of
@@ -873,34 +880,34 @@ listWorkflowStepsSerializedWith conn workflowId options = do
 -- 'loadOutput' flag it was read with, so a replay re-projects the typed view
 -- from the bytes the first execution actually read rather than from the
 -- replayed call's options.
-listWorkflowStepsWithInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+listWorkflowStepsWithInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                                 => WorkflowCtx exec m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
 listWorkflowStepsWithInWorkflow wctx workflowId options = do
   snapshot <- listWorkflowStepsSnapshotInWorkflow wctx workflowId options
   pure (fmap (\(loaded, rows) -> map (stepInfoFromRecord options {loadOutput = loaded}) rows) snapshot)
 
 -- | 'listWorkflowStepsWithInWorkflow' with the default options.
-listWorkflowStepsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+listWorkflowStepsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                             => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepInfo])
 listWorkflowStepsInWorkflow wctx workflowId =
   listWorkflowStepsWithInWorkflow wctx workflowId defaultListWorkflowStepsOptions
 
 -- | The raw in-workflow listing: the checkpoint records the Rust-shaped step
 -- rows and the flag they were read with.
-listWorkflowStepsSerializedWithInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+listWorkflowStepsSerializedWithInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                                          => WorkflowCtx exec m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
 listWorkflowStepsSerializedWithInWorkflow wctx workflowId options =
   fmap (fmap snd) (listWorkflowStepsSnapshotInWorkflow wctx workflowId options)
 
 -- | The raw in-workflow listing with default options.
-listWorkflowStepsSerializedInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+listWorkflowStepsSerializedInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                                      => WorkflowCtx exec m -> WorkflowId -> m (Either (TransactError.Error TransactError.EngineOnly) [StepRecord])
 listWorkflowStepsSerializedInWorkflow wctx workflowId =
   listWorkflowStepsSerializedWithInWorkflow wctx workflowId defaultListWorkflowStepsOptions
 
 -- | The checkpointed listing step: records @(loadOutput, rows)@ so a replay
 -- re-projects the typed view from the bytes the first execution read.
-listWorkflowStepsSnapshotInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+listWorkflowStepsSnapshotInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                                     => WorkflowCtx exec m -> WorkflowId -> ListWorkflowStepsOptions -> m (Either (TransactError.Error TransactError.EngineOnly) (Bool, [StepRecord]))
 listWorkflowStepsSnapshotInWorkflow wctx workflowId options =
   runStepWith
@@ -914,7 +921,7 @@ listWorkflowStepsSnapshotInWorkflow wctx workflowId options =
 -- | Lists workflows as a step of the calling workflow, under the
 -- cross-SDK name, so a step listing reads the same whichever SDK wrote
 -- it. Same leaf rule as every in-workflow call.
-listWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+listWorkflowsInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                         => WorkflowCtx exec m -> WorkflowFilter -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowRecord])
 listWorkflowsInWorkflow wctx filters =
   runStepWith

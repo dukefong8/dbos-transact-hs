@@ -1285,7 +1285,7 @@ isScheduleUpdateEmpty update =
 
 -- | Which applications' rows a query covers. 'Unset' lets the query decide;
 -- 'AnyApplication' is the operator's cross-application view; 'Named' names
--- applications plus the unclaimed rows. Mirrors Rust @Applications@, whose
+-- applications plus the unclaimed rows. Mirrors Rust @AppScope@, whose
 -- @Any@ case carries the prefix here (constructor-prefix deviation,
 -- ADR-0024).
 data AppScope

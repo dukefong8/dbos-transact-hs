@@ -80,7 +80,7 @@ import DBOS.Transact.EventCases (EventFixture (..))
 
 -- | Write, close, and consume a stream through the public reader and FoldM
 -- adapter; each value and the end marker become reader checkpoints.
-scenarioStreamReader :: forall m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioStreamReader :: forall m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                      => EventFixture m -> m ([Text], [(Int, Text)])
 scenarioStreamReader fx = do
   wid <- fx.efFreshId "stream-reader"
@@ -107,7 +107,7 @@ scenarioStreamReader fx = do
 checkStreamReader :: ([Text], [(Int, Text)]) -> Either String ()
 checkStreamReader = checkEq (["value"], [(0, writeStreamStepName), (1, closeStreamStepName), (2, readStreamStepName), (3, readStreamStepName)])
 
-scenarioWrittenStream :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioWrittenStream :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                       => EventFixture m -> m ([Text], [Text], Bool)
 scenarioWrittenStream fx = do
   producer <- fx.efFreshId "stream-written"
@@ -135,7 +135,7 @@ scenarioWrittenStream fx = do
 checkWrittenStream :: ([Text], [Text], Bool) -> Either String ()
 checkWrittenStream = checkEq (["a", "b", "c"], ["b", "c"], True)
 
-scenarioUnclosedStream :: (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioUnclosedStream :: (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                        => EventFixture m -> m [Text]
 scenarioUnclosedStream fx = do
   producer <- fx.efFreshId "stream-unclosed"
@@ -156,7 +156,7 @@ scenarioUnclosedStream fx = do
 checkUnclosedStream :: [Text] -> Either String ()
 checkUnclosedStream = checkEq ["a", "b"]
 
-scenarioCloseStopsStream :: (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioCloseStopsStream :: (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                         => EventFixture m -> m [Text]
 scenarioCloseStopsStream fx = do
   wid <- fx.efFreshId "stream-close-stops"
@@ -238,7 +238,7 @@ checkCrossPages (allValues, tailValues, prewrittenValues) = do
   checkEq [150 .. 249] tailValues
   checkEq [0 .. 249] prewrittenValues
 
-scenarioTimeoutAfterValue :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioTimeoutAfterValue :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                           => EventFixture m -> m (Maybe Text, Bool)
 scenarioTimeoutAfterValue fx = do
   producer <- fx.efFreshId "stream-next-timeout"
@@ -269,7 +269,7 @@ checkTimeoutAfterValue = checkEq (Just "a", True)
 
 -- | Pulling at individual offsets yields values in order, then the close
 -- marker and any later offset both appear as end-of-stream.
-scenarioSingleStreamValue :: forall m. (MonadAsync m, MonadMVar m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioSingleStreamValue :: forall m. (MonadAsync m, MonadMVar m, MonadTime m, MonadDelay m, MonadMask m)
                           => EventFixture m -> m (Maybe Text, Maybe Text, Bool, Bool)
 scenarioSingleStreamValue fx = do
   producer <- fx.efFreshId "stream-single-value"
@@ -308,7 +308,7 @@ checkSingleStreamValue :: (Maybe Text, Maybe Text, Bool, Bool) -> Either String 
 checkSingleStreamValue = checkEq (Just "a", Just "b", True, True)
 
 -- | A cancelled producer's reader drains values already written, then ends.
-scenarioCancelledProducer :: (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioCancelledProducer :: (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                           => EventFixture m -> m [Text]
 scenarioCancelledProducer fx = do
   producer <- fx.efFreshId "stream-cancelled-producer"
@@ -331,7 +331,7 @@ checkCancelledProducer = checkEq ["a", "b"]
 
 -- | Writes and close inside a step are plain; the outer step is the only
 -- checkpoint the workflow records.
-scenarioWriteInsideStep :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioWriteInsideStep :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                         => EventFixture m -> m ([Text], [(Int, Text)])
 scenarioWriteInsideStep fx = do
   producer <- fx.efFreshId "stream-step-writes"
@@ -358,7 +358,7 @@ checkWriteInsideStep = checkEq (["a", "b"], [(0, "produce")])
 
 -- | Replaying a consumer after deleting its producer returns the values and
 -- close it checkpointed on the first read.
-scenarioReplayRead :: (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioReplayRead :: (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                    => EventFixture m -> m ([Text], [Text])
 scenarioReplayRead fx = do
   producer <- fx.efFreshId "stream-replay-producer"
@@ -384,7 +384,7 @@ checkReplayRead :: ([Text], [Text]) -> Either String ()
 checkReplayRead = checkEq (["a", "b", "c"], ["a", "b", "c"])
 
 -- | A timed-out read replays the recorded timeout even after a value arrives.
-scenarioTimeoutReplay :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioTimeoutReplay :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                       => EventFixture m -> m (Bool, Bool)
 scenarioTimeoutReplay fx = do
   producer <- fx.efFreshId "stream-timeout-replay-producer"
@@ -474,7 +474,7 @@ checkDroppedRead = checkEq ([], ["0", "1", "2", "3", "4"])
 
 -- | A missing producer error is checkpointed, so creating that producer
 -- later does not change the consumer's replayed result.
-scenarioMissingWorkflowReplay :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioMissingWorkflowReplay :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                               => EventFixture m -> m (Bool, Bool)
 scenarioMissingWorkflowReplay fx = do
   consumer <- fx.efFreshId "stream-missing-replay-consumer"
@@ -503,7 +503,7 @@ checkMissingWorkflowReplay = checkEq (True, True)
 
 -- | Negative offsets and zero polling intervals are refused, and the reader
 -- stays ended after its first invalid argument.
-scenarioInvalidStreamRead :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m)
+scenarioInvalidStreamRead :: forall m. (MonadSTM m, MonadMVar m, MonadTime m, MonadDelay m, MonadThread m)
                           => EventFixture m -> m (Bool, Bool)
 scenarioInvalidStreamRead fx = do
   producer <- fx.efFreshId "stream-invalid-producer"
@@ -567,7 +567,7 @@ checkCancelledReader = checkEq True
 -- producer is pending, then delivers, ends, and the workflow's next step
 -- follows at the next id. Mirrors Rust @StreamReader::next@ taking its id at
 -- the call.
-scenarioWaitingReadStepId :: forall m. (MonadAsync m, MonadMVar m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioWaitingReadStepId :: forall m. (MonadAsync m, MonadMVar m, MonadTime m, MonadDelay m, MonadMask m)
                             => EventFixture m -> m ([Text], [(Int, Text)])
 scenarioWaitingReadStepId fx = do
   producer <- fx.efFreshId "stream-wait-step-id"
@@ -604,7 +604,7 @@ scenarioWaitingReadStepId fx = do
 checkWaitingReadStepId :: ([Text], [(Int, Text)]) -> Either String ()
 checkWaitingReadStepId = checkEq (["a"], [(0, readStreamStepName), (1, readStreamStepName), (2, "after")])
 
-readStreamHead :: forall m exec. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+readStreamHead :: forall m exec. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
                => WorkflowCtx exec m -> WorkflowId -> Int -> ReadStreamOptions -> m (Either (Error EngineOnly) (Maybe Text))
 readStreamHead wctx producer offset options = do
   reader <- readStreamFrom wctx producer "out" offset options :: m (StreamReader (Error EngineOnly) m Text)
@@ -616,20 +616,20 @@ readStreamHead wctx producer offset options = do
         Vector.Skip _ -> Nothing
         Vector.Done -> Nothing
 
-writeOrFail :: (ToJSON value, MonadSTM m, MonadThrow m) => WorkflowCtx exec m -> Text -> value -> m ()
+writeOrFail :: (ToJSON value, MonadSTM m, MonadThrow m, MonadThread m) => WorkflowCtx exec m -> Text -> value -> m ()
 writeOrFail wctx key value = writeStream wctx key value >>= either (throwIO . userError . show) pure
 
-closeOrFail :: (MonadSTM m, MonadThrow m) => WorkflowCtx exec m -> Text -> m ()
+closeOrFail :: (MonadSTM m, MonadThrow m, MonadThread m) => WorkflowCtx exec m -> Text -> m ()
 closeOrFail wctx key = closeStream wctx key >>= either (throwIO . userError . show) pure
 
-readValues :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+readValues :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
            => WorkflowCtx exec m -> WorkflowId -> Int -> ReadStreamOptions -> m (Either (Error EngineOnly) [value])
 readValues wctx wid offset options = do
   reader <- readStreamFrom wctx wid "out" offset options
   runExceptT (foldVectorStream (Foldl.generalize Foldl.list) (toVectorStream reader))
 
 -- | Missing producer errors propagate through the vector adapter.
-scenarioStreamReaderError :: forall m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+scenarioStreamReaderError :: forall m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
                           => EventFixture m -> m Bool
 scenarioStreamReaderError fx = do
   wid <- fx.efFreshId "stream-reader-error"
@@ -649,7 +649,7 @@ checkStreamReaderError = checkEq True
 
 -- | A decode error consumes only its value; a subsequent read can still
 -- yield the next value and then observe the close marker.
-scenarioStreamDecodeFailure :: forall m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+scenarioStreamDecodeFailure :: forall m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
                             => EventFixture m -> m (Bool, Maybe Text, Bool)
 scenarioStreamDecodeFailure fx = do
   wid <- fx.efFreshId "stream-decode-failure"

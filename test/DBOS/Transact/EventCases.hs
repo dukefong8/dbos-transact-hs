@@ -227,7 +227,7 @@ waitForEvent dbos wid key = go (50 :: Int)
 
 -- | The recovery body: publishes the offered value (or "republished" when
 -- the offer is already taken), then parks until released.
-progressBody ::  forall exec m. (MonadMVar m, MonadSTM m)
+progressBody ::  forall exec m. (MonadMVar m, MonadSTM m, MonadThread m)
              => StrictMVar m Text ->
                 StrictMVar m () ->
                 () ->
@@ -241,7 +241,7 @@ progressBody offer release () wctx = do
     Right () -> takeMVar release >> pure (Right 7)
 
 -- | Reads through the other instance: refused, never combined.
-readerBody ::  forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+readerBody ::  forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
            => DBOS m ->
               () ->
               WorkflowCtx exec m ->
@@ -251,7 +251,7 @@ readerBody other () wctx = do
   built.pendingRun
 
 -- | The same read from inside a step: plain, nothing checkpointed.
-inStepReaderBody ::  forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+inStepReaderBody ::  forall exec m. (MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                  => DBOS m ->
                     () ->
                     WorkflowCtx exec m ->
@@ -266,7 +266,7 @@ inStepReaderBody other () wctx = do
 
 -- | Builds a sleep, a set, a get, and a step, then drives them out of
 -- build order. The ids stay in build order regardless.
-outOfOrderBody :: forall exec m. (MonadMVar m, MonadAsync m, MonadTime m, MonadDelay m, MonadCatch m, MonadMonotonicTimeNSec m)
+outOfOrderBody :: forall exec m. (MonadMVar m, MonadAsync m, MonadTime m, MonadDelay m, MonadMask m, MonadMonotonicTimeNSec m)
                => DBOS m ->
                   () ->
                   WorkflowCtx exec m ->
@@ -295,7 +295,7 @@ outOfOrderBody dbos () wctx = do
 
 -- | A workflow can publish and replay an event. Returns the first read
 -- and the replay's read.
-scenarioPublishReplay :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioPublishReplay :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                       => EventFixture m ->
                          m (Maybe Text, Maybe Text)
 scenarioPublishReplay fx = do
@@ -322,7 +322,7 @@ scenarioPublishReplay fx = do
 -- | A reading workflow is checkpointed and a reading step is not. Returns
 -- the outside read with its steps, and the inside read with its steps
 -- plus whether the slot after the step stayed empty.
-scenarioCheckpointedRead :: forall m. (MonadAsync m, MonadCatch m, MonadTime m, MonadDelay m)
+scenarioCheckpointedRead :: forall m. (MonadAsync m, MonadMask m, MonadTime m, MonadDelay m)
                          => EventFixture m ->
                             m ((Maybe Int, [(Int, Text)]), (Maybe Int, [(Int, Text)], Bool))
 scenarioCheckpointedRead fx = do
@@ -360,7 +360,7 @@ scenarioCheckpointedRead fx = do
 
 -- | A refused set event spends no step id. Returns the refusal's operation
 -- and the step counter before and after.
-scenarioRefusedSet :: forall m. (MonadSTM m, MonadCatch m)
+scenarioRefusedSet :: forall m. (MonadSTM m, MonadMask m, MonadThread m)
                    => EventFixture m ->
                       m (Text, Int, Int)
 scenarioRefusedSet fx = do
@@ -383,7 +383,7 @@ scenarioRefusedSet fx = do
 
 -- | A getEvent through a captured parent is plain and moves no ids.
 -- Returns the read and the step counter before and after.
-scenarioCapturedRead :: forall m. (MonadSTM m, MonadCatch m, MonadTime m, MonadDelay m)
+scenarioCapturedRead :: forall m. (MonadSTM m, MonadMask m, MonadTime m, MonadDelay m, MonadThread m)
                      => EventFixture m ->
                         m (Maybe Int, Int, Int)
 scenarioCapturedRead fx = do
@@ -416,7 +416,7 @@ scenarioCapturedRead fx = do
   pure (read, before, after)
 
 -- | A replayed set event does not republish. Returns what the reader sees.
-scenarioReplayNoRepublish :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m)
+scenarioReplayNoRepublish :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m, MonadThread m)
                           => EventFixture m ->
                              m (Maybe Text)
 scenarioReplayNoRepublish fx = do
@@ -552,7 +552,7 @@ checkPublishReplay = checkEq (Just ("ready" :: Text), Just ("ready" :: Text))
 -- wait would sleep an hour too long, or record the absence at once.
 -- Returns the read with the nanoseconds the wait took on this process's
 -- monotonic clock. Mirrors the oracle's skewed-clock event waits.
-scenarioGetEventTimed :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m, MonadMonotonicTimeNSec m)
+scenarioGetEventTimed :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThrow m, MonadMonotonicTimeNSec m, MonadThread m)
                       => EventFixture m -> m (Maybe Text, Word64)
 scenarioGetEventTimed fx = do
   wid <- fx.efFreshId "event-timed"
@@ -598,7 +598,7 @@ data ThrowingValue = ThrowingValue
 instance ToJSON ThrowingValue where
   toJSON _ = error "encode boom"
 
-scenarioEncodeBeforeClaim :: forall m. (MonadSTM m, MonadCatch m)
+scenarioEncodeBeforeClaim :: forall m. (MonadSTM m, MonadCatch m, MonadThread m)
                           => EventFixture m ->
                              m (Int, Bool)
 scenarioEncodeBeforeClaim fx = do

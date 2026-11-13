@@ -18,6 +18,7 @@ module DBOS.Internal.Transact.Queue
     queueChangeToUpdate,
     validateQueueOptions,
     validateMergedQueue,
+    warnIfPartitioned,
     queueUpdateError,
     reserved,
     queueOptionsAfterChange,
@@ -49,14 +50,17 @@ import DBOS.Internal.SystemDB.Types
     defaultQueueUpdate,
     internalQueueName,
     newQueue,
+    queueHasPartitionLimits,
     queueIsLegacyPartitioned,
     secondsDuration,
     durationIsZero,
   )
-import DBOS.Internal.Transact.Connection (withConnection)
+import DBOS.Internal.Transact.Connection (Connection (..), withConnection)
+import DBOS.Internal.Transact.Dequeue (QueueEvent (..))
 import DBOS.Internal.Transact.Error qualified as TransactError
 import DBOS.Internal.Transact.Identity (Identity (..))
 import DBOS.Internal.Transact.Instance (DBOS, Executor (..), withExecutor)
+import DBOS.Internal.Transact.Logger (SomeTracer, runTracer)
 
 -- | A registered queue as this process understands it. Limits are resolved
 -- to their effective scope, not reported by raw database column. The
@@ -290,9 +294,9 @@ validateQueueOptions queueName options =
           ordered "worker_concurrency" "concurrency" options.workerConcurrency fleet,
           nonzeroDuration "polling_interval" options.pollingInterval,
           rate "rate_limit" options.rateLimit,
-          rate "partition_rate_limit" options.partitionRateLimit,
           positive "partition_concurrency" options.partitionConcurrency,
           positive "partition_worker_concurrency" options.partitionWorkerConcurrency,
+          rate "partition_rate_limit" options.partitionRateLimit,
           ordered "partition_worker_concurrency" "partition_concurrency" options.partitionWorkerConcurrency options.partitionConcurrency,
           ordered "partition_concurrency" "concurrency" options.partitionConcurrency fleet,
           ordered "partition_worker_concurrency" "worker_concurrency" options.partitionWorkerConcurrency options.workerConcurrency,
@@ -353,10 +357,23 @@ registerQueue dbos queueName options conflict
           Left err -> pure (Left err)
           Right policy -> do
             let new = (queueOptionsToNewQueue queueName options) {newQueueAppName = Just executor.identity.identityAppName}
-            inserted <- withConnection executor.conn (\db -> SystemDB.upsertQueue db new policy)
-            case inserted of
+            -- The before row for the partition warning: read ahead of the
+            -- upsert, as the update path reads ahead of its write. A peer
+            -- racing between the read and the write can misplace the
+            -- warning, but it stays warning-only either way — the same
+            -- standing the update path's pre-read has.
+            stored <- withConnection executor.conn (\db -> SystemDB.getQueue db queueName)
+            case stored of
               Left err -> pure (Left err)
-              Right (_, record) -> pure (Right (queueFromRecord record))
+              Right previous -> do
+                inserted <- withConnection executor.conn (\db -> SystemDB.upsertQueue db new policy)
+                case inserted of
+                  Left err -> pure (Left err)
+                  Right (_, record) -> do
+                    case previous of
+                      Just before -> warnIfPartitioned executor.conn.connTracer before record
+                      Nothing -> pure ()
+                    pure (Right (queueFromRecord record))
 
 queue :: (MonadMVar m)
       => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe Queue))
@@ -400,13 +417,26 @@ updateQueue dbos queueName change
       case stored of
         Left err -> pure (Left err)
         Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
-        Right (Just record) -> do
-          let currentQueue = queueFromRecord record
+        Right (Just stored) -> do
+          let currentQueue = queueFromRecord stored
               update = queueChangeToUpdate change currentQueue
           updated <- withConnection executor.conn (\db -> SystemDB.updateQueue db queueName update (validateMergedQueue queueName))
-          pure $ case updated of
-            Left err -> Left (queueUpdateError err)
-            Right record -> Right (queueFromRecord record)
+          case updated of
+            Left err -> pure (Left (queueUpdateError err))
+            Right written -> do
+              warnIfPartitioned executor.conn.connTracer stored written
+              pure (Right (queueFromRecord written))
+
+-- | Warn when an update partitions a previously unpartitioned queue: rows
+-- already enqueued without a key are never claimed by a partitioned
+-- dequeue, so they strand unless drained or re-enqueued with a key.
+-- Mirrors the oracle's @warn_partitioned@; the before row is the stored
+-- row the update read, the after row the one it wrote.
+warnIfPartitioned :: Monad m => SomeTracer m -> QueueRecord -> QueueRecord -> m ()
+warnIfPartitioned tracer before after
+  | not (queueHasPartitionLimits before) && queueHasPartitionLimits after =
+      runTracer tracer (QueuePartitioned after.queueRecordName)
+  | otherwise = pure ()
 
 -- | The validator the seam runs under its row lock: merge, then judge the
 -- merged record. Shared by the engine and the client so a concurrent

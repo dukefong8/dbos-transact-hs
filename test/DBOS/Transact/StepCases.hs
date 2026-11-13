@@ -18,6 +18,7 @@ module DBOS.Transact.StepCases
   ( StepFixture (..),
     scenarioRecordReplay,
     scenarioNestedPlain,
+    scenarioNestedTimedPlain,
     scenarioNestedWorkflowId,
     scenarioSmuggledPlain,
     scenarioScopedView,
@@ -28,6 +29,7 @@ module DBOS.Transact.StepCases
     scenarioTokenQuiet,
     checkRecordReplay,
     checkNestedPlain,
+    checkNestedTimedPlain,
     checkNestedWorkflowId,
     checkSmuggledPlain,
     checkScopedView,
@@ -48,6 +50,7 @@ import DBOS.Transact
     StepOptions (..),
     WorkflowCtx,
     millisDuration,
+    secondsDuration,
     pendingStep,
     runNestedStep,
     runStep,
@@ -92,7 +95,7 @@ orThrow = either (throwIO . userError . show) pure
 -- | A recorded workflow step runs once and replays: two executions over
 -- fresh contexts, exactly as a recovered run does. Returns both results,
 -- the body's run count, and the observed step id.
-scenarioRecordReplay :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+scenarioRecordReplay :: forall m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
                      => StepFixture m ->
                         m (Int, Int, Int, Maybe Int)
 scenarioRecordReplay fx = do
@@ -123,7 +126,7 @@ countingBody calls observed sctx = do
 
 -- | A step inside a step body runs plainly and takes no id. Returns the
 -- outer result with whether each level checkpointed.
-scenarioNestedPlain :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+scenarioNestedPlain :: forall m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
                     => StepFixture m ->
                        m (Int, Bool, Bool)
 scenarioNestedPlain fx = do
@@ -148,13 +151,36 @@ nestingBody s = do
     Right n -> pure (n + 1)
     Left err -> throwIO (userError (show (err :: Error EngineOnly)))
 
+-- | A nested call through the captured parent inside a timed outer step
+-- runs plainly and takes no id. The supervisor runs the timed body on a
+-- worker thread; without the inherited scope the inner call would see the
+-- workflow boundary and checkpoint under its own id.
+scenarioNestedTimedPlain :: forall m. (MonadTime m, MonadDelay m, MonadAsync m, MonadMask m)
+                         => StepFixture m ->
+                            m (Int, Bool, Bool)
+scenarioNestedTimedPlain fx = do
+  wid <- fx.sfFreshId "nested-timed"
+  owner <- fx.sfInitRow wid
+  conn <- fx.sfConnection
+  outer <-
+    withWorkflow conn fx.sfIdentity wid Nothing owner $ \wctx ->
+      runStepWith (stepOptionsDefault {timeout = Just (secondsDuration 5)}) wctx "outer-timed" $ \_sctx -> do
+        inner <- runStep wctx "inner" (\_ -> pure (42 :: Int))
+        case inner of
+          Right _ -> pure (Right (8 :: Int))
+          Left err -> pure (Left err)
+  result <- orThrow outer
+  placed <- fx.sfCheckStep wid 0 "outer-timed"
+  free <- fx.sfCheckStep wid 1 "inner"
+  pure (result, placed, free)
+
 -- | A nested step reads its workflow's id and returns it: the Python
 -- @test_nested_steps@ oracle at the step level. The outer step calls the
 -- inner step for the workflow id; only the outer call checkpoints, so the
 -- result is the id itself, the outer step checkpointed, and the inner call
 -- took no id. Returns the result, the id, and whether each level
 -- checkpointed.
-scenarioNestedWorkflowId :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+scenarioNestedWorkflowId :: forall m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
                          => StepFixture m ->
                             m (Text, Text, Bool, Bool)
 scenarioNestedWorkflowId fx = do
@@ -186,7 +212,7 @@ nestingIdBody s = do
 -- runs goes plain: the smuggled workflow view sees the shared depth and
 -- degrades to the leaf rule instead of checkpointing. Returns the outer
 -- result with whether each level checkpointed.
-scenarioSmuggledPlain :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+scenarioSmuggledPlain :: forall m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
                       => StepFixture m ->
                          m (Int, Bool, Bool)
 scenarioSmuggledPlain fx = do
@@ -204,7 +230,7 @@ scenarioSmuggledPlain fx = do
 -- | The smuggling body: reaches the recorded entry through the captured
 -- parent instead of the step view, proving the runtime backstop degrades
 -- to plain when the type gate is bypassed.
-smuggledBody :: forall exec m. (MonadSTM m, MonadTime m, MonadCatch m)
+smuggledBody :: forall exec m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
              => WorkflowCtx exec m ->
                 StepCtx exec m ->
                 m Int
@@ -218,7 +244,7 @@ smuggledBody wctx _ = do
 -- reads its narrowed view's status, proving the handoff as well as the
 -- checkpoint. Returns the first result, the observed status, the replay,
 -- and the run count.
-scenarioScopedView :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+scenarioScopedView :: forall m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
                    => StepFixture m ->
                       m (Int, Maybe StepStatus, Int, Int)
 scenarioScopedView fx = do
@@ -250,7 +276,7 @@ scopedBody calls observed s = do
 -- | A nested step through the step view is plain and takes no id: the same
 -- shape as 'scenarioNestedPlain', kept as its own case because the trees
 -- assert different seams around it (checkpoints live, traces sim).
-scenarioNestedStepView :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+scenarioNestedStepView :: forall m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
                        => StepFixture m ->
                           m (Int, Bool, Bool)
 scenarioNestedStepView = scenarioNestedPlain
@@ -259,7 +285,7 @@ scenarioNestedStepView = scenarioNestedPlain
 -- hands back step zero, the drive records under it, and a second run adopts
 -- the recording. Returns the first outcome, the claimed id, the replay,
 -- and the run count.
-scenarioPendingScoped :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+scenarioPendingScoped :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                       => StepFixture m ->
                          m (Int, Maybe Int, Int, Int)
 scenarioPendingScoped fx = do
@@ -289,7 +315,7 @@ pendingBody calls _ = do
 
 -- | Durable sleep reuses its recorded wake time: the replay adopts the
 -- original wake instead of sleeping again. Returns both outcomes.
-scenarioDurableSleep :: forall m. (MonadSTM m, MonadDelay m, MonadThrow m, MonadMonotonicTimeNSec m)
+scenarioDurableSleep :: forall m. (MonadSTM m, MonadDelay m, MonadThrow m, MonadMonotonicTimeNSec m, MonadThread m)
                      => StepFixture m ->
                         m ((), ())
 scenarioDurableSleep fx = do
@@ -307,7 +333,7 @@ scenarioDurableSleep fx = do
 -- once, and both attempts observe the inner call carrying the enclosing
 -- status whole. Returns the leading result, the retried outcome, the
 -- attempt count, the nested observations, and the recorded step names.
-scenarioNestedEnclosing :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+scenarioNestedEnclosing :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                         => StepFixture m ->
                            m ((), (), Int, [(Maybe StepStatus, Maybe StepStatus, Maybe Int)], [Text])
 scenarioNestedEnclosing fx = do
@@ -361,7 +387,7 @@ innerObserve seen outer innerSctx = do
 -- | A cancellation token outside a step never fires on its own: the
 -- abandoned step blows its deadline, which fires the workflow scope's token.
 -- Returns whether the abandonment timed out.
-scenarioTokenQuiet :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+scenarioTokenQuiet :: forall m. (MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                    => StepFixture m ->
                       m Bool
 scenarioTokenQuiet fx = do
@@ -387,6 +413,10 @@ checkRecordReplay = checkEq (42, 42, 1, Just 0)
 -- the inner call took no id.
 checkNestedPlain :: (Int, Bool, Bool) -> Either String ()
 checkNestedPlain = checkEq (8, True, False)
+
+-- | The timed outer step checkpointed and the inner call took no id.
+checkNestedTimedPlain :: (Int, Bool, Bool) -> Either String ()
+checkNestedTimedPlain = checkEq (8, True, False)
 
 -- | The outer body sees its workflow's id back, the outer step
 -- checkpointed, and the inner call took no id.

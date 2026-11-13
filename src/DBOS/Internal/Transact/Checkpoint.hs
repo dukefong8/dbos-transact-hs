@@ -27,7 +27,7 @@ where
 
 import DBOS.Internal.Prelude
 import DBOS.Internal.Transact.Connection (Connection (..), Owner (..))
-import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), insideAStep, isSameExecution, nextStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
+import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), inStepScope, isSameExecution, nextStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
 import DBOS.Internal.Transact.Error (Error (..))
 
 -- | Where a durable call stands: which of the execution's step ids it
@@ -87,19 +87,21 @@ placementAt sctx stepId' =
 -- application's connection is refused, because the record would land where
 -- the workflow that allocated the id cannot see it. The comparison is of
 -- instance identities, which is what the two halves would disagree about.
--- Callers check their own launch first, so a call to an unlaunched
--- instance moves no counter.
-takenPlacement :: MonadSTM m
+-- The in-step shape binds the running body itself — with its marker, so a
+-- later drive can tell this body from a sibling — rather than the unmarked
+-- boundary. Callers check their own launch first, so a call to an
+-- unlaunched instance moves no counter.
+takenPlacement :: (MonadSTM m, MonadThread m)
                => Connection m -> Text -> WorkflowCtx exec m -> m (Either (Error e) (StepPlacement exec m))
 takenPlacement conn operation wctx = do
-  stepped <- insideAStep wctx
+  ambient <- inStepScope wctx
   -- Ordered as the oracle orders it: inside a step nothing is
-  -- checkpointed whoever serves it, so the depth refusal comes before
+  -- checkpointed whoever serves it, so the in-step shape comes before
   -- the connection comparison — a captured parent under a foreign
   -- connection is a plain call, not a 'WrongInstance'.
-  if stepped
-    then pure (Right (PlacementInsideStep (stepCtxBoundary wctx)))
-    else
+  case ambient of
+    Just sctx -> pure (Right (PlacementInsideStep sctx))
+    Nothing ->
       if conn.connInstanceId == wctx.wctxConn.connInstanceId
         then do
           stepId' <- nextStepId wctx
@@ -112,17 +114,17 @@ takenPlacement conn operation wctx = do
 -- anything the call does can fail, because the position of the call in the
 -- workflow has to be the same on the run as it was on the run. Mirrors
 -- the allocation half of Rust @StepPlacement::here@; 'placementHere' is the
--- reader for a placement that already knows its id.
-placeCall :: MonadSTM m => WorkflowCtx exec m -> m (StepPlacement exec m)
+-- reader for a placement that already knows its id. A call built while a
+-- step body runs on this thread binds that body — with its marker — so the
+-- drive can tell this body from a sibling; a handed 'StepCtx' never reaches
+-- this entry (it builds through 'placeNestedCall'). Either way nothing is
+-- recorded and no id moves for the in-step shape.
+placeCall :: (MonadSTM m, MonadThread m) => WorkflowCtx exec m -> m (StepPlacement exec m)
 placeCall wctx = do
-  stepped <- insideAStep wctx
-  -- A call built while a step body runs is plain by the leaf rule. A
-  -- handed 'StepCtx' never reaches this entry (it builds through
-  -- 'placeNestedCall'); the depth says it when the call reaches through a
-  -- captured parent. Either way nothing is recorded and no id moves.
-  if stepped
-    then pure (PlacementInsideStep (stepCtxBoundary wctx))
-    else do
+  ambient <- inStepScope wctx
+  case ambient of
+    Just sctx -> pure (PlacementInsideStep sctx)
+    Nothing -> do
       stepId' <- nextStepId wctx
       pure (Recorded wctx stepId')
 
@@ -168,12 +170,12 @@ checkHere placement step ambient =
     (PlacementInsideStep built, Just here)
       | sameStepBody built here ->
           Right DurabilityPlain
-    -- A call built through a captured parent while a step body runs
-    -- carries no marker on either side: the depth said in-step where the
-    -- context could not. It degrades to plain exactly like the direct
-    -- shape — nothing is recorded and no id moves — so a step body's own
-    -- calls and its parent's calls read together. Marker-bearing
-    -- placements still mismatch below, as do cross-workflow ones.
+    -- A marker-less in-step placement polled at the boundary of the same
+    -- execution degrades to plain, as it did when the build bound the
+    -- boundary view: nothing is recorded and no id moves. No live build
+    -- produces this shape — 'placeCall' binds the running body with its
+    -- marker, and 'placeNestedCall' carries the handed view — so the arm
+    -- stands for the boundary-built form only.
     (PlacementInsideStep built, Just here)
       | stepMarker built == Nothing
       , stepMarker here == Nothing

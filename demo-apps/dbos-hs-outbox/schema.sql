@@ -17,11 +17,17 @@ CREATE TABLE IF NOT EXISTS outbox_store.orders (
     created_at TIMESTAMP DEFAULT now() NOT NULL
 );
 
--- The transactional-step checkpoint table. Its shape is fixed by the oracles
--- (Python SQLAlchemyDatasource, TypeScript KnexDataSource): the step's name,
--- output and error are recorded in the same transaction as the application
--- writes, and the name is checked on replay so a reordered or renamed
--- transaction is refused (DBOSUnexpectedStepError) rather than replayed.
+-- The transactional-step checkpoint table. The step's name, output and
+-- error are recorded in the same transaction as the application writes,
+-- and the name is checked on replay so a reordered or renamed transaction
+-- is refused (DBOSUnexpectedStepError) rather than replayed.
+--
+-- `step_name` is Haskell-only (ADR-0021): TypeScript's
+-- `transaction_completion` has no such column, and Python records
+-- transactions in its own `datasource_outputs` table instead. Do not
+-- point this app at a schema another SDK provisioned: every checkpoint
+-- insert binds `step_name` and fails with undefined-column `42703` where
+-- the column is missing.
 CREATE TABLE IF NOT EXISTS outbox_store.transaction_completion (
     workflow_id TEXT NOT NULL,
     step_name TEXT NOT NULL,

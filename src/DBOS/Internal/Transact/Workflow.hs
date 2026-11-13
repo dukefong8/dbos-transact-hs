@@ -1501,10 +1501,10 @@ startChildWorkflowWith :: (MonadAsync m, MonadMVar m, MonadMask m, MonadTimer m,
                        => Maybe Int -> WorkflowCtx exec m -> WorkflowRef m e -> StartOptions -> Maybe WorkflowInput -> m (Either (TransactError.Error c) (WorkflowHandle m e))
 startChildWorkflowWith placedStep wctx ref options input = do
   -- A start inside a step body is refused — and a start through a captured
-  -- parent while a step body runs is the same leaf violation with a scope
-  -- field predating the body, which the shared depth counter reports. Read
-  -- together, as the oracle reads its ambient scope: refused before
-  -- anything is written and before the counter moves.
+  -- parent while a step body runs on this thread is the same leaf violation
+  -- with a scope field predating the body, which the calling thread's depth
+  -- reports. Read together, as the oracle reads its ambient scope: refused
+  -- before anything is written and before the counter moves.
   stepped <- insideAStep wctx
   if stepped
     then pure (Left (TransactError.InsideStep "starting a workflow"))

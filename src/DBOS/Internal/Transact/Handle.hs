@@ -35,7 +35,7 @@ import DBOS.Internal.SystemDB.Types (AwaitedOutcome (..), Outcome (..), Serializ
 import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Internal.Transact.Config (serializerName)
 import DBOS.Internal.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Internal.Transact.Context (LocalTaskOutcome (..), WorkflowCtx, ownerToken, stepCtxBoundary, workflowId)
+import DBOS.Internal.Transact.Context (LocalTaskOutcome (..), WorkflowCtx, driveScope, ownerToken, stepCtxBoundary, workflowId)
 import DBOS.Internal.Transact.Error qualified as TransactError
 
 -- | Where this handle's result comes from. The local channel carries the
@@ -132,7 +132,7 @@ handleResult handle = do
 --
 -- The handle must belong to this execution: a recorded row under the
 -- claimed id that names a different workflow is refused, never adopted.
-awaitChild :: (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MonadThrow m, FromJSON e, ToJSON e)
+awaitChild :: (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MonadThrow m, MonadThread m, FromJSON e, ToJSON e)
            => WorkflowCtx exec m ->
               WorkflowHandle m e ->
               m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
@@ -143,7 +143,7 @@ awaitChild wctx handle = placeCall wctx >>= driveAwait wctx handle
 -- drives the wait when the pending value is awaited or raced. Mirrors the
 -- oracle's @handle.result()@ building a @PendingStep@; a pending await the
 -- race drops still spent its id, and recorded nothing.
-pendingAwait :: (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MonadThrow m, FromJSON e, ToJSON e)
+pendingAwait :: (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MonadThrow m, MonadThread m, FromJSON e, ToJSON e)
              => WorkflowCtx exec m ->
                 WorkflowHandle m e ->
                 m (PendingStep exec m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
@@ -159,13 +159,14 @@ pendingAwait wctx handle = do
 -- | Drives a placed await: adopt a recorded row, or wait and record the
 -- settled outcome under the claimed id. The placement decides, so a race
 -- can build every branch before any of them waits.
-driveAwait :: (MonadDelay m, MonadTime m, MonadMVar m, MonadThrow m, FromJSON e, ToJSON e)
+driveAwait :: (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MonadThrow m, MonadThread m, FromJSON e, ToJSON e)
            => WorkflowCtx exec m ->
               WorkflowHandle m e ->
               StepPlacement exec m ->
               m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
-driveAwait wctx handle placement =
-  case checkHere placement getResultStepName (Just (stepCtxBoundary wctx)) of
+driveAwait wctx handle placement = do
+  here <- driveScope wctx
+  case checkHere placement getResultStepName (Just here) of
     Left err                                 -> pure (Left err)
     Right DurabilityPlain                    -> fmap (>>= settledResult handle.workflowId) (settleOutcome handle)
     Right (DurabilityRecorded wctx' stepId') -> recordedAt wctx' stepId'

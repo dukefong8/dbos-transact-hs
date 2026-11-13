@@ -23,6 +23,7 @@ import DBOS.Transact.StepCases
     checkDurableSleep,
     checkNestedEnclosing,
     checkNestedPlain,
+    checkNestedTimedPlain,
     checkNestedStepView,
     checkNestedWorkflowId,
     checkSmuggledPlain,
@@ -33,6 +34,7 @@ import DBOS.Transact.StepCases
     scenarioDurableSleep,
     scenarioNestedEnclosing,
     scenarioNestedPlain,
+    scenarioNestedTimedPlain,
     scenarioNestedStepView,
     scenarioNestedWorkflowId,
     scenarioSmuggledPlain,
@@ -51,9 +53,10 @@ import DBOS.Transact
   )
 import DBOS.Internal.Transact.Identity (Identity (..))
 import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Connection (Connection (connSysdb), runSystemDB)
 import DBOS.Internal.Transact.Context (testOwner, withWorkflow)
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (assertFailure, testCase, (@?=))
 
 simIdentity :: Identity
 simIdentity =
@@ -115,11 +118,39 @@ tests =
         printSimTrace tr
         either fail pure (checkRecordReplay outcome)
         traceEvents tr @?= [StepRunning "test_step" 0, StepOutputRecorded "test_step" 0, StepReplaying "test_step" 0],
+      testCase "a recorded child step replays its output instead of refusing" $ do
+        (outcome, tr) <- runSimCase $ do
+          mem <- newMemDB
+          let wid = WorkflowId "wf-child-replay"
+          created <- SystemDB.initWorkflow mem ((newWorkflow "wf-child-replay") {newWorkflowName = Just "L2StepSim"}) Nothing WorkflowIdReturnExisting
+          (owner, token) <- case created of
+            Left err -> error (show err)
+            Right result -> pure (WorkflowOwner {ownerWorkflowId = wid, ownerToken = result.initResultCreatorXid}, result.initResultCreatorXid)
+          conn <- memConnectionOn mem simTracer
+          planted <- runSystemDB conn.connSysdb (\db -> SystemDB.recordChildWorkflow db wid (WorkflowId "child-1") 0 "probe" Nothing token)
+          case planted of
+            Left err -> error (show err)
+            Right () -> pure ()
+          calls <- newTVarIO (0 :: Int)
+          result <- withWorkflow conn simIdentity wid Nothing owner $ \wctx ->
+            runStep wctx "probe" (\_ -> atomically (modifyTVar calls (+ 1)) >> pure ())
+          count <- readTVarIO calls
+          pure ((result, count) :: (Either (Error EngineOnly) (), Int))
+        printSimTrace tr
+        case outcome of
+          (Right (), 0) -> pure ()
+          other -> assertFailure ("expected an unrun replay of (), got: " <> show other)
+        traceEvents tr @?= [StepReplaying "probe" 0],
       testCase "a step inside a step body runs plainly and takes no id" $ do
         (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioNestedPlain)
         printSimTrace tr
         either fail pure (checkNestedPlain outcome)
         traceEvents tr @?= [StepRunning "outer" 0, StepPlain "inner", StepOutputRecorded "outer" 0],
+      testCase "a nested call inside a timed step runs plainly and takes no id" $ do
+        (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioNestedTimedPlain)
+        printSimTrace tr
+        either fail pure (checkNestedTimedPlain outcome)
+        traceEvents tr @?= [StepPlain "inner", StepOutputRecorded "outer-timed" 0],
       testCase "a scoped step runs once and replays through the workflow view" $ do
         (outcome, tr) <- runSimCase (mkStepFixture >>= scenarioScopedView)
         printSimTrace tr

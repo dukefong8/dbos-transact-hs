@@ -28,6 +28,7 @@ import DBOS.Transact.StepCases
     checkDurableSleep,
     checkNestedEnclosing,
     checkNestedPlain,
+    checkNestedTimedPlain,
     checkNestedStepView,
     checkNestedWorkflowId,
     checkSmuggledPlain,
@@ -38,6 +39,7 @@ import DBOS.Transact.StepCases
     scenarioDurableSleep,
     scenarioNestedEnclosing,
     scenarioNestedPlain,
+    scenarioNestedTimedPlain,
     scenarioNestedStepView,
     scenarioNestedWorkflowId,
     scenarioSmuggledPlain,
@@ -84,6 +86,10 @@ tests =
           fixture <- mkStepFixture getBackend
           out <- scenarioNestedPlain fixture
           either fail pure (checkNestedPlain out),
+      testCase "a nested call inside a timed step runs plainly and takes no id" $ do
+          fixture <- mkStepFixture getBackend
+          out <- scenarioNestedTimedPlain fixture
+          either fail pure (checkNestedTimedPlain out),
       testCase "a scoped step runs once and replays through the workflow view" $ do
           fixture <- mkStepFixture getBackend
           out <- scenarioScopedView fixture

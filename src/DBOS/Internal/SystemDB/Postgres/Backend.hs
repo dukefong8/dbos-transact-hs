@@ -1178,10 +1178,10 @@ withPostgresSystemDB config tracer =
   bracket (acquirePostgresSystemDB config tracer) releasePostgresSystemDB
 
 -- | Reads back the highest applied migration and requires at least the
--- ceiling this port tracks (123). A higher value means a newer SDK (Python/TS
--- 122–123) has migrated the shared database; the oracle's runner tolerates
--- that too, so launch does. A lower value is a schema the port cannot read and
--- is refused. The pinned queries are verified against 121; a database ahead
+-- ceiling this port tracks (125). A higher value means a newer SDK has
+-- migrated the shared database; the oracle's runner tolerates that too, so
+-- launch does. A lower value is a schema the port cannot read and is
+-- refused. The pinned queries are verified against 125; a database ahead
 -- still has to pass the live suites.
 verifySystemDatabase :: PostgresSystemDB -> IO (Either Error ())
 verifySystemDatabase env = do
@@ -1397,7 +1397,6 @@ initParams applicationName new status queued creatorXid now = do
       initParamExecutorId = new.newWorkflowExecutorId,
       initParamAppVersion = new.newWorkflowAppVersion,
       initParamAppId = new.newWorkflowAppId,
-      initParamUpdatedAt = timestampToEpochMs now,
       initParamInitialAttempts = if queued then 0 else 1,
       initParamTimeoutMs = timeoutMs,
       initParamDeadline = timestampToEpochMs <$> new.newWorkflowDeadline,
@@ -2539,81 +2538,23 @@ sendInternal env stepName messages serialization caller owner sendToForks = do
   -- one key fanning out to many recipients is legal. Mirrors the oracle.
   case validateSendKeys messages of
     Left err -> pure (Left err)
-    Right () -> do
-      expanded <- if sendToForks then expandForks env messages else pure (Right messages)
-      case expanded of
-        Left err         -> pure (Left err)
-        Right recipients -> deliverTo env stepName recipients serialization caller owner
+    Right () -> deliverTo env stepName messages serialization caller owner sendToForks
 
--- | Every message copied once per recipient: the destination itself and
--- every workflow forked from it, transitively. One send fans out to a whole
--- fork tree, and each recipient gets its own scoped message id. Mirrors the
--- oracle's fork fan-out.
-expandForks :: PostgresSystemDB -> [EncodedSendMessage] -> IO (Either Error [EncodedSendMessage])
-expandForks env messages = do
-  let roots = [destination | message <- messages, let Types.WorkflowId destination = message.sendDestinationId]
-  forks <- descendantForks env roots
-  pure $ case forks of
-    Left err -> Left err
-    Right byRoot ->
-      Right
-        [ (message {sendDestinationId = Types.WorkflowId recipient})
-          | message <- messages,
-            let Types.WorkflowId destination = message.sendDestinationId,
-            recipient <- destination : Map.findWithDefault [] destination byRoot
-        ]
-
--- | Every descendant of every root, level by level, deduplicated and
--- sorted. Terminates because the seen set only grows. Mirrors
--- @descendant_forks@.
-descendantForks :: PostgresSystemDB -> [Text] -> IO (Either Error (Map.Map Text [Text]))
-descendantForks env roots = go Map.empty Set.empty roots
-  where
-    go children seen frontier = do
-      level <- runSession env "send_messages" (Statements.directForksSession frontier)
-      case level of
-        Left err -> pure (Left err)
-        Right pairs -> do
-          let fresh = [forkedId | (forkedId, _) <- pairs, Set.notMember forkedId seen]
-              children' = foldr (\(forkedId, source) acc -> Map.insertWith (++) source [forkedId] acc) children pairs
-              seen' = foldr Set.insert seen fresh
-          if null fresh
-            then pure (Right (Map.map (List.sort . List.nub) children'))
-            else go children' seen' fresh
-
--- | Delivers a batch once the recipient set is settled.
-deliverTo :: PostgresSystemDB -> Text -> [EncodedSendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> IO (Either Error ())
-deliverTo env stepName messages serialization caller owner = do
+-- | Delivers a batch with the recipient set settled inside the same
+-- transaction as the insert: the walk, the write, and the step record are
+-- one commit, so a fork created concurrently with the send is either
+-- walked with it or created after it — never walked past and missed.
+-- Mirrors the oracle's @deliver@, which resolves @descendant_forks@
+-- inside its transaction.
+deliverTo :: PostgresSystemDB -> Text -> [EncodedSendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> IO (Either Error ())
+deliverTo env stepName messages serialization caller owner sendToForks = do
   fallbacks <- traverse (const (MessageUUID . UUID.toText <$> UUID.V4.nextRandom)) messages
   timing <- StepTiming <$> timestampNow <*> timestampNow
-  let destinations = [destination | message <- messages, let Types.WorkflowId destination = message.sendDestinationId]
-      topics = [maybe nullTopicSentinel (\(Topic stored) -> stored) message.sendTopic | message <- messages]
-      payloads = [(.serializedText) message.sendMessageBody | message <- messages]
-      messageIds =
-        [ let MessageUUID scoped = messageUUIDForSend fallback message in scoped
-          | (message, fallback) <- zip messages fallbacks
-        ]
-      sendStep = do
-        (Types.WorkflowId widText, stepId) <- caller
-        pure
-          Statements.SendStep
-            { sendStepWorkflowId = widText,
-              sendStepStepId = stepId,
-              sendStepName = stepName,
-              sendStepStartedAt = timestampToEpochMs timing.stepTimingStartedAt,
-              sendStepCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt
-            }
-      params =
-        Statements.SendMessagesParams
-          { sendParamsDestinations = destinations,
-            sendParamsTopics = topics,
-            sendParamsPayloads = payloads,
-            sendParamsMessageIds = messageIds,
-            sendParamsSerialization = serialization,
-            sendParamsStep = sendStep
-          }
+  let roots = [destination | message <- messages, let Types.WorkflowId destination = message.sendDestinationId]
   -- An execution's send opens with its ownership check; a client send
-  -- has no execution and skips it. A refused send delivers nothing.
+  -- has no execution and skips it. A refused send delivers nothing. The
+  -- fork walk, the insert, and the step record share the one transaction,
+  -- so a fork committed before it started is walked with it.
   result <-
     runTransaction env "send_messages" $ do
       owned <- case owner of
@@ -2623,24 +2564,63 @@ deliverTo env stepName messages serialization caller owner = do
            in Statements.checkOwnerTx ownerText o.ownerToken
       case owned of
         Left conflict -> Tx.condemn >> pure (Left conflict)
-        Right () -> Statements.sendMessagesTx env.psdbExecutorId params
+        Right () -> do
+          byRoot <-
+            if sendToForks
+              then descendantForksTx roots
+              else pure Map.empty
+          let expanded =
+                [ (message {sendDestinationId = Types.WorkflowId recipient}, fallback)
+                | (message, fallback) <- zip messages fallbacks,
+                  let Types.WorkflowId destination = message.sendDestinationId,
+                  recipient <- destination : Map.findWithDefault [] destination byRoot
+                ]
+              destinations = [destination | (message, _) <- expanded, let Types.WorkflowId destination = message.sendDestinationId]
+              topics = [maybe nullTopicSentinel (\(Topic stored) -> stored) message.sendTopic | (message, _) <- expanded]
+              payloads = [(.serializedText) message.sendMessageBody | (message, _) <- expanded]
+              messageIds =
+                [ let MessageUUID scoped = messageUUIDForSend fallback message in scoped
+                | (message, fallback) <- expanded
+                ]
+              sendStep = do
+                (Types.WorkflowId widText, stepId) <- caller
+                pure
+                  Statements.SendStep
+                    { sendStepWorkflowId = widText,
+                      sendStepStepId = stepId,
+                      sendStepName = stepName,
+                      sendStepStartedAt = timestampToEpochMs timing.stepTimingStartedAt,
+                      sendStepCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt,
+                      sendStepAppName = env.psdbAppName
+                    }
+              params =
+                Statements.SendMessagesParams
+                  { sendParamsDestinations = destinations,
+                    sendParamsTopics = topics,
+                    sendParamsPayloads = payloads,
+                    sendParamsMessageIds = messageIds,
+                    sendParamsSerialization = serialization,
+                    sendParamsStep = sendStep
+                  }
+          written <- Statements.sendMessagesTx env.psdbExecutorId params
+          pure (fmap (const (zip destinations topics)) written)
   case join result of
     Left err
       | foreignKeyError err ->
-          pure (Left (NonExistentWorkflow {workflowIds = List.sort (List.nub destinations)}))
+          pure (Left (NonExistentWorkflow {workflowIds = List.sort (List.nub roots)}))
       | otherwise -> pure (Left err)
     -- A local waiter hears about the write without waiting out its poll
     -- interval. The migration trigger covers other processes; this is the
     -- same-process half, and the 1 s poll remains the backstop.
-    Right () -> do
-      forM_ (zip destinations topics) $ \(destination, topic) ->
+    Right wakes -> do
+      forM_ wakes $ \(destination, topic) ->
         wake env.psdbNotify (messageKey destination (Just topic))
       pure (Right ())
 
 -- | Every descendant of every root inside the caller's transaction, level by
--- level like 'descendantForks': the recipient set cannot go stale before
--- the insert. Statement failures propagate and abort the caller's
--- transaction, as every 'Tx'-composed piece behaves.
+-- level: the recipient set cannot go stale before the insert. Statement
+-- failures propagate and abort the caller's transaction, as every
+-- 'Tx'-composed piece behaves.
 descendantForksTx :: [Text] -> Tx.Transaction (Map.Map Text [Text])
 descendantForksTx roots = go Map.empty Set.empty roots
   where
@@ -3175,8 +3155,7 @@ instance SystemDB PostgresSystemDB IO where
             result <- runSession env "set_workflow_delay" (Statements.setWorkflowDelaySession (unwrap wid) relMs absMs)
             pure (() <$ result)
   clearQueueAssignment env wid = do
-    now <- timestampNow
-    result <- runSession env "clear_queue_assignment" (Statements.clearQueueAssignmentSession (unwrap wid) (timestampToEpochMs now))
+    result <- runSession env "clear_queue_assignment" (Statements.clearQueueAssignmentSession (unwrap wid))
     pure (fmap (> 0) result)
     where
       unwrap (Types.WorkflowId widText) = widText
@@ -3418,7 +3397,8 @@ instance SystemDB PostgresSystemDB IO where
                   rewindAppVersion = sysOpts.sysRewindAppVersion,
                   rewindCaller = caller,
                   rewindStartedAt = timestampToEpochMs timing.stepTimingStartedAt,
-                  rewindCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt
+                  rewindCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt,
+                  rewindAppName = env.psdbAppName
                 }
         runTransaction env "rewind_workflow" (Statements.rewindTx env.psdbExecutorId params) >>= \result ->
           case join result of
@@ -3444,7 +3424,7 @@ instance SystemDB PostgresSystemDB IO where
                           recordStepSerialization = Just portableJsonSerialization,
                           recordStepStartedAt = Just (timestampToEpochMs timing.stepTimingStartedAt),
                           recordStepCompletedAt = Just (timestampToEpochMs completedAt),
-                          recordStepAppName = Nothing,
+                          recordStepAppName = env.psdbAppName,
                           recordStepChildWorkflowId = Nothing
                         }
                     callerToken = caller.stepCallerOwner.ownerToken
@@ -3507,7 +3487,8 @@ instance SystemDB PostgresSystemDB IO where
                       recvStepId = stepId,
                       recvTopic = storedTopic,
                       recvStartedAt = timestampToEpochMs startedAt,
-                      recvCompletedAt = timestampToEpochMs completedAt
+                      recvCompletedAt = timestampToEpochMs completedAt,
+                      recvAppName = env.psdbAppName
                     }
             taken <-
               runTransaction
@@ -3717,7 +3698,8 @@ instance SystemDB PostgresSystemDB IO where
               setEventValue = value,
               setEventSerialization = serialization,
               setEventStartedAt = timestampToEpochMs startedAt,
-              setEventCompletedAt = timestampToEpochMs completedAt
+              setEventCompletedAt = timestampToEpochMs completedAt,
+              setEventAppName = env.psdbAppName
             }
     -- The publish opens with the ownership check, as a take does: a stale
     -- execution's event and history rows roll back with the refusal.
@@ -3782,7 +3764,8 @@ instance SystemDB PostgresSystemDB IO where
                             getEventRecordOutput = (.encodedValue) <$> value,
                             getEventRecordSerialization = value >>= (.encodedSerialization),
                             getEventRecordStartedAt = timestampToEpochMs startedAt,
-                            getEventRecordCompletedAt = timestampToEpochMs completedAt
+                            getEventRecordCompletedAt = timestampToEpochMs completedAt,
+                            getEventRecordAppName = env.psdbAppName
                           }
                   -- The record opens with the caller's ownership check: a
                   -- stale reader's take and record roll back together.

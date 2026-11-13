@@ -151,8 +151,7 @@ type WidgetCase m =
     MonadDelay m,
     MonadAsync m,
     MonadFork m,
-    MonadMask m,
-    MonadCatch m
+    MonadMask m
   )
 
 -- | The per-stack interpretation. Capabilities observe, never stage

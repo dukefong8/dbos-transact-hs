@@ -249,7 +249,7 @@ instance ToLogStr TransactionEvent where
 -- the body is a step like any other (nested durable calls are refused by
 -- the leaf rule, the checkpoint id is visible, and a retry gets a fresh
 -- marker and token).
-runTxStep :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+runTxStep :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m, MonadMask m, HasCallStack)
           => DataSource m -> TransactionConfig -> WorkflowCtx exec m -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
 runTxStep ds config wctx body =
   runTxStepWith ds config wctx body
@@ -257,7 +257,7 @@ runTxStep ds config wctx body =
 -- | The shared transaction path: the shaped body receives the attempt's
 -- context (the scoped entry turns it into the step view) and the
 -- transaction handle.
-runTxStepWith :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+runTxStepWith :: (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m, MonadMask m, HasCallStack)
               => DataSource m -> TransactionConfig -> WorkflowCtx exec m -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> m (Either (Error e) a)
 runTxStepWith ds config wctx body = do
   -- Refused through the handed context or a captured parent alike: a
@@ -365,7 +365,7 @@ checkWithRetry ds tracer wid stepName stepId = loop 1 initialBackoffMs
 -- | One attempt: body plus checkpoint insert in a single transaction. A
 -- held checkpoint throws 'TxConflict' to roll the attempt's application
 -- writes back; transport failures surface as 'Left' through the adapter.
-attemptTransaction :: forall a e exec m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+attemptTransaction :: forall a e exec m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m, MonadMask m, HasCallStack)
                    => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
 attemptTransaction ds wctx config body tracer wid stepName stepId n waitMs = do
   marker <- nextWorkflowMarker wctx
@@ -621,6 +621,13 @@ maxBackoffMs = 2000.0
 -- and nothing is announced — there is no execution to record against
 -- (mirrors the oracle running plainly outside workflows). Backend
 -- failures surface as 'Left'; anything else the body throws propagates.
+--
+-- The retry is broad on purpose and dangerous for the same reason: a
+-- commit whose acknowledgement is lost looks retriable, so the body
+-- runs again and a non-idempotent body applies twice. Inside a workflow
+-- the checkpoint dedup converges that retry to adoption; out here there
+-- is no checkpoint, so only idempotent bodies are safe. Python retries
+-- the same broad classes; TypeScript retries only @40001@.
 runTxOutside :: (MonadDelay m, MonadCatch m)
              => DataSource m -> TransactionConfig -> (Tx m -> m a) -> m (Either BackendError a)
 runTxOutside ds config body = loop (1 :: Int) initialBackoffMs

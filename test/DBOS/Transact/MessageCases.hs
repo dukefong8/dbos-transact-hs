@@ -32,6 +32,7 @@ module DBOS.Transact.MessageCases
     scenarioCapturedRecv,
     scenarioBulkSend,
     scenarioBulkEmpty,
+    scenarioBulkReplay,
     scenarioBatchNotifyUnique,
     checkSendDeliveredOnce,
     checkFanOut,
@@ -49,6 +50,7 @@ module DBOS.Transact.MessageCases
     checkCapturedRecv,
     checkBulkSend,
     checkBulkEmpty,
+    checkBulkReplay,
     checkBatchNotifyUnique,
   )
 where
@@ -117,7 +119,7 @@ mfFreshRun (MessageFixture _ _ fresh _ _ _ _ _) = fresh
 
 -- | Inside a step body a send succeeds and a receive is refused: the
 -- oracle's leaf rule for messages, observed as one Text line.
-probeSendRecv :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+probeSendRecv :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadThread m)
               => WorkflowId -> StepCtx exec m -> m Text
 probeSendRecv destination sctx = do
   let wctx = sctx.stepCtxWorkflow
@@ -130,7 +132,7 @@ probeSendRecv destination sctx = do
 
 -- | A workflow send is delivered once and recv replays: the replayed send
 -- moves nothing again and the replayed receive reads its recording.
-scenarioSendDeliveredOnce :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioSendDeliveredOnce :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadThread m)
                           => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text))
 scenarioSendDeliveredOnce fx = do
   (source, destination) <- fx.mfFreshPair "deliver"
@@ -142,7 +144,7 @@ scenarioSendDeliveredOnce fx = do
 
 -- | A send may fan out to the destination's forks: the default addresses
 -- the destination alone, asking for the fan-out reaches both.
-scenarioFanOut :: forall m. (MonadSTM m, MonadCatch m)
+scenarioFanOut :: forall m. (MonadSTM m, MonadCatch m, MonadThread m)
                => MessageFixture m -> m (Either (Error EngineOnly) (), Int, Int, Either (Error EngineOnly) (), Int, Int)
 scenarioFanOut fx = do
   (original, sender) <- fx.mfFreshPair "fanout"
@@ -160,7 +162,7 @@ scenarioFanOut fx = do
   pure (skipped, originalOnce, forkOnce, included, originalTwice, forkTwice)
 
 -- | A message from another workflow reaches its destination.
-scenarioThirdParty :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioThirdParty :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadThread m)
                    => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text))
 scenarioThirdParty fx = do
   (source, destination) <- fx.mfFreshPair "third-party"
@@ -170,7 +172,7 @@ scenarioThirdParty fx = do
 
 -- | Topics do not cross and absence is a value: a missing topic reads
 -- back empty, the addressed one delivers.
-scenarioTopics :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioTopics :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadThread m)
                => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text))
 scenarioTopics fx = do
   (source, destination) <- fx.mfFreshPair "topics"
@@ -182,7 +184,7 @@ scenarioTopics fx = do
 -- | A replay takes the recorded message and sends once: the replayed
 -- receive reads the first message back, the live receive moves on, and
 -- the replayed send moves nothing again.
-scenarioReplayTakes :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioReplayTakes :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadThread m)
                     => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (), Int)
 scenarioReplayTakes fx = do
   (source, destination) <- fx.mfFreshPair "replay-takes"
@@ -196,7 +198,7 @@ scenarioReplayTakes fx = do
   pure (firstSend, firstReceive, secondSend, replayed, secondReceive, replaySend, total)
 
 -- | A step may send but may not receive.
-scenarioStepSend :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioStepSend :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                  => MessageFixture m -> m (Either (Error EngineOnly) Text)
 scenarioStepSend fx = do
   (source, destination) <- fx.mfFreshPair "step-send"
@@ -206,7 +208,7 @@ scenarioStepSend fx = do
 -- refused: the workflow's code changed at this position since the row was
 -- written, so delivering would be a send the first run never made. Returns
 -- the refusal and the messages the destination holds.
-scenarioSendNameMismatch :: forall m. (MonadSTM m, MonadTime m, MonadCatch m)
+scenarioSendNameMismatch :: forall m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
                          => MessageFixture m -> m (Either (Error EngineOnly) (), Int)
 scenarioSendNameMismatch fx = do
   (source, destination) <- fx.mfFreshPair "send-name-mismatch"
@@ -222,7 +224,7 @@ scenarioSendNameMismatch fx = do
 -- Both oracles record the deadline unconditionally, so a replay that waited
 -- has the same remainder left rather than the full duration. Returns the
 -- recv verdict with the two steps' outputs and the sleep step's name.
-scenarioRecvTimeoutSteps :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioRecvTimeoutSteps :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
                          => MessageFixture m -> m (Either (Error EngineOnly) (Maybe Text), Maybe (Maybe Text), Maybe (Maybe Text), Maybe Text)
 scenarioRecvTimeoutSteps fx = do
   (source, _) <- fx.mfFreshPair "recv-timeout-steps"
@@ -232,7 +234,7 @@ scenarioRecvTimeoutSteps fx = do
   pure (timedOut, (.stepRecordOutput) <$> recvStep, (.stepRecordOutput) <$> sleepStep, (.stepRecordStepName) <$> sleepStep)
 
 -- | A send through a captured parent is plain and moves no id.
-scenarioCapturedSend :: forall m. (MonadSTM m, MonadCatch m)
+scenarioCapturedSend :: forall m. (MonadSTM m, MonadMask m, MonadThread m)
                      => MessageFixture m -> m (Either (Error EngineOnly) (), Int)
 scenarioCapturedSend fx = do
   (source, destination) <- fx.mfFreshPair "captured-send"
@@ -244,7 +246,7 @@ scenarioCapturedSend fx = do
     pure (sent, counter)
 
 -- | A recv through a captured parent is refused.
-scenarioCapturedRecv :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioCapturedRecv :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                      => MessageFixture m -> m (Either (Error EngineOnly) (Maybe Text))
 scenarioCapturedRecv fx = do
   (source, _) <- fx.mfFreshPair "captured-recv"
@@ -276,7 +278,7 @@ scenarioBulkSend fx = do
   pure (sent, first, second, count, checkpoint)
 
 -- | An empty bulk send still takes its step.
-scenarioBulkEmpty :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m)
+scenarioBulkEmpty :: forall m. (MonadTime m, MonadCatch m, MonadAsync m)
                   => MessageFixture m -> m (Either (Error EngineOnly) (), Maybe StepRecord)
 scenarioBulkEmpty fx = do
   (source, _) <- fx.mfFreshPair "bulk-empty"
@@ -306,7 +308,7 @@ checkFanOut (skipped, originalOnce, forkOnce, included, originalTwice, forkTwice
 
 -- | A keyed send fans out like an unkeyed one: the duplicate-key refusal
 -- applies to the caller's list, before fan-out, as both oracles check.
-scenarioKeyedFanOut :: forall m. (MonadSTM m, MonadCatch m)
+scenarioKeyedFanOut :: forall m. (MonadSTM m, MonadCatch m, MonadThread m)
                     => MessageFixture m -> m (Either (Error EngineOnly) (), Int, Int)
 scenarioKeyedFanOut fx = do
   (original, sender) <- fx.mfFreshPair "keyed-fanout"
@@ -326,7 +328,7 @@ checkKeyedFanOut (included, originalTwice, forkTwice) = do
 
 -- | A resend under one key delivers once: the second send succeeds but moves
 -- no new message, so the second receive times out.
-scenarioResendDeduped :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioResendDeduped :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadThread m)
                       => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text))
 scenarioResendDeduped fx = do
   (source, destination) <- fx.mfFreshPair "resend-dedup"
@@ -345,7 +347,7 @@ checkResendDeduped (firstSend, secondSend, firstReceive, secondReceive) = do
 
 -- | Topics do not cross workflows: a message addressed elsewhere is not
 -- readable here, even on a shared topic.
-scenarioScopedReceive :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioScopedReceive :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadThread m)
                       => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text))
 scenarioScopedReceive fx = do
   (sourceA, destA) <- fx.mfFreshPair "scope-a"
@@ -405,7 +407,7 @@ checkRecvTimeoutSteps (timedOut, recvOutput, sleepOutput, sleepName) = do
 -- wait would sleep an hour too long, or record the absence at once.
 -- Returns the recv verdict with the nanoseconds the wait took on this
 -- process's monotonic clock. Mirrors the oracle's skewed-clock recv waits.
-scenarioRecvTimed :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMonotonicTimeNSec m)
+scenarioRecvTimed :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMonotonicTimeNSec m, MonadThread m)
                   => MessageFixture m -> m (Either (Error EngineOnly) (Maybe Text), Word64)
 scenarioRecvTimed fx = do
   (source, _) <- fx.mfFreshPair "recv-timed"
@@ -467,7 +469,7 @@ checkBulkEmpty (sent, checkpoint) = do
 -- | Two deliveries in one batch carry distinct notification ids: the stored
 -- id is unique per row live (the message uuid), so the sim must not mint
 -- one counter value twice.
-scenarioBatchNotifyUnique :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m)
+scenarioBatchNotifyUnique :: forall m. (MonadTime m, MonadCatch m, MonadAsync m)
                           => MessageFixture m -> m (Either (Error EngineOnly) (), [Text])
 scenarioBatchNotifyUnique fx = do
   (source, destination) <- fx.mfFreshPair "batch-notify-unique"
@@ -486,3 +488,44 @@ checkBatchNotifyUnique (sent, ids) = do
   unless (sent == Right ()) $ Left ("expected the batch to send, got: " <> show sent)
   unless (length ids == 2) $ Left ("expected two notification rows, got: " <> show ids)
   unless (nub ids == ids) $ Left ("expected distinct notification ids, got: " <> show ids)
+
+-- | A replayed batch sends nothing again: the fresh scope restarts the step
+-- counter, so the resend meets its recorded bulk step and returns without
+-- inserting, leaving the two original rows and the one checkpoint.
+scenarioBulkReplay :: forall m. (MonadTime m, MonadCatch m, MonadAsync m, MonadTimer m)
+                   => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (), Int, Maybe StepRecord)
+scenarioBulkReplay fx = do
+  (source, destination) <- fx.mfFreshPair "bulk-replay"
+  sent <-
+    mfRun fx source $ \sender ->
+      sendBulk
+        sender
+        [ SendMessage destination ("one" :: Text) (Just (Topic "bulk")) Nothing,
+          SendMessage destination ("two" :: Text) (Just (Topic "bulk")) Nothing
+        ]
+  (first, second) <-
+    mfRun fx destination $ \receiver -> do
+      first <- recv receiver (Just (Topic "bulk")) (millisDuration 100)
+      second <- recv receiver (Just (Topic "bulk")) (millisDuration 100)
+      pure (first, second)
+  replayed <-
+    mfFreshRun fx source $ \replaySender ->
+      sendBulk
+        replaySender
+        [ SendMessage destination ("one" :: Text) (Just (Topic "bulk")) Nothing,
+          SendMessage destination ("two" :: Text) (Just (Topic "bulk")) Nothing
+        ]
+  total <- fx.mfNotifyCount destination
+  checkpoint <- fx.mfCheckStep source sendBulkStepName 0
+  pure (sent, first, second, replayed, total, checkpoint)
+
+checkBulkReplay :: (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (), Int, Maybe StepRecord) -> Either String ()
+checkBulkReplay (sent, first, second, replayed, total, checkpoint) = do
+  unless (sent == Right ()) $ Left ("expected the batch to send, got: " <> show sent)
+  unless (first == Right (Just "one")) $ Left ("expected one first, got: " <> show first)
+  unless (second == Right (Just "two")) $ Left ("expected two second, got: " <> show second)
+  unless (replayed == Right ()) $ Left ("expected the replayed batch to succeed without resending, got: " <> show replayed)
+  unless (total == 2) $ Left ("expected two notification rows after the replay, got: " <> show total)
+  case checkpoint of
+    Just _ -> pure ()
+    Nothing -> Left "expected the batch to checkpoint once"

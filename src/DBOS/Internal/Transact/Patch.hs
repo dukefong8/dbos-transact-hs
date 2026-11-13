@@ -37,7 +37,7 @@ import DBOS.Internal.Prelude
 import DBOS.Internal.SystemDB.Class qualified as SystemDB
 import DBOS.Internal.SystemDB.Types (Outcome (..), StepTiming (..), WorkflowId (..), patchMarkerName, timestampNow)
 import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere)
-import DBOS.Internal.Transact.Context (WorkflowCtx (wctxTracer), claimStepId, insideAStep, ownerToken, peekStepId, stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.Internal.Transact.Context (WorkflowCtx (wctxTracer), claimStepId, driveScope, insideAStep, ownerToken, peekStepId, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Internal.Transact.Error qualified as TransactError
 import DBOS.Internal.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import System.Log.FastLogger (ToLogStr (..))
@@ -89,22 +89,22 @@ data Found
 -- | A patch built at its position and not yet resolved: the id is peeked at
 -- the call so a replay rebuilds the same slot, and the read-claim-write
 -- runs when the pending value is awaited or raced.
-pendingPatch :: (MonadSTM m, MonadTime m) => WorkflowCtx exec m -> Text -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) Bool))
+pendingPatch :: (MonadSTM m, MonadTime m, MonadThread m) => WorkflowCtx exec m -> Text -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) Bool))
 pendingPatch wctx name = pendingPatchWith wctx "patch" name Write
 
 -- | A deprecation built at its position and not yet resolved. Honours
 -- recorded markers without recording new ones.
-pendingDeprecatePatch :: (MonadSTM m, MonadTime m) => WorkflowCtx exec m -> Text -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) Bool))
+pendingDeprecatePatch :: (MonadSTM m, MonadTime m, MonadThread m) => WorkflowCtx exec m -> Text -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) Bool))
 pendingDeprecatePatch wctx name = pendingPatchWith wctx "deprecate_patch" name Honour
 
 -- | 'pendingPatch' now: build and resolve in one call.
-patchStep :: (MonadSTM m, MonadTime m) => WorkflowCtx exec m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Bool)
+patchStep :: (MonadSTM m, MonadTime m, MonadThread m) => WorkflowCtx exec m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Bool)
 patchStep wctx name = do
   pending <- pendingPatch wctx name
   pending.pendingRun
 
 -- | 'pendingDeprecatePatch' now: build and resolve in one call.
-deprecatePatchStep :: (MonadSTM m, MonadTime m) => WorkflowCtx exec m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Bool)
+deprecatePatchStep :: (MonadSTM m, MonadTime m, MonadThread m) => WorkflowCtx exec m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) Bool)
 deprecatePatchStep wctx name = do
   pending <- pendingDeprecatePatch wctx name
   pending.pendingRun
@@ -113,7 +113,7 @@ deprecatePatchStep wctx name = do
 -- and peek the next position without taking it. A build inside a step body
 -- never reaches the counter: it carries no position anywhere, and the drive
 -- hands back the refusal it stored.
-pendingPatchWith :: (MonadSTM m, MonadTime m) => WorkflowCtx exec m -> Text -> Text -> Marker -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) Bool))
+pendingPatchWith :: (MonadSTM m, MonadTime m, MonadThread m) => WorkflowCtx exec m -> Text -> Text -> Marker -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) Bool))
 pendingPatchWith wctx operation name marker = do
   stepped <- insideAStep wctx
   if stepped
@@ -124,9 +124,10 @@ pendingPatchWith wctx operation name marker = do
 
 -- | Drives a placed patch: the placement check at await time, then the
 -- read-claim-write once the position is confirmed still ours.
-drivePatch :: (MonadSTM m, MonadTime m) => WorkflowCtx exec m -> Text -> Marker -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) Bool)
-drivePatch wctx name marker placement =
-  case checkHere placement (patchMarkerName name) (Just (stepCtxBoundary wctx)) of
+drivePatch :: (MonadSTM m, MonadTime m, MonadThread m) => WorkflowCtx exec m -> Text -> Marker -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) Bool)
+drivePatch wctx name marker placement = do
+  here <- driveScope wctx
+  case checkHere placement (patchMarkerName name) (Just here) of
     Left err -> pure (Left err)
     Right (DurabilityRecorded wctx' stepId') -> resolvePatch wctx' name marker stepId'
     Right DurabilityPlain ->

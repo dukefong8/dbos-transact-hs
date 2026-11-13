@@ -127,7 +127,7 @@ checkOutOfOrder obs = do
 
 -- | The two-patch body: two markers, then the step. New executions take
 -- both new paths.
-twoBody :: (MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) (Bool, Bool, Int))
+twoBody :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) (Bool, Bool, Int))
 twoBody wctx = do
   a <- patchStep wctx "first"
   b <- patchStep wctx "second"
@@ -141,7 +141,7 @@ twoBody wctx = do
     (_, Left err) -> pure (Left err)
 
 -- | The last-call body: a step, then the patch at the end.
-lastBody :: (MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+lastBody :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
 lastBody wctx = do
   a <- runStep wctx "step_one" $ \_ -> pure (1 :: Int)
   case a of
@@ -235,11 +235,11 @@ checkLastCall obs = do
     Left ("expected the replay to keep the rows, got: " <> show obs.ploSecondNames)
 
 -- | The old code: one step, no patch knowledge.
-oldBody :: (MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+oldBody :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
 oldBody wctx = runStep wctx "step_two" $ \_ -> pure (2 :: Int)
 
 -- | The code as first deployed: two steps, no patch.
-v1Body :: (MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+v1Body :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
 v1Body wctx = do
   a <- runStep wctx "step_one" $ \_ -> pure (1 :: Int)
   case a of
@@ -251,7 +251,7 @@ v1Body wctx = do
         Right m -> pure (Right (n + m))
 
 -- | The first step changed, behind a patch.
-v2Body :: (MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+v2Body :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
 v2Body wctx = do
   patched <- patchStep wctx "v2"
   case patched of
@@ -268,7 +268,7 @@ v2Body wctx = do
 
 -- | The first step changed again, behind a second patch tested before
 -- the first.
-v3Body :: (MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+v3Body :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
 v3Body wctx = do
   first <- patchStep wctx "v3"
   a <- case first of
@@ -291,7 +291,7 @@ v3Body wctx = do
 -- | Only v3's code is left, and its patch is deprecated. Returns whether
 -- the deprecation held with the answer, since a silent False would still
 -- sum to four with no markers.
-v4Body :: (MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) (Bool, Int))
+v4Body :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) (Bool, Int))
 v4Body wctx = do
   deprecated <- deprecatePatchStep wctx "v3"
   case deprecated of
@@ -307,7 +307,7 @@ v4Body wctx = do
             Right m -> pure (Right (held, n + m))
 
 -- | The deprecated patch is gone: two steps, no patches.
-v5Body :: (MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+v5Body :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
 v5Body wctx = do
   a <- runStep wctx "step_two" $ \_ -> pure (2 :: Int)
   case a of
@@ -320,7 +320,7 @@ v5Body wctx = do
 
 -- | The deprecated patch meeting old code: honoured past the marker
 -- search, then its first step meets the old history.
-deprecatedBody :: (MonadSTM m, MonadTime m, MonadCatch m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
+deprecatedBody :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)
 deprecatedBody wctx = do
   deprecated <- deprecatePatchStep wctx "v2"
   case deprecated of
@@ -338,7 +338,7 @@ deprecatedBody wctx = do
 -- | Code that no longer knows a marker meets the execution that took it:
 -- the old step fails against the marker row. Both planted halves in one
 -- twin, mirroring the oracle's two halves.
-scenarioOldMeetsMarker :: (MonadSTM m, MonadTime m, MonadCatch m) => PatchFixture m -> m (Either (Error EngineOnly) Int, Either (Error EngineOnly) Int)
+scenarioOldMeetsMarker :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => PatchFixture m -> m (Either (Error EngineOnly) Int, Either (Error EngineOnly) Int)
 scenarioOldMeetsMarker fx = do
   let PatchFixture {pfRunBody = runBody} = fx
   firstWid <- fx.pfFreshWorkflowId
@@ -368,7 +368,7 @@ checkOldMeetsMarker (first, second) = do
 -- history planted, v2 body runs the old branch to three. Mirrors Rust
 -- @an_execution_recovered_under_patched_code_takes_the_old_path@ without
 -- its crash machinery, which the recovery suite covers.
-scenarioRecoveredTakesOldPath :: (MonadSTM m, MonadTime m, MonadCatch m) => PatchFixture m -> m (Either (Error EngineOnly) Int, [Maybe Text])
+scenarioRecoveredTakesOldPath :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => PatchFixture m -> m (Either (Error EngineOnly) Int, [Maybe Text])
 scenarioRecoveredTakesOldPath fx = do
   let PatchFixture {pfRunBody = runBody} = fx
   wid <- fx.pfFreshWorkflowId
@@ -391,7 +391,7 @@ checkRecoveredTakesOldPath (outcome, names) = do
 -- 1 can be recorded while 0 is not. A patch at 0 takes the old path
 -- there, and records nothing in the gap. Mirrors Rust
 -- @a_patch_in_a_gap_below_a_recorded_step_takes_the_old_path@.
-scenarioPlantedGap :: forall m. (MonadSTM m, MonadTime m) => PatchFixture m -> m (Either (Error EngineOnly) Int, [Maybe Text])
+scenarioPlantedGap :: forall m. (MonadSTM m, MonadTime m, MonadThread m) => PatchFixture m -> m (Either (Error EngineOnly) Int, [Maybe Text])
 scenarioPlantedGap fx = do
   let PatchFixture {pfRunBody = runBody} = fx
   wid <- fx.pfFreshWorkflowId
@@ -421,7 +421,7 @@ checkPlantedGap (outcome, names) = do
 -- | A deprecated patch meeting old code: honoured past the marker search,
 -- then its first step fails against the old history. Mirrors Rust
 -- @a_deprecated_patch_meeting_the_old_code_finds_an_unexpected_step@.
-scenarioDeprecatedOnOldHistory :: (MonadSTM m, MonadTime m, MonadCatch m) => PatchFixture m -> m (Either (Error EngineOnly) Int)
+scenarioDeprecatedOnOldHistory :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => PatchFixture m -> m (Either (Error EngineOnly) Int)
 scenarioDeprecatedOnOldHistory fx = do
   let PatchFixture {pfRunBody = runBody} = fx
   wid <- fx.pfFreshWorkflowId
@@ -444,7 +444,7 @@ checkDeprecatedOnOldHistory result = case result of
 -- @a_patch_is_added_nested_deprecated_and_removed@ without its fork tails:
 -- forks copy step rows name-blind on both backends, so the sequential
 -- replays here plus the fork suites cover them.
-scenarioProgression :: (MonadSTM m, MonadTime m, MonadCatch m) => PatchFixture m -> m (Int, Int, Int, Int, Int, Int, (Bool, Int), Int)
+scenarioProgression :: (MonadSTM m, MonadTime m, MonadMask m, MonadThread m) => PatchFixture m -> m (Int, Int, Int, Int, Int, Int, (Bool, Int), Int)
 scenarioProgression fx = do
   let PatchFixture {pfRunBody = runBody} = fx
   v1Wid <- fx.pfFreshWorkflowId

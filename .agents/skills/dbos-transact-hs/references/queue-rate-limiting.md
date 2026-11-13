@@ -10,7 +10,7 @@ tags: queue, rate-limit
 Set `rateLimit` (and `partitionRateLimit` for partitioned queues) on `QueueOptions` to bound starts per second. Limits are enforced at dequeue; excess workflows wait for the next window.
 
 ```haskell
-q <- registerQueue dbos "email" (defaultQueueOptions { rateLimit = Just (perSecond 10) }) NeverUpdate
+q <- registerQueue dbos "email" (defaultQueueOptions { rateLimit = Just (RateLimit { rateLimitLimit = 10, rateLimitPeriod = secondsDuration 1 }) }) NeverUpdate
 ```
 
 Adjust at runtime with `updateQueue`. Rate limits compose with `workerConcurrency`: both must allow a start.

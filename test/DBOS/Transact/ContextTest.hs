@@ -247,7 +247,7 @@ scenarioDenseIds fx = do
   third <- nextStepId ctx
   pure (first, second, third)
 
-scenarioAttemptScope :: (MonadSTM m, MonadCatch m)
+scenarioAttemptScope :: (MonadSTM m, MonadMask m, MonadThread m)
                      => Fixture m -> m (Maybe Int, Maybe Int, Maybe Int)
 scenarioAttemptScope fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
@@ -257,7 +257,7 @@ scenarioAttemptScope fx = do
   let after = stepId (stepCtxBoundary ctx)
   pure (outside, inner, after)
 
-scenarioScopeStatus :: (MonadSTM m, MonadCatch m)
+scenarioScopeStatus :: (MonadSTM m, MonadMask m, MonadThread m)
                     => Fixture m -> m (Maybe StepStatus, Bool, (Maybe StepStatus, Maybe Int, Bool))
 scenarioScopeStatus fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
@@ -289,7 +289,7 @@ scenarioTokenFire fx = do
   fired <- tokenCancelled token
   pure (quiet, fired)
 
-scenarioAttemptTokens :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Bool, Bool)
+scenarioAttemptTokens :: (MonadSTM m, MonadMask m, MonadThread m) => Fixture m -> m (Bool, Bool)
 scenarioAttemptTokens fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
   firstMarker <- nextWorkflowMarker ctx
@@ -373,7 +373,7 @@ scenarioForkCounter fx = do
   second <- waitFor (takeMVar seen)
   pure (first, second)
 
-scenarioNestedScope :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Maybe Int, Maybe Int, Bool)
+scenarioNestedScope :: (MonadSTM m, MonadMask m, MonadThread m) => Fixture m -> m (Maybe Int, Maybe Int, Bool)
 scenarioNestedScope fx = do
   ctx <- fx.fixtureMkCtx "wf-1"
   let outside = stepId (stepCtxBoundary ctx)
@@ -417,13 +417,13 @@ scenarioExecCounters fx = do
     nextStepId wctx
   pure (first, second)
 
-scenarioRaceCompletes :: (MonadAsync m, MonadCatch m) => Fixture m -> m (Maybe Text)
+scenarioRaceCompletes :: (MonadAsync m, MonadMask m) => Fixture m -> m (Maybe Text)
 scenarioRaceCompletes fx = do
   ctx <- fx.fixtureMkCtx "wf-race"
   marker <- nextWorkflowMarker ctx
   withStep ctx marker (firstStepStatus 0) $ \sctx -> raceCancel sctx (pure "done")
 
-scenarioRaceCancelled :: (MonadAsync m, MonadMVar m, MonadCatch m) => Fixture m -> m (Maybe Text)
+scenarioRaceCancelled :: (MonadAsync m, MonadMVar m, MonadMask m) => Fixture m -> m (Maybe Text)
 scenarioRaceCancelled fx = do
   ctx <- fx.fixtureMkCtx "wf-race-cancel"
   marker <- nextWorkflowMarker ctx
@@ -433,7 +433,7 @@ scenarioRaceCancelled fx = do
     -- The action never completes; the already-fired token decides it.
     raceCancel sctx (takeMVar =<< newEmptyMVar)
 
-scenarioStepView :: (MonadSTM m, MonadCatch m) => Fixture m -> m (Text, Maybe StepStatus)
+scenarioStepView :: (MonadSTM m, MonadMask m, MonadThread m) => Fixture m -> m (Text, Maybe StepStatus)
 scenarioStepView fx = do
   conn <- fx.fixtureMkConn
   let ident = fx.fixtureIdentity

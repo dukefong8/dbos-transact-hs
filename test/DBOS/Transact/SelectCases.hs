@@ -60,7 +60,7 @@ branches2 =
 -- | A fresh select claims its id and records a winner: the row carries
 -- step 0 under the select name with the winner as output, and a second
 -- pass replays the winner.
-scenarioFreshWinner :: forall m. (MonadSTM m, MonadTime m)
+scenarioFreshWinner :: forall m. (MonadSTM m, MonadTime m, MonadThread m)
                     => SelectFixture m -> m (Bool, Int, Int, Text, Maybe Text, Int)
 scenarioFreshWinner fx = do
   isFresh <- scfWith fx $ \ctx -> do
@@ -85,7 +85,7 @@ scenarioFreshWinner fx = do
 
 -- | A winner outside the branches that exist now is refused, naming this
 -- run's shape and the stale winner.
-scenarioStaleWinner :: forall m. (MonadSTM m, MonadTime m)
+scenarioStaleWinner :: forall m. (MonadSTM m, MonadTime m, MonadThread m)
                     => SelectFixture m -> m (Bool, Maybe (Int, Text, Text))
 scenarioStaleWinner fx = do
   isFresh <- scfWith fx $ \ctx -> do

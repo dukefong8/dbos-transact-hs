@@ -606,7 +606,6 @@ data InitWorkflowParams = InitWorkflowParams
     initParamExecutorId         :: Maybe Text,
     initParamAppVersion         :: Maybe Text,
     initParamAppId              :: Maybe Text,
-    initParamUpdatedAt          :: Int64,
     initParamInitialAttempts    :: Int64,
     initParamTimeoutMs          :: Maybe Int64,
     initParamDeadline           :: Maybe Int64,
@@ -677,7 +676,7 @@ initWorkflowStatement params =
        ${initParamQueueName}, ${initParamDeduplicationId}, ${initParamPriority}, ${initParamQueuePartitionKey}, case when ${initParamDelayMs}::bigint is null then null when ${initParamDebounceTimeoutMs}::bigint is null then case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end else least(case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDelayMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDelayMs}::bigint) end, case when (extract(epoch from now()) * 1000)::bigint > 9223372036854775807 - (${initParamDebounceTimeoutMs}::bigint) then 9223372036854775807 else (extract(epoch from now()) * 1000)::bigint + (${initParamDebounceTimeoutMs}::bigint) end) end,
        ${initParamAuthenticatedUser}, ${initParamAssumedRole}, ${initParamAuthenticatedRoles},
        ${initParamExecutorId}, ${initParamAppVersion}, ${initParamAppId},
-       (extract(epoch from now()) * 1000)::bigint, ${initParamUpdatedAt}, ${initParamInitialAttempts},
+       (extract(epoch from now()) * 1000)::bigint, (extract(epoch from now()) * 1000)::bigint, ${initParamInitialAttempts},
        ${initParamTimeoutMs},
        coalesce(${initParamDeadline}, case when ${initParamStatus} = 'PENDING'
            then case when ${initParamTimeoutMs}::bigint is null then null
@@ -1285,7 +1284,8 @@ data RewindParams = RewindParams
     rewindAppVersion    :: Maybe Text,
     rewindCaller        :: Maybe StepCaller,
     rewindStartedAt     :: Int64,
-    rewindCompletedAt   :: Int64
+    rewindCompletedAt   :: Int64,
+    rewindAppName       :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -1516,7 +1516,7 @@ recordCallerOutcome executorId params outcome = case params.rewindCaller of
                   recordStepSerialization = Just portableJsonSerialization,
                   recordStepStartedAt = Just params.rewindStartedAt,
                   recordStepCompletedAt = Just params.rewindCompletedAt,
-                  recordStepAppName = Nothing,
+                  recordStepAppName = params.rewindAppName,
                   recordStepChildWorkflowId = Nothing
                 }
           )
@@ -2045,7 +2045,8 @@ data RecvParams = RecvParams
     recvStepId      :: Int,
     recvTopic       :: Text,
     recvStartedAt   :: Int64,
-    recvCompletedAt :: Int64
+    recvCompletedAt :: Int64,
+    recvAppName     :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -2121,7 +2122,7 @@ recvStepRecord params taken =
       recordStepSerialization = taken >>= (.encodedRawSerialization),
       recordStepStartedAt = Just params.recvStartedAt,
       recordStepCompletedAt = Just params.recvCompletedAt,
-      recordStepAppName = Nothing,
+      recordStepAppName = params.recvAppName,
       recordStepChildWorkflowId = Nothing
     }
 
@@ -2172,7 +2173,8 @@ data SendStep = SendStep
     sendStepStepId      :: Int,
     sendStepName        :: Text,
     sendStepStartedAt   :: Int64,
-    sendStepCompletedAt :: Int64
+    sendStepCompletedAt :: Int64,
+    sendStepAppName     :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -2220,7 +2222,7 @@ sendStepRecord step =
       recordStepSerialization = Just portableJsonSerialization,
       recordStepStartedAt = Just step.sendStepStartedAt,
       recordStepCompletedAt = Just step.sendStepCompletedAt,
-      recordStepAppName = Nothing,
+      recordStepAppName = step.sendStepAppName,
       recordStepChildWorkflowId = Nothing
     }
 
@@ -2255,7 +2257,8 @@ data SetEventParams = SetEventParams
     setEventValue         :: Text,
     setEventSerialization :: Maybe Text,
     setEventStartedAt     :: Int64,
-    setEventCompletedAt   :: Int64
+    setEventCompletedAt   :: Int64,
+    setEventAppName       :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -2314,7 +2317,7 @@ setEventStepRecord params =
       recordStepSerialization = Just portableJsonSerialization,
       recordStepStartedAt = Just params.setEventStartedAt,
       recordStepCompletedAt = Just params.setEventCompletedAt,
-      recordStepAppName = Nothing,
+      recordStepAppName = params.setEventAppName,
       recordStepChildWorkflowId = Nothing
     }
 
@@ -2346,7 +2349,8 @@ data GetEventRecordParams = GetEventRecordParams
     getEventRecordOutput        :: Maybe Text,
     getEventRecordSerialization :: Maybe Text,
     getEventRecordStartedAt     :: Int64,
-    getEventRecordCompletedAt   :: Int64
+    getEventRecordCompletedAt   :: Int64,
+    getEventRecordAppName       :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -2379,7 +2383,7 @@ getEventStepRecord params =
       recordStepSerialization = params.getEventRecordSerialization,
       recordStepStartedAt = Just params.getEventRecordStartedAt,
       recordStepCompletedAt = Just params.getEventRecordCompletedAt,
-      recordStepAppName = Nothing,
+      recordStepAppName = params.getEventRecordAppName,
       recordStepChildWorkflowId = Nothing
     }
 
@@ -2410,13 +2414,13 @@ setWorkflowDelaySession workflowId delayMs delayUntil =
 -- guard is what makes this a return rather than an enqueue, since a workflow
 -- that never came from a queue has none to go back to. Mirrors
 -- @clear_queue_assignment@.
-clearQueueAssignmentSession :: Text -> Int64 -> Session.Session Int64
-clearQueueAssignmentSession workflowId now =
+clearQueueAssignmentSession :: Text -> Session.Session Int64
+clearQueueAssignmentSession workflowId =
   sqlExecTypedSession [typedSql|
     update dbos.workflow_status
     set started_at_epoch_ms = null,
       status = 'ENQUEUED',
-      updated_at = ${now}
+      updated_at = (extract(epoch from now()) * 1000)::bigint
     where workflow_uuid = ${workflowId} and queue_name is not null and status = 'PENDING'
   |]
 

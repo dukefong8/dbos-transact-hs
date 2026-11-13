@@ -14,6 +14,6 @@ _ <- send wctx destination (Just (Topic "approval")) Nothing (encodeWorkflowValu
 m <- recv wctx (Just (Topic "approval")) (secondsDuration 60)
 ```
 
-Bulk variants: `sendBulk` / `sendBulkWith` with `SendBulkOptions`. From outside use `sendWorkflowMessage` / `sendWorkflowMessages` (executor) or `clientSendMessage(s)` (client). `IdempotencyKey` dedups sends.
+Bulk variants: `sendBulk` / `sendBulkWith` with `SendOptions`. From outside use `sendWorkflowMessage` / `sendWorkflowMessages` (executor) or `clientSendMessage(s)` (client). `IdempotencyKey` dedups sends.
 
-No streaming in this port: TS `comm-streaming` (`readStream`) has no Haskell equivalent.
+Streams are implemented: `readStream` / `readStreamFrom` / `writeStream` / `closeStream` over `StreamReader` with `ReadStreamOptions`.

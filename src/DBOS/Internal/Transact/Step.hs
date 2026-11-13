@@ -32,7 +32,7 @@ import DBOS.Internal.SystemDB.Types (AwaitedOutcome (..), Duration, Outcome (..)
 import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
 import DBOS.Internal.Transact.Config (Serializer (..), serializerName)
 import DBOS.Internal.Transact.Connection (Connection (..))
-import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, stepCtxBoundary, stepStatusAt, trySync, withStep, withSystemDB, workflowId)
+import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, driveScope, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, stepCtxBoundary, stepStatusAt, trySync, withInheritedStepScope, withStep, withSystemDB, workflowId)
 import DBOS.Internal.Transact.Error qualified as TransactError
 import DBOS.Internal.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Internal.Transact.Serialization (CodecError, SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
@@ -174,7 +174,7 @@ instance ToLogStr WorkflowEvent where
 -- Run and replay announcements go through the context's tracer, so the
 -- same call sites log to FastLogger in production and to the io-sim trace
 -- in simulations with no logger argument at all.
-runStep :: forall value e m exec. (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m)
+runStep :: forall value e m exec. (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadThread m, MonadMask m)
         => WorkflowCtx exec m -> Text -> (StepCtx exec m -> m value) -> m (Either (TransactError.Error e) value)
 runStep wctx name body = do
   stepped <- insideAStep wctx
@@ -272,12 +272,12 @@ runNestedStep sctx name body = do
 -- replay refuses again exactly as the first run did; a payload this build
 -- cannot read keeps the previous generic failure. Mirrors the oracle,
 -- where the recorded error deserializes back into the error the step
--- reported.
+-- reported. A row carrying a child workflow id is decoded the same way:
+-- the oracle ignores it and reads the outcome, and the child-start and
+-- await paths adopt such rows through their own checks.
 replayStep :: (FromJSON value, FromJSON e) => Text -> Int -> StepRecord -> Either (TransactError.Error e) value
 replayStep name _stepId record =
-  case record.stepRecordChildWorkflowId of
-    Just (WorkflowId childText) -> Left (TransactError.StepFailed name ("unexpected child workflow checkpoint: " <> childText))
-    Nothing -> case record.stepRecordError of
+  case record.stepRecordError of
       Just errorText -> case record.stepRecordSerialization of
         -- A tag this build cannot read is the oracle's
         -- UnknownSerialization, not a text decode failure.
@@ -372,7 +372,7 @@ stepBackoff options failures =
 --
 -- Leaf rule, as in 'runStep': inside a step body the call runs
 -- plainly once, uncheckpointed.
-runStepWith :: (FromJSON value, FromJSON e, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+runStepWith :: (FromJSON value, FromJSON e, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
             => StepOptions e ->
                WorkflowCtx exec m ->
                Text ->
@@ -387,7 +387,7 @@ runStepWith options wctx name body =
 -- Mirrors Rust @PendingStep@ for steps; a pending value that is dropped
 -- unconsumed still spent its id, which is what keeps a replay's numbering
 -- stable.
-pendingStepWith :: (FromJSON value, FromJSON e, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+pendingStepWith :: (FromJSON value, FromJSON e, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
                 => StepOptions e ->
                    WorkflowCtx exec m ->
                    Text ->
@@ -403,7 +403,7 @@ pendingStepWith options wctx name body = do
       }
 
 -- | 'pendingStepWith' with the default options: a plain step.
-pendingStep :: (FromJSON value, FromJSON e, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+pendingStep :: (FromJSON value, FromJSON e, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
             => WorkflowCtx exec m ->
                Text ->
                (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
@@ -413,15 +413,16 @@ pendingStep = pendingStepWith stepOptionsDefault
 -- | Drives a placed call: check where it stands, replay its recorded row,
 -- or run and record it. Building and driving are separate so a race can
 -- build every branch — claiming every id — before any branch runs.
-driveStepWith :: (FromJSON value, FromJSON e, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+driveStepWith :: (FromJSON value, FromJSON e, ToJSON value, ToJSON e, Show e, MonadDelay m, MonadTime m, MonadAsync m, MonadMask m)
               => StepOptions e ->
                  WorkflowCtx exec m ->
                  Text ->
                  StepPlacement exec m ->
                  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
                  m (Either (TransactError.Error e) value)
-driveStepWith options wctx name placement body =
-  case checkHere placement name (Just (stepCtxBoundary wctx)) of
+driveStepWith options wctx name placement body = do
+  here <- driveScope wctx
+  case checkHere placement name (Just here) of
     Left err -> pure (Left err)
     Right DurabilityPlain -> do
       let sctx = case placement of
@@ -560,7 +561,7 @@ driveStepWith options wctx name placement body =
                           Just (Left exn) -> cancel observer >> throwIO exn
                           _ -> timedOut task limit >>= \outcome -> cancel observer >> pure outcome
                   withoutObserver limit = do
-                    task <- async (body sctx)
+                    task <- async (withInheritedStepScope wctx' sctx (body sctx))
                     finished <- race (wait task) (threadDelay (durationMicros limit))
                     case finished of
                       Left value -> pure value
@@ -576,7 +577,7 @@ driveStepWith options wctx name placement body =
                           _ -> timedOut task limit
               if options.preemptible
                 then do
-                  task <- async (body sctx)
+                  task <- async (withInheritedStepScope wctx' sctx (body sctx))
                   observer <- async observeCancellation
                   case options.timeout of
                     Nothing -> withObserver task observer

@@ -26,6 +26,7 @@ import DBOS.Transact.MessageCases
     checkBulkEmpty,
     checkBatchNotifyUnique,
     checkBulkSend,
+    checkBulkReplay,
     checkCapturedRecv,
     checkCapturedSend,
     checkFanOut,
@@ -42,6 +43,7 @@ import DBOS.Transact.MessageCases
     scenarioBulkEmpty,
     scenarioBatchNotifyUnique,
     scenarioBulkSend,
+    scenarioBulkReplay,
     scenarioCapturedRecv,
     scenarioCapturedSend,
     scenarioFanOut,
@@ -188,5 +190,6 @@ tests =
             leaf "a recv through a captured parent is refused" scenarioCapturedRecv checkCapturedRecv,
             leaf "a batch delivers every message and checkpoints once" scenarioBulkSend checkBulkSend,
             leaf "an empty bulk send still takes its step" scenarioBulkEmpty checkBulkEmpty,
+            leaf "a replayed batch sends nothing again" scenarioBulkReplay checkBulkReplay,
             leaf "one batch mints a distinct notification id per delivery" scenarioBatchNotifyUnique checkBatchNotifyUnique
           ]

@@ -21,11 +21,12 @@ It is plain JSON, not SuperJSON and not Rust serde:
 - **Reads dispatch on the row's tag**: NULL, `""`, and legacy `rust_serde`
   decode as native plain JSON; an unknown tag is refused, never guessed.
 
-The facade re-exports `encodeWorkflowInput`, `encodeWorkflowValue`,
-`decodeWorkflowValue`, and `CodecError` (ADR-0038 addendum);
+The facade re-exports `encodeWorkflowInput`, `decodeWorkflowInput`,
+`encodeWorkflowValue`, `decodeWorkflowValue`,
+and `CodecError` (ADR-0038 addendum);
 `SerializedWorkflowValue` is the wire type those functions exchange. The
 lower-level `DBOS.Transact.Serialization` module stays internal, and its
-extra helpers (`decodeWorkflowInput`, `encodeUnit`) are not part of the app
+extra helper (`encodeUnit`) is not part of the app
 surface:
 
 ```haskell

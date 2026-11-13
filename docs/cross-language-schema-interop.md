@@ -154,14 +154,38 @@ Inside a workflow, `listWorkflowStepsInWorkflow` checkpoints under
 flag, so its own replay is exact. This is a shape divergence with the other
 SDKs, whose checkpoint for that step is a bare row array: a mixed-version
 replay of this one step is not shape-compatible (intra-port replay is).
+`listWorkflowsInWorkflow` checkpoints `[WorkflowRecord]` the same way.
+
+The recorded row JSON itself diverges from the oracle's serde shape, in
+three places that all ride the shared `ToJSON`/`FromJSON` instances
+(`Types.hs`):
+
+- Keys are the Haskell record names (`workflowRecordId`,
+  `stepRecordStepName`, …); the oracle serializes snake_case
+  (`workflow_id`, `step_name`, …).
+- `Timestamp` renders as ISO-8601 text; the oracle serializes the epoch
+  millisecond integer.
+- `Duration` renders as integer milliseconds; the oracle serializes
+  std's `Duration` mapping.
+
+Intra-port replay is exact — the same instances read back what they
+write, and unknown keys fail loud rather than decoding silently — but a
+checkpoint written by one SDK cannot be replayed by another. Changing the
+wire shape would break every existing Haskell checkpoint without a dual
+read, so the port keeps its shape and documents the boundary here.
 
 ## Known divergences
 
-Inert for this port (verified: zero references in `src/` and `test/`):
+**Known divergences**
 
-- `workflow_status.creator_xid` — Python/TS workflow-id-reuse policy.
-- `notifications.consumed_by_function_id` — Python/TS rewind bookkeeping; the
-  port sets `consumed` only.
+- `workflow_status.creator_xid` — the creator token every execution presents
+  on fenced writes (`checkOwnerTx`, init conflict adoption, datasource
+  completion clear). Load-bearing, not bookkeeping: a row whose creator
+  differs from the calling token is a foreign execution and is refused.
+- `notifications.consumed_by_function_id` — written by the port's take
+  alongside `consumed` (the consuming step id), and read by the
+  rewind delete (a message consumed below the cut stays consumed on
+  replay). Python/TS use the same column for rewind bookkeeping.
 - Non-finite floats follow aeson, not Rust (ADR-0039): NaN is stored as
   `null` and ±Infinity as the strings `"+inf"`/`"-inf"`; Rust's branch stores
   `"NaN"`/`"Infinity"`/`"-Infinity"`. A required `Double` reads `null` back as
@@ -171,8 +195,20 @@ Inert for this port (verified: zero references in `src/` and `test/`):
   everywhere (ADR-0038). The port reads both, so it reads Rust's native rows
   and Python/TypeScript portable rows.
 - LISTEN/NOTIFY trigger gating.
-- `transaction_completion` / `datasource_outputs` — datasource bookkeeping,
-  outside the system schema.
+- Transactional-step checkpoint tables differ by SDK, and the Haskell
+  column set is a superset of TypeScript's. TypeScript records
+  `transaction_completion (workflow_id, function_num, output[, error])`
+  with no step name; Python records a different table altogether,
+  `datasource_outputs (workflow_id, step_id, output, error,
+  serialization, created_at)`; this port records `transaction_completion
+  (workflow_id, step_name, function_num, output, error)`, where
+  `step_name` is Haskell-only (ADR-0021) and is checked on replay so a
+  reordered or renamed transaction is refused rather than replayed.
+  Do not point a Haskell app at a schema another SDK provisioned:
+  every checkpoint insert binds `step_name` and fails with
+  undefined-column `42703` where the column is missing. The port's
+  `createSchemaSession` migration adds the column where it is absent,
+  and the demo schemas document this at the table.
 
 **Migrations 121–125 (shared with the Rust corpus):**
 
@@ -183,9 +219,9 @@ Inert for this port (verified: zero references in `src/` and `test/`):
   tables (`workflow_input` / `workflow_output`) arrived earlier and are
   shared too: the port creates, writes, and reads them exactly as the other
   SDKs do (ported 2026-10-03 from Rust #77, itself verbatim from Python).
-- The port does not reference `creator_xid` or `consumed_by_function_id`
-  (Python/TS bookkeeping, listed under the divergences above), but its
-  corpus now *creates* both columns.
+- The port reads and writes both `creator_xid` (creator-token fencing) and
+  `consumed_by_function_id` (take records the consuming step; rewind keeps
+  below-cut rows consumed), and its corpus creates both columns.
 - A shared database may be at **125** or ahead. The port's corpus ceiling is
   125, it never migrates, and launch accepts a database **ahead** of that
   ceiling (matching Rust's runner tolerance); a database behind 125 is

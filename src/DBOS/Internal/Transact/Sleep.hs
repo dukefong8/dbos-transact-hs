@@ -27,6 +27,7 @@ import DBOS.Internal.Transact.Checkpoint
   )
 import DBOS.Internal.Transact.Context
   ( WorkflowCtx (wctxTracer),
+    driveScope,
     ownerToken,
     stepCtxBoundary,
     withSystemDB,
@@ -57,7 +58,7 @@ instance LogEvent SleepEvent where
 instance ToLogStr SleepEvent where
   toLogStr = toLogStr . renderLine
 
-sleepStep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m)
+sleepStep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m, MonadThread m)
           => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sleepStep wctx duration =
   -- The duration is checked first, so a refusal claims no id — and only
@@ -70,7 +71,7 @@ sleepStep wctx duration =
 -- the call so a replay rebuilds the same slot, and the wait runs when the
 -- pending value is awaited or raced. The pre-check runs first for the
 -- same reason as 'sleepStep': a refused sleep moves no counter.
-pendingSleep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m)
+pendingSleep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m, MonadThread m)
              => WorkflowCtx exec m -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ())))
 pendingSleep wctx duration =
   TransactError.refusing (TransactError.refusedArgument "sleep") (durationToMs "duration" duration) $ \_ -> do
@@ -79,10 +80,11 @@ pendingSleep wctx duration =
 
 -- | Drives a placed sleep: a plain wait inside a step or outside a
 -- workflow, otherwise the recorded wake-time wait under the claimed id.
-driveSleep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m)
+driveSleep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m, MonadThread m)
            => WorkflowCtx exec m -> Duration -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-driveSleep wctx duration placement =
-  case checkHere placement sleepStepName (Just (stepCtxBoundary wctx)) of
+driveSleep wctx duration placement = do
+  here <- driveScope wctx
+  case checkHere placement sleepStepName (Just here) of
     Left err -> pure (Left err)
     Right DurabilityPlain -> do
       -- Inside a step the sleep is plain: the enclosing step's checkpoint

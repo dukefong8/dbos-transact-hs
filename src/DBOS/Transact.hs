@@ -187,7 +187,6 @@ module DBOS.Transact
     enqueueWorkflow,
     enqueueWorkflowByName,
     enqueueWorkflowByNameInWorkflow,
-    enqueueWorkflow,
 
   -- queue-management: inspect and change queues at runtime
     queue,
@@ -203,6 +202,7 @@ module DBOS.Transact
     QueueRequest (..),
     DuplicationPolicy (..),
     queueRequestNew,
+    validateEnqueue,
     WorkflowDelay (..),
     setWorkflowDelay,
     setWorkflowDelayInWorkflow,
@@ -345,6 +345,20 @@ module DBOS.Transact
     logInfo,
     logWarn,
     logError,
+
+  -- * Deferred (not yet ported): named here so the absence is documented
+  -- where an app author would look for it. Schedules are deferred
+  -- entirely (ADR-0036): no @Schedule*@ surface exists yet. The send and
+  -- event paths take no serialization option: the port writes
+  -- @portable_json@ everywhere and reads both native and portable rows
+  -- (ADR-0038), so a @SendOptions.serialization@ or @SetEventOptions@
+  -- would have exactly one legal value. The pending surface is partial:
+  -- steps, sleeps, set events, instance-bound reads, and awaits all build
+  -- pending values (@pendingStep@, @pendingSleep@, @pendingSetEvent@,
+  -- @pendingGetEvent@, @pendingAwait@, raced with @selectStep@ and polled
+  -- with @awaitChild@), but there is no pending send or recv, no
+  -- instance-free pending @getEvent@, and no join combinator — the eager
+  -- calls checkpoint the same rows.
   )
 where
 
@@ -373,6 +387,6 @@ import DBOS.Internal.Transact.Sleep (pendingSleep, sleepPlain, sleepStep)
 import DBOS.Internal.Transact.Step (StepError (..), StepOptions (..), pendingStep, pendingStepWith, runNestedStep, runStep, runStepWith, stepOptionsDefault)
 import DBOS.Internal.Transact.Stream (ReadStreamOptions (..), StreamReader, closeStream, defaultReadStreamOptions, foldVectorStream, readStream, readStreamFrom, toVectorStream, writeStream)
 import DBOS.Internal.Transact.Wait (joinWorkflows, selectWorkflow, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
-import DBOS.Internal.Transact.Workflow (DuplicationPolicy (..), QueueRequest (..), RunOptions (..), StartOptions (..), Timeout (..), WorkflowRef, enqueueWorkflowByNameInWorkflow, queueRequestNew, runOptionsDefault, startChildWorkflow, startOptionsDefault)
+import DBOS.Internal.Transact.Workflow (DuplicationPolicy (..), QueueRequest (..), RunOptions (..), StartOptions (..), Timeout (..), WorkflowRef, enqueueWorkflowByNameInWorkflow, queueRequestNew, runOptionsDefault, startChildWorkflow, startOptionsDefault, validateEnqueue)
 
 import DBOS.Internal.SystemDB.Types (AppScope (..), ApplicationVersion (..), AttributeUpdate (..), Change (..), Duration, ForkOptions (..), ForkPoint (..), IdempotencyKey (..), IdleTransactionTimeout (..), PollingConcurrency (PollingDefault, PollingUnlimited), RateLimit (..), RewindOptions (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), Timestamp, Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), QualifiedWorkflowName, WorkflowName (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultRewindOptions, defaultWorkflowFilter, isTerminal, instanceQualifiedWorkflowName, methodQualifiedWorkflowName, millisDuration, newQualifiedWorkflowName, pollingAtMost, secondsDuration, timestampFromEpochMs, timestampToEpochMs, workflowStatusText)

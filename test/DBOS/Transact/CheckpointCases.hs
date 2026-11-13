@@ -115,24 +115,24 @@ scenarioBoundaryRecords fx = withCtxOf fx $ \ctx -> do
     )
 
 -- | A call built through a captured parent while a step body runs is plain.
-scenarioCapturedParent :: forall m. (MonadSTM m, MonadCatch m) => CheckpointFixture m -> m Bool
+scenarioCapturedParent :: forall m. (MonadSTM m, MonadMask m, MonadThread m) => CheckpointFixture m -> m Bool
 scenarioCapturedParent fx = withCtxOf fx $ \ctx -> do
   marker <- nextWorkflowMarker ctx
-  withStep ctx marker (firstStepStatus 0) $ \_sctx -> do
+  withStep ctx marker (firstStepStatus 0) $ \sctx -> do
     placement <- placeCall ctx
-    pure (placement == PlacementInsideStep (stepCtxBoundary ctx))
+    pure (placement == PlacementInsideStep sctx)
 
 -- | A taken placement through a captured parent under another connection
 -- is plain.
-scenarioTakenOther :: forall m. (MonadSTM m, MonadCatch m) => CheckpointFixture m -> m Bool
+scenarioTakenOther :: forall m. (MonadSTM m, MonadMask m, MonadThread m) => CheckpointFixture m -> m Bool
 scenarioTakenOther fx = withCtxOf fx $ \ctx -> do
   marker <- nextWorkflowMarker ctx
-  withStep ctx marker (firstStepStatus 0) $ \_sctx -> do
+  withStep ctx marker (firstStepStatus 0) $ \sctx -> do
     placed <- takenOther fx ctx
-    pure (placed == Right (PlacementInsideStep (stepCtxBoundary ctx)))
+    pure (placed == Right (PlacementInsideStep sctx))
 
 -- | Inside a step body the call is plain by the leaf rule.
-scenarioLeafRule :: forall m. (MonadSTM m, MonadCatch m) => CheckpointFixture m -> m (Bool, Bool)
+scenarioLeafRule :: forall m. (MonadSTM m, MonadMask m, MonadThread m) => CheckpointFixture m -> m (Bool, Bool)
 scenarioLeafRule fx = withCtxOf fx $ \ctx -> do
   marker <- nextWorkflowMarker ctx
   withStep ctx marker (firstStepStatus 3) $ \sctx -> do
@@ -148,7 +148,7 @@ scenarioRecordedDurable fx = withCtxOf fx $ \ctx -> do
   pure (isDurableRecorded ctx 0 (checkHere (Recorded ctx 0) "checkout" (Just (stepCtxBoundary ctx))))
 
 -- | A recorded call carried into a step is refused.
-scenarioRecordedRefused :: forall m. (MonadSTM m, MonadCatch m) => CheckpointFixture m -> m Bool
+scenarioRecordedRefused :: forall m. (MonadSTM m, MonadMask m, MonadThread m) => CheckpointFixture m -> m Bool
 scenarioRecordedRefused fx = withCtxOf fx $ \ctx -> do
   marker <- nextWorkflowMarker ctx
   withStep ctx marker (firstStepStatus 0) $ \sctx ->
@@ -164,14 +164,14 @@ scenarioClientPlain fx = withCtxOf fx $ \ctx -> do
     )
 
 -- | An in-step call polled in its own body stays plain.
-scenarioInStepOwnBody :: forall m. (MonadSTM m, MonadCatch m) => CheckpointFixture m -> m Bool
+scenarioInStepOwnBody :: forall m. (MonadSTM m, MonadMask m, MonadThread m) => CheckpointFixture m -> m Bool
 scenarioInStepOwnBody fx = withCtxOf fx $ \ctx -> do
   marker <- nextWorkflowMarker ctx
   withStep ctx marker (firstStepStatus 3) $ \sctx ->
     pure (isDurabilityPlain (checkHere (PlacementInsideStep sctx) "checkout" (Just sctx)))
 
 -- | An in-step call carried to a sibling body is refused.
-scenarioSiblingRefused :: forall m. (MonadSTM m, MonadCatch m) => CheckpointFixture m -> m Bool
+scenarioSiblingRefused :: forall m. (MonadSTM m, MonadMask m, MonadThread m) => CheckpointFixture m -> m Bool
 scenarioSiblingRefused fx = withCtxOf fx $ \ctx -> do
   firstMarker <- nextWorkflowMarker ctx
   secondMarker <- nextWorkflowMarker ctx

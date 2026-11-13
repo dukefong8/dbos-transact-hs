@@ -204,7 +204,7 @@ protoConfig = TransactionConfig {txName = Just "proto_step", txIsolation = Just 
 
 -- | Python @test_sync_ds_records_and_replays@: a fresh execution replays
 -- the recorded output without re-running the body.
-scenarioCommitReplay :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioCommitReplay :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                      => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
 scenarioCommitReplay fx = do
   fake <- fx.dsFixtureMkDs
@@ -217,7 +217,7 @@ scenarioCommitReplay fx = do
 -- | Python @test_sync_ds_records_and_replays_errors@ (replay half): a
 -- recorded failure decodes back to itself. The record half follows once
 -- the body-failure channel lands.
-scenarioErrorReplays :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioErrorReplays :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                      => DsFixture m -> m (Either (Error Text) Text)
 scenarioErrorReplays fx = do
   fake <- fx.dsFixtureMkDs
@@ -226,7 +226,7 @@ scenarioErrorReplays fx = do
 
 -- | Python @test_sync_ds_retries_on_serialization_error@: two retriable
 -- failures, then success, with the injections consumed.
-scenarioRetryThenSuccess :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioRetryThenSuccess :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                          => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
 scenarioRetryThenSuccess fx = do
   fake <- fx.dsFixtureMkDs
@@ -237,7 +237,7 @@ scenarioRetryThenSuccess fx = do
 
 -- | Python @test_sync_ds_conflicts_when_duplicate_execution_wins@: a
 -- concurrent winner committed first, so this execution adopts it.
-scenarioConflictAdopts :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioConflictAdopts :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                        => DsFixture m -> m (Either (Error EngineOnly) Text)
 scenarioConflictAdopts fx = do
   fake <- fx.dsFixtureMkDs
@@ -248,7 +248,7 @@ scenarioConflictAdopts fx = do
 -- through a context whose scope field predates the running body, so the
 -- shared depth counter reports it. Refused with 'InsideStep' before
 -- anything is written.
-scenarioCaptureRefused :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioCaptureRefused :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                        => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
 scenarioCaptureRefused fx = do
   fake <- fx.dsFixtureMkDs
@@ -263,7 +263,7 @@ scenarioCaptureRefused fx = do
 -- 'runNestedStep' with its handed step view; the inner call checkpoints
 -- nothing, the tx records exactly its row, and the result carries the
 -- inner value.
-scenarioNestedInTx :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioNestedInTx :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                    => DsFixture m -> m (Either (Error EngineOnly) Text, Int, Int)
 scenarioNestedInTx fx = do
   fake <- fx.dsFixtureMkDs
@@ -277,7 +277,7 @@ scenarioNestedInTx fx = do
 
 -- | The record half: a body failure records, and replay returns it
 -- without re-running the body.
-scenarioBodyFailureRecorded :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioBodyFailureRecorded :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                             => DsFixture m -> m (Either (Error Text) Text, Either (Error Text) Text, Int)
 scenarioBodyFailureRecorded fx = do
   fake <- fx.dsFixtureMkDs
@@ -289,7 +289,7 @@ scenarioBodyFailureRecorded fx = do
   pure (first, second, runs)
 
 -- | A transient pre-check read is retried, then the transaction runs.
-scenarioPrecheckRetry :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioPrecheckRetry :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                       => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
 scenarioPrecheckRetry fx = do
   fake <- fx.dsFixtureMkDs
@@ -330,7 +330,7 @@ scenarioOutsideReexecutes fx = do
 -- | Python completion clearing (`delete_checkpoints` shape): deleting
 -- from a step drops later checkpoints (earlier ones stay, replaying),
 -- and deleting everything re-runs the body.
-scenarioDeleteCheckpoints :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioDeleteCheckpoints :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                           => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
 scenarioDeleteCheckpoints fx = do
   fake <- fx.dsFixtureMkDs
@@ -356,7 +356,7 @@ scenarioDeleteCheckpoints fx = do
 -- lost to an execution owned by another executor, so this execution stops
 -- instead of adopting. Staged through the 'SystemDB' class so both stacks
 -- run it: the row carries a foreign executor on live and sim alike.
-scenarioOwnershipMoved :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioOwnershipMoved :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                        => DsFixture m -> Text -> m (Either (Error EngineOnly) Text)
 scenarioOwnershipMoved fx wfId = do
   fake <- fx.dsFixtureMkDs
@@ -372,7 +372,7 @@ scenarioOwnershipMoved fx wfId = do
 -- | The registry's created-before-launch rule and completion clearing,
 -- over an instance that never launches: registration is open, a duplicate
 -- name is refused, and clearing empties the fake's rows.
-scenarioRegistryLifecycle :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadMVar m)
+scenarioRegistryLifecycle :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadMVar m, MonadThread m)
                           => DBOS m -> DsFixture m -> Text -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Int, Int)
 scenarioRegistryLifecycle dbos fx wid = do
   fake <- fx.dsFixtureMkDs
@@ -387,7 +387,7 @@ scenarioRegistryLifecycle dbos fx wid = do
 -- | A read-only transaction commits without recording: the body runs
 -- and answers, but no checkpoint row exists to replay. Reads re-execute
 -- safely, so there is nothing to adopt.
-scenarioReadOnlyCommitsUnrecorded :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioReadOnlyCommitsUnrecorded :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                                   => DsFixture m -> m (Either (Error EngineOnly) Text, Either BackendError (Maybe RecordedOutcome))
 scenarioReadOnlyCommitsUnrecorded fx = do
   fake <- fx.dsFixtureMkDs
@@ -402,7 +402,7 @@ scenarioReadOnlyCommitsUnrecorded fx = do
 -- construction — every execution re-runs. Safe because reads are
 -- side-effect-free; a volatile read is the caller's hazard, documented at
 -- 'TransactionConfig'. Both runs answer alike.
-scenarioReadOnlyReplayReruns :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioReadOnlyReplayReruns :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                              => DsFixture m -> m (Either (Error EngineOnly) Text, Either (Error EngineOnly) Text, Int)
 scenarioReadOnlyReplayReruns fx = do
   fake <- fx.dsFixtureMkDs
@@ -480,7 +480,7 @@ checkRetryThenSuccess (result, left) = do
 
 -- | A connection-class failure retries like a serialization failure: the
 -- runner retries on the error kind, not just the SQLSTATE class.
-scenarioConnectionRetry :: (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+scenarioConnectionRetry :: (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, MonadThread m)
                         => DsFixture m -> m (Either (Error EngineOnly) Text, Int)
 scenarioConnectionRetry fx = do
   fake <- fx.dsFixtureMkDs

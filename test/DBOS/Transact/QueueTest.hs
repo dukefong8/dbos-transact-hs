@@ -64,6 +64,7 @@ import DBOS.Transact.QueueCases
     checkQueueDefaults,
     checkRateLimit,
     checkReregister,
+    checkReregisterPartitioned,
     checkReserved,
     checkSentinel,
     checkPausedZero,
@@ -107,6 +108,7 @@ import DBOS.Transact.QueueCases
     scenarioQueueDefaults,
     scenarioRateLimit,
     scenarioReregister,
+    scenarioReregisterPartitioned,
     scenarioReserved,
     scenarioSentinel,
     scenarioPausedZero,
@@ -305,6 +307,7 @@ tests =
       leaf getBackend (const Nothing) "a queue carries a rate limit, always prioritised" scenarioRateLimit checkRateLimit,
       leaf getBackend (const Nothing) "per-partition limits partition a queue" scenarioPartitionLimits checkPartitionLimits,
       leaf getBackend (const Nothing) "re-registering updates the stored limits" scenarioReregister checkReregister,
+      leaf getBackend (const Nothing) "re-registering with a per-partition limit partitions the stored row" scenarioReregisterPartitioned checkReregisterPartitioned,
       leaf getBackend (const Nothing) "a saturated worker budget runs one at a time" scenarioWorkerBudgetExhausted checkWorkerBudgetExhausted,
       leaf getBackend (const Nothing) "a dispatch past the recovery budget parks the row without running it" scenarioDispatchPark checkDispatchPark
     ]

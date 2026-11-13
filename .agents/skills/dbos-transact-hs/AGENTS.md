@@ -39,7 +39,7 @@ Import only from `DBOS.Transact` in app code; anything else is engine-internal (
 
 Reference files are named `{prefix}-{topic}.md` (e.g. `step-retries.md`).
 
-Only the implemented subset is present. TS-only topics (`lifecycle-express`, `pattern-classes`, `pattern-scheduled`, `comm-streaming`, `advanced-patching`, `advanced-upgrading`) are intentionally absent. Where the Rust oracle differs from TS (datasource naming, queue defaults, fork/rewind availability), the Haskell reference states the Haskell behavior and names the difference.
+Only the implemented subset is present. TS-only topics (`lifecycle-express`, `pattern-classes`, `pattern-scheduled`, `advanced-patching`, `advanced-upgrading`) are intentionally absent. Where the Rust oracle differs from TS (datasource naming, queue defaults, fork/rewind availability), the Haskell reference states the Haskell behavior and names the difference.
 
 ## Available References
 
@@ -49,13 +49,16 @@ Only the implemented subset is present. TS-only topics (`lifecycle-express`, `pa
 **Workflow** (`workflow-`):
 - `references/workflow-background.md`
 - `references/workflow-constraints.md`
+- `references/workflow-attributes.md`
 - `references/workflow-control.md`
 - `references/workflow-determinism.md`
+- `references/workflow-errors.md`
 - `references/workflow-introspection.md`
 - `references/workflow-timeout.md`
 
 **Step** (`step-`):
 - `references/step-basics.md`
+- `references/step-concurrency.md`
 - `references/step-nesting.md`
 - `references/step-retries.md`
 - `references/step-timeouts.md`
@@ -69,11 +72,13 @@ Only the implemented subset is present. TS-only topics (`lifecycle-express`, `pa
 - `references/queue-listening.md`
 - `references/queue-management.md`
 - `references/queue-partitioning.md`
+- `references/queue-priority.md`
 - `references/queue-rate-limiting.md`
 
 **Communication** (`comm-`):
 - `references/comm-events.md`
 - `references/comm-messages.md`
+- `references/comm-streaming.md`
 
 **Pattern** (`pattern-`):
 - `references/pattern-debouncing.md`

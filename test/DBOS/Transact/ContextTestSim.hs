@@ -19,7 +19,9 @@ import DBOS.Internal.Transact.Identity (Identity (..))
 import DBOS.Internal.Transact.Logger (runTracer)
 import DBOS.Transact (logDebug, logError, logInfo, logWarn)
 import DBOS.Internal.SystemDB.Retry (SysdbEvent (..))
-import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..), pendingStep)
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..))
+import DBOS.Internal.Transact.Error (Error (..))
 import DBOS.Internal.Transact.Context
   ( WorkflowCtx (wctxTracer),
     firstStepStatus,
@@ -94,7 +96,7 @@ import DBOS.Transact.ContextTest
     scenarioWorkflowId,
   )
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, testCase, (@?=))
+import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 
 simIdentity :: Identity
 simIdentity =
@@ -163,6 +165,36 @@ tests =
           threadDelay 1000
           not <$> insideAStep ctx
         restored @?= True,
+      testCase "a concurrent call sees outside-step while a step runs" $ do
+        ((sibling, inner), _) <- runSimCase $ do
+          ctx <- simFixture.fixtureMkCtx "wf-concurrent-step"
+          entered <- newEmptyMVar
+          release <- newEmptyMVar
+          marker <- nextWorkflowMarker ctx
+          worker <-
+            async
+              ( withStep ctx marker (firstStepStatus 0) (\_ -> do
+                  putMVar entered ()
+                  takeMVar release
+                  insideAStep ctx
+              )
+              )
+          takeMVar entered
+          sibling <- insideAStep ctx
+          putMVar release ()
+          inner <- wait worker
+          pure (sibling, inner)
+        sibling @?= False
+        inner @?= True,
+      testCase "a recorded pending driven inside a step is refused" $ do
+        (refused :: Either (Error Text) Text, _) <- runSimCase $ do
+          ctx <- simFixture.fixtureMkCtx "wf-drive-in-step"
+          PendingStep _ _ run <- pendingStep ctx "probe" (\_ -> pure (Right "ok"))
+          marker <- nextWorkflowMarker ctx
+          withStep ctx marker (firstStepStatus 0) $ \_ -> run
+        case refused of
+          Left (StepBuiltElsewhere {}) -> pure ()
+          other -> assertFailure ("expected a built-elsewhere refusal, got: " <> show other),
       simCase (pure simFixture) "raceCancel returns the value when the token stays quiet" scenarioRaceCompletes checkRaceCompletes traceContextSilent,
       simCase (pure simFixture) "a starts token holds the outcome wait until it is given back" scenarioStartsToken checkStartsToken traceContextSilent,
       simCase (pure simFixture) "raceCancel reports cancellation when the token has fired" scenarioRaceCancelled checkRaceCancelled traceContextSilent,

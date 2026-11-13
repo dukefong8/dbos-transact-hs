@@ -1592,7 +1592,7 @@ forkableBody attempts _ _ = do
     else pure (Right 8)
 
 -- | The staged body: records the names of the steps it actually runs.
-stagedBody :: forall exec m. (MonadSTM m, MonadTime m, MonadCatch m)
+stagedBody :: forall exec m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
            => StrictTVar m [Text] ->
               Int ->
               WorkflowCtx exec m ->
@@ -2835,7 +2835,7 @@ checkSetDelayRefusal (zero, refused, saturated, status) = do
 
 -- | Two steps and a run counter: the rewind target that proves steps at
 -- and past the cut run again.
-rewindCountBody :: forall exec m. (MonadSTM m, MonadTime m, MonadCatch m)
+rewindCountBody :: forall exec m. (MonadSTM m, MonadTime m, MonadMask m, MonadThread m)
                 => StrictTVar m Int ->
                    Int ->
                    WorkflowCtx exec m ->
@@ -2855,7 +2855,7 @@ rewindCountBody ran input wctx = do
 -- branch. Step ids are fixed by the calls: send at 0, recv at 1 (timeout
 -- at 2), publish at 3, send at 4, recv at 5 (timeout at 6), publish at 7,
 -- stream writes at 8 and 9, a parked send at 10, the close at 11.
-rewindUndoBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
+rewindUndoBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, MonadThread m)
                => Text ->
                   WorkflowCtx exec m ->
                   m (Either (Error EngineOnly) Text)
@@ -2909,7 +2909,7 @@ rewindUndoBody widText wctx = do
                                         Right () -> pure (Right "done")
 
 -- | The datasource transaction a rewind drops checkpoints for.
-rewindTxBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+rewindTxBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, HasCallStack, MonadThread m)
              => FakeDs m ->
                 () ->
                 WorkflowCtx exec m ->
@@ -2922,7 +2922,7 @@ rewindTxBody fake () wctx = do
 
 -- | A transaction that reports its checkpoint count mid-run: the count
 -- the completion clearing must later remove.
-txCountBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+txCountBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, HasCallStack, MonadThread m)
             => FakeDs m ->
                StrictTVar m Int ->
                () ->
@@ -3352,7 +3352,7 @@ checkRewindKeepBelowCut (messages, eventHit, values, stepIds, status) = do
 -- | A body that writes one stream entry and then closes the stream. The close
 -- is a step, so whether its sentinel is the discarded run's to undo depends on
 -- where the cut falls.
-streamCloseBody :: forall exec m. (MonadSTM m)
+streamCloseBody :: forall exec m. (MonadSTM m, MonadThread m)
                 => () -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Text)
 streamCloseBody () wctx = do
   wrote <- writeStream wctx "out" ("v" :: Text)

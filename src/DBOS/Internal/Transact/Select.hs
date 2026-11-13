@@ -123,7 +123,7 @@ branchCount (Branches identities) = length identities
 -- are constructed and the select's own id follows them, so a select that
 -- took its id first would leave every branch one slot higher than the
 -- replay expects. Holds a recorded winner to the branches that exist now.
-checkSelect :: (MonadSTM m, MonadTime m)
+checkSelect :: (MonadSTM m, MonadTime m, MonadThread m)
             => WorkflowCtx exec m -> Branches -> m (Either (TransactError.Error TransactError.EngineOnly) (Racing exec m))
 checkSelect wctx branches = do
   placement <- placeCall wctx

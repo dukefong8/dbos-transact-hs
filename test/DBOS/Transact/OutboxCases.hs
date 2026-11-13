@@ -107,7 +107,7 @@ txMarkCfg = TransactionConfig {txName = Just "update_notification_status", txIso
 
 -- | Variant A body (shared): insert-order transaction, notification send
 -- step, mark-sent transaction. Returns the order id.
-atomicBody :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+atomicBody :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, HasCallStack, MonadThread m)
            => DataSource m ->
               (Tx m -> Text -> Text -> Int -> m Int) ->
               (Tx m -> Int -> m ()) ->
@@ -133,7 +133,7 @@ atomicBody ds insertOp markOp noteSent takeFail (cust, item, qty) wctx = do
 -- | The enqueued notification body (shared): send step, then mark-sent
 -- transaction. The engine unwraps the portable argument envelope before the
 -- body runs, so the triple arrives as the recorded input itself.
-notifyBody :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
+notifyBody :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadMask m, HasCallStack, MonadThread m)
            => DataSource m ->
               (Tx m -> Int -> m ()) ->
               m () ->

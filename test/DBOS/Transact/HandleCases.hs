@@ -135,7 +135,7 @@ mkHandleFixture config identity connApp nameScheme genId genEntropy sysdb tracer
         tracer
 
 -- | Register the doubling body both retrieval cases run.
-registerDouble ::  forall m. (MonadMVar m, MonadSTM m, MonadCatch m, MonadTime m) => DBOS m -> m ()
+registerDouble ::  forall m. (MonadMVar m, MonadSTM m, MonadMask m, MonadTime m, MonadThread m) => DBOS m -> m ()
 registerDouble dbos = do
   let key = newQualifiedWorkflowName "double"
       body :: forall exec. Int -> WorkflowCtx exec m -> m (Either (Error EngineOnly) Int)

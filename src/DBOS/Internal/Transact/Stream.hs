@@ -91,11 +91,11 @@ data ReaderState = ReaderState
 streamPageSize :: Int
 streamPageSize = 100
 
-readStream :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+readStream :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
            => WorkflowCtx exec m -> WorkflowId -> Text -> ReadStreamOptions -> m (StreamReader (Error EngineOnly) m value)
 readStream wctx wid key options = readStreamFrom wctx wid key 0 options
 
-readStreamFrom :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+readStreamFrom :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
                => WorkflowCtx exec m -> WorkflowId -> Text -> Int -> ReadStreamOptions -> m (StreamReader (Error EngineOnly) m value)
 readStreamFrom wctx wid key initialOffset options =
   readStreamWith (placeCall wctx) (withSystemDB wctx) (Just (WorkflowId (workflowId wctx))) wid key initialOffset options
@@ -264,7 +264,7 @@ readStreamWith place runDb caller wid key initialOffset options = do
           Just tag -> fromSerializationError (Serialization.UnknownSerialization {name = tag})
           Nothing -> fromSerializationError (Serialization.Deserialization "stream value" (codecErrorText codecError))
 
-writeStream :: (ToJSON value, MonadSTM m) => WorkflowCtx exec m -> Text -> value -> m (Either (Error EngineOnly) ())
+writeStream :: (ToJSON value, MonadSTM m, MonadThread m) => WorkflowCtx exec m -> Text -> value -> m (Either (Error EngineOnly) ())
 writeStream wctx key value = do
   let encoded = encodeWorkflowValue value
   placement <- placeCall wctx
@@ -273,7 +273,7 @@ writeStream wctx key value = do
     SystemDB.writeStream db (WorkflowId (workflowId wctx)) stepNo key encoded.serializedText (unSerialization <$> encoded.serializedSerialization) writtenBy (ownerToken wctx)
   pure (either (Left . fromExecution) Right written)
 
-closeStream :: MonadSTM m => WorkflowCtx exec m -> Text -> m (Either (Error EngineOnly) ())
+closeStream :: (MonadSTM m, MonadThread m) => WorkflowCtx exec m -> Text -> m (Either (Error EngineOnly) ())
 closeStream wctx key = do
   placement <- placeCall wctx
   let (stepNo, writtenBy) = writePosition placement

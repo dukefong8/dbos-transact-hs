@@ -20,7 +20,7 @@ import DBOS.Internal.SystemDB.Error (Error (..))
 import DBOS.Internal.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), getEventStepName, setEventStepName)
 import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
 import DBOS.Internal.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Internal.Transact.Context (WorkflowCtx, insideAStep, nextStepId, ownerToken, stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.Internal.Transact.Context (WorkflowCtx, driveScope, insideAStep, nextStepId, ownerToken, stepCtxBoundary, withSystemDB, workflowId)
 import DBOS.Internal.Transact.Error qualified as TransactError
 import DBOS.Internal.Transact.Instance (DBOS, Executor (..), requireExecutor)
 import DBOS.Internal.Transact.Serialization (SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
@@ -29,7 +29,7 @@ import DBOS.Internal.Transact.Serialization qualified as Serialization
 -- | Publish a value on the current workflow. A write is a checkpointed
 -- operation and is refused from inside a step, where allocating another
 -- operation id would shift replay order.
-setEvent :: (ToJSON value, MonadSTM m)
+setEvent :: (ToJSON value, MonadSTM m, MonadThread m)
          => WorkflowCtx exec m -> Text -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 setEvent wctx key value =
   let encoded = forceEncoded value
@@ -38,7 +38,7 @@ setEvent wctx key value =
 -- | A publish built at its position and not yet run: the id is claimed at
 -- the call so a replay rebuilds the same slot, and the write runs when the
 -- pending value is awaited or raced.
-pendingSetEvent :: (ToJSON value, MonadSTM m)
+pendingSetEvent :: (ToJSON value, MonadSTM m, MonadThread m)
                 => WorkflowCtx exec m -> Text -> value -> m (PendingStep exec m (Either (TransactError.Error TransactError.EngineOnly) ()))
 pendingSetEvent wctx key value =
   let encoded = forceEncoded value
@@ -56,10 +56,11 @@ forceEncoded value =
 
 -- | Drives a placed publish: refused from inside a step, otherwise the
 -- checkpointed write under the claimed id.
-driveSetEvent :: MonadSTM m
+driveSetEvent :: (MonadSTM m, MonadThread m)
               => WorkflowCtx exec m -> Text -> SerializedWorkflowValue -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-driveSetEvent wctx key encoded placement =
-  case checkHere placement setEventStepName (Just (stepCtxBoundary wctx)) of
+driveSetEvent wctx key encoded placement = do
+  here <- driveScope wctx
+  case checkHere placement setEventStepName (Just here) of
     Left err -> pure (Left err)
     -- No plain form exists: a publish built in a step can never run, so
     -- driving it reports the refusal the eager call would have raised.
@@ -92,7 +93,7 @@ driveSetEvent wctx key encoded placement =
 -- observes the same value (including absence) as the original execution.
 -- Inside a step the enclosing step checkpoint stands for the read, so it
 -- runs plainly. Mirrors Rust @get_event(workflow_id, key, timeout)@.
-getEvent :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m)
+getEvent :: (FromJSON value, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
          => WorkflowCtx exec m -> WorkflowId -> Text -> Duration -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe value))
 getEvent wctx destination key timeout = do
   let workflowText = workflowId wctx
@@ -147,7 +148,7 @@ adoptEventValue found = case found of
 -- is claimed or read; inside a step the read is plain, with nothing to
 -- disagree about. A refusal is carried in the pending value, so the caller
 -- keeps its single error channel. Mirrors Rust @DBOS::get_event@.
-pendingGetEvent :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m)
+pendingGetEvent :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
                 => DBOS m ->
                    WorkflowCtx exec m ->
                    WorkflowId ->
@@ -168,18 +169,26 @@ pendingGetEvent dbos wctx destination key timeout = do
           Recorded wctx' readStep -> do
             timeoutStep <- nextStepId wctx'
             let caller = Just (GetEventCaller (WorkflowId (workflowId wctx')) readStep timeoutStep (ownerToken wctx'))
-            pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor caller destination key timeout))
-          _ -> pure (PendingStep getEventStepName (Just placement) (driveGetEvent executor Nothing destination key timeout))
+            pure (PendingStep getEventStepName (Just placement) (driveGetEvent wctx executor caller placement destination key timeout))
+          _ -> pure (PendingStep getEventStepName (Just placement) (driveGetEvent wctx executor Nothing placement destination key timeout))
 
 -- | Drives a placed read: the recorded form of whatever the database
--- answers, decoded back into the caller's channel.
-driveGetEvent :: (FromJSON value, MonadMVar m, MonadTime m, MonadDelay m)
-              => Executor m ->
+-- answers, decoded back into the caller's channel. The placement is
+-- checked at drive time, so a read carried into a step body is refused
+-- rather than recorded.
+driveGetEvent :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDelay m, MonadThread m)
+              => WorkflowCtx exec m ->
+                 Executor m ->
                  Maybe GetEventCaller ->
+                 StepPlacement exec m ->
                  WorkflowId ->
                  Text ->
                  Duration ->
                  m (Either (TransactError.Error c) (Maybe value))
-driveGetEvent executor caller destination key timeout = do
-  found <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getEvent db destination key timeout caller)
-  pure (adoptEventValue found)
+driveGetEvent wctx executor caller placement destination key timeout = do
+  here <- driveScope wctx
+  case checkHere placement getEventStepName (Just here) of
+    Left err -> pure (Left (TransactError.liftEngine err))
+    Right _ -> do
+      found <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getEvent db destination key timeout caller)
+      pure (adoptEventValue found)
