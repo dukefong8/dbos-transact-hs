@@ -2855,7 +2855,7 @@ rewindCountBody ran input wctx = do
 -- branch. Step ids are fixed by the calls: send at 0, recv at 1 (timeout
 -- at 2), publish at 3, send at 4, recv at 5 (timeout at 6), publish at 7,
 -- stream writes at 8 and 9, a parked send at 10, the close at 11.
-rewindUndoBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m)
+rewindUndoBody :: forall exec m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
                => Text ->
                   WorkflowCtx exec m ->
                   m (Either (Error EngineOnly) Text)

@@ -112,6 +112,8 @@ import DBOS.Internal.SystemDB.Types
     qualifiedConfigName,
     WorkflowRecord (..),
     WorkflowStatus,
+    isActiveStatus,
+    workflowStatusText,
     defaultWorkflowFilter,
     newWorkflow,
     renderQualifiedWorkflowName,
@@ -761,11 +763,50 @@ rewindWorkflows :: (MonadMVar m)
                 => DBOS m -> WorkflowId -> RewindOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 rewindWorkflows dbos workflowId options =
   withExecutor dbos "rewind workflow" $ \executor -> do
-    sources <- snapshotDatasources dbos.dbos_datasources
-    outcomes <- traverse (\source -> source.dsDeleteCheckpoints workflowId options.rewindStartStep) sources
-    case sequence outcomes of
-      Left backendErr -> pure (Left (TransactError.fromSystemDB (SystemDBError.Backend backendErr)))
-      Right _ -> Management.rewindWorkflows executor.conn workflowId options
+    let WorkflowId workflowText = workflowId
+        start = options.rewindStartStep
+    -- Validate before touching checkpoints: a running workflow's rows must
+    -- not be pulled out from under it, and a negative start step must not
+    -- wipe every row. Mirrors Python/TS checkRewindable ordering.
+    if start < 0
+      then
+        pure
+          ( Left
+              ( TransactError.InvalidArgument
+                  { operation = "rewind a workflow",
+                    detail = "start_step must not be negative, got " <> showText start
+                  }
+              )
+          )
+      else do
+        found <- withConnection executor.conn (\db -> SystemDB.getWorkflow db workflowId)
+        case found of
+          Left err -> pure (Left err)
+          Right Nothing ->
+            pure
+              ( Left
+                  ( TransactError.fromSystemDB
+                      (SystemDBError.NonExistentWorkflow {workflowIds = [workflowText]})
+                  )
+              )
+          Right (Just row)
+            | isActiveStatus row.workflowRecordStatus ->
+                pure
+                  ( Left
+                      ( TransactError.fromSystemDB
+                          ( SystemDBError.WorkflowNotRewindable
+                              { workflowId = workflowText,
+                                status = workflowStatusText row.workflowRecordStatus
+                              }
+                          )
+                      )
+                  )
+            | otherwise -> do
+                sources <- snapshotDatasources dbos.dbos_datasources
+                outcomes <- traverse (\source -> source.dsDeleteCheckpoints workflowId start (pure True)) sources
+                case sequence outcomes of
+                  Left backendErr -> pure (Left (TransactError.fromSystemDB (SystemDBError.Backend backendErr)))
+                  Right _ -> Management.rewindWorkflows executor.conn workflowId options
 
 -- | Rewinds one workflow and hands back its handle. Mirrors Rust
 -- @DBOS::rewind@ / @rewind_with@.
@@ -932,7 +973,7 @@ registerDataSource dbos source = Datasource.registerDataSource dbos.dbos_datasou
 -- | Clear a finished workflow's checkpoints from every registered
 -- datasource, best effort and silent.
 clearCheckpoints :: (MonadMVar m, MonadCatch m) => DBOS m -> WorkflowId -> m ()
-clearCheckpoints dbos wid = clearDatasourceCheckpoints dbos.dbos_datasources wid
+clearCheckpoints dbos wid = clearDatasourceCheckpoints dbos.dbos_datasources wid (pure True)
 
 -- | Installs an executor over a caller-built connection: the seam tests
 -- launch arbitrary backends through. The snapshot is taken from the

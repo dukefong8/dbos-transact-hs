@@ -103,9 +103,18 @@ driveSleep wctx duration placement =
         -- woke long ago waits not at all. Mirrors the oracle's sleep wait.
           now <- getMonotonicTimeNSec
           let arrives = wakeArrives wake
-              remainingMillis = fromIntegral ((if arrives > now then arrives - now else 0) `div` 1000000) :: Int64
+              remainingNs = if arrives > now then arrives - now else 0
+              remainingMillis = fromIntegral (min (remainingNs `div` 1000000) (fromIntegral (maxBound :: Int64))) :: Int64
+              -- Ceiling division: a sub-millisecond remainder must not wake
+              -- early, and the clamp keeps the Int conversion total.
+              remainingMicros =
+                fromIntegral
+                  ( min
+                      (remainingNs `div` 1000 + (if remainingNs `mod` 1000 == 0 then 0 else 1))
+                      (fromIntegral (maxBound :: Int))
+                  )
           runTracer wctx'.wctxTracer (SleepUntilWake stepId' remainingMillis)
-          threadDelay (millisToMicros remainingMillis)
+          threadDelay remainingMicros
           pure (Right ())
 
 -- | A plain wait, mirroring the free @sleep@ outside a workflow or inside
@@ -115,7 +124,9 @@ driveSleep wctx duration placement =
 sleepPlain :: MonadDelay m => Duration -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sleepPlain duration =
   TransactError.refusing (TransactError.refusedArgument "sleep") (durationToMs "duration" duration) $ \_ ->
-    threadDelay (fromInteger (durationAsMillis duration) * 1000) >> pure (Right ())
+    threadDelay (millisToMicros (durationAsMillis duration)) >> pure (Right ())
 
-millisToMicros :: Int64 -> Int
-millisToMicros milliseconds = fromIntegral (milliseconds * 1000)
+millisToMicros :: Integer -> Int
+millisToMicros milliseconds
+  | milliseconds <= 0 = 0
+  | otherwise = fromInteger (min (milliseconds * 1000) (toInteger (maxBound :: Int)))

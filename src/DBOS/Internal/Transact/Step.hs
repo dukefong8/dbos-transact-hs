@@ -24,14 +24,15 @@ where
 
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (pack)
+import Data.Text qualified as Text
 import DBOS.Internal.Prelude
 import DBOS.Internal.SystemDB.Class qualified as SystemDB
 import DBOS.Internal.SystemDB.Error qualified as SystemDBError
 import DBOS.Internal.SystemDB.Types (AwaitedOutcome (..), Duration, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), durationAsMillis, durationFromSecs, durationSeconds, durationMicros, secondsDuration, timestampNow)
 import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
-import DBOS.Internal.Transact.Config (serializerName)
+import DBOS.Internal.Transact.Config (Serializer (..), serializerName)
 import DBOS.Internal.Transact.Connection (Connection (..))
-import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, stepCtxBoundary, stepStatusAt, withStep, withSystemDB, workflowId)
+import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, stepCtxBoundary, stepStatusAt, trySync, withStep, withSystemDB, workflowId)
 import DBOS.Internal.Transact.Error qualified as TransactError
 import DBOS.Internal.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Internal.Transact.Serialization (CodecError, SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
@@ -173,7 +174,7 @@ instance ToLogStr WorkflowEvent where
 -- Run and replay announcements go through the context's tracer, so the
 -- same call sites log to FastLogger in production and to the io-sim trace
 -- in simulations with no logger argument at all.
-runStep :: (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m)
+runStep :: forall value e m exec. (FromJSON value, FromJSON e, ToJSON value, MonadSTM m, MonadTime m, MonadCatch m)
         => WorkflowCtx exec m -> Text -> (StepCtx exec m -> m value) -> m (Either (TransactError.Error e) value)
 runStep wctx name body = do
   stepped <- insideAStep wctx
@@ -202,25 +203,55 @@ runStep wctx name body = do
               serialization = case encoded.serializedSerialization of
                 Nothing                    -> Nothing
                 Just (Serialization name') -> Just name'
-          written <-
-            withSystemDB
-              wctx
-              ( \db ->
-                  SystemDB.recordStep
-                    db
-                    workflowId'
-                    stepId'
-                    name
-                    (OutcomeOutput (Just encoded.serializedText))
-                    serialization
-                    (Just (StepTiming startedAt completedAt))
-                    (ownerToken wctx)
-              )
-          case written of
-            Left err -> pure (Left (TransactError.fromExecution err))
-            Right () -> do
-              runTracer wctx.wctxTracer (StepOutputRecorded name stepId')
-              pure (Right value)
+          -- Force the payload now: a throwing ToJSON is recorded as the
+          -- step's error (Rust 0.6's EncodedError::refused), not left to
+          -- escape after the id was spent.
+          forced <- trySync (pure $! Text.length encoded.serializedText) :: m (Either SomeException Int)
+          case forced of
+            Left exn -> do
+              let refused = TransactError.ErrorSerialization {what = "result", message = showText exn}
+                  refusedText =
+                    TransactError.encodeErrorText
+                      (TransactError.ErrorSerialization {what = "result", message = showText exn} :: TransactError.Error TransactError.EngineOnly)
+              written <-
+                withSystemDB
+                  wctx
+                  ( \db ->
+                      SystemDB.recordStep
+                        db
+                        workflowId'
+                        stepId'
+                        name
+                        (OutcomeError refusedText)
+                        Nothing
+                        (Just (StepTiming startedAt completedAt))
+                        (ownerToken wctx)
+                  )
+              case written of
+                Left err -> pure (Left (TransactError.fromExecution err))
+                Right () -> do
+                  runTracer wctx.wctxTracer (StepErrorRecorded name stepId')
+                  pure (Left refused)
+            Right _ -> do
+              written <-
+                withSystemDB
+                  wctx
+                  ( \db ->
+                      SystemDB.recordStep
+                        db
+                        workflowId'
+                        stepId'
+                        name
+                        (OutcomeOutput (Just encoded.serializedText))
+                        serialization
+                        (Just (StepTiming startedAt completedAt))
+                        (ownerToken wctx)
+                  )
+              case written of
+                Left err -> pure (Left (TransactError.fromExecution err))
+                Right () -> do
+                  runTracer wctx.wctxTracer (StepOutputRecorded name stepId')
+                  pure (Right value)
 
 -- | The step-scope entry: a call made inside a step body runs plainly —
 -- no id is allocated and nothing is checkpointed — mirroring the leaf
@@ -247,9 +278,14 @@ replayStep name _stepId record =
   case record.stepRecordChildWorkflowId of
     Just (WorkflowId childText) -> Left (TransactError.StepFailed name ("unexpected child workflow checkpoint: " <> childText))
     Nothing -> case record.stepRecordError of
-      Just errorText -> case TransactError.decodeErrorText errorText of
-        Right err -> Left err
-        Left _ -> Left (TransactError.StepFailed name errorText)
+      Just errorText -> case record.stepRecordSerialization of
+        -- A tag this build cannot read is the oracle's
+        -- UnknownSerialization, not a text decode failure.
+        Just tag | tag /= serializerName PortableJson ->
+          Left (TransactError.fromSerializationError (Serialization.UnknownSerialization {name = tag}))
+        _ -> case TransactError.decodeErrorText errorText of
+          Right err -> Left err
+          Left _ -> Left (TransactError.StepFailed name errorText)
       Nothing ->
         -- A NULL output column is the recorded unit result, not a missing
         -- one: the oracle decodes it as JSON @null@. Keep the same codec
@@ -519,6 +555,9 @@ driveStepWith options wctx name placement body =
                         atExpiry <- poll task
                         case atExpiry of
                           Just (Right value) -> cancel observer >> pure value
+                          -- The body panicked at the same instant: propagate
+                          -- the panic, never record it as a timeout.
+                          Just (Left exn) -> cancel observer >> throwIO exn
                           _ -> timedOut task limit >>= \outcome -> cancel observer >> pure outcome
                   withoutObserver limit = do
                     task <- async (body sctx)
@@ -531,6 +570,9 @@ driveStepWith options wctx name placement body =
                         atExpiry <- poll task
                         case atExpiry of
                           Just (Right value) -> pure value
+                          -- As above: a body that panicked at the expiry
+                          -- propagates its exception instead of a timeout.
+                          Just (Left exn) -> throwIO exn
                           _ -> timedOut task limit
               if options.preemptible
                 then do

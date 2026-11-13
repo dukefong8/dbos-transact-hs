@@ -32,7 +32,7 @@ import DBOS.Internal.SystemDB.Error (BackendError (..), BackendErrorKind (..), E
 import DBOS.Internal.SystemDB.Postgres.Backend qualified as SystemPostgres (classifyUsageError)
 import DBOS.Internal.SystemDB.Types (WorkflowId (..))
 import DBOS.Internal.Transact.Config qualified as Config
-import DBOS.Internal.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), TransactionConfig (..), Tx (..))
+import DBOS.Internal.Transact.Datasource (DataSource (..), IsolationLevel (..), RecordedOutcome (..), TransactionConfig (..), Tx (..), transactionConfigDefault)
 import Hasql.Connection qualified as Connection
 import Hasql.Connection.Settings qualified as ConnSettings
 import Hasql.Decoders qualified as Decoders
@@ -228,6 +228,13 @@ deleteCheckpointsStatement schema =
       <> contramap snd (Encoders.param (Encoders.nonNullable Encoders.int4)))
     Decoders.noResult
 
+-- | The owner fence said this execution no longer owns the workflow: roll
+-- the delete back. Internal only; the caller treats it as a skipped delete.
+data TxDeleteAbort = TxDeleteAbort
+  deriving stock (Show)
+
+instance Exception TxDeleteAbort
+
 -- | Run one session on the held connection, throwing backend failures so
 -- the bracket rolls the attempt back.
 txRunner :: Connection.Connection -> Statement.Statement params result -> params -> IO result
@@ -265,8 +272,19 @@ toDataSource app =
         run (recordTxStatement app.appSchema) (widText, name, fromIntegral step, text, False),
       dsRecordError = \(Tx run) (WorkflowId widText) name step text ->
         run (recordTxStatement app.appSchema) (widText, name, fromIntegral step, text, True),
-      dsDeleteCheckpoints = \(WorkflowId widText) step ->
-        runAppSession app (Session.statement (widText, fromIntegral step) (deleteCheckpointsStatement app.appSchema))
+      dsDeleteCheckpoints = \(WorkflowId widText) step stillOwner -> do
+        attempted <-
+          try
+            ( transactionAttempt transactionConfigDefault $ \tx -> do
+                let Tx run = tx
+                _ <- run (deleteCheckpointsStatement app.appSchema) (widText, fromIntegral step)
+                owned <- stillOwner
+                unless owned (throwIO TxDeleteAbort)
+            )
+            :: IO (Either TxDeleteAbort (Either BackendError ()))
+        pure $ case attempted of
+          Left TxDeleteAbort -> Right ()
+          Right outcome -> outcome
     }
   where
     acquireConn :: IO Connection.Connection

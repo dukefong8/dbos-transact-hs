@@ -71,6 +71,10 @@ module DBOS.Internal.Transact.Context
     tokenCancelled,
     raceCancel,
 
+    -- * Exception discipline
+    AsyncException (..),
+    trySync,
+
     -- * The engine's task seam
     TaskSpawner (..),
     LocalTaskOutcome (..),
@@ -97,6 +101,13 @@ where
 
 import Data.Kind (Type)
 import DBOS.Internal.Prelude
+-- NOTE (deviation): the one base import outside the port's prelude. Mapping
+-- the abort channel needs the identity of the exception 'killThread'
+-- throws, and io-classes exposes no async-exception identity — exactly what
+-- the oracle matches with @join.is_cancelled()@. It lives in this shared
+-- leaf so the step and message runners can re-raise a shutdown instead of
+-- recording it as a failure.
+import Control.Exception (AsyncException (..))
 import DBOS.Internal.SystemDB.Class qualified as SystemDB
 import DBOS.Internal.SystemDB.Types (Timestamp, WorkflowId (..), WorkflowOwner (..))
 import DBOS.Internal.Transact.Connection (Connection (..), ExecutionIdentity, nextExecutionIdentity, runSystemDB)
@@ -125,7 +136,7 @@ data LocalTaskOutcome a
 -- engine's.
 data TaskSpawner m = TaskSpawner
   { spawnLocalTask          :: forall a. Text -> (TaskSpawner m -> m a) -> m (StrictMVar m (LocalTaskOutcome a))
-  , spawnerClearCheckpoints :: Text -> m ()
+  , spawnerClearCheckpoints :: Text -> m Bool -> m ()
   }
 
 -- | Spawns an action detached on the spawner's registry and hands back the
@@ -144,7 +155,7 @@ spawnLocal (TaskSpawner spawn _) = spawn
 -- engine closes the callback over the registry when it builds the spawner.
 -- The other call site for the record's fields, so callers never touch
 -- record-dot on a function-typed field.
-clearSpawnerCheckpoints :: TaskSpawner m -> Text -> m ()
+clearSpawnerCheckpoints :: TaskSpawner m -> Text -> m Bool -> m ()
 clearSpawnerCheckpoints (TaskSpawner _ clear) = clear
 
 -- | One detached start's hold on its workflow's count — the oracle's
@@ -419,6 +430,18 @@ raceCancel sctx action = do
   pure $ case outcome of
     Left value -> Just value
     Right ()   -> Nothing
+
+-- | Catch a synchronous exception and re-raise an asynchronous one. A
+-- catch-all around a pure force must not turn a shutdown into a step
+-- failure; the engine's abort channel is 'ThreadKilled'.
+trySync :: (MonadCatch m, Exception e) => m a -> m (Either e a)
+trySync action =
+  tryJust
+    ( \e -> case fromException (toException e) :: Maybe AsyncException of
+        Just _  -> Nothing
+        Nothing -> Just e
+    )
+    action
 
 -- | Fires a token: work watching it should stop.
 cancelToken :: MonadSTM m => StrictTVar m Bool -> m ()

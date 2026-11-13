@@ -111,7 +111,7 @@ mkSimDs storeVar =
       dsStepName = \(WorkflowId widText) step -> do
         store <- readTVarIO storeVar
         pure (Right (fst <$> Map.lookup (widText, step) store.simCommits)),
-      dsDeleteCheckpoints = \(WorkflowId widText) step -> do
+      dsDeleteCheckpoints = \(WorkflowId widText) step _ -> do
         atomically (modifyTVar storeVar (\store -> store {simCommits = Map.filterWithKey (\(w, s) _ -> w /= widText || s < fromIntegral step) store.simCommits}))
         pure (Right ())
     }
@@ -345,7 +345,6 @@ traceAtomicRedrive tr = do
   selectTraceEventsDynamic tr
     @?= [ TransactionRunning "sim-ob-atomic-redrive-0" "insert_order" 0,
           TransactionOutputRecorded "sim-ob-atomic-redrive-0" "insert_order" 0,
-          TransactionRunning "sim-ob-atomic-redrive-0" "insert_order" 0,
           TransactionReplaying "sim-ob-atomic-redrive-0" "insert_order" 0,
           TransactionRunning "sim-ob-atomic-redrive-0" "update_notification_status" 2,
           TransactionOutputRecorded "sim-ob-atomic-redrive-0" "update_notification_status" 2

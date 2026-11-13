@@ -87,7 +87,7 @@ import DBOS.Internal.SystemDB.Error qualified as SystemDBError
 import DBOS.Internal.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.Internal.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.Internal.SystemDB.Retry (uuidEntropy)
-import DBOS.Internal.SystemDB.Types (AppScope (..), Change (..), Duration, EncodedSendMessage (..), EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), IdleTransactionTimeout (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), QualifiedWorkflowName, RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, idleTimeoutValidate, newWorkflow, qualifiedClassName, qualifiedConfigName, qualifiedName, queueIsLegacyPartitioned, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
+import DBOS.Internal.SystemDB.Types (AppScope (..), Change (..), Duration, EncodedSendMessage (..), EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), IdleTransactionTimeout (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), QualifiedWorkflowName, QueueName (..), QueueRecord (queueRecordName), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, idleTimeoutValidate, internalQueueName, newWorkflow, qualifiedClassName, qualifiedConfigName, qualifiedName, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
 import DBOS.Internal.Transact.Config (Serializer (..), defaultOutcomePollInterval, serializerName, systemDatabaseUrlEnv)
 import DBOS.Internal.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, withConnection)
 import DBOS.Internal.Transact.Error qualified as TransactError
@@ -95,7 +95,7 @@ import DBOS.Internal.Transact.Handle (WorkflowHandle (workflowId), pollingHandle
 import DBOS.Internal.Transact.Identity (refuseAppName, validateAppName)
 import DBOS.Internal.Transact.Logger (nullTracer)
 import DBOS.Internal.Transact.Management (ListWorkflowStepsOptions (..), StepInfo, checkRewindOptions, defaultListWorkflowStepsOptions, latestAppVersion, listAppVersions, mergeWorkflowAttributes, promoteAppVersion, promoteAppVersionFor, setWorkflowDelay, stepInfoFromRecord, updateWorkflowAttributes)
-import DBOS.Internal.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionRateLimit, partitionWorkerConcurrency), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsAfterChange, queueOptionsToNewQueue, reserved, validateQueueOptions)
+import DBOS.Internal.Transact.Queue (Queue, QueueChange (partitionConcurrency, partitionRateLimit, partitionWorkerConcurrency), QueueConflict (..), QueueOptions, changeBothSet, queueChangeToUpdate, queueFromRecord, queueOptionsToNewQueue, queueUpdateError, reserved, validateMergedQueue, validateQueueOptions)
 import DBOS.Internal.Transact.Serialization (CodecError (..), WorkflowInput (..), codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeAttributes, unWorkflowInput)
 import DBOS.Internal.Transact.Stream (ReadStreamOptions, StreamReader, readStreamOutside)
 import DBOS.Internal.Transact.Workflow (DuplicationPolicy (..), EnqueueOptions (..), QueueRequest (..), Submitted (..), Timeout (..), enqueueOptionsNew, initOrJoin, queueRequest, queueRequestNew, refuseEmptyQueueName, refuseNamelessWorkflow, storedPriority, timeoutBudget, validateEnqueueOptions, validateStart)
@@ -597,7 +597,8 @@ clientListQueues :: Monad m
                  => Client m -> m (Either (TransactError.Error TransactError.EngineOnly) [Queue])
 clientListQueues client = do
   result <- withConnection client.conn (\db -> SystemDB.listQueues db Unset)
-  pure (fmap (map queueFromRecord) result)
+  let QueueName internalName = internalQueueName
+  pure (fmap (map queueFromRecord . filter (\record -> record.queueRecordName /= internalName)) result)
 
 -- | Register a queue from outside, or report the one already registered
 -- under the name. Mirrors Rust @Connection::register_queue@ with
@@ -655,28 +656,12 @@ clientUpdateQueue client queueName change = case reserved queueName of
         Left err -> pure (Left err)
         Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
         Right (Just record) -> do
-          let touchesPartition =
-                change.partitionConcurrency /= Leave
-                  || change.partitionWorkerConcurrency /= Leave
-                  || change.partitionRateLimit /= Leave
-          if touchesPartition && queueIsLegacyPartitioned record
-            then
-              pure
-                ( Left
-                    ( TransactError.ErrorConfig
-                        ( "queue `" <> queueName <> "`: this queue is registered with the deprecated `partition_queue` flag, under which its queue-wide limits already apply per partition; re-register it with the per-partition limits instead"
-                        )
-                    )
-                )
-            else do
-              let currentQueue = queueFromRecord record
-                  desired = queueOptionsAfterChange change currentQueue
-              case validateQueueOptions queueName desired of
-                Left err -> pure (Left err)
-                Right () -> do
-                  let update = queueChangeToUpdate change currentQueue
-                  updated <- withConnection client.conn (\db -> SystemDB.updateQueue db queueName update (\_ _ -> Right ()))
-                  pure (queueFromRecord <$> updated)
+          let currentQueue = queueFromRecord record
+              update = queueChangeToUpdate change currentQueue
+          updated <- withConnection client.conn (\db -> SystemDB.updateQueue db queueName update (validateMergedQueue queueName))
+          pure $ case updated of
+            Left err -> Left (queueUpdateError err)
+            Right record -> Right (queueFromRecord record)
 
 -- | Remove a queue's registration from outside. Removing one that is not
 -- registered is not an error.

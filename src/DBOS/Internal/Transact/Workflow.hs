@@ -80,12 +80,8 @@ where
 
 import Data.Int (Int32)
 import DBOS.Internal.Prelude
--- NOTE (deviation): the one base import outside the port's prelude. Mapping
--- the abort channel needs the identity of the exception 'killThread'
--- throws, and io-classes exposes no async-exception identity — exactly what
--- the oracle matches with @join.is_cancelled()@. Nothing here forks,
--- throws, or waits through base; all effects stay on io-classes.
-import Control.Exception (AsyncException (..))
+-- The async-exception identity is re-exported by the shared context leaf;
+-- this module names 'ThreadKilled' to tell a shutdown from a body panic.
 import Data.Aeson (FromJSON, ToJSON, Value (..), fromJSON)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
@@ -118,7 +114,7 @@ import DBOS.Internal.SystemDB.Types
     qualifiedClassName,
     qualifiedConfigName,
     WorkflowOwner (..),
-    WorkflowRecord (workflowRecordStatus),
+    WorkflowRecord (workflowRecordStatus, workflowRecordOwnerXid),
     WorkflowStatus (..),
     databaseTimeRead,
     databaseTimeReaches,
@@ -134,7 +130,8 @@ import DBOS.Internal.Transact.Config (serializerName)
 import DBOS.Internal.Transact.Connection (Connection (..), generatedWorkflowId, runSystemDB)
 import DBOS.Internal.Transact.Datasource (DataSourceRegistry, clearDatasourceCheckpoints)
 import DBOS.Internal.Transact.Context
-  ( LocalTaskOutcome (..),
+  ( AsyncException (..),
+    LocalTaskOutcome (..),
     TaskSpawner (..),
     WorkflowCtx (wctxConn, wctxIdentity, wctxSpawner),
     clearSpawnerCheckpoints,
@@ -145,6 +142,7 @@ import DBOS.Internal.Transact.Context
     releaseStart,
     spawnLocal,
     startToken,
+    trySync,
     waitForStarts,
     withWorkflow,
     withWorkflowTaskSpawner,
@@ -259,7 +257,7 @@ runRegisteredWorkflowWithRow tasks conn identity snapshot key workflowId@(Workfl
 -- its parent's spawner, so its checkpoints clear on completion exactly like
 -- a top-level run's, with no registry channel on any body-level signature.
 tasksSpawner :: (MonadFork m, MonadMask m, MonadSTM m, MonadMVar m)
-             => Tasks m -> (Text -> m ()) -> TaskSpawner m
+             => Tasks m -> (Text -> m Bool -> m ()) -> TaskSpawner m
 tasksSpawner tasks clear = spawner
   where
     spawner = TaskSpawner (\label action -> do
@@ -296,8 +294,8 @@ tasksSpawner tasks clear = spawner
 -- named workflow's rows. Best effort and silent at the call site — the
 -- registry call already swallows per-source failures, and the runner
 -- swallows what the snapshot read itself could still throw.
-clearCheckpointsFor :: (MonadMVar m, MonadCatch m) => DataSourceRegistry m -> Text -> m ()
-clearCheckpointsFor registry widText = clearDatasourceCheckpoints registry (WorkflowId widText)
+clearCheckpointsFor :: (MonadMVar m, MonadCatch m) => DataSourceRegistry m -> Text -> m Bool -> m ()
+clearCheckpointsFor registry widText stillOwner = clearDatasourceCheckpoints registry (WorkflowId widText) stillOwner
 
 -- | Park-and-adopt: wait for whoever owns the row and report its recorded
 -- outcome as an erased failure. Mirrors @Connection::adopt@: the recorded
@@ -419,7 +417,15 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
     -- test in the panic-post-commit shape, and deletion there breaks
     -- exactly-once adoption.
     clearExecution = do
-      _ <- try (clearSpawnerCheckpoints spawner workflowText) :: m (Either SomeException ())
+      let -- Delete, then ask the system database whether this execution
+          -- still owns the workflow; a lost owner rolls the delete back so
+          -- a superseded execution cannot wipe the new owner's rows.
+          stillOwner = do
+            found <- runSystemDB conn.connSysdb (\db -> SystemDB.getWorkflow db workflowId)
+            pure $ case found of
+              Right (Just row) -> row.workflowRecordOwnerXid == Just owner.ownerToken
+              _ -> False
+      _ <- trySync (clearSpawnerCheckpoints spawner workflowText stillOwner) :: m (Either SomeException ())
       pure ()
     -- The scope the body runs in: fresh counters, the row's deadline, and
     -- the executor's task spawner, so a converted body's scoped entries
@@ -506,6 +512,10 @@ executeRegisteredWorkflow spawner conn identity workflowId@(WorkflowId workflowT
             pure fallback
         Right AlreadyFinished -> do
           runTracer conn.connTracer (WorkflowSuperseded workflowText)
+          -- Give up the queue slot before polling for the winner: holding
+          -- the only slot would stall the worker that must run it. Mirrors
+          -- Rust's adopt_superseded and the timeout path.
+          maybe (pure ()) id releaseSlot
           adoptRecordedFailure conn workflowId
     isControlFailure failure = case failure of
       TransactError.FailureControl _  -> True

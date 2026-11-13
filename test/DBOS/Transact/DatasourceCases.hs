@@ -192,7 +192,7 @@ mkFakeDs = do
                   writeTVar names (Map.insert (widText wid, step) name priorNames)
                   pure True,
             dsStepName = \wid step -> Right . Map.lookup (widText wid, step) <$> readTVarIO names,
-            dsDeleteCheckpoints = \wid step -> atomically $ do
+            dsDeleteCheckpoints = \wid step _ -> atomically $ do
               existing <- readTVar rows
               writeTVar rows (Map.filterWithKey (\(w, s) _ -> not (w == widText wid && s >= fromIntegral step)) existing)
               pure (Right ())
@@ -336,7 +336,7 @@ scenarioDeleteCheckpoints fx = do
   fake <- fx.dsFixtureMkDs
   let counted _ = atomically (modifyTVar fake.fakeRuns (+ 1)) >> pure (Right ("v" :: Text))
       clean wid step = do
-        cleared <- fake.fakeSource.dsDeleteCheckpoints (WorkflowId wid) step
+        cleared <- fake.fakeSource.dsDeleteCheckpoints (WorkflowId wid) step (pure True)
         case cleared of
           Left err -> pure (Left (SystemDatabase (SysDB.Backend err)))
           Right () -> pure (Right ("cleaned" :: Text))

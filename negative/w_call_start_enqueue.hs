@@ -13,25 +13,25 @@ import DBOS.Transact
 goodOutsideCall ::
   forall exec. Executor IO -> QualifiedWorkflowName -> WorkflowId -> WorkflowCtx exec IO -> IO ()
 goodOutsideCall exec key wid wctx = do
-  _ <- runStep wctx "probe" $ \_sctx -> do
+  _ <- (runStep wctx "probe" $ \_sctx -> do
     _ <- (runWorkflow exec key wid Nothing :: IO (Either (Error EngineOnly) (Maybe SerializedWorkflowValue)))
-    pure ()
+    pure ()) :: IO (Either (Error EngineOnly) ())
   pure ()
 
 -- GOOD (boundary): starting through a captured executor compiles — outside form.
 goodOutsideStart ::
   forall exec. Executor IO -> WorkflowRef IO () -> WorkflowCtx exec IO -> IO ()
 goodOutsideStart exec ref wctx = do
-  _ <- runStep wctx "probe" $ \_sctx -> do
+  _ <- (runStep wctx "probe" $ \_sctx -> do
     _ <- (startWorkflow exec ref undefined Nothing :: IO (Either (Error EngineOnly) (WorkflowHandle IO ())))
-    pure ()
+    pure ()) :: IO (Either (Error EngineOnly) ())
   pure ()
 
 -- GOOD (boundary): enqueueing through a captured DBOS compiles — outside form.
 goodOutsideEnqueue ::
   forall exec. DBOS IO -> QualifiedWorkflowName -> WorkflowId -> WorkflowCtx exec IO -> IO ()
 goodOutsideEnqueue dbos key wid wctx = do
-  _ <- runStep wctx "probe" $ \_sctx -> do
+  _ <- (runStep wctx "probe" $ \_sctx -> do
     _ <- (fmap (const ()) <$> enqueueWorkflow dbos key wid Nothing "q" :: IO (Either (Error EngineOnly) ()))
-    pure ()
+    pure ()) :: IO (Either (Error EngineOnly) ())
   pure ()

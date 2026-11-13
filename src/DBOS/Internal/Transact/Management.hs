@@ -117,6 +117,7 @@ import DBOS.Internal.Transact.Context
     WorkflowCtx (wctxConn),
     stepCtxBoundary,
     stepCtxStatus,
+    stepId,
     workflowId,
     workflowOwner
   )
@@ -563,8 +564,16 @@ forkFromInWorkflow wctx workflowIds point options =
 -- database's own check decides.
 setWorkflowDelay :: Monad m
                  => Connection m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-setWorkflowDelay conn workflowId delay = do
-  result <- runSystemDB conn.connSysdb (\db -> SystemDB.setWorkflowDelay db workflowId delay Nothing)
+setWorkflowDelay conn workflowId delay =
+  setWorkflowDelayWithCaller conn workflowId delay Nothing
+
+-- | The shared write: the caller-owner check fences the call, and the step
+-- record is placed by the caller of this helper (the outside form has none;
+-- the in-workflow form records through 'runStepWith').
+setWorkflowDelayWithCaller :: Monad m
+                           => Connection m -> WorkflowId -> WorkflowDelay -> Maybe StepCaller -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+setWorkflowDelayWithCaller conn workflowId delay caller = do
+  result <- runSystemDB conn.connSysdb (\db -> SystemDB.setWorkflowDelay db workflowId delay caller)
   TransactError.refusing (TransactError.refusedArgument delayOperation) result $ \() -> do
     let WorkflowId workflowText = workflowId
     runTracer conn.connTracer (WorkflowDelayMoveAsked workflowText)
@@ -580,11 +589,8 @@ delayOperation = "delay a workflow"
 setWorkflowDelayInWorkflow :: (MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
                            => WorkflowCtx exec m -> WorkflowId -> WorkflowDelay -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 setWorkflowDelayInWorkflow wctx workflowId delay =
-  runStepWith
-    stepOptionsDefault
-    wctx
-    setWorkflowDelayStepName
-    (\_ -> setWorkflowDelay conn workflowId delay)
+  runStepWith stepOptionsDefault wctx setWorkflowDelayStepName $ \sctx ->
+    setWorkflowDelayWithCaller conn workflowId delay (Just (StepCaller (workflowOwner wctx) (fromMaybe 0 (stepId sctx))))
   where
     conn = wctx.wctxConn
 
@@ -597,7 +603,7 @@ setWorkflowDelayInWorkflow wctx workflowId delay =
 updateWorkflowAttributes :: Monad m
                          => Connection m -> WorkflowId -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 updateWorkflowAttributes conn workflowId attributes =
-  updateWorkflowAttributesAs conn workflowId (Replace attributes) WorkflowAttributesReplaceAsked
+  updateWorkflowAttributesAs conn workflowId (Replace attributes) WorkflowAttributesReplaceAsked Nothing
 
 -- | Merges keys into a workflow's attributes, in one statement. A key
 -- already there takes the new value and the others stay as they are; a key
@@ -610,16 +616,16 @@ updateWorkflowAttributes conn workflowId attributes =
 mergeWorkflowAttributes :: Monad m
                         => Connection m -> WorkflowId -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 mergeWorkflowAttributes conn workflowId attributes =
-  updateWorkflowAttributesAs conn workflowId (Merge attributes) WorkflowAttributesMergeAsked
+  updateWorkflowAttributesAs conn workflowId (Merge attributes) WorkflowAttributesMergeAsked Nothing
 
 -- | The shared write behind the replace and the merge: the backend judges
 -- the update and refuses a missing id, and the announcement is phrased as
 -- the request, not the effect — a replay reads back the recorded outcome
 -- and writes nothing, so it announces "asked to" again from the one call.
 updateWorkflowAttributesAs :: Monad m
-                           => Connection m -> WorkflowId -> AttributeUpdate -> (Text -> ManagementEvent) -> m (Either (TransactError.Error TransactError.EngineOnly) ())
-updateWorkflowAttributesAs conn workflowId update asked = do
-  result <- withConnection conn (\db -> SystemDB.updateWorkflowAttributes db workflowId update Nothing)
+                           => Connection m -> WorkflowId -> AttributeUpdate -> (Text -> ManagementEvent) -> Maybe StepCaller -> m (Either (TransactError.Error TransactError.EngineOnly) ())
+updateWorkflowAttributesAs conn workflowId update asked caller = do
+  result <- withConnection conn (\db -> SystemDB.updateWorkflowAttributes db workflowId update caller)
   case result of
     Left err -> pure (Left err)
     Right () -> do
@@ -638,11 +644,8 @@ updateWorkflowAttributesInWorkflow wctx workflowId attributes =
   case validateAttributes attributes of
     Left err -> pure (Left (TransactError.fromSystemDB err))
     Right () ->
-      runStepWith
-        stepOptionsDefault
-        wctx
-        updateWorkflowAttributesStepName
-        (\_ -> updateWorkflowAttributes conn workflowId attributes)
+      runStepWith stepOptionsDefault wctx updateWorkflowAttributesStepName $ \sctx ->
+        updateWorkflowAttributesAs conn workflowId (Replace attributes) WorkflowAttributesReplaceAsked (Just (StepCaller (workflowOwner wctx) (fromMaybe 0 (stepId sctx))))
   where
     conn = wctx.wctxConn
 
@@ -656,11 +659,8 @@ mergeWorkflowAttributesInWorkflow wctx workflowId attributes =
   case validateAttributeUpdate (Merge attributes) of
     Left err -> pure (Left (TransactError.fromSystemDB err))
     Right () ->
-      runStepWith
-        stepOptionsDefault
-        wctx
-        updateWorkflowAttributesStepName
-        (\_ -> mergeWorkflowAttributes conn workflowId attributes)
+      runStepWith stepOptionsDefault wctx updateWorkflowAttributesStepName $ \sctx ->
+        updateWorkflowAttributesAs conn workflowId (Merge attributes) WorkflowAttributesMergeAsked (Just (StepCaller (workflowOwner wctx) (fromMaybe 0 (stepId sctx))))
   where
     conn = wctx.wctxConn
 

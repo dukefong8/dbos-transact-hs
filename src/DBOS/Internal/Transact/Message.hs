@@ -23,7 +23,7 @@ import Data.Text qualified as Text
 import DBOS.Internal.SystemDB.Class qualified as SystemDB
 import DBOS.Internal.SystemDB.Types (Duration, EncodedValue (..), IdempotencyKey, EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), sendBulkStepName)
 import DBOS.Internal.Transact.Serialization (codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextStepId, ownerToken, withSystemDB, workflowId, workflowOwner)
+import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx, insideAStep, nextStepId, ownerToken, trySync, withSystemDB, workflowId, workflowOwner)
 import DBOS.Internal.Transact.Error qualified as TransactError
 import DBOS.Internal.Transact.Step (runStepWith, stepOptionsDefault)
 
@@ -59,7 +59,7 @@ sendOptionsDefault = SendOptions {sendToForks = ForksSkip}
 -- | Send a typed message to another workflow. At a workflow boundary the
 -- send is checkpointed under its own operation id; inside a step it is plain
 -- and the enclosing step's checkpoint stands for the send.
-send :: (ToJSON value, MonadSTM m)
+send :: (ToJSON value, MonadSTM m, MonadCatch m)
      => WorkflowCtx exec m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 send wctx destination topic idempotencyKey value =
   sendWith wctx (SendMessage destination value topic idempotencyKey) sendOptionsDefault
@@ -67,7 +67,7 @@ send wctx destination topic idempotencyKey value =
 -- | 'send' with the options rather than the defaults: the fork fan-out.
 -- The message carries its destination, payload, topic, and idempotency
 -- key. Mirrors Rust @send_with@.
-sendWith :: (ToJSON value, MonadSTM m)
+sendWith :: forall value m exec. (ToJSON value, MonadSTM m, MonadCatch m)
          => WorkflowCtx exec m -> SendMessage value -> SendOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWith wctx message options = do
   let workflowText = workflowId wctx
@@ -83,21 +83,28 @@ sendWith wctx message options = do
             sendIdempotencyKey = message.messageIdempotencyKey
           }
       fanOut = options.sendToForks == ForksInclude
-  -- Inside a step the enclosing checkpoint stands for the send — through
-  -- the handed context or a captured parent, read together.
-  stepped <- insideAStep wctx
-  caller <-
-    if stepped
-      then pure Nothing
-      else do
-        stepId' <- nextStepId wctx
-        pure (Just (WorkflowId workflowText, stepId'))
-  -- Workflow and step sends alike present the sending execution; the
-  -- client path below presents no owner and skips the fence.
-  written <- withSystemDB wctx (\db -> SystemDB.sendMessage db encodedMessage serialization caller (Just (workflowOwner wctx)) fanOut)
-  pure $ case written of
-    Left err -> Left (TransactError.fromExecution err)
-    Right () -> Right ()
+  -- Force the payload before any id is taken: a throwing ToJSON is a send
+  -- that never happened, not an id spent on a message that cannot be
+  -- written.
+  forced <- trySync (pure $! Text.length encoded.serializedText) :: m (Either SomeException Int)
+  case forced of
+    Left exn -> pure (Left (TransactError.ErrorSerialization {what = "message", message = showText exn}))
+    Right _ -> do
+      -- Inside a step the enclosing checkpoint stands for the send — through
+      -- the handed context or a captured parent, read together.
+      stepped <- insideAStep wctx
+      caller <-
+        if stepped
+          then pure Nothing
+          else do
+            stepId' <- nextStepId wctx
+            pure (Just (WorkflowId workflowText, stepId'))
+      -- Workflow and step sends alike present the sending execution; the
+      -- client path below presents no owner and skips the fence.
+      written <- withSystemDB wctx (\db -> SystemDB.sendMessage db encodedMessage serialization caller (Just (workflowOwner wctx)) fanOut)
+      pure $ case written of
+        Left err -> Left (TransactError.fromExecution err)
+        Right () -> Right ()
 
 -- | Send many messages in one transaction: all or none. The batch is
 -- checkpointed as one @DBOS.send_bulk@ step however long it is, so a replay
@@ -111,7 +118,7 @@ sendBulk wctx messages = sendBulkWith wctx messages sendOptionsDefault
 
 -- | 'sendBulk' with the options rather than the defaults: the fork
 -- fan-out. Mirrors Rust @send_bulk_with@.
-sendBulkWith :: (ToJSON value, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
+sendBulkWith :: forall value m exec. (ToJSON value, MonadDelay m, MonadTime m, MonadAsync m, MonadCatch m)
              => WorkflowCtx exec m -> [SendMessage value] -> SendOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendBulkWith wctx messages options = do
   let encoded = map encodeMessage messages
@@ -120,15 +127,21 @@ sendBulkWith wctx messages options = do
           Nothing -> Nothing
           Just (Serialization name) -> Just name
         [] -> Nothing
-  -- 'sendBulk' takes only the workflow view, so it always checkpoints
-  -- here; a bulk send through a captured parent degrades inside
-  -- 'runStepWith' by the depth backstop. The batch goes out with no
-  -- caller step: the runner's own output record is the checkpoint, and a
-  -- second record at the same id would race it by the millisecond (the
-  -- send stamps one clock reading, the runner another). Single sends keep
-  -- their caller record — no runner stands behind them.
-  runStepWith stepOptionsDefault wctx sendBulkStepName $ \sctx -> do
-    plainSend sctx.stepCtxWorkflow encoded serialization Nothing
+  -- Force every payload before the step id is taken: a message that
+  -- cannot be encoded is a batch that never happened.
+  forced <- trySync (mapM_ (\m -> pure $! Text.length m.sendMessageBody.serializedText) encoded) :: m (Either SomeException ())
+  case forced of
+    Left exn -> pure (Left (TransactError.ErrorSerialization {what = "message", message = showText exn}))
+    Right () -> do
+      -- 'sendBulk' takes only the workflow view, so it always checkpoints
+      -- here; a bulk send through a captured parent degrades inside
+      -- 'runStepWith' by the depth backstop. The batch goes out with no
+      -- caller step: the runner's own output record is the checkpoint, and a
+      -- second record at the same id would race it by the millisecond (the
+      -- send stamps one clock reading, the runner another). Single sends keep
+      -- their caller record — no runner stands behind them.
+      runStepWith stepOptionsDefault wctx sendBulkStepName $ \sctx -> do
+        plainSend sctx.stepCtxWorkflow encoded serialization Nothing
   where
     encodeMessage message =
       let encodedValue = encodeWorkflowValue message.messageValue

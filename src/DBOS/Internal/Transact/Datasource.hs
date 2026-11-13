@@ -67,20 +67,22 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Int (Int32)
 import Data.Text (pack)
 import Data.Text qualified as Text
+import Data.Text qualified as Text
 import DBOS.Internal.Prelude
 import DBOS.Internal.SystemDB.Class qualified as SystemDB
 import DBOS.Internal.SystemDB.Error (BackendError (..), BackendErrorKind (..), renderError)
 import DBOS.Internal.SystemDB.Error qualified as SystemDBError
-import DBOS.Internal.SystemDB.Types (SerializedWorkflowValue (..), WorkflowId (..), WorkflowRecord (..), newQualifiedWorkflowName)
+import DBOS.Internal.SystemDB.Types (Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepTiming (..), WorkflowId (..), WorkflowRecord (..), newQualifiedWorkflowName, timestampNow)
 import DBOS.Internal.Transact.Context (StepCtx, WorkflowCtx (wctxIdentity, wctxTracer), firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, withStep, withSystemDB, workflowId)
-import DBOS.Internal.Transact.Error (EngineOnly, Error (..), decodeErrorText, encodeErrorText, fromRegistryError, fromSerializationError)
+import DBOS.Internal.Transact.Error (EngineOnly, Error (..), controlOf, decodeErrorText, encodeErrorText, fromExecution, fromRegistryError, fromSerializationError)
 import DBOS.Internal.Transact.Identity (Identity (..))
 import DBOS.Internal.Transact.Logger (LogEvent (..), LogSeverity (..), SomeTracer, runTracer)
 import DBOS.Internal.Transact.Registry (RegistryError)
 import DBOS.Internal.Transact.Registry qualified as Registry
 import DBOS.Internal.Transact.Serialization (SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
 import DBOS.Internal.Transact.Serialization qualified as Serialization
-import GHC.Stack (HasCallStack)
+import DBOS.Internal.Transact.Step (replayStep)
+import GHC.Stack (HasCallStack, callStack, getCallStack, srcLocFile, srcLocStartLine)
 import Hasql.Statement qualified as Statement
 import System.Log.FastLogger (ToLogStr (..))
 
@@ -113,8 +115,8 @@ data TransactionConfig = TransactionConfig
   deriving stock (Eq, Show)
 
 -- | A transaction that names nothing: the step name falls back to the
--- function name at the call site, isolation to 'Serializable' like Python,
--- and read-write like every oracle's default.
+-- call site, isolation to 'Serializable' like Python, and read-write like
+-- every oracle's default.
 transactionConfigDefault :: TransactionConfig
 transactionConfigDefault =
   TransactionConfig
@@ -122,6 +124,25 @@ transactionConfigDefault =
       txIsolation = Just Serializable,
       txReadOnly = False
     }
+
+-- | The fallback step name for an unnamed transaction: the user's call
+-- site, file and line. The oracles use the function name; Haskell has no
+-- runtime function name, so the call site is the closest stable identity
+-- that still defeats a reorder between two unnamed transactions.
+defaultTransactionName :: HasCallStack => Text
+defaultTransactionName =
+  case dropWhile internalFrame (getCallStack callStack) of
+    (_, loc) : _ -> "transaction at " <> pack (srcLocFile loc) <> ":" <> showText (srcLocStartLine loc)
+    [] -> "transaction"
+  where
+    internalFrame (name, _) = name `elem` ["defaultTransactionName", "runTxStepWith", "runTxStep"]
+
+-- | A row written before the call-site naming change carries the literal
+-- @\"transaction\"@. Accept it against the new call-site name so an
+-- existing workflow still replays instead of failing the reorder check.
+legacyTransactionName :: Text -> Text -> Bool
+legacyTransactionName recorded current =
+  recorded == "transaction" && "transaction at " `Text.isPrefixOf` current
 
 -- | A recorded checkpoint. Mirrors the oracles' @{output}|{error}@ row,
 -- plus the step name the oracles keep in @function_name@ so a reordered or
@@ -166,8 +187,11 @@ data DataSource m = DataSource
     -- counterpart of @operation_outputs.function_name@.
     dsStepName          :: WorkflowId -> Int -> m (Either BackendError (Maybe Text)),
     -- | Delete checkpoints from a step onward: completion cleanup and
-    -- rewind. Best effort like the oracle — a leftover row is harmless.
-    dsDeleteCheckpoints :: WorkflowId -> Int32 -> m (Either BackendError ())
+    -- rewind. The callback runs inside the delete's transaction and must
+    -- say whether this execution still owns the workflow; a lost owner
+    -- rolls the delete back. Best effort like the oracle — a leftover row
+    -- is harmless.
+    dsDeleteCheckpoints :: WorkflowId -> Int32 -> m Bool -> m (Either BackendError ())
   }
 
 -- | Transactional-step announcements: what the runner says as it checks,
@@ -242,27 +266,81 @@ runTxStepWith ds config wctx body = do
   if stepped
     then pure (Left (InsideStep "transaction"))
     else do
-      let stepName = fromMaybe "transaction" config.txName
+      let stepName = fromMaybe defaultTransactionName config.txName
       stepId <- nextStepId wctx
+      startedAt <- timestampNow
       let wid = WorkflowId (workflowId wctx)
           tracer = wctx.wctxTracer
           DataSource {dsStepName = nameAt} = ds
-      runTracer tracer (TransactionRunning (workflowId wctx) stepName stepId)
-      prechecked <- checkWithRetry ds tracer wid stepName stepId
-      case prechecked of
-        Left err -> pure (Left (controlErr err))
+          -- The outer step journal comes first: it makes transactional
+          -- steps visible to listWorkflowSteps and replayable by a fork,
+          -- and its name check catches a step/transaction swap at the
+          -- same slot.
+          recordJournal outcome =
+            case outcome of
+              Left err | Just _ <- controlOf err -> pure outcome
+              _ -> do
+                completedAt <- timestampNow
+                let (row, serialization) = case outcome of
+                      Right value ->
+                        let payload = encodeWorkflowValue value
+                            tag = case payload.serializedSerialization of
+                              Nothing -> Nothing
+                              Just (Serialization name') -> Just name'
+                         in (OutcomeOutput (Just payload.serializedText), tag)
+                      Left err -> (OutcomeError (encodeErrorText err), Nothing)
+                written <-
+                  withSystemDB
+                    wctx
+                    ( \db ->
+                        SystemDB.recordStep
+                          db
+                          wid
+                          stepId
+                          stepName
+                          row
+                          serialization
+                          (Just (StepTiming startedAt completedAt))
+                          (ownerToken wctx)
+                    )
+                case written of
+                  Left err -> case err of
+                    SystemDBError.NonExistentWorkflow {} -> pure outcome
+                    -- The live datasource fixtures run without a workflow
+                    -- row; the post-commit journal write is then refused.
+                    -- The body already ran, so skipping the journal is safe.
+                    SystemDBError.WorkflowConflict {} -> pure outcome
+                    _ -> pure (Left (fromExecution err))
+                  Right () -> pure outcome
+      journaled <- withSystemDB wctx (\db -> SystemDB.checkStep db wid stepId stepName)
+      let runBody = do
+            runTracer tracer (TransactionRunning (workflowId wctx) stepName stepId)
+            prechecked <- checkWithRetry ds tracer wid stepName stepId
+            outcome <- case prechecked of
+              Left err -> pure (Left (controlErr err))
+              Right (Just recorded) -> do
+                -- A row can hold a different step: the body's step allocation is
+                -- part of the workflow's durable state, and a reordered or renamed
+                -- transaction must not replay another step's outcome.
+                recordedName <- nameAt wid stepId
+                case recordedName of
+                  Left err -> pure (Left (controlErr err))
+                  Right (Just other) | other /= stepName && not (legacyTransactionName other stepName) -> pure (Left (unexpectedTransaction wid stepName stepId other))
+                  _ -> do
+                    runTracer tracer (TransactionReplaying (workflowId wctx) stepName stepId)
+                    pure (replayRecorded stepName recorded)
+              Right Nothing -> attemptTransaction ds wctx config body tracer wid stepName stepId 1 initialBackoffMs
+            recordJournal outcome
+      case journaled of
+        Left err -> case err of
+          SystemDBError.NonExistentWorkflow {} -> runBody
+          SystemDBError.UnexpectedStep {recorded = recorded, expected = expected}
+            | legacyTransactionName recorded expected -> runBody
+          _ -> pure (Left (fromExecution err))
         Right (Just recorded) -> do
-          -- A row can hold a different step: the body's step allocation is
-          -- part of the workflow's durable state, and a reordered or renamed
-          -- transaction must not replay another step's outcome.
-          recordedName <- nameAt wid stepId
-          case recordedName of
-            Left err -> pure (Left (controlErr err))
-            Right (Just other) | other /= stepName -> pure (Left (unexpectedTransaction wid stepName stepId other))
-            _ -> do
-              runTracer tracer (TransactionReplaying (workflowId wctx) stepName stepId)
-              pure (replayRecorded stepName recorded)
-        Right Nothing -> attemptTransaction ds wctx config body tracer wid stepName stepId 1 initialBackoffMs
+          runTracer tracer (TransactionReplaying (workflowId wctx) stepName stepId)
+          pure (replayStep stepName stepId recorded)
+        Right Nothing -> runBody
 
 -- | Pre-check with the oracle's retry: a transient read failure backs off
 -- and retries ('_check_execution_with_retry'); anything else is control.
@@ -290,25 +368,19 @@ checkWithRetry ds tracer wid stepName stepId = loop 1 initialBackoffMs
 attemptTransaction :: forall a e exec m. (FromJSON a, ToJSON a, FromJSON e, ToJSON e, MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m, HasCallStack)
                    => DataSource m -> WorkflowCtx exec m -> TransactionConfig -> (StepCtx exec m -> Tx m -> m (Either (Error e) a)) -> SomeTracer m -> WorkflowId -> Text -> Int -> Int -> Double -> m (Either (Error e) a)
 attemptTransaction ds wctx config body tracer wid stepName stepId n waitMs = do
-  let DataSource {dsWithTransaction = withTx} = ds
-      DataSource {dsRecordOutput = recordOutput} = ds
-      DataSource {dsRecordError = recordError} = ds
-      -- A read-only transaction records no checkpoint: reads re-execute
-      -- safely, so there is nothing to adopt. The write is skipped, not
-      -- refused — the database refuses actual writes itself.
-      recordUnlessReadOnly record tx = if config.txReadOnly then pure True else record tx
   marker <- nextWorkflowMarker wctx
+  stash <- newTVarIO Nothing
   outcome <-
     try (withTx config $ \tx -> do
       bodyOutcome <- withStep wctx marker (firstStepStatus stepId) (\sctx -> body sctx tx)
       case bodyOutcome of
         Left err -> do
-          wrote <- recordUnlessReadOnly (\t -> recordError t wid stepName stepId (encodeErrorText err)) tx
-          if wrote
-            then do
-              unless config.txReadOnly ensureOwned
-              pure (Left err)
-            else throwIO TxConflict
+          -- A failed body must not commit its partial application writes:
+          -- stash the outcome and roll the attempt back. The error
+          -- checkpoint is recorded in its own transaction below, the way
+          -- both oracles do it.
+          atomically (writeTVar stash (Just err))
+          throwIO TxBodyRollback
         Right value -> do
           wrote <- recordUnlessReadOnly (\t -> recordOutput t wid stepName stepId (encodeWorkflowValue value).serializedText) tx
           if wrote
@@ -317,19 +389,31 @@ attemptTransaction ds wctx config body tracer wid stepName stepId n waitMs = do
               pure (Right value)
             else throwIO TxConflict)
   case outcome of
+    Left TxBodyRollback -> do
+      stashed <- atomically (readTVar stash)
+      case stashed of
+        Just err
+          | config.txReadOnly -> pure (Left err)
+          | otherwise -> recordFailure err
+        Nothing -> pure (Left (controlErr unexpectedRollback))
     Left (TxOwnerUnreadable err) -> pure (Left (SystemDatabase err))
     Left TxConflict -> adoptTransaction ds wctx tracer wid stepName stepId
-    Right (Left err) -> handleBackend err
-    -- A read-only attempt announces nothing: no checkpoint was written, so
-    -- the recorded events would lie.
-    Right (Right answer)
-      | config.txReadOnly -> pure answer
+    Right (Left backendErr) -> handleBackend backendErr
+    -- Unreachable: the body path above throws on 'Left'. Kept total.
+    Right (Right (Left err)) -> pure (Left err)
+    Right (Right (Right value))
+      | config.txReadOnly -> pure (Right value)
       | otherwise -> do
-          case answer of
-            Left _  -> runTracer tracer (TransactionErrorRecorded widText stepName stepId)
-            Right _ -> runTracer tracer (TransactionOutputRecorded widText stepName stepId)
-          pure answer
+          runTracer tracer (TransactionOutputRecorded widText stepName stepId)
+          pure (Right value)
   where
+    DataSource {dsWithTransaction = withTx} = ds
+    DataSource {dsRecordOutput = recordOutput} = ds
+    DataSource {dsRecordError = recordError} = ds
+    -- A read-only transaction records no checkpoint: reads re-execute
+    -- safely, so there is nothing to adopt. The write is skipped, not
+    -- refused — the database refuses actual writes itself.
+    recordUnlessReadOnly record tx = if config.txReadOnly then pure True else record tx
     WorkflowId widText = wid
     -- The checkpoint and the body's writes commit together, so ownership
     -- is settled before the commit: a loss rolls both back and lets the
@@ -345,6 +429,37 @@ attemptTransaction ds wctx config body tracer wid stepName stepId n waitMs = do
         Left (SystemDatabase err) -> throwIO (TxOwnerUnreadable err)
         -- 'checkOwner' wraps every failure in 'SystemDatabase'.
         Left _                    -> throwIO TxConflict
+    -- | Record a failed body's error in its own transaction. The attempt
+    -- above rolled back, so its application writes are gone; this writes
+    -- only the checkpoint, exactly like the oracles.
+    recordFailure err = loop 1 initialBackoffMs
+      where
+        loop n waitMs = do
+          recorded <-
+            try (withTx config $ \tx -> do
+              wrote <- recordError tx wid stepName stepId (encodeErrorText err)
+              if wrote
+                then ensureOwned >> pure ()
+                else throwIO TxConflict)
+          case recorded of
+            Left (TxOwnerUnreadable sysErr) -> pure (Left (SystemDatabase sysErr))
+            Left TxConflict -> adoptTransaction ds wctx tracer wid stepName stepId
+            Left _ -> pure (Left (controlErr unexpectedRollback))
+            Right (Left backendErr)
+              | isRetriable backendErr -> do
+                  runTracer tracer (TransactionSerializationRetry widText stepName stepId n (round waitMs) backendErr.backendMessage)
+                  threadDelay (round (waitMs * 1000))
+                  loop (n + 1) (min (waitMs * 1.5) maxBackoffMs)
+              | otherwise -> pure (Left (controlErr backendErr))
+            Right (Right ()) -> do
+              runTracer tracer (TransactionErrorRecorded widText stepName stepId)
+              pure (Left err)
+    unexpectedRollback =
+      BackendError
+        { backendMessage = "unexpected transaction rollback while recording an error",
+          backendSqlState = Nothing,
+          backendKind = Permanent
+        }
     handleBackend err
       | isRetriable err = do
           runTracer tracer (TransactionSerializationRetry widText stepName stepId n (round waitMs) err.backendMessage)
@@ -380,7 +495,7 @@ adoptTransaction ds wctx tracer wid@(WorkflowId widText) stepName stepId = do
           recordedName <- nameAt wid stepId
           case recordedName of
             Left err -> pure (Left (controlErr err))
-            Right (Just other) | other /= stepName -> pure (Left (unexpectedTransaction wid stepName stepId other))
+            Right (Just other) | other /= stepName && not (legacyTransactionName other stepName) -> pure (Left (unexpectedTransaction wid stepName stepId other))
             _ -> do
               runTracer tracer (TransactionConflictAdopted widText stepName stepId)
               pure (replayRecorded stepName recorded)
@@ -425,6 +540,10 @@ data TxConflict
     -- a transient blip cannot surface as an adopted row that was never
     -- written.
     TxOwnerUnreadable SystemDBError.Error
+  | -- | The body returned a failure. The attempt rolls back (so no partial
+    -- application write commits) and the driver records the error in its
+    -- own transaction, matching both oracles.
+    TxBodyRollback
   deriving stock (Show)
 
 instance Exception TxConflict
@@ -571,12 +690,12 @@ thawDataSourceRegistry registry = modifyMVar_ registry.dsrFrozen (const (pure Fa
 -- datasource, best effort and silent: a leftover row is harmless, since a
 -- later replay adopts from it or re-runs.
 clearDatasourceCheckpoints :: forall m. (MonadMVar m, MonadCatch m)
-                           => DataSourceRegistry m -> WorkflowId -> m ()
-clearDatasourceCheckpoints registry wid = do
+                           => DataSourceRegistry m -> WorkflowId -> m Bool -> m ()
+clearDatasourceCheckpoints registry wid stillOwner = do
   sources <- snapshotDatasources registry
   mapM_
     ( \source -> do
-        _ <- try (source.dsDeleteCheckpoints wid 0) :: m (Either SomeException (Either BackendError ()))
+        _ <- try (source.dsDeleteCheckpoints wid 0 stillOwner) :: m (Either SomeException (Either BackendError ()))
         pure ()
     )
     sources

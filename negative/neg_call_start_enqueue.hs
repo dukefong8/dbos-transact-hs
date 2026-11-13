@@ -17,23 +17,23 @@ childBody () _ = pure (Right 7)
 -- CALL: invoking a workflow body inline with a step context.
 badInlineCall :: forall exec. WorkflowCtx exec IO -> IO ()
 badInlineCall wctx = do
-  _ <- runStep wctx "probe" $ \sctx -> childBody () sctx
+  _ <- (runStep wctx "probe" $ \sctx -> childBody () sctx) :: IO (Either (Error EngineOnly) (Either (Error EngineOnly) Int))
   pure ()
 
 -- START: the ctx-threaded start from a step body.
 badStartInStep ::
   forall exec. WorkflowRef IO () -> WorkflowCtx exec IO -> IO ()
 badStartInStep ref wctx = do
-  _ <- runStep wctx "probe" $ \sctx -> do
+  _ <- (runStep wctx "probe" $ \sctx -> do
     _ <- (startChildWorkflow sctx ref undefined Nothing :: IO (Either (Error EngineOnly) (WorkflowHandle IO ())))
-    pure ()
+    pure ()) :: IO (Either (Error EngineOnly) ())
   pure ()
 
 -- ENQUEUE: the ctx-threaded enqueue (start with a queue) from a step body.
 badEnqueueInStep ::
   forall exec. WorkflowRef IO () -> WorkflowCtx exec IO -> IO ()
 badEnqueueInStep ref wctx = do
-  _ <- runStep wctx "probe" $ \sctx -> do
+  _ <- (runStep wctx "probe" $ \sctx -> do
     _ <- (startChildWorkflow sctx ref (startOptionsDefault {startQueue = Just (enqueueNew "q")}) Nothing :: IO (Either (Error EngineOnly) (WorkflowHandle IO ())))
-    pure ()
+    pure ()) :: IO (Either (Error EngineOnly) ())
   pure ()

@@ -101,6 +101,7 @@ module DBOS.Internal.SystemDB.Postgres.Statements
     claimExecutorStatement,
     claimExecutorTx,
     setWorkflowDelaySession,
+    callerOwnerSession,
     clearQueueAssignmentSession,
     updateWorkflowAttributesSession,
     mergeWorkflowAttributesSession,
@@ -2388,6 +2389,14 @@ getEventStepRecord params =
 -- the database clock the release sweep compares it with, as on
 -- @init_workflow@; an absolute one is written as given. Exactly one of the
 -- two is bound. Mirrors @set_workflow_delay@.
+-- | Whether the caller still owns its own workflow row. A missing row or a
+-- null owner is a conflict: the fence must not pass without proof.
+callerOwnerSession :: Text -> Text -> Session.Session [Maybe Bool]
+callerOwnerSession workflowId owner =
+  sqlQueryTypedSession [typedSql|
+    select owner_xid = ${owner} from dbos.workflow_status where workflow_uuid = ${workflowId}
+  |]
+
 setWorkflowDelaySession :: Text -> Maybe Int64 -> Maybe Int64 -> Session.Session Int64
 setWorkflowDelaySession workflowId delayMs delayUntil =
   sqlExecTypedSession [typedSql|

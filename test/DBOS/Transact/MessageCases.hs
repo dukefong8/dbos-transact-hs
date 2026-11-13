@@ -117,7 +117,7 @@ mfFreshRun (MessageFixture _ _ fresh _ _ _ _ _) = fresh
 
 -- | Inside a step body a send succeeds and a receive is refused: the
 -- oracle's leaf rule for messages, observed as one Text line.
-probeSendRecv :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m)
+probeSendRecv :: forall m exec. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
               => WorkflowId -> StepCtx exec m -> m Text
 probeSendRecv destination sctx = do
   let wctx = sctx.stepCtxWorkflow
@@ -130,7 +130,7 @@ probeSendRecv destination sctx = do
 
 -- | A workflow send is delivered once and recv replays: the replayed send
 -- moves nothing again and the replayed receive reads its recording.
-scenarioSendDeliveredOnce :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+scenarioSendDeliveredOnce :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
                           => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text))
 scenarioSendDeliveredOnce fx = do
   (source, destination) <- fx.mfFreshPair "deliver"
@@ -142,7 +142,7 @@ scenarioSendDeliveredOnce fx = do
 
 -- | A send may fan out to the destination's forks: the default addresses
 -- the destination alone, asking for the fan-out reaches both.
-scenarioFanOut :: forall m. (MonadSTM m)
+scenarioFanOut :: forall m. (MonadSTM m, MonadCatch m)
                => MessageFixture m -> m (Either (Error EngineOnly) (), Int, Int, Either (Error EngineOnly) (), Int, Int)
 scenarioFanOut fx = do
   (original, sender) <- fx.mfFreshPair "fanout"
@@ -160,7 +160,7 @@ scenarioFanOut fx = do
   pure (skipped, originalOnce, forkOnce, included, originalTwice, forkTwice)
 
 -- | A message from another workflow reaches its destination.
-scenarioThirdParty :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+scenarioThirdParty :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
                    => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text))
 scenarioThirdParty fx = do
   (source, destination) <- fx.mfFreshPair "third-party"
@@ -170,7 +170,7 @@ scenarioThirdParty fx = do
 
 -- | Topics do not cross and absence is a value: a missing topic reads
 -- back empty, the addressed one delivers.
-scenarioTopics :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+scenarioTopics :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
                => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text))
 scenarioTopics fx = do
   (source, destination) <- fx.mfFreshPair "topics"
@@ -182,7 +182,7 @@ scenarioTopics fx = do
 -- | A replay takes the recorded message and sends once: the replayed
 -- receive reads the first message back, the live receive moves on, and
 -- the replayed send moves nothing again.
-scenarioReplayTakes :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+scenarioReplayTakes :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
                     => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (), Int)
 scenarioReplayTakes fx = do
   (source, destination) <- fx.mfFreshPair "replay-takes"
@@ -222,7 +222,7 @@ scenarioSendNameMismatch fx = do
 -- Both oracles record the deadline unconditionally, so a replay that waited
 -- has the same remainder left rather than the full duration. Returns the
 -- recv verdict with the two steps' outputs and the sleep step's name.
-scenarioRecvTimeoutSteps :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+scenarioRecvTimeoutSteps :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
                          => MessageFixture m -> m (Either (Error EngineOnly) (Maybe Text), Maybe (Maybe Text), Maybe (Maybe Text), Maybe Text)
 scenarioRecvTimeoutSteps fx = do
   (source, _) <- fx.mfFreshPair "recv-timeout-steps"
@@ -306,7 +306,7 @@ checkFanOut (skipped, originalOnce, forkOnce, included, originalTwice, forkTwice
 
 -- | A keyed send fans out like an unkeyed one: the duplicate-key refusal
 -- applies to the caller's list, before fan-out, as both oracles check.
-scenarioKeyedFanOut :: forall m. (MonadSTM m)
+scenarioKeyedFanOut :: forall m. (MonadSTM m, MonadCatch m)
                     => MessageFixture m -> m (Either (Error EngineOnly) (), Int, Int)
 scenarioKeyedFanOut fx = do
   (original, sender) <- fx.mfFreshPair "keyed-fanout"
@@ -326,7 +326,7 @@ checkKeyedFanOut (included, originalTwice, forkTwice) = do
 
 -- | A resend under one key delivers once: the second send succeeds but moves
 -- no new message, so the second receive times out.
-scenarioResendDeduped :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+scenarioResendDeduped :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
                       => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text), Either (Error EngineOnly) (Maybe Text))
 scenarioResendDeduped fx = do
   (source, destination) <- fx.mfFreshPair "resend-dedup"
@@ -345,7 +345,7 @@ checkResendDeduped (firstSend, secondSend, firstReceive, secondReceive) = do
 
 -- | Topics do not cross workflows: a message addressed elsewhere is not
 -- readable here, even on a shared topic.
-scenarioScopedReceive :: forall m. (MonadSTM m, MonadTime m, MonadDelay m)
+scenarioScopedReceive :: forall m. (MonadSTM m, MonadTime m, MonadDelay m, MonadCatch m)
                       => MessageFixture m -> m (Either (Error EngineOnly) (), Either (Error EngineOnly) (Maybe Text))
 scenarioScopedReceive fx = do
   (sourceA, destA) <- fx.mfFreshPair "scope-a"

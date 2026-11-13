@@ -3148,7 +3148,7 @@ instance SystemDB PostgresSystemDB IO where
                 threadDelay (durationMicros pollInterval)
                 loop env remaining
       unwrap (Types.WorkflowId widText) = widText
-  setWorkflowDelay env wid delay _caller =
+  setWorkflowDelay env wid delay caller =
     case delay of
       DelayFor duration -> case durationToMs "delay" duration of
         Left err -> pure (Left err)
@@ -3156,32 +3156,62 @@ instance SystemDB PostgresSystemDB IO where
       DelayUntil instant -> runUpdate Nothing (Just (timestampToEpochMs instant))
     where
       unwrap (Types.WorkflowId widText) = widText
+      callerIds = case caller of
+        Just c -> Just (unwrap c.stepCallerOwner.ownerWorkflowId, c.stepCallerOwner.ownerToken)
+        Nothing -> Nothing
+      checkCaller = case callerIds of
+        Just (callerWid, token) -> do
+          result <- runSession env "check_caller_owner" (Statements.callerOwnerSession callerWid token)
+          pure $ case result of
+            Left err -> Left err
+            Right [Just True] -> Right ()
+            Right _ -> Left (WorkflowConflict {workflowId = callerWid})
+        Nothing -> pure (Right ())
       runUpdate relMs absMs = do
-        result <- runSession env "set_workflow_delay" (Statements.setWorkflowDelaySession (unwrap wid) relMs absMs)
-        pure (() <$ result)
+        allowed <- checkCaller
+        case allowed of
+          Left err -> pure (Left err)
+          Right () -> do
+            result <- runSession env "set_workflow_delay" (Statements.setWorkflowDelaySession (unwrap wid) relMs absMs)
+            pure (() <$ result)
   clearQueueAssignment env wid = do
     now <- timestampNow
     result <- runSession env "clear_queue_assignment" (Statements.clearQueueAssignmentSession (unwrap wid) (timestampToEpochMs now))
     pure (fmap (> 0) result)
     where
       unwrap (Types.WorkflowId widText) = widText
-  updateWorkflowAttributes env wid update _caller =
+  updateWorkflowAttributes env wid update caller =
     case validateAttributeUpdate update of
       Left err -> pure (Left err)
       Right () -> do
-        result <- case update of
-          Replace attributes ->
-            runSession env "update_workflow_attributes" (Statements.updateWorkflowAttributesSession (unwrap wid) attributes)
-          Merge attributes ->
-            runSession env "merge_workflow_attributes" (Statements.mergeWorkflowAttributesSession (unwrap wid) attributes)
-        -- Counted as matched, not as changed: a workflow whose attributes
-        -- were absent, or already what is written, still counts. None
-        -- means no workflow has the id, refused as Go refuses it rather
-        -- than reported as done. Mirrors the oracle.
-        case result of
+        let callerIds = case caller of
+              Just c -> Just (unwrap c.stepCallerOwner.ownerWorkflowId, c.stepCallerOwner.ownerToken)
+              Nothing -> Nothing
+            checkCaller = case callerIds of
+              Just (callerWid, token) -> do
+                checked <- runSession env "check_caller_owner" (Statements.callerOwnerSession callerWid token)
+                pure $ case checked of
+                  Left err -> Left err
+                  Right [Just True] -> Right ()
+                  Right _ -> Left (WorkflowConflict {workflowId = callerWid})
+              Nothing -> pure (Right ())
+        allowed <- checkCaller
+        case allowed of
           Left err -> pure (Left err)
-          Right 0 -> pure (Left (NonExistentWorkflow {workflowIds = [unwrap wid]}))
-          Right _ -> pure (Right ())
+          Right () -> do
+            result <- case update of
+              Replace attributes ->
+                runSession env "update_workflow_attributes" (Statements.updateWorkflowAttributesSession (unwrap wid) attributes)
+              Merge attributes ->
+                runSession env "merge_workflow_attributes" (Statements.mergeWorkflowAttributesSession (unwrap wid) attributes)
+            -- Counted as matched, not as changed: a workflow whose attributes
+            -- were absent, or already what is written, still counts. None
+            -- means no workflow has the id, refused as Go refuses it rather
+            -- than reported as done. Mirrors the oracle.
+            case result of
+              Left err -> pure (Left err)
+              Right 0 -> pure (Left (NonExistentWorkflow {workflowIds = [unwrap wid]}))
+              Right _ -> pure (Right ())
     where
       unwrap (Types.WorkflowId widText) = widText
   reenqueueForRecovery env executorIds applicationVersion recoveryQueue

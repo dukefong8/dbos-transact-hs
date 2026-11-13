@@ -202,14 +202,14 @@ runProbeTx ds iso body =
 -- | A probe pool over a scratch schema this case owns, with the checkpoint
 -- table the live delete path writes to. The suite's own schema never has one
 -- (verify refuses), so the case creates and drops it.
-withProbeCheckpointApp :: forall a. (AppDataSource -> IO a) -> IO a
+withProbeCheckpointApp :: forall a. (AppDataSource -> Text -> IO a) -> IO a
 withProbeCheckpointApp action = do
   config <- Postgres.configFromEnv
   schema <- ("ds_ckpt_" <>) . Text.filter (/= '-') <$> uuidWorkflowId
   app <- acquireAppDataSourceIn schema config.configUrl 2
   execProbe app ("CREATE SCHEMA " <> schema)
   execProbe app ("CREATE TABLE " <> schema <> ".transaction_completion (workflow_id text not null, step_name text not null, function_num int not null, output text, error text, primary key (workflow_id, function_num))")
-  outcome <- try (action app) :: IO (Either SomeException a)
+  outcome <- try (action app schema) :: IO (Either SomeException a)
   execProbe app ("DROP SCHEMA " <> schema <> " CASCADE")
   releaseAppDataSource app
   either throwIO pure outcome
@@ -272,6 +272,30 @@ tests =
                     Right _ -> assertFailure "expected the body failure to escape"
                   count <- countProbe app table
                   count @?= 0,
+            -- IO only: needs a live pool, scratch DDL, and the checkpoint
+            -- table. A body that returns Left after writing must roll the
+            -- write back and record the error in its own transaction, the
+            -- way both oracles do.
+            testCase "a returned body failure rolls its writes back" $ do
+              backend <- getBackend
+              wfId <- (("ds-live-fail-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
+              withProbeCheckpointApp $ \app schema -> do
+                let ds = toDataSource app
+                    table = schema <> ".probe_writes"
+                    insert = Statement.preparable ("INSERT INTO " <> table <> " (id) VALUES (1)") Encoders.noParams Decoders.noResult
+                    cfg = transactionConfigDefault {txName = Just "probe_failure", txIsolation = Nothing}
+                execProbe app ("CREATE TABLE " <> table <> " (id int)")
+                result <- dsRunOver backend wfId $ \wctx ->
+                  (runTxStep ds cfg wctx $ \_ (Tx run) -> run insert () >> pure (Left (StepFailed "probe_failure" "out of stock"))) :: IO (Either (Error EngineOnly) ())
+                case result of
+                  Left (StepFailed _ _) -> pure ()
+                  other -> assertFailure ("expected the recorded body failure, got: " <> show other)
+                count <- countProbe app table
+                count @?= 0
+                found <- ds.dsCheck (WorkflowId wfId) "probe_failure" 0
+                case found of
+                  Right (Just (RecordedError _)) -> pure ()
+                  other -> assertFailure ("expected a recorded error checkpoint, got: " <> show other),
             -- IO only: the read-only mode is database enforcement — the
             -- sim and fakes have no SQL layer to refuse the write. The
             -- read-write twin commits the identical body, so a Left here
@@ -345,7 +369,7 @@ tests =
             testCase "deleting from a step drops later checkpoints on the live datasource" $ do
               backend <- getBackend
               wfId <- (("ds-live-del-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
-              withProbeCheckpointApp $ \app -> do
+              withProbeCheckpointApp $ \app _ -> do
                 let ds = toDataSource app
                     expected = RecordedOutput (encodeWorkflowValue ("v" :: Text)).serializedText
                 (first, second) <-
@@ -356,16 +380,16 @@ tests =
                 (first, second) @?= (Right "v", Right "v")
                 ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right (Just expected))
                 ds.dsCheck (WorkflowId wfId) "proto_step" 1 >>= (@?= Right (Just expected))
-                ds.dsDeleteCheckpoints (WorkflowId wfId) 1 >>= (@?= Right ())
+                ds.dsDeleteCheckpoints (WorkflowId wfId) 1 (pure True) >>= (@?= Right ())
                 ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right (Just expected))
                 ds.dsCheck (WorkflowId wfId) "proto_step" 1 >>= (@?= Right Nothing)
-                ds.dsDeleteCheckpoints (WorkflowId wfId) 0 >>= (@?= Right ())
+                ds.dsDeleteCheckpoints (WorkflowId wfId) 0 (pure True) >>= (@?= Right ())
                 ds.dsCheck (WorkflowId wfId) "proto_step" 0 >>= (@?= Right Nothing),
             -- IO only: the live binding, over a scratch checkpoint table.
             testCase "a transaction recorded under another name at the same step is refused" $ do
               backend <- getBackend
               wfId <- (("ds-live-name-" <>) . Text.filter (/= '-')) <$> uuidWorkflowId
-              withProbeCheckpointApp $ \app -> do
+              withProbeCheckpointApp $ \app _ -> do
                 let ds = toDataSource app
                     first = TransactionConfig {txName = Just "first_step", txIsolation = Just ReadCommitted, txReadOnly = False}
                     second = TransactionConfig {txName = Just "second_step", txIsolation = Just ReadCommitted, txReadOnly = False}

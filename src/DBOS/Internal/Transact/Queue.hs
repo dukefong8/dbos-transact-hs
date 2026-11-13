@@ -17,6 +17,8 @@ module DBOS.Internal.Transact.Queue
     queueOptionsToNewQueue,
     queueChangeToUpdate,
     validateQueueOptions,
+    validateMergedQueue,
+    queueUpdateError,
     reserved,
     queueOptionsAfterChange,
     changeBothSet,
@@ -224,10 +226,10 @@ queueChangeToUpdate change current =
           queueUpdateWorkerConcurrency = change.workerConcurrency,
           queueUpdateRateLimit = change.rateLimit,
           -- Legacy column, still read by other SDKs: every materialized
-          -- update persists true, as Python's upsert does. This keeps an
-          -- otherwise-empty change non-empty, so an empty update writes
-          -- its (unchanged) row rather than skipping.
-          queueUpdatePriorityEnabled = Set True,
+          -- update persists true, as Python's upsert does. An empty change
+          -- stays empty, so the seam returns the stored row without a
+          -- write or a validation pass.
+          queueUpdatePriorityEnabled = if queueChangeIsEmpty change then Leave else Set True,
           queueUpdatePartitionQueue = if partitionTouched then Set resultingPartitioned else Leave,
           queueUpdatePartitionConcurrency = change.partitionConcurrency,
           queueUpdatePartitionWorkerConcurrency = change.partitionWorkerConcurrency,
@@ -237,6 +239,7 @@ queueChangeToUpdate change current =
   where
     maybeChanged (Set value) _ = value
     maybeChanged Leave oldValue = oldValue
+
     -- The fleet-limit change the update means. Only reached with at most
     -- one spelling set (the change check refuses both): the explicit
     -- spelling takes precedence over the deprecated alias.
@@ -244,6 +247,22 @@ queueChangeToUpdate change current =
       (Set value, _) -> Set value
       (Leave, Set value) -> Set value
       (Leave, Leave) -> Leave
+
+-- | Whether this change asks for nothing. An empty change returns the
+-- stored row without a write or a validation pass, as both oracles do.
+queueChangeIsEmpty :: QueueChange -> Bool
+queueChangeIsEmpty change =
+  isLeave change.concurrency
+    && isLeave change.globalConcurrency
+    && isLeave change.workerConcurrency
+    && isLeave change.rateLimit
+    && isLeave change.partitionConcurrency
+    && isLeave change.partitionWorkerConcurrency
+    && isLeave change.partitionRateLimit
+    && isLeave change.pollingInterval
+  where
+    isLeave Leave = True
+    isLeave _ = False
 
 -- | Python's both-spellings refusal detail (@_queue.py:148-151@), shared by
 -- the registration check and the update change check.
@@ -382,28 +401,32 @@ updateQueue dbos queueName change
         Left err -> pure (Left err)
         Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
         Right (Just record) -> do
-          -- The stored flag is not a compatibility gate: every limit
-          -- applies at the scope its column names, so a partition-touching
-          -- update is ordinary, even on a row some older writer stamped
-          -- with the deprecated flag.
           let currentQueue = queueFromRecord record
-              desired = queueOptionsAfterChange change currentQueue
-          case validateQueueOptions queueName desired of
-            Left err -> pure (Left err)
-            Right () -> do
-              let update = queueChangeToUpdate change currentQueue
-                  -- The seam locks the row, merges, then validates the
-                  -- merged record inside that lock. The caller-side check
-                  -- above is a fast path; this one is what keeps two
-                  -- operators' interleaved limits coherent.
-                  validateMerged _ merged =
-                    case validateQueueOptions queueName (queueOptionsOfRecord merged) of
-                      Right () -> Right ()
-                      Left (TransactError.ErrorConfig detail) ->
-                        Left (SystemDBError.InvalidInput {field = "queue", detail})
-                      Left _ -> Right ()
-              updated <- withConnection executor.conn (\db -> SystemDB.updateQueue db queueName update validateMerged)
-              pure (queueFromRecord <$> updated)
+              update = queueChangeToUpdate change currentQueue
+          updated <- withConnection executor.conn (\db -> SystemDB.updateQueue db queueName update (validateMergedQueue queueName))
+          pure $ case updated of
+            Left err -> Left (queueUpdateError err)
+            Right record -> Right (queueFromRecord record)
+
+-- | The validator the seam runs under its row lock: merge, then judge the
+-- merged record. Shared by the engine and the client so a concurrent
+-- operator's update is judged against the locked row, not a stale read.
+validateMergedQueue :: Text -> QueueRecord -> QueueRecord -> Either SystemDBError.Error ()
+validateMergedQueue queueName _ merged =
+  case validateQueueOptions queueName (queueOptionsOfRecord merged) of
+    Right () -> Right ()
+    Left (TransactError.ErrorConfig detail) ->
+      Left (SystemDBError.InvalidInput {field = "queue", detail})
+    Left err ->
+      Left (SystemDBError.InvalidInput {field = "queue", detail = TransactError.renderTransactError err})
+
+-- | The seam speaks the system-database error channel; a queue-config
+-- refusal under the lock must still reach the caller as the user-facing
+-- config error, exactly as the pre-lock check did.
+queueUpdateError :: TransactError.Error e -> TransactError.Error e
+queueUpdateError = \case
+  TransactError.SystemDatabase (SystemDBError.InvalidInput {field = "queue", detail}) -> TransactError.ErrorConfig detail
+  err -> err
 
 deleteQueue :: (MonadMVar m)
             => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) ())

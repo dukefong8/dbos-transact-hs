@@ -37,7 +37,7 @@ These are what one language reads out of another's rows.
    `MAX_RECOVERY_ATTEMPTS_EXCEEDED`, `CANCELLED`, `ENQUEUED`, `DELAYED`. The
    same literals appear in partial-index predicates, so a mismatch breaks
    dequeue/recovery queries, not just decoding. An unrecognised spelling is
-   reported rather than guessed (`DBOS.SystemDB.Types`), because a row written
+   reported rather than guessed (`DBOS.Internal.SystemDB.Types`), because a row written
    by a newer SDK is a real possibility.
 2. **`serialization` tag** — names the payload format (`portable_json`,
    `py_pickle`, `rust_serde`). Payload bodies are **opaque** to other SDKs;
