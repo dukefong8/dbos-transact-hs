@@ -10,8 +10,8 @@
 module NegCounter where
 
 import DBOS.Transact
-import DBOS.Transact.Context (insideAStep, nextStepId, nextWorkflowMarker, withStep, withSystemDB)
-import DBOS.Transact.Checkpoint (placeCall)
+import DBOS.Internal.Transact.Context (insideAStep, nextStepId, nextWorkflowMarker, withStep, withSystemDB)
+import DBOS.Internal.Transact.Checkpoint (placeCall)
 
 -- BAD: claiming a step id from a step view.
 badNextStepId :: forall exec. WorkflowCtx exec IO -> IO ()

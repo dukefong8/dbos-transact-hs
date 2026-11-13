@@ -1,6 +1,6 @@
 module Main (main, tasty, simTests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB.ErrorTest qualified as SystemDBError
 import DBOS.SystemDB.IOSimTest qualified as SystemDBIOSim
 import DBOS.SystemDB.NotifierTest qualified as SystemDBNotifier

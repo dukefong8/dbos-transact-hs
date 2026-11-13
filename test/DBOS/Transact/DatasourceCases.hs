@@ -54,14 +54,14 @@ module DBOS.Transact.DatasourceCases
   )
 where
 
-import DBOS.Prelude
-import DBOS.Transact.Context (withSystemDB)
+import DBOS.Internal.Prelude
+import DBOS.Internal.Transact.Context (withSystemDB)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.SystemDB (BackendErrorKind (..), NewWorkflow (..), SystemDB (..), newWorkflow)
 import DBOS.SystemDB qualified as SysDB
-import DBOS.Transact.Serialization (encodeWorkflowValue)
+import DBOS.Internal.Transact.Serialization (encodeWorkflowValue)
 import DBOS.Transact
   (
   DBOS,
@@ -81,12 +81,12 @@ import DBOS.Transact
   runTxStep,
   transactionConfigDefault,
   )
-import DBOS.SystemDB.Error (BackendError (..))
-import DBOS.Transact.Datasource (RecordedOutcome (..))
-import DBOS.Transact.Datasource.Postgres (beginSql)
-import DBOS.Transact.Instance (clearCheckpoints)
-import DBOS.Transact.Error (encodeErrorText)
-import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep)
+import DBOS.Internal.SystemDB.Error (BackendError (..))
+import DBOS.Internal.Transact.Datasource (RecordedOutcome (..))
+import DBOS.Internal.Transact.Datasource.Postgres (beginSql)
+import DBOS.Internal.Transact.Instance (clearCheckpoints)
+import DBOS.Internal.Transact.Error (encodeErrorText)
+import DBOS.Internal.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep)
 
 -- | How a tree instantiation builds its world: contexts over any backend
 -- plus a fresh fake datasource per case (each case owns its rows).

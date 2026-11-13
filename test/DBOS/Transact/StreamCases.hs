@@ -50,7 +50,7 @@ where
 import Control.Foldl qualified as Foldl
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Vector.Fusion.Stream.Monadic qualified as Vector
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB
   ( Outcome (..),
     WorkflowId (..),
@@ -75,7 +75,7 @@ import DBOS.Transact
     writeStream,
     runStep
   )
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), withWorkflow)
+import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), withWorkflow)
 import DBOS.Transact.EventCases (EventFixture (..))
 
 -- | Write, close, and consume a stream through the public reader and FoldM

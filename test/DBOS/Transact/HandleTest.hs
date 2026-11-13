@@ -7,7 +7,7 @@
 module DBOS.Transact.HandleTest (tests) where
 
 import DBOS.DualStack (liveCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
@@ -18,10 +18,10 @@ import DBOS.Transact
   ( Config (..),
     configFromEnv,
   )
-import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
-import DBOS.SystemDB.Retry (uuidEntropy)
+import DBOS.Internal.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
+import DBOS.Internal.SystemDB.Retry (uuidEntropy)
 import DBOS.Transact.HandleCases
   ( HandleFixture (..),
     checkDeletedAbsent,

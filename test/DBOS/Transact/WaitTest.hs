@@ -11,17 +11,17 @@
 module DBOS.Transact.WaitTest (tests) where
 
 import DBOS.DualStack (liveCaseWith)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (NewWorkflow (..), Outcome (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, selectStepName)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
-import DBOS.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Internal.Transact.Identity (Identity (..))
 import DBOS.Transact (Config (..), DBOS, Environment (..), configFromEnv, launchWithEnvironment, newDBOS, shutdown, waitForFirstWorkflow, waitForWorkflow, waitForWorkflows)
-import DBOS.Transact.Context (withWorkflow)
+import DBOS.Internal.Transact.Context (withWorkflow)
 import DBOS.Transact.ContextTest (connOver)
 import DBOS.Transact.WaitCases
   ( WaitFixture (..),

@@ -30,7 +30,7 @@ module DBOS.SystemDB.IOSim
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim)
 import Data.Int (Int64)
 import Data.Aeson (FromJSON, ToJSON, Value (..), eitherDecodeStrict, encode)
@@ -43,7 +43,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
-import DBOS.SystemDB.Error (Error (..), decodePortableError, encodePortableError)
+import DBOS.Internal.SystemDB.Error (Error (..), decodePortableError, encodePortableError)
 import DBOS.SystemDB
   ( AppScope (..),
     AwaitedOutcome (..),
@@ -152,7 +152,7 @@ import DBOS.SystemDB
     WakeTime (..),
     validateAttributeUpdate,
     zeroRowCounts)
-import DBOS.SystemDB.Postgres.Statements (CallerStep (..))
+import DBOS.Internal.SystemDB.Postgres.Statements (CallerStep (..))
 import DBOS.Transact
   ( DBOS,
     Executor,
@@ -160,11 +160,11 @@ import DBOS.Transact
     configNew,
     newDBOS,
   )
-import DBOS.Transact.Logger (SomeTracer (..))
-import DBOS.Transact.Serialization (codecErrorText, decodeWorkflowValue, encodeWorkflowValue)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Instance (launchExecutor, launchOn, launchOnWithQueues)
-import DBOS.Transact.Connection
+import DBOS.Internal.Transact.Logger (SomeTracer (..))
+import DBOS.Internal.Transact.Serialization (codecErrorText, decodeWorkflowValue, encodeWorkflowValue)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Instance (launchExecutor, launchOn, launchOnWithQueues)
+import DBOS.Internal.Transact.Connection
   ( Connection,
     Owner (..),
     SomeSystemDB (..),

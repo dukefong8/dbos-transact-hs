@@ -10,7 +10,7 @@
 module DBOS.Transact.DatasourceTestSim (tests) where
 
 import DBOS.DualStack (simCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, newMemDB, simConnectionWith, simInstance)
@@ -19,10 +19,10 @@ import DBOS.Transact
   WorkflowCtx,
   WorkflowId (..),
   )
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Datasource (TransactionEvent (..))
-import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.Context (testOwner, withWorkflow)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Datasource (TransactionEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Context (testOwner, withWorkflow)
 import DBOS.Transact.DatasourceCases
   ( DsFixture (..),
     RegistryFixture (..),

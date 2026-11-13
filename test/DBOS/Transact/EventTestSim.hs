@@ -13,7 +13,7 @@ module DBOS.Transact.EventTestSim (tests, simEventFixture) where
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Int (Int64)
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (MemSystemDB, newMemDB, newMemDBSkewed, simEntropy, simGeneratedId, simIdentity)
@@ -21,10 +21,10 @@ import DBOS.Transact
   (
   configNew,
   )
-import DBOS.Transact.Recovery (EngineEvent (..))
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.Connection (SomeSystemDB (..))
+import DBOS.Internal.Transact.Recovery (EngineEvent (..))
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..))
 import DBOS.Transact.EventCases
   ( EventFixture (..),
     checkCapturedRead,

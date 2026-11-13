@@ -39,7 +39,7 @@ module DBOS.Transact.StepCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (WorkflowId (..), WorkflowOwner (..))
 import DBOS.Transact
   ( EngineOnly,
@@ -54,11 +54,11 @@ import DBOS.Transact
     runStepWith,
     sleepStep,
     stepOptionsDefault)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Checkpoint (PendingStep (..))
-import DBOS.Transact.Checkpoint (pendingStepId)
-import DBOS.Transact.Connection (Connection)
-import DBOS.Transact.Context
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..))
+import DBOS.Internal.Transact.Checkpoint (pendingStepId)
+import DBOS.Internal.Transact.Connection (Connection)
+import DBOS.Internal.Transact.Context
   ( StepStatus,
     StepCtx (stepCtxWorkflow),
     firstStepStatus,

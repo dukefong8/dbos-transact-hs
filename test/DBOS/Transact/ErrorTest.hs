@@ -6,7 +6,7 @@
 -- lift, the engine lift into any channel, and the control classification.
 module DBOS.Transact.ErrorTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), fromJSON, object, withObject, (.:), (.=))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
@@ -17,7 +17,7 @@ import DBOS.Transact
     newQualifiedWorkflowName,
     methodQualifiedWorkflowName,
   )
-import DBOS.Transact.Error (Failure (..), controlOf, decodeErrorText, encodeErrorText, failureOf, fromExecution, fromSystemDB, liftEngine)
+import DBOS.Internal.Transact.Error (Failure (..), controlOf, decodeErrorText, encodeErrorText, failureOf, fromExecution, fromSystemDB, liftEngine)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 

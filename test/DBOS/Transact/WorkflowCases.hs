@@ -142,7 +142,7 @@ module DBOS.Transact.WorkflowCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), eitherDecodeStrict, object, toJSON, (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.List (sort)
@@ -174,8 +174,8 @@ import DBOS.SystemDB
     newWorkflow
   )
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Error qualified as SysErr
-import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Internal.SystemDB.Error qualified as SysErr
+import DBOS.Internal.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
     EngineOnly,
@@ -238,13 +238,13 @@ import DBOS.Transact
     stepOptionsDefault,
     waitForWorkflow,
   )
-import DBOS.Transact.Logger (SomeTracer (..))
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Handle (Provenance (..), WorkflowHandle (..))
-import DBOS.Transact.Error (decodeErrorText)
-import DBOS.Transact.Instance (dequeueWorkflows, launchOn, launchOnWithQueues)
-import DBOS.Transact.Workflow (resolveTimeoutDeadline, runOptionsToStartOptions, timeoutBudget)
-import DBOS.Transact.Context
+import DBOS.Internal.Transact.Logger (SomeTracer (..))
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Handle (Provenance (..), WorkflowHandle (..))
+import DBOS.Internal.Transact.Error (decodeErrorText)
+import DBOS.Internal.Transact.Instance (dequeueWorkflows, launchOn, launchOnWithQueues)
+import DBOS.Internal.Transact.Workflow (resolveTimeoutDeadline, runOptionsToStartOptions, timeoutBudget)
+import DBOS.Internal.Transact.Context
   ( firstStepStatus,
     nextWorkflowMarker,
     testOwner,
@@ -256,7 +256,7 @@ import DBOS.Transact.Context
     tokenCancelled,
     workflowId
   )
-import DBOS.Transact.Workflow
+import DBOS.Internal.Transact.Workflow
   ( abortAll,
     childWorkflowId,
     isRecordedStartError,
@@ -267,7 +267,7 @@ import DBOS.Transact.Workflow
     spawnTracked,
     waitAllUntil
   )
-import DBOS.Transact.Connection
+import DBOS.Internal.Transact.Connection
   ( Connection,
     Owner (..),
     SomeSystemDB (..),

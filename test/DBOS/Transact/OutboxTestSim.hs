@@ -18,18 +18,18 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (NewWorkflow (..), WorkflowRecord (..), newWorkflow, portableJsonSerialization)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
-import DBOS.SystemDB.Error qualified as SysErr
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..), runSystemDB)
+import DBOS.Internal.SystemDB.Error qualified as SysErr
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB)
-import DBOS.Transact.Serialization (encodeWorkflowInput, unWorkflowInput)
+import DBOS.Internal.Transact.Serialization (encodeWorkflowInput, unWorkflowInput)
 import DBOS.Transact
-import DBOS.Transact.Datasource (RecordedOutcome (..), TransactionEvent (..))
+import DBOS.Internal.Transact.Datasource (RecordedOutcome (..), TransactionEvent (..))
 import DBOS.Transact.OutboxCases
-import DBOS.Transact.Recovery (EngineEvent (..))
-import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Recovery (EngineEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit ((@?=))
 

@@ -11,18 +11,18 @@
 -- @message.rs@).
 module DBOS.Transact.MessageTestSim (tests) where
 
-import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import DBOS.SystemDB (ForkOptions (..), ForkPoint (..), NewWorkflow (..), NotificationRecord (notificationRecordMessageUuid), Outcome (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (MemSystemDB, memConnectionOn, newMemDB, newMemDBSkewed, simIdentity)
-import DBOS.Transact.Connection (nextExecutionIdentity)
-import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState)
+import DBOS.Internal.Transact.Connection (nextExecutionIdentity)
+import DBOS.Internal.Transact.Context (newWorkflowCtx, newWorkflowState)
 import DBOS.Transact.MessageCases
   ( MessageFixture (..),
     checkBulkEmpty,

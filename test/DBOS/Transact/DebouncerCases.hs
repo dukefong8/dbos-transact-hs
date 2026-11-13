@@ -45,16 +45,16 @@ module DBOS.Transact.DebouncerCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import DBOS.SystemDB (Timestamp (..), WorkflowRecord (..), debounceStepName)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Error qualified as SystemDBError
+import DBOS.Internal.SystemDB.Error qualified as SystemDBError
 import DBOS.Transact (StepInfo (..), defaultListWorkflowStepsOptions)
-import DBOS.Transact.Management (stepInfoFromRecord)
-import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Internal.Transact.Management (stepInfoFromRecord)
+import DBOS.Internal.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
-import DBOS.Transact.Instance (dequeueWorkflows)
+import DBOS.Internal.Transact.Instance (dequeueWorkflows)
 
 -- | Domain operations each backend implements: the fixture launches over
 -- its own queue set, registers the echo target, and observes rows and

@@ -4,12 +4,12 @@
 module DBOS.Transact.StreamTest (tests) where
 
 import DBOS.DualStack (liveCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB.Postgres (PostgresSystemDB)
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.SystemDB.PostgresTest qualified as PostgresTest
 import DBOS.Transact.EventTest (liveEventFixture)
-import DBOS.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Internal.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.StreamCases
   ( checkCloseStopsStream,
     checkCrossPages,

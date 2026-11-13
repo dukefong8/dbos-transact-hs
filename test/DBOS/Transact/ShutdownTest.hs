@@ -11,7 +11,7 @@
 -- threads against shutdown sleeps, which no IOSim mirror can stage.
 module DBOS.Transact.ShutdownTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
@@ -19,9 +19,9 @@ import DBOS.SystemDB (WorkflowRecord (..))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
-import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
-import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowInput)
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..), runSystemDB)
+import DBOS.Internal.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Serialization (CodecError (..), decodeWorkflowValue, encodeWorkflowInput)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 

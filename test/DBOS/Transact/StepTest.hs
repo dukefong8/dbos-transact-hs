@@ -4,7 +4,7 @@
 -- | Public workflow-step behavior against the configured live SystemDB.
 module DBOS.Transact.StepTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -21,8 +21,8 @@ import DBOS.Transact
     WorkflowId (..),
     WorkflowIdReusePolicy (..)
   )
-import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Identity (Identity (..))
 import DBOS.Transact.StepCases
   ( StepFixture (..),
     checkDurableSleep,

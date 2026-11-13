@@ -7,7 +7,7 @@
 module DBOS.Transact.SleepTest (tests) where
 
 import DBOS.DualStack (liveCaseWith)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.Transact.SleepCases
   ( SleepFixture (..),
     checkSleepCheckpoint,
@@ -34,9 +34,9 @@ import DBOS.Transact
   sleepPlain,
   sleepStep,
   )
-import DBOS.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, peekStepId, withStep, withWorkflow)
+import DBOS.Internal.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, peekStepId, withStep, withWorkflow)
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 

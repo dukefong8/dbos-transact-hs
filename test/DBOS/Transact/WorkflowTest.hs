@@ -11,7 +11,7 @@
 module DBOS.Transact.WorkflowTest (tests) where
 
 import DBOS.DualStack (liveCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
@@ -20,7 +20,7 @@ import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (AwaitedOutcome (..), DatabaseTime (..), NewWorkflow (..), StepRecord (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (..), WorkflowRecord (..), getWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, unWorkflowInput, CodecError (..))
+import DBOS.Internal.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, unWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
     EngineOnly,
@@ -61,14 +61,14 @@ import DBOS.Transact
     startOptionsDefault,
     waitForWorkflow,
   )
-import DBOS.SystemDB.Error qualified as SystemDBError
-import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Error (decodeErrorText)
-import DBOS.Transact.Workflow (abortAll, newTasks, tasksSpawner)
-import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
-import DBOS.Transact.Context (spawnLocal)
-import DBOS.SystemDB.Retry (uuidEntropy)
+import DBOS.Internal.SystemDB.Error qualified as SystemDBError
+import DBOS.Internal.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Error (decodeErrorText)
+import DBOS.Internal.Transact.Workflow (abortAll, newTasks, tasksSpawner)
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
+import DBOS.Internal.Transact.Context (spawnLocal)
+import DBOS.Internal.SystemDB.Retry (uuidEntropy)
 import GHC.Conc (ThreadStatus (..), threadStatus)
 import Data.Int (Int64)
 import Hasql.Decoders qualified as Decoders

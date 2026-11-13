@@ -21,7 +21,7 @@
 -- reproduction depends on the schedule alone.
 module DBOS.Transact.QueueTestSim (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim, SimEventType (..), SimTrace, selectTraceEvents)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text

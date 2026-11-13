@@ -10,7 +10,7 @@ module DBOS.Transact.PatchTestSim (tests) where
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import DBOS.SystemDB (NewWorkflow (..), Outcome (OutcomeOutput), StepRecord (stepRecordStepName), StepTiming (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, patchMarkerName)
 import DBOS.SystemDB qualified as SystemDB
@@ -23,9 +23,9 @@ import DBOS.Transact
     pendingPatch,
     runStep,
   )
-import DBOS.Transact.Checkpoint (PendingStep (..))
-import DBOS.Transact.Context (WorkflowCtx, withWorkflow)
-import DBOS.Transact.Error (EngineOnly, Error (..))
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..))
+import DBOS.Internal.Transact.Context (WorkflowCtx, withWorkflow)
+import DBOS.Internal.Transact.Error (EngineOnly, Error (..))
 import DBOS.Transact.PatchCases
   ( PatchFixture (..),
     PatchLastObservation (..),
@@ -60,7 +60,7 @@ import DBOS.Transact.PatchCases
     v4Body,
     v5Body,
   )
-import DBOS.Transact.Patch (PatchEvent (..))
+import DBOS.Internal.Transact.Patch (PatchEvent (..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, (@?=))
 

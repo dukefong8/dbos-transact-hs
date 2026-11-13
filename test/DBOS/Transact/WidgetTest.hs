@@ -16,7 +16,7 @@ import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.DualStack (liveCaseWith)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.Transact
   ( AppDataSource,
     Config (..),
@@ -38,9 +38,9 @@ import DBOS.Transact
     runAppSession,
     shutdown,
     toDataSource)
-import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, testOwner, withStep, withWorkflow)
+import DBOS.Internal.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Context (firstStepStatus, nextWorkflowMarker, testOwner, withStep, withWorkflow)
 import DBOS.Transact.WidgetCases
   ( CheckoutSteps (..),
     lostAckOnce,

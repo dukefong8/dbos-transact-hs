@@ -40,16 +40,16 @@ module DBOS.Transact.RegistryCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import DBOS.SystemDB (WorkflowId (..))
-import DBOS.SystemDB.Types (QualifiedWorkflowName, instanceQualifiedWorkflowName, methodQualifiedWorkflowName, renderQualifiedWorkflowName, qualifiedWorkflowNameFromRow)
+import DBOS.Internal.SystemDB.Types (QualifiedWorkflowName, instanceQualifiedWorkflowName, methodQualifiedWorkflowName, renderQualifiedWorkflowName, qualifiedWorkflowNameFromRow)
 import DBOS.Transact (EngineOnly, Error, SerializedWorkflowValue (..), WorkflowCtx, newQualifiedWorkflowName)
-import DBOS.Transact.Connection (Connection)
-import DBOS.Transact.Context (testOwner, withWorkflow)
-import DBOS.Transact.Error (Error (..), Failure (..))
-import DBOS.Transact.Identity (Identity)
-import DBOS.Transact.Registry
+import DBOS.Internal.Transact.Connection (Connection)
+import DBOS.Internal.Transact.Context (testOwner, withWorkflow)
+import DBOS.Internal.Transact.Error (Error (..), Failure (..))
+import DBOS.Internal.Transact.Identity (Identity)
+import DBOS.Internal.Transact.Registry
   ( lookupSnapshotWorkflow,
     newRegistry,
     registerErasedWorkflow,
@@ -57,14 +57,14 @@ import DBOS.Transact.Registry
     snapshotSize,
     thawRegistry,
   )
-import DBOS.Transact.Workflow
+import DBOS.Internal.Transact.Workflow
   ( ErasedWorkflow (..),
     WorkflowRef (refQualifiedName),
     refName,
     registerTypedWorkflow,
     registerWorkflowRef,
   )
-import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, unWorkflowInput)
+import DBOS.Internal.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, unWorkflowInput)
 
 -- | How a tree instantiation builds bodies' world: connections over any
 -- backend and the identity they carry. Registry checks never reach the

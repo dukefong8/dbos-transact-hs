@@ -1,0 +1,338 @@
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings   #-}
+
+-- | A running or finished workflow, by id. Mirrors Rust @handle.rs@: every
+-- reference agrees on the surface — the id, the result, the status — and
+-- splits the implementation the same way. A handle to a workflow running in
+-- this process awaits the running task directly; a handle to one running
+-- elsewhere, or to one that finished before this process started, polls the
+-- database. Dropping a handle stops watching, never the workflow.
+--
+-- The local-task await and the durable parent-side @DBOS.get_result@
+-- checkpoint are L2 engine work (NOTE): this module polls the database,
+-- which is the whole of the polling provenance and the whole of what
+-- management and client surfaces hand back.
+module DBOS.Internal.Transact.Handle
+  ( -- * Handle
+    WorkflowHandle (..),
+    Provenance (..),
+    pollingHandle,
+    localHandle,
+    handleStatus,
+    handleResult,
+    awaitChild,
+    pendingAwait,
+  )
+where
+
+import Data.Aeson (FromJSON, ToJSON)
+import Data.Int (Int64)
+import Data.Text qualified as Text
+import DBOS.Internal.Prelude
+import DBOS.Internal.SystemDB.Class qualified as SystemDB
+import DBOS.Internal.SystemDB.Error qualified as SystemDBError
+import DBOS.Internal.SystemDB.Types (AwaitedOutcome (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowRecord (..), WorkflowStatus, getResultStepName, timestampNow)
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
+import DBOS.Internal.Transact.Config (serializerName)
+import DBOS.Internal.Transact.Connection (Connection (..), runSystemDB)
+import DBOS.Internal.Transact.Context (LocalTaskOutcome (..), WorkflowCtx, ownerToken, stepCtxBoundary, workflowId)
+import DBOS.Internal.Transact.Error qualified as TransactError
+
+-- | Where this handle's result comes from. The local channel carries the
+-- erased @Failure@, as the oracle's spawned task does: the application
+-- error type was serialized at the registration boundary, and the awaiting
+-- caller decodes it back into its own channel.
+data Provenance m
+  = -- | The workflow runs elsewhere, or already finished: the database is
+    -- the only witness. Whether the minting call saw the row decides what
+    -- an absent row means.
+    Polling {fail_if_missing :: Bool}
+  | -- | The workflow runs in this process: the spawned task's outcome is
+    -- read directly, without touching its row. Mirrors Rust
+    -- @Provenance::Local@.
+    Local (StrictMVar m (LocalTaskOutcome (Either TransactError.Failure (Maybe SerializedWorkflowValue))))
+
+-- | The provenance's label, as the oracle's @Debug@ prints it.
+instance Show (Provenance m) where
+  show Polling {} = "polling"
+  show Local {}   = "local"
+
+-- | A running or finished workflow, by id. Public fields are camelCase
+-- (record-access rule): @workflowId@ names the workflow; the connection
+-- serves the reads and carries the poll interval the handle watches at.
+data WorkflowHandle m e = WorkflowHandle
+  { conn       :: Connection m,
+    workflowId :: Text,
+    provenance :: Provenance m
+  }
+
+instance Show (WorkflowHandle m e) where
+  show handle = "WorkflowHandle " <> Text.unpack handle.workflowId <> " " <> show handle.provenance
+
+-- | A handle over a workflow some other execution owns. Takes a connection
+-- rather than an executor, which is what lets a client hand one back.
+pollingHandle :: Connection m -> Text -> Bool -> WorkflowHandle m e
+pollingHandle conn workflowId failIfMissing =
+  WorkflowHandle
+    { conn = conn,
+      workflowId = workflowId,
+      provenance = Polling failIfMissing
+    }
+
+-- | A handle over the task this process spawned. The channel is filled
+-- while the task unwinds, so dropping the handle stops watching, never the
+-- workflow, and an aborted task still answers its waiter.
+localHandle :: Connection m -> Text -> StrictMVar m (LocalTaskOutcome (Either TransactError.Failure (Maybe SerializedWorkflowValue))) -> WorkflowHandle m e
+localHandle conn workflowId channel =
+  WorkflowHandle
+    { conn = conn,
+      workflowId = workflowId,
+      provenance = Local channel
+    }
+
+-- | The workflow's status, as its row records it right now. An unknown id
+-- reports the absence, because a single read has nothing to wait for.
+handleStatus :: Monad m
+             => WorkflowHandle m e -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe WorkflowStatus))
+handleStatus handle = do
+  result <- runSystemDB handle.conn.connSysdb (\db -> SystemDB.getWorkflow db (WorkflowId handle.workflowId))
+  pure $ case result of
+    Left err            -> Left (TransactError.fromSystemDB err)
+    Right Nothing       -> Right Nothing
+    Right (Just record) -> Right (Just record.workflowRecordStatus)
+
+-- | Waits for the workflow to finish and returns what it returned. Polls
+-- the database: the local-task await is future engine work. This is the
+-- ctx-less polling face, for client and management handles; inside a
+-- workflow body reach for 'awaitChild' instead, or the wait goes
+-- unrecorded and a replay decides it again. A cancelled workflow is
+-- reported as its own cancellation here: only an in-workflow await
+-- ('driveAwait') has a caller for the two to be confused with, and only
+-- it reports the awaited cancellation. Mirrors the oracle's
+-- @handle.result()@ outside a workflow.
+handleResult :: (MonadDelay m, MonadTime m, MonadMVar m, MonadThrow m, FromJSON e)
+             => WorkflowHandle m e -> m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+handleResult handle = do
+  settled <- settleOutcome handle
+  pure (settled >>= \case
+    SettledCancelled -> Left (TransactError.WorkflowCancelled {workflowId = handle.workflowId})
+    other -> settledResult handle.workflowId other)
+
+-- | Await a child workflow from inside a workflow body, recording the wait
+-- as a @DBOS.get_result@ step. Mirrors the oracle's @handle.result()@ where
+-- its ambient context is a running workflow: the id is claimed at the call
+-- site, before anything can fail, so a replay rebuilds the same position;
+-- a recorded row is adopted rather than waited for again; and a settled
+-- outcome (success, failure, cancellation) is recorded while an
+-- interruption, a substrate failure and a parked child are not.
+--
+-- Inside a step body nothing is allocated and nothing is recorded: the
+-- enclosing step's checkpoint stands for the wait, as in the oracle's leaf
+-- rule.
+--
+-- The handle must belong to this execution: a recorded row under the
+-- claimed id that names a different workflow is refused, never adopted.
+awaitChild :: (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MonadThrow m, FromJSON e, ToJSON e)
+           => WorkflowCtx exec m ->
+              WorkflowHandle m e ->
+              m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+awaitChild wctx handle = placeCall wctx >>= driveAwait wctx handle
+
+-- | An await built at its position and not yet run: the @DBOS.get_result@
+-- step claims its id here, where the call is written, and 'pendingRun'
+-- drives the wait when the pending value is awaited or raced. Mirrors the
+-- oracle's @handle.result()@ building a @PendingStep@; a pending await the
+-- race drops still spent its id, and recorded nothing.
+pendingAwait :: (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MonadThrow m, FromJSON e, ToJSON e)
+             => WorkflowCtx exec m ->
+                WorkflowHandle m e ->
+                m (PendingStep exec m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue)))
+pendingAwait wctx handle = do
+  placement <- placeCall wctx
+  pure
+    PendingStep
+      { name = getResultStepName,
+        placement = Just placement,
+        pendingRun = driveAwait wctx handle placement
+      }
+
+-- | Drives a placed await: adopt a recorded row, or wait and record the
+-- settled outcome under the claimed id. The placement decides, so a race
+-- can build every branch before any of them waits.
+driveAwait :: (MonadDelay m, MonadTime m, MonadMVar m, MonadThrow m, FromJSON e, ToJSON e)
+           => WorkflowCtx exec m ->
+              WorkflowHandle m e ->
+              StepPlacement exec m ->
+              m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
+driveAwait wctx handle placement =
+  case checkHere placement getResultStepName (Just (stepCtxBoundary wctx)) of
+    Left err                                 -> pure (Left err)
+    Right DurabilityPlain                    -> fmap (>>= settledResult handle.workflowId) (settleOutcome handle)
+    Right (DurabilityRecorded wctx' stepId') -> recordedAt wctx' stepId'
+  where
+    recordedAt wctx' stepId' = do
+      let parent = WorkflowId (workflowId wctx')
+      checked <- runSystemDB handle.conn.connSysdb (\db -> SystemDB.checkChildResult db parent stepId')
+      case checked of
+        Left err -> pure (Left (TransactError.fromExecution err))
+        Right (Just recorded) -> pure (adoptRecordedAwait wctx' handle stepId' recorded)
+        Right Nothing -> do
+          startedAt <- timestampNow
+          settled <- settleOutcome handle
+          completedAt <- timestampNow
+          case settled of
+            Left err -> pure (Left err)
+            Right outcome -> do
+              written <- recordAwait wctx' handle stepId' startedAt completedAt outcome
+              pure (written >> settledResult handle.workflowId outcome)
+
+-- | What an awaited workflow did, before it is mapped onto the error
+-- channel. The oracle's @AwaitedOutcome@ minus the shapes its await never
+-- lets out (a void success is a success).
+data Settled e
+  = SettledSucceeded (Maybe Text) (Maybe Text)
+  | SettledFailed (TransactError.Error e)
+  | SettledCancelled
+  | SettledParked Int64
+  deriving stock (Eq, Show)
+
+-- | The one wait behind both faces: 'handleResult' and 'awaitChild'. A
+-- local task answers from its own channel — no row is read, and only
+-- shutdown produces a cancellation — while a polling handle reads the row
+-- at the interval the connection carries.
+settleOutcome :: (MonadDelay m, MonadTime m, MonadMVar m, MonadThrow m, FromJSON e)
+              => WorkflowHandle m e -> m (Either (TransactError.Error e) (Settled e))
+settleOutcome handle = case handle.provenance of
+  Local channel -> do
+    outcome <- readMVar channel
+    case outcome of
+      LocalTaskCancelled -> pure (Left (TransactError.Interrupted {workflowId = handle.workflowId}))
+      LocalTaskPanic err -> throwIO err
+      LocalTaskValue value -> pure $ case value of
+        Right Nothing -> Right (SettledSucceeded Nothing Nothing)
+        Right (Just stored) ->
+          Right
+            ( SettledSucceeded
+                (Just stored.serializedText)
+                (case stored.serializedSerialization of
+                  Just (Serialization serializationName') -> Just serializationName'
+                  Nothing                                 -> Nothing
+                )
+            )
+        -- The erased failure decodes back into this caller's channel; a
+        -- control signal is handed back unrecorded — except a durable
+        -- cancellation, which a polling read would see as the child's
+        -- status and report as an awaited cancellation.
+        Left failure -> case TransactError.failureError handle.workflowId failure of
+          err | isCancellation err                    -> Right SettledCancelled
+          err | Just _ <- TransactError.controlOf err -> Left err
+          err                                         -> Right (SettledFailed err)
+  Polling failMissing -> do
+    awaited <-
+      runSystemDB handle.conn.connSysdb (\db -> SystemDB.awaitWorkflowResult db (WorkflowId handle.workflowId) handle.conn.connOutcomePollInterval failMissing)
+    pure $ case awaited of
+      Left err                                      -> Left (TransactError.fromSystemDB err)
+      Right (AwaitedSucceeded output serialization) -> Right (SettledSucceeded output serialization)
+      Right (AwaitedFailed message _)               -> Right (SettledFailed (decodedRecordedError handle.workflowId message))
+      Right AwaitedCancelled                        -> Right SettledCancelled
+      Right (AwaitedParked attempts)                -> Right (SettledParked attempts)
+  where
+    isCancellation err = case err of
+      TransactError.SystemDatabase SystemDBError.WorkflowCancelled {} -> True
+      TransactError.WorkflowCancelled {}                              -> True
+      _                                                               -> False
+
+-- | Map a settled outcome onto the result channel, as both faces report it.
+settledResult :: Text -> Settled e -> Either (TransactError.Error e) (Maybe SerializedWorkflowValue)
+settledResult workflowText settled =
+  case settled of
+    SettledSucceeded output serialization ->
+      Right (SerializedWorkflowValue <$> output <*> pure (Serialization <$> serialization))
+    SettledFailed err -> Left err
+    SettledCancelled -> Left (TransactError.AwaitedWorkflowCancelled {workflowId = workflowText})
+    SettledParked attempts ->
+      -- The handle's own verdict, matching @adopt@: the sysdb layer never
+      -- built one, so neither does this port.
+      Left
+        ( TransactError.ErrorMaxRecoveryAttemptsExceeded
+            { workflowId = workflowText,
+              recoveryAttempts = attempts
+            }
+        )
+
+-- | Record a settled await under its claimed id, with the awaited
+-- workflow's id in the step's @child_workflow_id@. A parked child and a
+-- failed wait record nothing: freezing either into the parent's replay
+-- would outlive its own truth.
+recordAwait :: (MonadTime m, ToJSON e)
+            => WorkflowCtx exec m ->
+               WorkflowHandle m e ->
+               Int ->
+               Timestamp ->
+               Timestamp ->
+               Settled e ->
+               m (Either (TransactError.Error e) ())
+recordAwait wctx handle stepId' startedAt completedAt settled =
+  case settled of
+    SettledSucceeded output _ -> record (OutcomeOutput output)
+    SettledFailed err -> record (OutcomeError (TransactError.encodeErrorText err))
+    SettledCancelled ->
+      record
+        ( OutcomeError
+            ( TransactError.encodeErrorText
+                (TransactError.AwaitedWorkflowCancelled {workflowId = handle.workflowId} :: (TransactError.Error TransactError.EngineOnly))
+            )
+        )
+    SettledParked _ -> pure (Right ())
+  where
+    parent = WorkflowId (workflowId wctx)
+    record outcome =
+      fmap (either (Left . TransactError.fromExecution) Right) $
+        runSystemDB handle.conn.connSysdb $ \db ->
+          SystemDB.recordChildResult
+            db
+            parent
+            stepId'
+            (WorkflowId handle.workflowId)
+            outcome
+            (Just (serializerName handle.conn.connSerializer))
+            (Just (StepTiming startedAt completedAt))
+            (ownerToken wctx)
+
+-- | The replayed form of an await: adopt the recorded row, and only when
+-- it names the workflow this handle stands for.
+adoptRecordedAwait :: FromJSON e
+                   => WorkflowCtx exec m -> WorkflowHandle m e -> Int -> StepRecord -> Either (TransactError.Error e) (Maybe SerializedWorkflowValue)
+adoptRecordedAwait wctx handle stepId' recorded =
+  case recorded.stepRecordChildWorkflowId of
+    Just (WorkflowId recordedChild)
+      | recordedChild == handle.workflowId ->
+          case (recorded.stepRecordOutput, recorded.stepRecordError) of
+            (Just output, _) ->
+              Right (Just (SerializedWorkflowValue output (Serialization <$> recorded.stepRecordSerialization)))
+            (Nothing, Just message) -> Left (decodedRecordedError handle.workflowId message)
+            (Nothing, Nothing) ->
+              Left
+                ( TransactError.StepFailed
+                    getResultStepName
+                    ("recorded await " <> showText stepId' <> " has no outcome")
+                )
+    mismatched ->
+      Left
+        ( TransactError.fromSystemDB
+            ( SystemDBError.UnexpectedStep
+                { workflowId = workflowId wctx,
+                  stepId = stepId',
+                  expected = "an await of " <> handle.workflowId,
+                  recorded = case mismatched of
+                    Just (WorkflowId other) -> "an await of " <> other
+                    Nothing                 -> "an await of no workflow at all"
+                }
+            )
+        )
+
+-- | A recorded failure text decoded back into the caller's channel. The
+-- shared decoder keeps another SDK's portable @name: message@ when the payload
+-- does not fit this caller's error type, and the raw text otherwise.
+decodedRecordedError :: FromJSON e => Text -> Text -> TransactError.Error e
+decodedRecordedError = TransactError.decodeRecordedError

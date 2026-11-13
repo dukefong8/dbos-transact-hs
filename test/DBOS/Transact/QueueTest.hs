@@ -14,13 +14,13 @@ import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import DBOS.DualStack (liveCaseWith)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (AppScope (..), AwaitedOutcome (..), QueueRecord (..), SystemDB (getQueue, upsertQueue), WorkflowRecord (..), WorkflowStatus (..), getWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Dequeue (Admission (..), admission)
-import DBOS.Transact.Workflow (maxRecoveryAttempts)
-import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Internal.Transact.Dequeue (Admission (..), admission)
+import DBOS.Internal.Transact.Workflow (maxRecoveryAttempts)
+import DBOS.Internal.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact ( Config (..), DBOS, WorkflowCtx, Executor, EngineOnly, Environment (..), Error (..), QueueConflict (..), Serialization (..), SerializedWorkflowValue (..),
  WorkflowId (..),
  QualifiedWorkflowName,
@@ -28,7 +28,7 @@ import DBOS.Transact ( Config (..), DBOS, WorkflowCtx, Executor, EngineOnly, Env
  WorkflowHandle, configFromEnv, defaultQueueOptions, enqueueWorkflow, handleResult, handleStatus,
  launchWithEnvironment,
  newDBOS, newQualifiedWorkflowName, registerWorkflowRef, registerWorkflow, registerQueue, retrieveWorkflow, shutdown, waitForWorkflow)
-import DBOS.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Logger (nullTracer)
 import DBOS.Transact.QueueCases
   ( QueueFixture (..),
     checkBadEnqueue,

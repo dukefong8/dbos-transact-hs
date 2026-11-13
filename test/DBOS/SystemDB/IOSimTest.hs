@@ -9,7 +9,7 @@
 -- engine's backend seam has an @IOSim@ instance.
 module DBOS.SystemDB.IOSimTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim, runSimOrThrow)
 import Data.Map.Strict qualified as Map
 import DBOS.SystemDB

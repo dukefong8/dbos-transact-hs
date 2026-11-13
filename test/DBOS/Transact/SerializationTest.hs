@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | 'DBOS.Transact.Serialization' against the portable-JSON contract: every
+-- | 'DBOS.Internal.Transact.Serialization' against the portable-JSON contract: every
 -- payload is tagged @portable_json@, workflow arguments use the
 -- @{positionalArgs, namedArgs}@ envelope, legacy @rust_serde@/untagged rows
 -- stay readable as native JSON, and unknown tags are refused.
@@ -9,14 +9,14 @@ module DBOS.Transact.SerializationTest
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Aeson (Value (..), eitherDecodeStrict, toJSON)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Vector qualified as Vector
 import Data.Text qualified as Text
 import DBOS.Transact (Serialization (..), SerializedWorkflowValue (..))
-import DBOS.Transact.Error (Error (..), decodeErrorText, encodeErrorText)
-import DBOS.Transact.Serialization
+import DBOS.Internal.Transact.Error (Error (..), decodeErrorText, encodeErrorText)
+import DBOS.Internal.Transact.Serialization
   ( CodecError (..),
     codecUnknownTag,
     decodeWorkflowInput,

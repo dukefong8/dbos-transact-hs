@@ -22,10 +22,10 @@ import DBOS.SystemDB
     WorkflowOwner (..),
     WorkflowStatus (..),
     rewindStepName)
-import DBOS.SystemDB.Error qualified as SysErr
+import DBOS.Internal.SystemDB.Error qualified as SysErr
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
-import DBOS.Prelude
-import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, CodecError (..))
+import DBOS.Internal.Prelude
+import DBOS.Internal.Transact.Serialization (WorkflowInput, decodeWorkflowValue, CodecError (..))
 import DBOS.Transact
   (
     EngineOnly,
@@ -44,14 +44,14 @@ import DBOS.Transact
     runWorkflow,
     runStep,
     configNew)
-import DBOS.Transact.Logger (runTracer)
-import DBOS.Transact.Recovery (EngineEvent (..))
-import DBOS.Transact.Dequeue (QueueEvent (..))
-import DBOS.Transact.Management (ManagementEvent (..))
-import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.Step qualified as StepEvent
-import DBOS.Transact.Connection (SomeSystemDB (..))
-import DBOS.SystemDB.Postgres.Statements (CallerStep (..))
+import DBOS.Internal.Transact.Logger (runTracer)
+import DBOS.Internal.Transact.Recovery (EngineEvent (..))
+import DBOS.Internal.Transact.Dequeue (QueueEvent (..))
+import DBOS.Internal.Transact.Management (ManagementEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Step qualified as StepEvent
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..))
+import DBOS.Internal.SystemDB.Postgres.Statements (CallerStep (..))
 import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity, verifyCallerStep)
 import DBOS.Transact.WorkflowSimData (mockWorkflow)
 import DBOS.Transact.ManagementCases

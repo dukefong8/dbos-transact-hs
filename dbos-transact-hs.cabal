@@ -13,7 +13,16 @@ common commons
     OverloadedLabels
     OverloadedRecordDot
     RecordWildCards
-  ghc-options: -Wall -threaded -Wno-ambiguous-fields -Wincomplete-record-updates -Wincomplete-record-selectors -Wincomplete-uni-patterns -Wredundant-constraints
+
+  ghc-options:
+    -Wall
+    -threaded
+    -Wno-ambiguous-fields
+    -Wincomplete-record-updates
+    -Wincomplete-record-selectors
+    -Wincomplete-uni-patterns
+    -Wredundant-constraints
+
   build-depends:
     aeson,
     base >=4.21 && <5,
@@ -50,62 +59,57 @@ common commons
     uuid,
     vector,
 
-library dbos-transact-internals
-  import: commons
-  -- Private to this package: the public library's facade and the test suite
-  -- may depend on it; demo-apps must use the public `dbos-transact-hs`
-  -- library only.
-  visibility: private
-  hs-source-dirs: src/DBOS/Internal
-  exposed-modules:
-    DBOS.Prelude
-    DBOS.Transact.Checkpoint
-    DBOS.Transact.Client
-    DBOS.Transact.Config
-    DBOS.Transact.Connection
-    DBOS.Transact.Context
-    DBOS.Transact.Datasource
-    DBOS.Transact.Datasource.Postgres
-    DBOS.Transact.Debouncer
-    DBOS.Transact.Dequeue
-    DBOS.Transact.Error
-    DBOS.Transact.Event
-    DBOS.Transact.Handle
-    DBOS.Transact.Identity
-    DBOS.Transact.Instance
-    DBOS.Transact.Logger
-    DBOS.Transact.Management
-    DBOS.Transact.Message
-    DBOS.Transact.Patch
-    DBOS.Transact.Queue
-    DBOS.Transact.Recovery
-    DBOS.Transact.Registry
-    DBOS.Transact.Select
-    DBOS.Transact.Serialization
-    DBOS.Transact.Sleep
-    DBOS.Transact.Stream
-    DBOS.Transact.Step
-    DBOS.Transact.TimeoutSweep
-    DBOS.Transact.Wait
-    DBOS.Transact.Workflow
-    DBOS.SystemDB.Class
-    DBOS.SystemDB.Error
-    DBOS.SystemDB.Notify
-    DBOS.SystemDB.Postgres.Backend
-    DBOS.SystemDB.Postgres.Notifier
-    DBOS.SystemDB.Postgres.Statements
-    DBOS.SystemDB.Retry
-    DBOS.SystemDB.Types
-
 library
   import: commons
+  -- One library. GHC home-resolves the DBOS.Internal.* modules from src into
+  -- this component (-Wmissing-home-modules), and cabal archives only declared
+  -- modules while the facades re-export internal entities, so a second
+  -- library's archive missed them and broke every cross-package link
+  -- (ADR-0043). The Internal modules stay exposed so the test suite can
+  -- import them directly; demo-apps use only the facades by convention.
   hs-source-dirs: src
   exposed-modules:
     DBOS.SystemDB
     DBOS.SystemDB.Postgres
     DBOS.Transact
-  build-depends:
-    dbos-transact-hs:dbos-transact-internals
+    DBOS.Internal.Prelude
+    DBOS.Internal.SystemDB.Class
+    DBOS.Internal.SystemDB.Error
+    DBOS.Internal.SystemDB.Notify
+    DBOS.Internal.SystemDB.Postgres.Backend
+    DBOS.Internal.SystemDB.Postgres.Notifier
+    DBOS.Internal.SystemDB.Postgres.Statements
+    DBOS.Internal.SystemDB.Retry
+    DBOS.Internal.SystemDB.Types
+    DBOS.Internal.Transact.Checkpoint
+    DBOS.Internal.Transact.Client
+    DBOS.Internal.Transact.Config
+    DBOS.Internal.Transact.Connection
+    DBOS.Internal.Transact.Context
+    DBOS.Internal.Transact.Datasource
+    DBOS.Internal.Transact.Datasource.Postgres
+    DBOS.Internal.Transact.Debouncer
+    DBOS.Internal.Transact.Dequeue
+    DBOS.Internal.Transact.Error
+    DBOS.Internal.Transact.Event
+    DBOS.Internal.Transact.Handle
+    DBOS.Internal.Transact.Identity
+    DBOS.Internal.Transact.Instance
+    DBOS.Internal.Transact.Logger
+    DBOS.Internal.Transact.Management
+    DBOS.Internal.Transact.Message
+    DBOS.Internal.Transact.Patch
+    DBOS.Internal.Transact.Queue
+    DBOS.Internal.Transact.Recovery
+    DBOS.Internal.Transact.Registry
+    DBOS.Internal.Transact.Select
+    DBOS.Internal.Transact.Serialization
+    DBOS.Internal.Transact.Sleep
+    DBOS.Internal.Transact.Step
+    DBOS.Internal.Transact.Stream
+    DBOS.Internal.Transact.TimeoutSweep
+    DBOS.Internal.Transact.Wait
+    DBOS.Internal.Transact.Workflow
 
 test-suite test
   import: commons
@@ -116,105 +120,108 @@ test-suite test
   -- minute. Never run two live suite binaries at once (shared-fixture 40P01
   -- deadlock). The old serial pin (--num-threads 1) was dropped 2026-11-08
   -- after consecutive green parallel gates with no freeze.
-  ghc-options: -rtsopts -with-rtsopts=-N4
+  ghc-options:
+    -rtsopts
+    -with-rtsopts=-N4
+
   hs-source-dirs: test
   main-is: Main.hs
   other-modules:
     -- PARKED while the Postgres backend is rewritten: ghciwatch and
     -- `cabal build test` cover the DBOS.SystemDB slice only.
-    DBOS.Transact.SerializationTest
-    DBOS.Transact.LoggerTest
     DBOS.DualStack
     DBOS.IOSimTracer
-    DBOS.SystemDB.TypesTest
     DBOS.SystemDB.ErrorTest
     DBOS.SystemDB.IOSim
     DBOS.SystemDB.IOSimTest
-    DBOS.SystemDB.RetryTest
+    DBOS.SystemDB.NotifierTest
+    DBOS.SystemDB.NotifyTest
     DBOS.SystemDB.PostgresTest
+    DBOS.SystemDB.RetryTest
+    DBOS.SystemDB.TypesTest
     DBOS.Transact.CheckpointCases
     DBOS.Transact.CheckpointTest
     DBOS.Transact.CheckpointTestSim
     DBOS.Transact.ClientTest
     DBOS.Transact.ClockTest
     DBOS.Transact.ConfigTest
+    DBOS.Transact.ContextSimData
     DBOS.Transact.ContextTest
     DBOS.Transact.ContextTestSim
     DBOS.Transact.DatasourceCases
     DBOS.Transact.DatasourceTest
     DBOS.Transact.DatasourceTestSim
-    DBOS.Transact.QueueTestSim
-    DBOS.Transact.QueueCases
-    DBOS.Transact.WidgetTest
-    DBOS.Transact.WidgetCases
-    DBOS.Transact.WidgetSim
-    DBOS.Transact.VersionsTest
-    DBOS.Transact.ContextSimData
     DBOS.Transact.DeadlinesCases
     DBOS.Transact.DeadlinesTest
     DBOS.Transact.DeadlinesTestSim
     DBOS.Transact.DebouncerCases
     DBOS.Transact.DebouncerTest
     DBOS.Transact.DebouncerTestSim
-    DBOS.Transact.HandleCases
-    DBOS.Transact.HandleTest
-    DBOS.Transact.HandleTestSim
-    DBOS.Transact.IdentityTest
-    DBOS.Transact.InteropTest
-    DBOS.Transact.RegistryCases
-    DBOS.Transact.RegistryTest
-    DBOS.Transact.RegistryTestSim
-    DBOS.Transact.SelectCases
-    DBOS.Transact.SelectTest
-    DBOS.Transact.SelectTestSim
-    DBOS.Transact.ShutdownTest
-    DBOS.Transact.StepRetryCases
-    DBOS.Transact.StepRetryTest
-    DBOS.Transact.StepRetryTestSim
-    DBOS.Transact.StepCases
-    DBOS.Transact.StepTestSim
-    DBOS.Transact.StepTest
     DBOS.Transact.ErrorTest
     DBOS.Transact.EventCases
     DBOS.Transact.EventTest
     DBOS.Transact.EventTestSim
-    DBOS.Transact.StreamCases
-    DBOS.Transact.StreamTest
-    DBOS.Transact.StreamSim
+    DBOS.Transact.HandleCases
+    DBOS.Transact.HandleTest
+    DBOS.Transact.HandleTestSim
+    DBOS.Transact.IdentityTest
+    DBOS.Transact.InstanceTest
+    DBOS.Transact.InteropTest
+    DBOS.Transact.LoggerTest
+    DBOS.Transact.ManagementCases
+    DBOS.Transact.ManagementSimData
+    DBOS.Transact.ManagementTest
+    DBOS.Transact.ManagementTestSim
     DBOS.Transact.MessageCases
+    DBOS.Transact.MessageSimData
     DBOS.Transact.MessageTest
     DBOS.Transact.MessageTestSim
-    DBOS.Transact.MessageSimData
     DBOS.Transact.OutboxCases
     DBOS.Transact.OutboxTest
     DBOS.Transact.OutboxTestSim
     DBOS.Transact.PatchCases
     DBOS.Transact.PatchTest
     DBOS.Transact.PatchTestSim
+    DBOS.Transact.QueueCases
+    DBOS.Transact.QueueTest
+    DBOS.Transact.QueueTestSim
+    DBOS.Transact.RegistryCases
+    DBOS.Transact.RegistryTest
+    DBOS.Transact.RegistryTestSim
+    DBOS.Transact.SelectCases
+    DBOS.Transact.SelectTest
+    DBOS.Transact.SelectTestSim
+    DBOS.Transact.SerializationTest
+    DBOS.Transact.ShutdownTest
+    DBOS.Transact.SimTest
+    DBOS.Transact.SleepCases
+    DBOS.Transact.SleepTest
+    DBOS.Transact.SleepTestSim
+    DBOS.Transact.StepCases
+    DBOS.Transact.StepRetryCases
+    DBOS.Transact.StepRetryTest
+    DBOS.Transact.StepRetryTestSim
+    DBOS.Transact.StepTest
+    DBOS.Transact.StepTestSim
+    DBOS.Transact.StreamCases
+    DBOS.Transact.StreamSim
+    DBOS.Transact.StreamTest
+    DBOS.Transact.VersionsTest
     DBOS.Transact.WaitCases
     DBOS.Transact.WaitTest
     DBOS.Transact.WaitTestSim
-    DBOS.Transact.InstanceTest
-    DBOS.Transact.WorkflowTest
-    DBOS.Transact.WorkflowTestSim
+    DBOS.Transact.WidgetCases
+    DBOS.Transact.WidgetSim
+    DBOS.Transact.WidgetTest
     DBOS.Transact.WorkflowCases
     DBOS.Transact.WorkflowSimData
-    DBOS.Transact.QueueTest
-    DBOS.SystemDB.NotifyTest
-    DBOS.SystemDB.NotifierTest
-    DBOS.Transact.ManagementCases
-    DBOS.Transact.ManagementTest
-    DBOS.Transact.ManagementTestSim
-    DBOS.Transact.ManagementSimData
-    DBOS.Transact.SimTest
-    DBOS.Transact.SleepTest
-    DBOS.Transact.SleepCases
-    DBOS.Transact.SleepTestSim
+    DBOS.Transact.WorkflowTest
+    DBOS.Transact.WorkflowTestSim
+
   build-depends:
     breakpoint,
     bytestring,
     dbos-transact-hs,
-    dbos-transact-hs:dbos-transact-internals,
     hasql >=2.0.1 && <2.1,
     hasql-pool,
     hedgehog,

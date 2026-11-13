@@ -10,7 +10,7 @@ import Control.Foldl qualified as Foldl
 import Control.Monad.IOSim (IOSim, SimTrace, runSimOrThrow, selectTraceEventsDynamic)
 import Data.Vector.Fusion.Stream.Monadic qualified as Vector
 import DBOS.DualStack (simCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB
   ( EncodedValue (..),
     StreamRead (..),
@@ -23,8 +23,8 @@ import DBOS.SystemDB
 import DBOS.SystemDB.IOSim (MockSystemDB (..))
 import DBOS.Transact qualified as Transact
 import DBOS.Transact.EventTestSim (simEventFixture)
-import DBOS.Transact.Recovery (EngineEvent)
-import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Recovery (EngineEvent)
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
 import DBOS.Transact.StreamCases
   ( checkCloseStopsStream,
     checkCrossPages,

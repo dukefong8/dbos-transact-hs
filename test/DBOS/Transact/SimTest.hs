@@ -11,7 +11,7 @@
 -- behavior mirrors stay eval-only.
 module DBOS.Transact.SimTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim, runSimOrThrow)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB.IOSim (simDBOSWith)

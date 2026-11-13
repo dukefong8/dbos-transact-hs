@@ -13,7 +13,7 @@ module DBOS.Transact.SleepTestSim (tests) where
 import Control.Monad.IOSim (IOSim, SimEventType (..), SimTrace, selectTraceEventsDynamic, traceEvents)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), newWorkflow, sleepStepName)
@@ -24,8 +24,8 @@ import DBOS.Transact
   sleepPlain,
   sleepStep,
   )
-import DBOS.Transact.Sleep (SleepEvent (..))
-import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, peekStepId, withStep, withWorkflow)
+import DBOS.Internal.Transact.Sleep (SleepEvent (..))
+import DBOS.Internal.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, peekStepId, withStep, withWorkflow)
 import DBOS.Transact.SleepCases
   ( SleepFixture (..),
     checkSleepCheckpoint,

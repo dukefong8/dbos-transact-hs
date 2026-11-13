@@ -2,8 +2,8 @@
 
 module DBOS.SystemDB.PostgresTest (tests, streamTests) where
 
-import DBOS.Prelude
-import DBOS.SystemDB.Error (decodePortableError)
+import DBOS.Internal.Prelude
+import DBOS.Internal.SystemDB.Error (decodePortableError)
 import DBOS.SystemDB
   ( AppScope (..),
     DeleteCaller (..),
@@ -111,8 +111,8 @@ import DBOS.SystemDB
     timestampToEpochMs,
     databaseTimeNow,
   )
-import DBOS.SystemDB.Postgres.Statements qualified as Statements
-import DBOS.SystemDB.Postgres.Backend qualified as Backend
+import DBOS.Internal.SystemDB.Postgres.Statements qualified as Statements
+import DBOS.Internal.SystemDB.Postgres.Backend qualified as Backend
 import DBOS.SystemDB.Postgres
   ( Config (..),
     DbosMigration (..),
@@ -140,7 +140,7 @@ import Data.Int (Int32, Int64)
 import Data.List (sort)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
-import DBOS.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Logger (nullTracer)
 import Data.UUID.V4 qualified as UUID.V4
 import Hasql.Connection qualified as Connection
 import Hasql.Connection.Settings qualified as ConnectionSettings

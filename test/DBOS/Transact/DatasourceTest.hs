@@ -14,12 +14,12 @@ module DBOS.Transact.DatasourceTest
 where
 
 import DBOS.DualStack (liveCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import DBOS.SystemDB qualified as SysDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Serialization (encodeWorkflowValue)
+import DBOS.Internal.Transact.Serialization (encodeWorkflowValue)
 import DBOS.Transact
   ( AppDataSource,
     DataSource (..),
@@ -44,19 +44,19 @@ import DBOS.Transact
     transactionConfigDefault,
     verifyAppDataSource,
   )
-import DBOS.Transact.Logger (nullTracer)
-import DBOS.SystemDB.Error (BackendError)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Datasource (RecordedOutcome (..))
-import DBOS.Transact.Context (testOwner, withWorkflow)
-import DBOS.Transact.Connection
+import DBOS.Internal.Transact.Logger (nullTracer)
+import DBOS.Internal.SystemDB.Error (BackendError)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Datasource (RecordedOutcome (..))
+import DBOS.Internal.Transact.Context (testOwner, withWorkflow)
+import DBOS.Internal.Transact.Connection
   ( newConnection,
     uuidWorkflowId,
     Connection,
     Owner (..),
     SomeSystemDB (..)
   )
-import DBOS.SystemDB.Retry (uuidEntropy)
+import DBOS.Internal.SystemDB.Retry (uuidEntropy)
 import DBOS.Transact.DatasourceCases
   ( DsFixture (..),
     RegistryFixture (..),

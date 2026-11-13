@@ -8,7 +8,7 @@
 module DBOS.Transact.DebouncerTest (tests) where
 
 import DBOS.DualStack (liveCaseWith)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -22,12 +22,12 @@ import Hasql.Statement qualified as Statement
 import Pqi.Ffi qualified as Pqi
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Serialization (encodeWorkflowInput)
+import DBOS.Internal.Transact.Serialization (encodeWorkflowInput)
 import DBOS.Transact
-import DBOS.Transact.Management (stepInfoFromRecord)
-import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
+import DBOS.Internal.Transact.Management (stepInfoFromRecord)
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..), runSystemDB)
 import DBOS.Transact.DebouncerCases
-import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Internal.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (testCase, (@?=))
 

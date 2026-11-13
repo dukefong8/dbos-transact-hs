@@ -109,7 +109,7 @@ where
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB
   ( AwaitedOutcome (..),
     Change (..),
@@ -135,11 +135,11 @@ import DBOS.SystemDB
     secondsDuration
   )
 import DBOS.SystemDB qualified as SysDB
-import DBOS.Transact.Connection (Connection (connSysdb), runSystemDB)
-import DBOS.Transact.Dequeue (Polled (..), newRunning, pollOnce)
-import DBOS.Transact.Identity (Identity (identityAppVersion))
-import DBOS.Transact.Instance (Executor (conn, datasources, identity, workflowTasks, workflows))
-import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Internal.Transact.Connection (Connection (connSysdb), runSystemDB)
+import DBOS.Internal.Transact.Dequeue (Polled (..), newRunning, pollOnce)
+import DBOS.Internal.Transact.Identity (Identity (identityAppVersion))
+import DBOS.Internal.Transact.Instance (Executor (conn, datasources, identity, workflowTasks, workflows))
+import DBOS.Internal.Transact.Serialization (decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
     DBOS,
@@ -184,7 +184,7 @@ import DBOS.Transact
     updateQueue,
     waitForWorkflow,
   )
-import DBOS.Transact.Queue (defaultQueueChange, queueFromRecord, queueIsPartitioned)
+import DBOS.Internal.Transact.Queue (defaultQueueChange, queueFromRecord, queueIsPartitioned)
 
 -- | What a stack must provide: the leaf's suffix and application name,
 -- the bracketed instance, launch/shutdown, a raw queue-row write (for

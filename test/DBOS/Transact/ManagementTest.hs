@@ -10,7 +10,7 @@
 module DBOS.Transact.ManagementTest (tests) where
 
 import DBOS.DualStack (liveCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
@@ -44,9 +44,9 @@ import DBOS.SystemDB
     internalQueueName,
     newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Error qualified as SystemDBError
+import DBOS.Internal.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Internal.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
     EngineOnly,
@@ -113,15 +113,15 @@ import DBOS.Transact
     rewindWorkflowsInWorkflow,
     RewindOptions (rewindStartStep),
     startChildWorkflow)
-import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Instance (dequeueWorkflows, listWorkflowSteps)
-import DBOS.Transact.Client (clientListWorkflowSteps, clientListWorkflowStepsWith)
-import DBOS.Transact.Context (testOwner, withWorkflow)
-import DBOS.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
-import DBOS.SystemDB.Retry (uuidEntropy)
+import DBOS.Internal.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Instance (dequeueWorkflows, listWorkflowSteps)
+import DBOS.Internal.Transact.Client (clientListWorkflowSteps, clientListWorkflowStepsWith)
+import DBOS.Internal.Transact.Context (testOwner, withWorkflow)
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..), uuidWorkflowId)
+import DBOS.Internal.SystemDB.Retry (uuidEntropy)
 import DBOS.Transact.ContextTest (connOver)
-import DBOS.Transact.Management (stepInfoFromRecord)
+import DBOS.Internal.Transact.Management (stepInfoFromRecord)
 import DBOS.Transact.ManagementCases
   ( MgmtFixture (..),
     checkCancelMissing,

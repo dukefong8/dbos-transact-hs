@@ -4,7 +4,7 @@
 -- | Instance lifecycle behavior through the public DBOS facade.
 module DBOS.Transact.InstanceTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -15,7 +15,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import DBOS.SystemDB (AwaitedOutcome (..), VersionInfo (..), WorkflowRecord (..), getWorkflow, listApplicationVersions)
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Serialization (CodecError (..), WorkflowInput, decodeWorkflowValue, encodeWorkflowInput)
+import DBOS.Internal.Transact.Serialization (CodecError (..), WorkflowInput, decodeWorkflowValue, encodeWorkflowInput)
 import System.Mem (performGC)
 import System.Mem.Weak (Weak, deRefWeak, mkWeakPtr)
 import DBOS.Transact
@@ -49,9 +49,9 @@ import DBOS.Transact
     handleResult,
     waitForWorkflow,
   )
-import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Instance (dbosAppVersion, dbosExecutorId)
-import DBOS.Transact.Workflow (WorkflowRef, refName, startOptionsDefault)
+import DBOS.Internal.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Instance (dbosAppVersion, dbosExecutorId)
+import DBOS.Internal.Transact.Workflow (WorkflowRef, refName, startOptionsDefault)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 

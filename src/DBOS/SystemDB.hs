@@ -1,5 +1,5 @@
 -- | The system-database seam: public client surface. The class lives
--- in 'DBOS.SystemDB.Class' and the domain modules beside it; this module
+-- in 'DBOS.Internal.SystemDB.Class' and the domain modules beside it; this module
 -- only re-exports them, so engine peers import the defining modules
 -- directly and clients keep the stable name.
 module DBOS.SystemDB
@@ -24,16 +24,16 @@ module DBOS.SystemDB
     withRetry,
     uuidEntropy,
     -- * Wakeups (notify.rs)
-    module DBOS.SystemDB.Notify,
+    module DBOS.Internal.SystemDB.Notify,
     -- * Postgres notifier (postgres/notifier.rs)
-    module DBOS.SystemDB.Postgres.Notifier,
+    module DBOS.Internal.SystemDB.Postgres.Notifier,
   )
 where
 
-import DBOS.SystemDB.Class
-import DBOS.SystemDB.Notify
-import DBOS.SystemDB.Postgres.Notifier
-import DBOS.SystemDB.Error
+import DBOS.Internal.SystemDB.Class
+import DBOS.Internal.SystemDB.Notify
+import DBOS.Internal.SystemDB.Postgres.Notifier
+import DBOS.Internal.SystemDB.Error
   ( BackendError (..),
     BackendErrorKind (..),
     Error (..),
@@ -42,7 +42,7 @@ import DBOS.SystemDB.Error
     renderError,
     shouldRecord,
   )
-import DBOS.SystemDB.Retry
+import DBOS.Internal.SystemDB.Retry
   ( RetryPolicy (..),
     defaultRetryPolicy,
     jitter,
@@ -51,4 +51,4 @@ import DBOS.SystemDB.Retry
     withRetry,
     withoutConflictReplay,
   )
-import DBOS.SystemDB.Types as Types
+import DBOS.Internal.SystemDB.Types as Types

@@ -11,7 +11,7 @@
 module DBOS.Transact.DeadlinesTest (tests) where
 
 import DBOS.DualStack (liveCaseWith)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
@@ -28,7 +28,7 @@ import DBOS.Transact
     newDBOS,
     shutdown,
   )
-import DBOS.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Logger (nullTracer)
 import DBOS.Transact.DeadlinesCases
   ( DeadlinesFixture (..),
     checkBeatenDeadline,

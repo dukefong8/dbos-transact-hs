@@ -9,7 +9,7 @@
 -- @versions.rs@.
 module DBOS.Transact.VersionsTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
@@ -28,8 +28,8 @@ import DBOS.Transact
     promoteAppVersionFor,
     shutdown,
   )
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Instance (Executor (..))
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Instance (Executor (..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 

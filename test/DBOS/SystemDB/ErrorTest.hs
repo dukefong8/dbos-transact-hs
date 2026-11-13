@@ -5,9 +5,9 @@ module DBOS.SystemDB.ErrorTest
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (BackendError (..), BackendErrorKind (..), Error (..), defaultRetryPolicy, renderBackendError, renderError, shouldRecord, shouldRetry)
-import DBOS.SystemDB.Error (decodePortableError, encodePortableError)
+import DBOS.Internal.SystemDB.Error (decodePortableError, encodePortableError)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 

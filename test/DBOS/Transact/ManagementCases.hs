@@ -132,7 +132,7 @@ module DBOS.Transact.ManagementCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Int (Int64)
 import Data.List (sort)
 import Data.Map.Strict qualified as Map
@@ -180,7 +180,7 @@ import DBOS.SystemDB
     updateWorkflowAttributesStepName
   )
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.Transact.Serialization
+import DBOS.Internal.Transact.Serialization
   ( WorkflowInput,
     decodeWorkflowValue,
     encodeWorkflowValue,
@@ -288,11 +288,11 @@ import DBOS.Transact
     writeStream,
   )
 import DBOS.Transact.DatasourceCases (FakeDs (..), mkFakeDs, protoConfig)
-import DBOS.Transact.Datasource (DataSource (..), Tx (..))
-import DBOS.Transact.Logger (SomeTracer (..))
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Instance (dequeueWorkflows, launchOnWithQueues)
-import DBOS.Transact.Connection
+import DBOS.Internal.Transact.Datasource (DataSource (..), Tx (..))
+import DBOS.Internal.Transact.Logger (SomeTracer (..))
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Instance (dequeueWorkflows, launchOnWithQueues)
+import DBOS.Internal.Transact.Connection
   ( Connection,
     Owner (..),
     SomeSystemDB (..),

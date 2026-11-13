@@ -23,5 +23,5 @@
 :set -fplugin=Debug.Breakpoint
 
 :set -outputdir .build
-:set -isrc:test:src/DBOS/Internal
+:set -isrc:test:demo-apps
 :load test/Main.hs

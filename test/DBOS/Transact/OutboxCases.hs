@@ -46,14 +46,14 @@ where
 
 import Data.Aeson (Value (..), decodeStrict)
 import Data.Aeson.KeyMap qualified as KeyMap
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (WorkflowFilter (..), WorkflowRecord (..), defaultWorkflowFilter)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Error (BackendError)
-import DBOS.Transact.Serialization (decodeWorkflowValue, CodecError (..))
+import DBOS.Internal.SystemDB.Error (BackendError)
+import DBOS.Internal.Transact.Serialization (decodeWorkflowValue, CodecError (..))
 import DBOS.Transact
-import DBOS.Transact.Connection (SomeSystemDB, runSystemDB)
-import DBOS.Transact.Instance (dequeueWorkflows)
+import DBOS.Internal.Transact.Connection (SomeSystemDB, runSystemDB)
+import DBOS.Internal.Transact.Instance (dequeueWorkflows)
 import GHC.Stack (HasCallStack)
 
 -- | What the next instrumented transaction body does instead of its work:

@@ -13,7 +13,7 @@
 module DBOS.Transact.OutboxTest (tests) where
 
 import DBOS.DualStack (liveCaseWith)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Aeson qualified as Aeson
 import Data.Int (Int32, Int64)
 import Data.Text qualified as Text
@@ -23,10 +23,10 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import DBOS.SystemDB (WorkflowRecord (..))
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Serialization (encodeWorkflowInput)
+import DBOS.Internal.Transact.Serialization (encodeWorkflowInput)
 import DBOS.Transact
-import DBOS.Transact.Connection (SomeSystemDB (..))
-import DBOS.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..))
+import DBOS.Internal.Transact.Logger (SomeTracer (..), acquireLoggerBackend, ioTracer, nullTracer)
 import DBOS.Transact.OutboxCases
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders

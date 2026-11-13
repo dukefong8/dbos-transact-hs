@@ -6,7 +6,7 @@
 -- its Rust test name in @identity.rs@.
 module DBOS.Transact.IdentityTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.Transact
   ( Config (..),
     EngineOnly,
@@ -14,8 +14,8 @@ import DBOS.Transact
     Error (..),
     configNew,
   )
-import DBOS.Transact.Error qualified as TransactError
-import DBOS.Transact.Identity
+import DBOS.Internal.Transact.Error qualified as TransactError
+import DBOS.Internal.Transact.Identity
   ( Identity (..),
     appVersionEnv,
     cloudAppNameEnv,

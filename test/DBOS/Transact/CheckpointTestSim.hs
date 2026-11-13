@@ -8,15 +8,15 @@
 -- proving placement never touches the tracer.
 module DBOS.Transact.CheckpointTestSim (tests) where
 
-import DBOS.Transact.Step (WorkflowEvent (..), replayStep)
+import DBOS.Internal.Transact.Step (WorkflowEvent (..), replayStep)
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (StepRecord (..), WorkflowId (..))
 import DBOS.Transact (EngineOnly, Error)
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB, simIdentity)
-import DBOS.Transact.Checkpoint (takenPlacement)
+import DBOS.Internal.Transact.Checkpoint (takenPlacement)
 import DBOS.Transact.CheckpointCases
   ( CheckpointFixture (..),
     checkBoundaryRecords,
@@ -42,8 +42,8 @@ import DBOS.Transact.CheckpointCases
     scenarioSiblingRefused,
     scenarioTakenOther,
   )
-import DBOS.Transact.Connection (nextExecutionIdentity)
-import DBOS.Transact.Context (newWorkflowCtx, newWorkflowState, testOwner)
+import DBOS.Internal.Transact.Connection (nextExecutionIdentity)
+import DBOS.Internal.Transact.Context (newWorkflowCtx, newWorkflowState, testOwner)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 

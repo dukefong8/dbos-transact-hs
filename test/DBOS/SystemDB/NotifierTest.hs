@@ -3,7 +3,7 @@
 
 module DBOS.SystemDB.NotifierTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import DBOS.SystemDB
   ( Notifier (..),
@@ -27,7 +27,7 @@ import DBOS.SystemDB.Postgres
 import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import DBOS.Transact.Logger (LogEvent (..), SomeTracer (..), mkTracer, nullTracer)
+import DBOS.Internal.Transact.Logger (LogEvent (..), SomeTracer (..), mkTracer, nullTracer)
 import Hasql.Pool qualified as Pool
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (testCase, (@?=))

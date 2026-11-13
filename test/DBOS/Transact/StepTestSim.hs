@@ -12,7 +12,7 @@
 -- scenarios and checks with 'DBOS.Transact.StepRetryTest'.
 module DBOS.Transact.StepTestSim (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.IOSimTracer (printSimTrace, runSimCase, simTracer)
 import DBOS.SystemDB (NewWorkflow (..), StepRecord (..), WorkflowId (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), newWorkflow)
@@ -49,9 +49,9 @@ import DBOS.Transact
     WorkflowIdReusePolicy (..),
     runStep,
   )
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.Context (testOwner, withWorkflow)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Context (testOwner, withWorkflow)
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 

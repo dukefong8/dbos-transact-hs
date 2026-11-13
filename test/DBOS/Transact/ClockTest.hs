@@ -13,7 +13,7 @@
 -- the oracle's @clock.rs@.
 module DBOS.Transact.ClockTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Int (Int64)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -39,10 +39,10 @@ import DBOS.SystemDB
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact (sleepStep)
-import DBOS.Transact.Context (withWorkflow)
+import DBOS.Internal.Transact.Context (withWorkflow)
 import DBOS.Transact.ContextTest (connOver)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Logger (nullTracer)
 import Hasql.Connection.Settings qualified as ConnectionSettings
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders

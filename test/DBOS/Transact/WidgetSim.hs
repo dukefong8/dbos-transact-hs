@@ -15,7 +15,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (printSimTrace, simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, simConnectionWith, simInstance)
 import DBOS.Transact
   ( DataSource (..),
@@ -26,9 +26,9 @@ import DBOS.Transact
     newQualifiedWorkflowName,
     registerWorkflowRef,
     retrieveWorkflow)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Datasource (RecordedOutcome (..))
-import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, testOwner, withStep, withWorkflow)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Datasource (RecordedOutcome (..))
+import DBOS.Internal.Transact.Context (firstStepStatus, nextWorkflowMarker, testOwner, withStep, withWorkflow)
 import DBOS.Transact.WidgetCases
   ( CheckoutSteps (..),
     lostAckOnce,

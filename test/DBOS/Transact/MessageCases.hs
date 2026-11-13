@@ -53,7 +53,7 @@ module DBOS.Transact.MessageCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Word (Word64)
 import Data.List (nub)
 import DBOS.SystemDB
@@ -83,8 +83,8 @@ import DBOS.Transact
     sendOptionsDefault,
     sendWith,
   )
-import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep)
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow))
+import DBOS.Internal.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep)
+import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow))
 
 -- | What a stack must provide: labeled sender/destination pairs over
 -- initialized rows, running sends and receives through a context for an

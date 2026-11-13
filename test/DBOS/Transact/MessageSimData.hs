@@ -5,7 +5,7 @@
 -- value the backend serves. Duplicated across domains on purpose.
 module DBOS.Transact.MessageSimData (mockMessageBody) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 
 -- | The message body mock receives answer with.
 mockMessageBody :: Text

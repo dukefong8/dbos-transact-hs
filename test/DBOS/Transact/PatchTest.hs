@@ -8,7 +8,7 @@
 module DBOS.Transact.PatchTest (tests) where
 
 import DBOS.DualStack (liveCaseWith)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.Transact.PatchCases
   ( PatchFixture (..),
     PatchLastObservation (..),
@@ -72,12 +72,12 @@ import DBOS.Transact
     startWorkflow,
     waitForWorkflow,
   )
-import DBOS.Transact.Checkpoint (PendingStep (..))
-import DBOS.Transact.Context (WorkflowCtx, withWorkflow)
-import DBOS.Transact.Error (EngineOnly, Error (..))
-import DBOS.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
-import DBOS.Transact.Identity (Environment (..), Identity (..))
-import DBOS.Transact.Serialization (CodecError (..), WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, encodeWorkflowValue)
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..))
+import DBOS.Internal.Transact.Context (WorkflowCtx, withWorkflow)
+import DBOS.Internal.Transact.Error (EngineOnly, Error (..))
+import DBOS.Internal.Transact.Logger (acquireLoggerBackend, ioTracer, nullTracer)
+import DBOS.Internal.Transact.Identity (Environment (..), Identity (..))
+import DBOS.Internal.Transact.Serialization (CodecError (..), WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, encodeWorkflowValue)
 import DBOS.Transact.ContextTest (connOver)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (testCase)

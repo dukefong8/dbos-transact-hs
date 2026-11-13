@@ -8,18 +8,18 @@
 module DBOS.Transact.CheckpointTest (tests) where
 
 import DBOS.DualStack (liveCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact (Serializer (..), secondsDuration)
-import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Checkpoint (takenPlacement)
-import DBOS.Transact.Connection
+import DBOS.Internal.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Checkpoint (takenPlacement)
+import DBOS.Internal.Transact.Connection
   ( Owner (..),
     SomeSystemDB (..),
     newConnection,
     uuidWorkflowId
   )
-import DBOS.SystemDB.Retry (uuidEntropy)
+import DBOS.Internal.SystemDB.Retry (uuidEntropy)
 import DBOS.Transact.CheckpointCases
   ( CheckpointFixture (..),
     checkBoundaryRecords,

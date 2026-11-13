@@ -4,7 +4,7 @@
 -- | Public-behavior tests for the @client.rs@ outside-in surface.
 module DBOS.Transact.ClientTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Aeson (Value (..))
 import Data.Int (Int64)
 import Data.Map.Strict qualified as Map
@@ -23,9 +23,9 @@ import Hasql.Statement qualified as Statement
 import Hasql.Transaction qualified as Tx
 import DBOS.SystemDB (AppScope (..), QueueRecord (..), VersionInfo (..), WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus (..), defaultForkOptions, defaultWorkflowFilter, durationFromSecs, forkNew, getWorkflow, millisDuration, secondsDuration)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.SystemDB.Error qualified as SystemDBError
+import DBOS.Internal.SystemDB.Error qualified as SystemDBError
 import DBOS.SystemDB.Postgres qualified as Postgres
-import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Internal.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
     EngineOnly, Client,
@@ -126,12 +126,12 @@ import DBOS.Transact
     toVectorStream,
     writeStream)
 import DBOS.Transact.DatasourceCases (FakeDs (..), mkFakeDs)
-import DBOS.Transact.Datasource (DataSource (..))
-import DBOS.Transact.Datasource qualified as DSTx (Tx (Tx))
-import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Instance (dequeueWorkflows)
-import DBOS.Transact.Client (clientGetEventSerialized, queueRequest)
-import DBOS.Transact.Workflow (Timeout (..), storedPriority, validateEnqueue, validateStart)
+import DBOS.Internal.Transact.Datasource (DataSource (..))
+import DBOS.Internal.Transact.Datasource qualified as DSTx (Tx (Tx))
+import DBOS.Internal.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Instance (dequeueWorkflows)
+import DBOS.Internal.Transact.Client (clientGetEventSerialized, queueRequest)
+import DBOS.Internal.Transact.Workflow (Timeout (..), storedPriority, validateEnqueue, validateStart)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))
 

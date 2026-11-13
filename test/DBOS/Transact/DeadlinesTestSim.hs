@@ -12,13 +12,13 @@ module DBOS.Transact.DeadlinesTestSim (tests) where
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Int (Int64)
 import DBOS.SystemDB (WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..))
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOn, newMemDB, newMemDBSkewed, simInstance)
-import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.TimeoutSweep (TimeoutSweepEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.TimeoutSweep (TimeoutSweepEvent (..))
 import DBOS.Transact.DeadlinesCases
   ( DeadlinesFixture (..),
     checkBeatenDeadline,

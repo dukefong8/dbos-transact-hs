@@ -29,7 +29,7 @@ module DBOS.Transact.SleepCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Word (Word64)
 import Data.Text qualified as Text
 import DBOS.SystemDB (Duration, StepRecord (..), WorkflowId, durationFromMs, millisDuration, secondsDuration, sleepStepName)

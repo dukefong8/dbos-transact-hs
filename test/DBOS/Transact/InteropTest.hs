@@ -25,7 +25,7 @@ import Data.Text.Encoding (encodeUtf8)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
 import Data.Vector qualified as Vector
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (AwaitedOutcome (..), Serialization (..), SerializedWorkflowValue (..), Topic (..), WorkflowId (..), WorkflowStatus (..))
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact
@@ -69,10 +69,10 @@ import DBOS.Transact
     waitForWorkflow,
     writeStream,
   )
-import DBOS.Transact.Error (Error (..), decodeErrorText)
-import DBOS.Transact.Instance (dequeueWorkflows)
-import DBOS.Transact.Logger (nullTracer)
-import DBOS.Transact.Serialization (CodecError, decodeWorkflowValue, encodeWorkflowInput, encodeWorkflowValue)
+import DBOS.Internal.Transact.Error (Error (..), decodeErrorText)
+import DBOS.Internal.Transact.Instance (dequeueWorkflows)
+import DBOS.Internal.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Serialization (CodecError, decodeWorkflowValue, encodeWorkflowInput, encodeWorkflowValue)
 import Hasql.Decoders qualified as Decoders
 import Hasql.Encoders qualified as Encoders
 import Hasql.Session qualified as Session

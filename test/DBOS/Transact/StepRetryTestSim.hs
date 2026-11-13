@@ -12,16 +12,16 @@ module DBOS.Transact.StepRetryTestSim (tests) where
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowOwner (..), WorkflowRecord (workflowRecordCreatorXid), millisDuration, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memConnectionOn, newMemDB)
 import DBOS.Transact
   ( Error (..),
     EngineOnly)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.Context (withWorkflow)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Context (withWorkflow)
 import DBOS.Transact.StepRetryCases
   ( StepRetryFixture (..),
     checkPlainNotPreemptible,

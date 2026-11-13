@@ -4,7 +4,7 @@
 -- | Mirrors the @config.rs@ test module, name for name.
 module DBOS.Transact.ConfigTest (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.Transact
   ( Config (..),
     IdleTransactionTimeout (..),
@@ -14,8 +14,8 @@ import DBOS.Transact
     serializerName,
     validateConfig,
   )
-import DBOS.SystemDB.Types (durationAsMillis)
-import DBOS.Transact.Config (systemDatabaseUrlEnv, outcomePollInterval)
+import DBOS.Internal.SystemDB.Types (durationAsMillis)
+import DBOS.Internal.Transact.Config (systemDatabaseUrlEnv, outcomePollInterval)
 import Data.Text qualified as Text
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, testCase, (@?=))

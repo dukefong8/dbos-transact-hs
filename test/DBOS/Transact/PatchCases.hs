@@ -45,11 +45,11 @@ module DBOS.Transact.PatchCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (StepRecord (..), WorkflowId, patchMarkerName)
-import DBOS.SystemDB.Error qualified as SystemDBError
+import DBOS.Internal.SystemDB.Error qualified as SystemDBError
 import DBOS.Transact (EngineOnly, Error (..), deprecatePatchStep, patchStep, runStep)
-import DBOS.Transact.Context (WorkflowCtx)
+import DBOS.Internal.Transact.Context (WorkflowCtx)
 
 -- | What a stack must provide to run the shared patch scenarios: fresh
 -- workflow ids, the patch-inside-a-step probe, the out-of-order probe in

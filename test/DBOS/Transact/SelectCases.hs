@@ -21,7 +21,7 @@ module DBOS.Transact.SelectCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import DBOS.SystemDB (StepRecord (..), selectStepStepName)
 import DBOS.SystemDB qualified as SysDB
@@ -31,9 +31,9 @@ import DBOS.Transact
   Error (..),
   WorkflowCtx,
   )
-import DBOS.Transact.Select (Branches, Racing (..))
-import DBOS.Transact.Checkpoint (PendingStep (..))
-import DBOS.Transact.Select (checkSelect, controlError, newBranches, pushBranch, recordSelect)
+import DBOS.Internal.Transact.Select (Branches, Racing (..))
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..))
+import DBOS.Internal.Transact.Select (checkSelect, controlError, newBranches, pushBranch, recordSelect)
 
 -- | What a stack must provide: run one check/record pass over a fresh
 -- workflow row, and read the select step rows back.

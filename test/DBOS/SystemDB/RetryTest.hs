@@ -8,7 +8,7 @@ module DBOS.SystemDB.RetryTest
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim, runSim, runSimTrace, selectTraceEventsDynamic)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import DBOS.SystemDB
@@ -25,8 +25,8 @@ import DBOS.SystemDB
     withRetry,
     withoutConflictReplay,
   )
-import DBOS.SystemDB.Retry (SysdbEvent (..))
-import DBOS.Transact.Logger (nullTracer)
+import DBOS.Internal.SystemDB.Retry (SysdbEvent (..))
+import DBOS.Internal.Transact.Logger (nullTracer)
 import DBOS.IOSimTracer (simTracer)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))

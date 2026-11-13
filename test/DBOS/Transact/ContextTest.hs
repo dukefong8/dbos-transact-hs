@@ -77,7 +77,7 @@ module DBOS.Transact.ContextTest
 where
 
 import DBOS.DualStack (liveCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.List (isInfixOf)
 import DBOS.SystemDB.Postgres (PostgresSystemDB)
 import DBOS.SystemDB.Postgres qualified as Postgres
@@ -92,7 +92,7 @@ import DBOS.Transact
   logWarn,
   secondsDuration,
   workflowId)
-import DBOS.Transact.Logger
+import DBOS.Internal.Transact.Logger
   ( AppLog (..),
     LogEvent (..),
     LogSeverity (..),
@@ -105,9 +105,9 @@ import DBOS.Transact.LoggerTest (callbackBackend, renderedLines)
 import Data.IORef (newIORef)
 import Data.Text (unpack)
 import System.Log.FastLogger (newTimeCache)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.SystemDB.Types (Timestamp)
-import DBOS.Transact.Context
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.SystemDB.Types (Timestamp)
+import DBOS.Internal.Transact.Context
   ( StepCtx (stepCtxWorkflow),
     StepStatus,
     WorkflowCtx (wctxConn, wctxIdentity),
@@ -141,7 +141,7 @@ import DBOS.Transact.Context
     withTracer,
     withWorkflow
   )
-import DBOS.Transact.Connection
+import DBOS.Internal.Transact.Connection
   ( Connection (..),
     newConnection,
     uuidWorkflowId,
@@ -149,7 +149,7 @@ import DBOS.Transact.Connection
     Owner (..),
     SomeSystemDB (..)
   )
-import DBOS.SystemDB.Retry (uuidEntropy)
+import DBOS.Internal.SystemDB.Retry (uuidEntropy)
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (testCase)
 

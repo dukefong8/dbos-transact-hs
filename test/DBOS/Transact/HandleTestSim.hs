@@ -13,13 +13,13 @@ module DBOS.Transact.HandleTestSim (tests) where
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (newMemDB, simEntropy, simGeneratedId, simIdentity)
 import DBOS.Transact (configNew)
-import DBOS.Transact.Recovery (EngineEvent (..))
-import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.Connection (SomeSystemDB (..))
+import DBOS.Internal.Transact.Recovery (EngineEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..))
 import DBOS.Transact.HandleCases
   ( HandleFixture (..),
     checkDeletedAbsent,

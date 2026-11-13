@@ -38,7 +38,7 @@ module DBOS.Transact.DeadlinesCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB
   ( Duration,
     Timestamp,
@@ -48,7 +48,7 @@ import DBOS.SystemDB
     secondsDuration,
     timestampFromEpochMs
   )
-import DBOS.Transact.Serialization (decodeWorkflowValue, CodecError (..))
+import DBOS.Internal.Transact.Serialization (decodeWorkflowValue, CodecError (..))
 import DBOS.Transact
   (
     DBOS,

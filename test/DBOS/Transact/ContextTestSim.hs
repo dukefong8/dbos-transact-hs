@@ -8,19 +8,19 @@
 -- each leaf through 'runSimCase' and judges the trace by type.
 module DBOS.Transact.ContextTestSim (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic, selectTraceEventsSay)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (runSimCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB (WorkflowId (..))
 import DBOS.SystemDB.IOSim (simConnectionWith)
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Logger (runTracer)
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Logger (runTracer)
 import DBOS.Transact (logDebug, logError, logInfo, logWarn)
-import DBOS.SystemDB.Retry (SysdbEvent (..))
-import DBOS.Transact.Step (WorkflowEvent (..))
-import DBOS.Transact.Context
+import DBOS.Internal.SystemDB.Retry (SysdbEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Context
   ( WorkflowCtx (wctxTracer),
     firstStepStatus,
     insideAStep,
@@ -32,8 +32,8 @@ import DBOS.Transact.Context
     withStep,
     withTracer
   )
-import DBOS.Transact.Connection (Connection, ExecutionIdentity (..))
-import DBOS.Transact.Connection
+import DBOS.Internal.Transact.Connection (Connection, ExecutionIdentity (..))
+import DBOS.Internal.Transact.Connection
   ( nextExecutionIdentity
   )
 import DBOS.Transact.ContextTest

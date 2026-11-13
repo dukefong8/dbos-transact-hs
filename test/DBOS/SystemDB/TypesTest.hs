@@ -5,7 +5,7 @@ module DBOS.SystemDB.TypesTest
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Aeson qualified as Aeson
 import Data.Int (Int64)
 import Data.Text qualified as Text
@@ -21,8 +21,8 @@ import DBOS.Transact
   WorkflowId (..),
   WorkflowStatus (..),
   )
-import DBOS.SystemDB.Types (MessageUUID (..), NotificationRow (..), notificationRowForMessage, nullTopicSentinel)
-import DBOS.Transact.Debouncer (debounceDedupKey)
+import DBOS.Internal.SystemDB.Types (MessageUUID (..), NotificationRow (..), notificationRowForMessage, nullTopicSentinel)
+import DBOS.Internal.Transact.Debouncer (debounceDedupKey)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 

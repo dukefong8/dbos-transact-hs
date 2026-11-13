@@ -47,7 +47,7 @@ module DBOS.Transact.StepRetryCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (StepRecord (..), WorkflowId, millisDuration)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.Transact
@@ -60,7 +60,7 @@ import DBOS.Transact
     stepCtxCancellationToken,
     stepOptionsDefault,
   )
-import DBOS.Transact.Context (tokenCancelled)
+import DBOS.Internal.Transact.Context (tokenCancelled)
 
 -- | What a stack must provide: fresh workflow ids over initialized rows,
 -- a workflow scope to run steps through, cancellation by workflow id, and

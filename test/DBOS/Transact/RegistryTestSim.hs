@@ -11,13 +11,13 @@
 -- validates the same deep seams as the live tree, not just its values.
 module DBOS.Transact.RegistryTestSim (tests) where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import DBOS.DualStack (simCase)
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB.IOSim (simConnectionWith)
-import DBOS.Transact.Connection (Connection)
-import DBOS.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Connection (Connection)
+import DBOS.Internal.Transact.Identity (Identity (..))
 import DBOS.Transact.RegistryCases
   ( RegistryFixture (..),
     checkDuplicateRefRefused,
@@ -45,7 +45,7 @@ import DBOS.Transact.RegistryCases
     scenarioUnregistrableRefused,
     scenarioZeroArgCall,
   )
-import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit ((@?=))
 

@@ -47,13 +47,13 @@ module DBOS.Transact.EventCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Aeson (ToJSON (..))
 import Data.Word (Word64)
 import DBOS.SystemDB (NewWorkflow (..), Outcome (..), QueueName (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), getEventStepName, initWorkflow, internalQueueName, listSteps, newWorkflow, secondsDuration, setEventStepName, sleepStepName)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
-import DBOS.Transact.Instance (getWorkflowEventSerialized)
+import DBOS.Internal.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Internal.Transact.Instance (getWorkflowEventSerialized)
 import DBOS.Transact
   (
     Config (..),
@@ -83,20 +83,20 @@ import DBOS.Transact
     shutdown,
     stepOptionsDefault,
   )
-import DBOS.Transact.Logger (SomeTracer (..))
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Checkpoint (PendingStep (..))
-import DBOS.Transact.Instance (dequeueWorkflows, launchExecutor, launchOn, launchOnWithQueues)
-import DBOS.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep, withWorkflow)
-import DBOS.Transact.Checkpoint (pendingStepId)
-import DBOS.Transact.Connection
+import DBOS.Internal.Transact.Logger (SomeTracer (..))
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..))
+import DBOS.Internal.Transact.Instance (dequeueWorkflows, launchExecutor, launchOn, launchOnWithQueues)
+import DBOS.Internal.Transact.Context (firstStepStatus, nextStepId, nextWorkflowMarker, withStep, withWorkflow)
+import DBOS.Internal.Transact.Checkpoint (pendingStepId)
+import DBOS.Internal.Transact.Connection
   ( Connection,
     Owner (..),
     SomeSystemDB (..),
     newConnection,
     runSystemDB,
   )
-import DBOS.Transact.Context (StepCtx (stepCtxWorkflow), testOwner)
+import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), testOwner)
 
 -- | How a tree instantiation builds its world: fresh unlaunched instances
 -- (plus a second one for the cross-instance refusal), the stack-specific

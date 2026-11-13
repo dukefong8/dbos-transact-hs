@@ -10,7 +10,7 @@
 module DBOS.Transact.SelectTest (tests) where
 
 import DBOS.DualStack (liveCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID.V4
@@ -18,8 +18,8 @@ import DBOS.SystemDB (NewWorkflow (..), WorkflowId (..), WorkflowIdReusePolicy (
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.Postgres qualified as Postgres
 import DBOS.Transact.ContextTest (connOver, testIdentity)
-import DBOS.Transact.Context (withWorkflow)
-import DBOS.Transact.Logger (nullTracer)
+import DBOS.Internal.Transact.Context (withWorkflow)
+import DBOS.Internal.Transact.Logger (nullTracer)
 import DBOS.Transact.SelectCases
   ( SelectFixture (..),
     checkControlError,

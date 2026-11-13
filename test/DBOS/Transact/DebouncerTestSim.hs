@@ -8,19 +8,19 @@
 module DBOS.Transact.DebouncerTestSim (tests) where
 
 import DBOS.DualStack (simCase)
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Control.Monad.IOSim (IOSim, SimTrace, selectTraceEventsDynamic)
 import Data.Text qualified as Text
 import DBOS.IOSimTracer (simTracer)
 import DBOS.SystemDB qualified as SystemDB
 import DBOS.SystemDB.IOSim (memLaunchOnWith, newMemDB, simInstance)
-import DBOS.Transact.Serialization (encodeWorkflowInput)
+import DBOS.Internal.Transact.Serialization (encodeWorkflowInput)
 import DBOS.Transact
-import DBOS.Transact.Management (ManagementEvent (..), stepInfoFromRecord)
-import DBOS.Transact.Connection (SomeSystemDB (..), runSystemDB)
+import DBOS.Internal.Transact.Management (ManagementEvent (..), stepInfoFromRecord)
+import DBOS.Internal.Transact.Connection (SomeSystemDB (..), runSystemDB)
 import DBOS.Transact.DebouncerCases
-import DBOS.Transact.Recovery (EngineEvent (..))
-import DBOS.Transact.Step (WorkflowEvent (..))
+import DBOS.Internal.Transact.Recovery (EngineEvent (..))
+import DBOS.Internal.Transact.Step (WorkflowEvent (..))
 import Test.Tasty (DependencyType (..), TestTree, dependentTestGroup)
 import Test.Tasty.HUnit ((@?=))
 

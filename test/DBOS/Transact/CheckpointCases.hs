@@ -40,14 +40,14 @@ module DBOS.Transact.CheckpointCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.Transact
   ( EngineOnly,
     Error (..),
     WorkflowCtx,
   )
-import DBOS.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep)
-import DBOS.Transact.Checkpoint
+import DBOS.Internal.Transact.Context (firstStepStatus, nextWorkflowMarker, withStep)
+import DBOS.Internal.Transact.Checkpoint
   ( PendingStep (..),
     StepDurability (..),
     StepPlacement (..),
@@ -61,7 +61,7 @@ import DBOS.Transact.Checkpoint
     placementStepId,
     placementWhereabouts,
   )
-import DBOS.Transact.Context (stepCtxBoundary)
+import DBOS.Internal.Transact.Context (stepCtxBoundary)
 
 -- | What a stack must provide: a workflow context to place calls through,
 -- and the taken-placement probe over a second connection.

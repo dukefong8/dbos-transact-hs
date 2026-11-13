@@ -46,7 +46,7 @@ module DBOS.Transact.WaitCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import Data.Text qualified as Text
 import DBOS.SystemDB (AwaitedOutcome (..), StepRecord (..), WorkflowId (..))
 import DBOS.SystemDB qualified as SysDB

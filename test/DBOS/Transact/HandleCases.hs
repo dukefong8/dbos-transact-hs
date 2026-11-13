@@ -29,10 +29,10 @@ module DBOS.Transact.HandleCases
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (NewWorkflow (..), SerializedWorkflowValue (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowInitResult (initResultCreatorXid), WorkflowOwner (..), WorkflowStatus (..), getResultStepName, initWorkflow, listSteps, newWorkflow)
 import DBOS.SystemDB qualified as SystemDB
-import DBOS.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Internal.Transact.Serialization (WorkflowInput, decodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
     Config (..),
@@ -57,11 +57,11 @@ import DBOS.Transact
     secondsDuration,
     shutdown,
   )
-import DBOS.Transact.Logger (SomeTracer (..))
-import DBOS.Transact.Identity (Identity (..))
-import DBOS.Transact.Instance (launchOn)
-import DBOS.Transact.Context (testOwner, withWorkflow)
-import DBOS.Transact.Connection
+import DBOS.Internal.Transact.Logger (SomeTracer (..))
+import DBOS.Internal.Transact.Identity (Identity (..))
+import DBOS.Internal.Transact.Instance (launchOn)
+import DBOS.Internal.Transact.Context (testOwner, withWorkflow)
+import DBOS.Internal.Transact.Connection
   ( Connection,
     Owner (..),
     SomeSystemDB (..),

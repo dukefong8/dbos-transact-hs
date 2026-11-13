@@ -15,7 +15,7 @@ module DBOS.Transact.ContextSimData
   )
 where
 
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB
   ( EventRecord (..),
     NotificationRecord (..),

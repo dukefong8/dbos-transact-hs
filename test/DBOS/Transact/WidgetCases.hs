@@ -69,11 +69,11 @@ where
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
-import DBOS.Prelude
+import DBOS.Internal.Prelude
 import DBOS.SystemDB (BackendErrorKind (..))
-import DBOS.Transact.Datasource (RecordedOutcome (..))
-import DBOS.Transact.Instance (getWorkflowEventSerialized)
-import DBOS.Transact.Serialization (decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
+import DBOS.Internal.Transact.Datasource (RecordedOutcome (..))
+import DBOS.Internal.Transact.Instance (getWorkflowEventSerialized)
+import DBOS.Internal.Transact.Serialization (decodeWorkflowValue, encodeWorkflowValue, encodeWorkflowInput, CodecError (..))
 import DBOS.Transact
   (
   DBOS,
@@ -107,7 +107,7 @@ import DBOS.Transact
   startWorkflow,
   startOptionsDefault,
   )
-import DBOS.SystemDB.Error (BackendError (..))
+import DBOS.Internal.SystemDB.Error (BackendError (..))
 
 -- * Shared step-table vocabulary
 
