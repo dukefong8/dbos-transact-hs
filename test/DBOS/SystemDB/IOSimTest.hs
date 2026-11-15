@@ -78,7 +78,9 @@ import DBOS.SystemDB
     secondsDuration,
     spansPartitions,
     timestampFromEpochMs,
-    zeroRowCounts)
+    zeroRowCounts,
+    UpdatedQueue (updatedAfter),
+    upsertedCreated)
 import DBOS.SystemDB.IOSim (MemSystemDB (memRows, memSteps), MockSystemDB (..), memInitWorkflowAs, newMemDB)
 import DBOS.Transact.WorkflowSimData (mockTimestamp)
 import Test.Tasty (TestTree, testGroup)
@@ -304,7 +306,7 @@ queueTests =
   testGroup
     "Queues"
     [ testCase "upsertQueue reports a write" $ do
-        fmap fst (run (upsertQueue backend (newQueue "q") UpdateExisting)) @?= Right True,
+        fmap upsertedCreated (run (upsertQueue backend (newQueue "q") UpdateExisting)) @?= Right True,
       testCase "startQueuedWorkflows answers a claimed id" $ do
         fmap (.dequeuedWorkflowIds) (run (startQueuedWorkflows backend mockQueueRecord "exec" "0.0.0" Nothing 0 0 "tok-mock")) @?= Right [WorkflowId "mock-queued"],
       testCase "getQueuePartitions answers a partition" $ do
@@ -324,7 +326,7 @@ queueTests =
       testCase "updateQueue keeps the queue's name" $ do
         let result = run (updateQueue backend "q" defaultQueueUpdate (\_ _ -> Right ()))
         case result of
-          Right record -> record.queueRecordName @?= "q"
+          Right result -> result.updatedAfter.queueRecordName @?= "q"
           Left err -> fail (show err),
       testCase "debounceDelayedWorkflow answers a debounced holder" $ do
         run (debounceDelayedWorkflow backend debounceRequest Nothing) @?= Right (Debounced "mock-debounced"),

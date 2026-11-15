@@ -22,14 +22,12 @@ import DBOS.Internal.Transact.Checkpoint
   ( PendingStep (..),
     StepDurability (..),
     StepPlacement (..),
-    checkHere,
+    checkHereOn,
     placeCall
   )
 import DBOS.Internal.Transact.Context
   ( WorkflowCtx (wctxTracer),
-    driveScope,
     ownerToken,
-    stepCtxBoundary,
     withSystemDB,
     workflowId
   )
@@ -83,8 +81,8 @@ pendingSleep wctx duration =
 driveSleep :: (MonadSTM m, MonadDelay m, MonadMonotonicTimeNSec m, MonadThread m)
            => WorkflowCtx exec m -> Duration -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 driveSleep wctx duration placement = do
-  here <- driveScope wctx
-  case checkHere placement sleepStepName (Just here) of
+  placed <- checkHereOn wctx placement sleepStepName
+  case placed of
     Left err -> pure (Left err)
     Right DurabilityPlain -> do
       -- Inside a step the sleep is plain: the enclosing step's checkpoint

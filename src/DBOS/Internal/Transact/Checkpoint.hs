@@ -19,6 +19,7 @@ module DBOS.Internal.Transact.Checkpoint
     placementStepId,
     pendingStepId,
     checkHere,
+    checkHereOn,
     describePlacement,
     placementWhereabouts,
     insideAWorkflow,
@@ -27,7 +28,7 @@ where
 
 import DBOS.Internal.Prelude
 import DBOS.Internal.Transact.Connection (Connection (..), Owner (..))
-import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), inStepScope, isSameExecution, nextStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
+import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn), driveScope, inStepScope, isSameExecution, nextStepId, stepCtxBoundary, stepId, stepMarker, workflowId)
 import DBOS.Internal.Transact.Error (Error (..))
 
 -- | Where a durable call stands: which of the execution's step ids it
@@ -135,6 +136,9 @@ placeCall wctx = do
 placeNestedCall :: StepCtx exec m -> StepPlacement exec m
 placeNestedCall sctx = PlacementInsideStep sctx
 
+-- | The oracle's @StepPlacement::here@ reader: no ambient context builds
+-- 'Outside'. Only this reader and the pure tests produce it; the drive seam
+-- ('checkHereOn') always holds a 'WorkflowCtx', so a drive never does.
 placementHere :: Maybe (StepCtx exec m) -> Int -> StepPlacement exec m
 placementHere ambient stepId' =
   case ambient of
@@ -201,6 +205,14 @@ checkHere placement step ambient =
           outer == inner && isSameExecution here.stepCtxWorkflow built.stepCtxWorkflow
         _ -> False
 
+-- | 'checkHere' at the ambient this thread is actually standing in. Every
+-- drive path holds a 'WorkflowCtx', so the ambient there is always 'Just';
+-- only the pure tests pair a placement with 'Nothing'. Reads 'driveScope'
+-- itself so the drive sites share one preamble instead of repeating it.
+checkHereOn :: (MonadSTM m, MonadThread m)
+            => WorkflowCtx exec m -> StepPlacement exec m -> Text
+            -> m (Either (Error e) (StepDurability exec m))
+checkHereOn wctx placement step = checkHere placement step . Just <$> driveScope wctx
 -- | How to describe the place a call is standing, given the context there.
 describePlacement :: Maybe (StepCtx exec m) -> Text
 describePlacement ambient =

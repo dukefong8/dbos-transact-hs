@@ -198,7 +198,7 @@ data QueueFixture m = QueueFixture
     qfDBOS :: DBOS m,
     qfLaunch :: m (Executor m),
     qfShutdown :: m (),
-    qfUpsertQueue :: NewQueue -> OnExistingQueue -> m (Either SysDB.Error (Bool, QueueRecord)),
+    qfUpsertQueue :: NewQueue -> OnExistingQueue -> m (Either SysDB.Error SysDB.UpsertedQueue),
     qfReadQueueRow :: Text -> m (Maybe QueueRecord),
     qfReadWorkflowRow :: WorkflowId -> m (Maybe WorkflowRecord),
     qfPlantAttempts :: WorkflowId -> Int64 -> m ()
@@ -775,7 +775,7 @@ checkReregisterPartitioned (second, stored) = do
 -- | A legacy partitioned row resolves through the facade, and adding a
 -- per-partition limit to it is refused as the deprecated flag.
 scenarioLegacyUpdateRefused ::  forall m. (MonadSTM m, MonadMVar m)
-                            => QueueFixture m -> m (Either SysDB.Error (Bool, QueueRecord), Maybe Queue, Either (Error EngineOnly) Queue)
+                            => QueueFixture m -> m (Either SysDB.Error SysDB.UpsertedQueue, Maybe Queue, Either (Error EngineOnly) Queue)
 scenarioLegacyUpdateRefused fx = do
   let queueName = "hs-l2-legacy-q-" <> Text.take 12 fx.qfSuffix
   written <- fx.qfUpsertQueue ((newQueue queueName) {newQueueConcurrency = Just 1, newQueueWorkerConcurrency = Just 1, newQueuePartitionQueue = True, newQueueAppName = Just fx.qfAppName}) UpdateExisting
@@ -785,7 +785,7 @@ scenarioLegacyUpdateRefused fx = do
   fx.qfShutdown
   pure (written, stored, refused)
 
-checkLegacyUpdateRefused :: (Either SysDB.Error (Bool, QueueRecord), Maybe Queue, Either (Error EngineOnly) Queue) -> Either String ()
+checkLegacyUpdateRefused :: (Either SysDB.Error SysDB.UpsertedQueue, Maybe Queue, Either (Error EngineOnly) Queue) -> Either String ()
 checkLegacyUpdateRefused (written, stored, refused) = do
   case written of
     Right _ -> Right ()

@@ -18,9 +18,9 @@ import DBOS.Internal.Prelude
 import DBOS.Internal.SystemDB.Class qualified as SystemDB
 import DBOS.Internal.SystemDB.Error (Error (..))
 import DBOS.Internal.SystemDB.Types (Duration, EncodedValue (..), GetEventCaller (..), Serialization (..), SerializedWorkflowValue (..), WorkflowId (..), getEventStepName, setEventStepName)
-import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall, takenPlacement)
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHereOn, placeCall, takenPlacement)
 import DBOS.Internal.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Internal.Transact.Context (WorkflowCtx, driveScope, insideAStep, nextStepId, ownerToken, stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.Internal.Transact.Context (WorkflowCtx, insideAStep, nextStepId, ownerToken, withSystemDB, workflowId)
 import DBOS.Internal.Transact.Error qualified as TransactError
 import DBOS.Internal.Transact.Instance (DBOS, Executor (..), requireExecutor)
 import DBOS.Internal.Transact.Serialization (SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
@@ -59,8 +59,8 @@ forceEncoded value =
 driveSetEvent :: (MonadSTM m, MonadThread m)
               => WorkflowCtx exec m -> Text -> SerializedWorkflowValue -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 driveSetEvent wctx key encoded placement = do
-  here <- driveScope wctx
-  case checkHere placement setEventStepName (Just here) of
+  placed <- checkHereOn wctx placement setEventStepName
+  case placed of
     Left err -> pure (Left err)
     -- No plain form exists: a publish built in a step can never run, so
     -- driving it reports the refusal the eager call would have raised.
@@ -186,8 +186,8 @@ driveGetEvent :: (FromJSON value, MonadMVar m, MonadSTM m, MonadTime m, MonadDel
                  Duration ->
                  m (Either (TransactError.Error c) (Maybe value))
 driveGetEvent wctx executor caller placement destination key timeout = do
-  here <- driveScope wctx
-  case checkHere placement getEventStepName (Just here) of
+  placed <- checkHereOn wctx placement getEventStepName
+  case placed of
     Left err -> pure (Left (TransactError.liftEngine err))
     Right _ -> do
       found <- runSystemDB executor.conn.connSysdb (\db -> SystemDB.getEvent db destination key timeout caller)

@@ -43,6 +43,8 @@ import DBOS.Internal.SystemDB.Types
     OnExistingQueue (..),
     QueueName (..),
     QueueRecord (..),
+    UpsertedQueue (upsertedAfter, upsertedBefore),
+    UpdatedQueue (updatedAfter, updatedBefore),
     VersionInfo (..),
     QueueUpdate (..),
     RateLimit (..),
@@ -214,17 +216,13 @@ queueOptionsToNewQueue queueName options =
 effectiveConcurrency :: QueueOptions -> Maybe Int
 effectiveConcurrency options = options.globalConcurrency <|> options.concurrency
 
-queueChangeToUpdate :: QueueChange -> Queue -> QueueUpdate
-queueChangeToUpdate change current =
+-- | A change as the system database takes it: a pure copy of the change's
+-- fields, needing no stored row. The legacy partition flag is left for
+-- 'applyQueueUpdate' to derive from the merged limits under the write's
+-- own lock, exactly like the oracle builds its update without a read.
+queueChangeToUpdate :: QueueChange -> QueueUpdate
+queueChangeToUpdate change =
   let update = defaultQueueUpdate
-      partitionTouched =
-        change.partitionConcurrency /= Leave
-          || change.partitionWorkerConcurrency /= Leave
-          || change.partitionRateLimit /= Leave
-      resultingPartitioned =
-        maybeChanged change.partitionConcurrency current.partitionConcurrency /= Nothing
-          || maybeChanged change.partitionWorkerConcurrency current.partitionWorkerConcurrency /= Nothing
-          || maybeChanged change.partitionRateLimit current.partitionRateLimit /= Nothing
    in update
         { queueUpdateConcurrency = effectiveChange change,
           queueUpdateWorkerConcurrency = change.workerConcurrency,
@@ -234,16 +232,13 @@ queueChangeToUpdate change current =
           -- stays empty, so the seam returns the stored row without a
           -- write or a validation pass.
           queueUpdatePriorityEnabled = if queueChangeIsEmpty change then Leave else Set True,
-          queueUpdatePartitionQueue = if partitionTouched then Set resultingPartitioned else Leave,
+          queueUpdatePartitionQueue = Leave,
           queueUpdatePartitionConcurrency = change.partitionConcurrency,
           queueUpdatePartitionWorkerConcurrency = change.partitionWorkerConcurrency,
           queueUpdatePartitionRateLimit = change.partitionRateLimit,
           queueUpdatePollingInterval = change.pollingInterval
         }
   where
-    maybeChanged (Set value) _ = value
-    maybeChanged Leave oldValue = oldValue
-
     -- The fleet-limit change the update means. Only reached with at most
     -- one spelling set (the change check refuses both): the explicit
     -- spelling takes precedence over the deprecated alias.
@@ -357,23 +352,15 @@ registerQueue dbos queueName options conflict
           Left err -> pure (Left err)
           Right policy -> do
             let new = (queueOptionsToNewQueue queueName options) {newQueueAppName = Just executor.identity.identityAppName}
-            -- The before row for the partition warning: read ahead of the
-            -- upsert, as the update path reads ahead of its write. A peer
-            -- racing between the read and the write can misplace the
-            -- warning, but it stays warning-only either way — the same
-            -- standing the update path's pre-read has.
-            stored <- withConnection executor.conn (\db -> SystemDB.getQueue db queueName)
-            case stored of
+            -- The before row for the partition warning rides on the
+            -- upsert's own result, read under its lock: no second
+            -- round-trip and no race with a concurrent peer's write.
+            inserted <- withConnection executor.conn (\db -> SystemDB.upsertQueue db new policy)
+            case inserted of
               Left err -> pure (Left err)
-              Right previous -> do
-                inserted <- withConnection executor.conn (\db -> SystemDB.upsertQueue db new policy)
-                case inserted of
-                  Left err -> pure (Left err)
-                  Right (_, record) -> do
-                    case previous of
-                      Just before -> warnIfPartitioned executor.conn.connTracer before record
-                      Nothing -> pure ()
-                    pure (Right (queueFromRecord record))
+              Right upserted -> do
+                forM_ upserted.upsertedBefore (\before -> warnIfPartitioned executor.conn.connTracer before upserted.upsertedAfter)
+                pure (Right (queueFromRecord upserted.upsertedAfter))
 
 queue :: (MonadMVar m)
       => DBOS m -> Text -> m (Either (TransactError.Error TransactError.EngineOnly) (Maybe Queue))
@@ -413,25 +400,24 @@ updateQueue dbos queueName change
   | Just refusal <- changeBothSet queueName change = pure (Left refusal)
   | otherwise = do
     withExecutor dbos "update a queue" $ \executor -> do
-      stored <- withConnection executor.conn (\db -> SystemDB.getQueue db queueName)
-      case stored of
-        Left err -> pure (Left err)
-        Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
-        Right (Just stored) -> do
-          let currentQueue = queueFromRecord stored
-              update = queueChangeToUpdate change currentQueue
-          updated <- withConnection executor.conn (\db -> SystemDB.updateQueue db queueName update (validateMergedQueue queueName))
-          case updated of
-            Left err -> pure (Left (queueUpdateError err))
-            Right written -> do
-              warnIfPartitioned executor.conn.connTracer stored written
-              pure (Right (queueFromRecord written))
+      -- The update is a pure copy of the change: the legacy partition flag
+      -- is derived from the merged limits under the write's own lock (see
+      -- 'applyQueueUpdate'), and a missing row is refused by the write
+      -- itself and mapped to the exact not-registered text below. No
+      -- read stands beside the write, so no peer can slip between them.
+      let update = queueChangeToUpdate change
+      updated <- withConnection executor.conn (\db -> SystemDB.updateQueue db queueName update (validateMergedQueue queueName))
+      case updated of
+        Left err -> pure (Left (queueUpdateError err))
+        Right result -> do
+          warnIfPartitioned executor.conn.connTracer result.updatedBefore result.updatedAfter
+          pure (Right (queueFromRecord result.updatedAfter))
 
 -- | Warn when an update partitions a previously unpartitioned queue: rows
 -- already enqueued without a key are never claimed by a partitioned
 -- dequeue, so they strand unless drained or re-enqueued with a key.
--- Mirrors the oracle's @warn_partitioned@; the before row is the stored
--- row the update read, the after row the one it wrote.
+-- Mirrors the oracle's @warn_partitioned@; both rows come from the write's
+-- own result, read under its lock.
 warnIfPartitioned :: Monad m => SomeTracer m -> QueueRecord -> QueueRecord -> m ()
 warnIfPartitioned tracer before after
   | not (queueHasPartitionLimits before) && queueHasPartitionLimits after =
@@ -456,6 +442,7 @@ validateMergedQueue queueName _ merged =
 queueUpdateError :: TransactError.Error e -> TransactError.Error e
 queueUpdateError = \case
   TransactError.SystemDatabase (SystemDBError.InvalidInput {field = "queue", detail}) -> TransactError.ErrorConfig detail
+  TransactError.SystemDatabase (SystemDBError.NotRegistered {kind = "Queue", name}) -> TransactError.ErrorConfig ("queue `" <> name <> "` is not registered")
   err -> err
 
 deleteQueue :: (MonadMVar m)

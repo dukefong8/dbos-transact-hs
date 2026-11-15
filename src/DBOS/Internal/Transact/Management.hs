@@ -110,13 +110,11 @@ import DBOS.Internal.SystemDB.Types
     validateAttributes,
     validateAttributeUpdate
   )
-import DBOS.Internal.Transact.Checkpoint (StepDurability (..), checkHere, placeCall)
+import DBOS.Internal.Transact.Checkpoint (StepDurability (..), checkHereOn, placeCall)
 import DBOS.Internal.Transact.Connection (Connection (..), runSystemDB, withConnection)
 import DBOS.Internal.Transact.Context
   ( StepCtx (stepCtxWorkflow),
     WorkflowCtx (wctxConn),
-    driveScope,
-    stepCtxBoundary,
     stepCtxStatus,
     stepId,
     workflowId,
@@ -205,8 +203,8 @@ cancelWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 cancelWorkflowsInWorkflow wctx workflowIds cancelChildren = do
   placement <- placeCall wctx
-  here <- driveScope wctx
-  case checkHere placement cancelStepName (Just here) of
+  placed <- checkHereOn wctx placement cancelStepName
+  case placed of
     Left err -> pure (Left err)
     Right DurabilityPlain -> cancelWorkflows conn workflowIds cancelChildren (Just (workflowId wctx))
     Right (DurabilityRecorded wctx' stepId') -> do
@@ -255,8 +253,8 @@ resumeWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> [WorkflowId] -> Maybe Text -> m (Either (TransactError.Error TransactError.EngineOnly) [WorkflowId])
 resumeWorkflowsInWorkflow wctx workflowIds queueName = do
   placement <- placeCall wctx
-  here <- driveScope wctx
-  case checkHere placement resumeStepName (Just here) of
+  placed <- checkHereOn wctx placement resumeStepName
+  case placed of
     Left err -> pure (Left err)
     Right DurabilityPlain -> resumeWorkflows conn workflowIds queueName (Just (workflowId wctx))
     Right (DurabilityRecorded wctx' stepId') -> do
@@ -313,8 +311,8 @@ deleteWorkflowsInWorkflow :: (MonadDelay m, MonadAsync m)
                           => WorkflowCtx exec m -> [WorkflowId] -> Bool -> m (Either (TransactError.Error TransactError.EngineOnly) Word64)
 deleteWorkflowsInWorkflow wctx workflowIds deleteChildren = do
   placement <- placeCall wctx
-  here <- driveScope wctx
-  case checkHere placement deleteStepName (Just here) of
+  placed <- checkHereOn wctx placement deleteStepName
+  case placed of
     Left err -> pure (Left err)
     Right DurabilityPlain ->
       -- The leaf rule: the fence still applies, nothing is recorded.
@@ -400,8 +398,8 @@ forkWorkflowsInWorkflow wctx forks options =
     Left err -> pure (Left err)
     Right () -> do
       placement <- placeCall wctx
-      here <- driveScope wctx
-      case checkHere placement forkStepName (Just here) of
+      placed <- checkHereOn wctx placement forkStepName
+      case placed of
         Left err -> pure (Left err)
         -- Inside a step body the leaf rule runs the call plainly: no id, -- no record.
         Right DurabilityPlain -> forkWorkflows conn forks options
@@ -500,8 +498,8 @@ rewindWorkflowsInWorkflow wctx target options =
     Left err -> pure (Left err)
     Right () -> do
       placement <- placeCall wctx
-      here <- driveScope wctx
-      case checkHere placement rewindStepName (Just here) of
+      placed <- checkHereOn wctx placement rewindStepName
+      case placed of
         Left err -> pure (Left err)
         Right DurabilityPlain -> rewindWorkflows conn target options
         Right (DurabilityRecorded wctx' stepId') -> do
@@ -546,8 +544,8 @@ forkFromInWorkflow wctx workflowIds point options =
     Left err -> pure (Left err)
     Right () -> do
       placement <- placeCall wctx
-      here <- driveScope wctx
-      case checkHere placement forkStepName (Just here) of
+      placed <- checkHereOn wctx placement forkStepName
+      case placed of
         Left err -> pure (Left err)
         Right DurabilityPlain -> forkFrom conn workflowIds point options
         Right (DurabilityRecorded wctx' stepId') -> do

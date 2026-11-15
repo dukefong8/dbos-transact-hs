@@ -87,7 +87,7 @@ import DBOS.Internal.SystemDB.Error qualified as SystemDBError
 import DBOS.Internal.SystemDB.Postgres.Backend (PostgresSystemDB, Settings (..))
 import DBOS.Internal.SystemDB.Postgres.Backend qualified as Postgres
 import DBOS.Internal.SystemDB.Retry (uuidEntropy)
-import DBOS.Internal.SystemDB.Types (AppScope (..), Change (..), Duration, EncodedSendMessage (..), EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), IdleTransactionTimeout (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), QualifiedWorkflowName, QueueName (..), QueueRecord (queueRecordName), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, idleTimeoutValidate, internalQueueName, newWorkflow, qualifiedClassName, qualifiedConfigName, qualifiedName, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
+import DBOS.Internal.SystemDB.Types (AppScope (..), Change (..), Duration, EncodedSendMessage (..), EncodedValue (..), Fork (..), ForkOptions (..), IdempotencyKey (..), IdleTransactionTimeout (..), NewQueue (..), NewWorkflow (..), OnExistingQueue (..), PollingConcurrency (PollingDefault), QualifiedWorkflowName, QueueName (..), QueueRecord (queueRecordName), RewindOptions (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), Topic (..), UpsertedQueue (upsertedAfter, upsertedBefore), UpdatedQueue (updatedAfter, updatedBefore), VersionInfo (..), WorkflowDelay, WorkflowFilter (..), WorkflowId (..), WorkflowIdReusePolicy (..), WorkflowRecord (..), WorkflowStatus, durationIsZero, idleTimeoutValidate, internalQueueName, newWorkflow, qualifiedClassName, qualifiedConfigName, qualifiedName, sysRewindOptions, timestampNow, validateNewWorkflow, validateSendKeys)
 import DBOS.Internal.Transact.Config (Serializer (..), defaultOutcomePollInterval, serializerName, systemDatabaseUrlEnv)
 import DBOS.Internal.Transact.Connection (Connection (..), Owner (..), SomeSystemDB (..), generatedWorkflowId, newConnection, releaseConnection, withConnection)
 import DBOS.Internal.Transact.Error qualified as TransactError
@@ -627,20 +627,14 @@ clientRegisterQueue client queueName options conflict = case reserved queueName 
   where
     upsert policy = do
       let new = (queueOptionsToNewQueue queueName options) {newQueueAppName = client.conn.connAppName}
-      -- The before row for the partition warning, read ahead of the
-      -- upsert as the engine path does. Same race note as there:
-      -- warning-only either way.
-      stored <- withConnection client.conn (\db -> SystemDB.getQueue db queueName)
-      case stored of
+      -- The before row for the partition warning rides on the upsert's
+      -- own result, as on the engine path: no second round-trip, no race.
+      inserted <- withConnection client.conn (\db -> SystemDB.upsertQueue db new policy)
+      case inserted of
         Left err -> pure (Left err)
-        Right previous -> do
-          inserted <- withConnection client.conn (\db -> SystemDB.upsertQueue db new policy)
-          case (previous, inserted) of
-            (_, Left err) -> pure (Left err)
-            (Just before, Right (_, record)) -> do
-              warnIfPartitioned client.conn.connTracer before record
-              pure (Right (queueFromRecord record))
-            (Nothing, Right (_, record)) -> pure (Right (queueFromRecord record))
+        Right upserted -> do
+          forM_ upserted.upsertedBefore (\before -> warnIfPartitioned client.conn.connTracer before upserted.upsertedAfter)
+          pure (Right (queueFromRecord upserted.upsertedAfter))
 
 -- | The queue registered under a name from outside, or 'Nothing'.
 clientRetrieveQueue :: Monad m
@@ -661,19 +655,16 @@ clientUpdateQueue client queueName change = case reserved queueName of
   Nothing -> case changeBothSet queueName change of
     Just refusal -> pure (Left refusal)
     Nothing -> do
-      stored <- withConnection client.conn (\db -> SystemDB.getQueue db queueName)
-      case stored of
-        Left err -> pure (Left err)
-        Right Nothing -> pure (Left (TransactError.ErrorConfig ("queue `" <> queueName <> "` is not registered")))
-        Right (Just stored) -> do
-          let currentQueue = queueFromRecord stored
-              update = queueChangeToUpdate change currentQueue
-          updated <- withConnection client.conn (\db -> SystemDB.updateQueue db queueName update (validateMergedQueue queueName))
-          case updated of
-            Left err -> pure (Left (queueUpdateError err))
-            Right written -> do
-              warnIfPartitioned client.conn.connTracer stored written
-              pure (Right (queueFromRecord written))
+      -- As on the engine path: a pure copy of the change, no read beside
+      -- the write; the write refuses a missing row and the error maps to
+      -- the exact not-registered text below.
+      let update = queueChangeToUpdate change
+      updated <- withConnection client.conn (\db -> SystemDB.updateQueue db queueName update (validateMergedQueue queueName))
+      case updated of
+        Left err -> pure (Left (queueUpdateError err))
+        Right result -> do
+          warnIfPartitioned client.conn.connTracer result.updatedBefore result.updatedAfter
+          pure (Right (queueFromRecord result.updatedAfter))
 
 -- | Remove a queue's registration from outside. Removing one that is not
 -- registered is not an error.

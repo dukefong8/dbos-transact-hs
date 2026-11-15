@@ -48,7 +48,6 @@ module DBOS.Internal.Transact.Context
     deadline,
     ownerToken,
     workflowOwner,
-    stepDepth,
     isSameExecution,
 
     -- * Step scopes
@@ -231,21 +230,14 @@ data WorkflowState m = WorkflowState
     deadline          :: Maybe Timestamp,
     nextStepIdRef     :: StrictTVar m Int,
     nextMarkerRef     :: StrictTVar m Int,
-    -- | How many step bodies each thread of this execution is inside: zero
-    -- on a thread running at a step boundary. Keyed by thread because the
-    -- question is per call stack, not per workflow — a sibling step running
-    -- on another thread must not make this stack's calls plain. Mirrors the
-    -- oracle's @in_step@, which reads the marker bound on the context for
-    -- that stack alone. Entries leave when their count reaches zero, so a
-    -- finished thread holds no state.
-    stepDepthByThread :: StrictTVar m (Map.Map (ThreadId m) Int),
-    -- | The step scope this thread is currently driving inside, if any: what
-    -- a pending drive reads as its ambient context instead of the
-    -- build-time boundary. Installed by 'withStep' beside the depth bump
-    -- and restored beside it, so a drive on a thread running a step body
-    -- sees that body — the oracle's task-local @CURRENT@ at poll time.
-    -- Entries leave with their depth, so a finished thread holds no state.
-    scopeByThread     :: StrictTVar m (Map.Map (ThreadId m) (StepScope m)),
+    -- | The step body each thread of this execution is currently running, if
+    -- any. Keyed by thread because the question is per call stack, not per
+    -- workflow. A sibling step on another thread must not make this stack's
+    -- calls plain. Mirrors the oracle's task-local @CURRENT@. A pending drive
+    -- on this thread reads the body it runs in. A nested body shadows the
+    -- outer one and is restored when it returns. A finished thread holds no
+    -- entry.
+    stepScopeByThread :: StrictTVar m (Map.Map (ThreadId m) (StepScope m)),
     startsInFlight    :: StrictTVar m Int,
     executionIdentity :: ExecutionIdentity,
     workflowOwner     :: WorkflowOwner
@@ -258,7 +250,6 @@ newWorkflowState :: MonadSTM m
 newWorkflowState workflowText deadlineAt owner identity = do
   stepRef <- newTVarIO 0
   markerRef <- newTVarIO 0
-  depthRef <- newTVarIO Map.empty
   scopeRef <- newTVarIO Map.empty
   startsRef <- newTVarIO 0
   pure
@@ -267,8 +258,7 @@ newWorkflowState workflowText deadlineAt owner identity = do
         deadline = deadlineAt,
         nextStepIdRef = stepRef,
         nextMarkerRef = markerRef,
-        stepDepthByThread = depthRef,
-        scopeByThread = scopeRef,
+        stepScopeByThread = scopeRef,
         startsInFlight = startsRef,
         executionIdentity = identity,
         workflowOwner = owner
@@ -308,19 +298,6 @@ testOwner wid = WorkflowOwner {ownerWorkflowId = wid, ownerToken = "test-owner"}
 isSameExecution :: WorkflowCtx exec m -> WorkflowCtx exec m -> Bool
 isSameExecution first second =
   first.wctxState.executionIdentity == second.wctxState.executionIdentity
-
--- | How many step bodies deep this thread's stack in the execution
--- currently runs: zero on a thread at a step boundary, one inside a step
--- body, more under nesting on the same stack. A sibling step on another
--- thread keeps its own count, so a call reaching through a captured parent
--- sees the running body exactly when the body runs on the calling thread —
--- the per-call-stack answer the oracle's @in_step@ gives. Bumped by
--- 'withStep' on entry and restored on every exit.
-stepDepth :: (MonadSTM m, MonadThread m) => WorkflowCtx exec m -> m Int
-stepDepth wctx = do
-  tid <- myThreadId
-  depths <- readTVarIO wctx.wctxState.stepDepthByThread
-  pure (Map.findWithDefault 0 tid depths)
 
 -- | Which step body a context is inside. Opaque and equality-only; a fresh
 -- value per attempt, so two bodies of one workflow cannot be confused.
@@ -423,16 +400,16 @@ stepStatus sctx = case sctx.stepCtxScope of
   Nothing    -> Nothing
   Just scope -> Just scope.scopeStatus
 
--- | Whether this call stack is inside a step body right now: the calling
--- thread's depth is nonzero while a body runs on it. Every guard that
--- refuses or degrades inside a step reads this — a handed 'StepCtx' is
--- statically in-step and never reaches these guards; a call through a
+-- | Whether this call stack is inside a step body right now. A scope is
+-- installed for the calling thread while a body runs on it, and every guard
+-- that refuses or degrades inside a step reads this. A handed 'StepCtx' is
+-- statically in-step and never reaches these guards. A call through a
 -- captured parent view reads the running body when the body runs on the
 -- calling thread, exactly like the handed view does. A sibling step on
 -- another thread is invisible here, as the oracle's per-stack marker is
 -- invisible to other stacks. One predicate, same verdict either way.
 insideAStep :: (MonadSTM m, MonadThread m) => WorkflowCtx exec m -> m Bool
-insideAStep wctx = (> 0) <$> stepDepth wctx
+insideAStep wctx = isJust <$> inStepScope wctx
 
 -- | The ambient context a drive on this thread stands in: the step scope
 -- running here, or the step boundary when no body runs on this thread. A
@@ -448,13 +425,20 @@ driveScope wctx = maybe (stepCtxBoundary wctx) id <$> inStepScope wctx
 -- a step body runs on this thread binds that body — with its marker, so a
 -- later drive can tell this body from a sibling — exactly like the handed
 -- view does. The oracle binds the same ambient context at build
--- (@StepPlacement::at@ reads @CURRENT@); the depth predicate alone cannot,
--- because it reports whether without reporting which.
+-- (@StepPlacement::at@ reads @CURRENT@).
 inStepScope :: (MonadSTM m, MonadThread m) => WorkflowCtx exec m -> m (Maybe (StepCtx exec m))
 inStepScope wctx = do
   tid <- myThreadId
-  scopes <- readTVarIO wctx.wctxState.scopeByThread
+  scopes <- readTVarIO wctx.wctxState.stepScopeByThread
   pure (StepCtx wctx . Just <$> Map.lookup tid scopes)
+
+-- | Replace the step scope installed on a thread, or drop the entry when none
+-- was installed there before. Every install path restores through this, so one
+-- expression decides what "one level up" means: a nested body puts the outer
+-- body back, and the bottom of the stack leaves no entry.
+putStepScope :: (MonadSTM m, MonadThread m) => WorkflowCtx exec m -> ThreadId m -> Maybe (StepScope m) -> STM m ()
+putStepScope wctx tid previous =
+  modifyTVar wctx.wctxState.stepScopeByThread (maybe (Map.delete tid) (Map.insert tid) previous)
 
 -- | A token that fires when the step running here is abandoned. Outside a
 -- step it never fires, so a body that is also called outside a workflow
@@ -506,7 +490,7 @@ withSystemDB wctx action = runSystemDB wctx.wctxConn.connSysdb action
 
 -- * Scoped workflow contexts: one execution's view and one attempt's view.
 --
--- 'WorkflowCtx' owns its counters (step, marker, depth) through the shared
+-- 'WorkflowCtx' owns its counters (step, marker, scope) through the shared
 -- 'WorkflowState'; 'StepCtx' narrows it to a single attempt. Both are
 -- built only by the runners below — constructors stay private — and both
 -- are branded by execution, so a value from one run cannot be driven in
@@ -582,39 +566,35 @@ newWorkflowCtx conn identity state =
         wctxTracer = conn.connTracer
       }
 
--- | Run one attempt under the narrowed view. Bumps this thread's depth on
--- entry and restores it on every exit; abandoning the attempt
--- (cancellation, timeout kill, dropped future) fires the token, as the
--- oracle's drop guard does, completing it leaves the token quiet. The
--- handler covers the increment as well as the body, so a kill cannot land
--- between them; the scope's restore flag makes the handler idempotent, so
--- a kill after the normal restore does not decrement a second time. The
--- install runs masked so no kill lands between it and the handler setup;
--- the body runs unmasked so timeouts and cancellation still reach it. This
--- takes the 'MonadMask' constraint the workflow paths already carry.
+-- | Run one attempt under the narrowed view. Installs this thread's step
+-- scope on entry and restores the previous one on every exit. Abandoning the
+-- attempt (cancellation, timeout kill, dropped future) fires the token, as the
+-- oracle's drop guard does. Completing it leaves the token quiet. The handler
+-- covers the install as well as the body, so a kill cannot land between them.
+-- The scope's restore flag makes the handler idempotent, so a kill after the
+-- normal restore does not restore a second time. The install runs masked so no
+-- kill lands between it and the handler setup. The body runs unmasked so
+-- timeouts and cancellation still reach it. This takes the 'MonadMask'
+-- constraint the workflow paths already carry.
 withStep :: (MonadSTM m, MonadThread m, MonadMask m)
          => WorkflowCtx exec m -> StepMarker -> StepStatus -> (StepCtx exec m -> m a) -> m a
 withStep wctx marker status body = mask $ \unmasked -> do
   scope <- newStepScope marker status
   tid <- myThreadId
-  let unbump = modifyTVar wctx.wctxState.stepDepthByThread (Map.update (\n -> if n <= 1 then Nothing else Just (n - 1)) tid)
+  let putScope = putStepScope wctx tid
       attempt = do
         previous <- atomically $ do
-          modifyTVar wctx.wctxState.stepDepthByThread (Map.insertWith (+) tid 1)
-          scopes <- readTVar wctx.wctxState.scopeByThread
-          writeTVar wctx.wctxState.scopeByThread (Map.insert tid scope scopes)
+          scopes <- readTVar wctx.wctxState.stepScopeByThread
+          writeTVar wctx.wctxState.stepScopeByThread (Map.insert tid scope scopes)
           pure (Map.lookup tid scopes)
-        let unseat = modifyTVar wctx.wctxState.scopeByThread (maybe (Map.delete tid) (Map.insert tid) previous)
-            restore = atomically $ do
+        let restore = atomically $ do
               restored <- readTVar scope.scopeRestored
               unless restored $ do
                 writeTVar scope.scopeCancellation True
-                unbump
-                unseat
+                putScope previous
             finish = atomically $ do
               writeTVar scope.scopeRestored True
-              unbump
-              unseat
+              putScope previous
         (unmasked (body (StepCtx wctx (Just scope))) >>= \value -> finish >> pure value) `onException` restore
   attempt
 
@@ -623,12 +603,12 @@ withStep wctx marker status body = mask $ \unmasked -> do
 -- with, so a timed body reads the same ambient scope the plain body
 -- would. The oracle stays in one task under @select!@, so its task-local
 -- scope never leaves; the port's worker is a new thread with an empty map
--- and must have the scope carried across. Only the thread-keyed entries
--- ride along — the scope's restore flag and cancellation token stay owned
--- by 'withStep' on the supervising thread. A user spawn still starts
--- empty, exactly like the oracle's spawn without the task-local. The
--- install runs masked for the same reason 'withStep' masks its own: the
--- body stays unmasked so the timeout kill still reaches the worker.
+-- and must have the scope carried across. Only the thread-keyed entry rides
+-- along. The scope's restore flag and cancellation token stay owned by
+-- 'withStep' on the supervising thread. A user spawn still starts empty,
+-- exactly like the oracle's spawn without the task-local. The install runs
+-- masked for the same reason 'withStep' masks its own. The body stays
+-- unmasked so the timeout kill still reaches the worker.
 withInheritedStepScope :: (MonadSTM m, MonadThread m, MonadMask m)
                         => WorkflowCtx exec m -> StepCtx exec m -> m a -> m a
 withInheritedStepScope wctx sctx action = case sctx.stepCtxScope of
@@ -636,18 +616,10 @@ withInheritedStepScope wctx sctx action = case sctx.stepCtxScope of
   Just scope -> mask $ \unmasked -> do
     tid <- myThreadId
     previous <- atomically $ do
-      depths <- readTVar wctx.wctxState.stepDepthByThread
-      scopes <- readTVar wctx.wctxState.scopeByThread
-      writeTVar wctx.wctxState.stepDepthByThread (Map.insertWith (+) tid 1 depths)
-      writeTVar wctx.wctxState.scopeByThread (Map.insert tid scope scopes)
-      pure (Map.lookup tid depths, Map.lookup tid scopes)
-    let restorePrevious = atomically $ do
-          modifyTVar wctx.wctxState.stepDepthByThread $ \current -> case fst previous of
-            Nothing -> Map.delete tid current
-            Just depth -> Map.insert tid depth current
-          modifyTVar wctx.wctxState.scopeByThread $ \current -> case snd previous of
-            Nothing -> Map.delete tid current
-            Just previousScope -> Map.insert tid previousScope current
+      scopes <- readTVar wctx.wctxState.stepScopeByThread
+      writeTVar wctx.wctxState.stepScopeByThread (Map.insert tid scope scopes)
+      pure (Map.lookup tid scopes)
+    let restorePrevious = atomically (putStepScope wctx tid previous)
     (unmasked action >>= \value -> restorePrevious >> pure value) `onException` restorePrevious
 
 -- | Allocate the next step id in this execution. Only 'WorkflowCtx' can

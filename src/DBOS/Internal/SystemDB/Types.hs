@@ -77,6 +77,8 @@ module DBOS.Internal.SystemDB.Types
     ApplicationRowCounts (..),
     OnExistingQueue (..),
     QueueRecord (..),
+    UpsertedQueue (..),
+    UpdatedQueue (..),
     QueueUpdate (..),
     Dequeued (..),
     DequeueStop (..),
@@ -183,6 +185,7 @@ module DBOS.Internal.SystemDB.Types
     newQueue,
     queueHasPartitionLimits,
     queueIsLegacyPartitioned,
+    upsertedCreated,
     defaultQueueUpdate,
     isQueueUpdateEmpty,
     applyQueueUpdate,
@@ -1021,6 +1024,30 @@ queueIsLegacyPartitioned :: QueueRecord -> Bool
 queueIsLegacyPartitioned record =
   record.queueRecordPartitionQueue && not (queueHasPartitionLimits record)
 
+-- | What a queue registration found and left: the row there before, read
+-- under the registration's own lock, and the row as the registration left
+-- it — what was written, or, under @LeaveExisting@, what was stored.
+-- Mirrors Rust @UpsertedQueue@.
+data UpsertedQueue = UpsertedQueue
+  { upsertedBefore :: Maybe QueueRecord,
+    upsertedAfter  :: QueueRecord
+  }
+  deriving stock (Eq, Show)
+
+-- | Whether a registration created its queue rather than finding one.
+-- Mirrors Rust @UpsertedQueue::created@.
+upsertedCreated :: UpsertedQueue -> Bool
+upsertedCreated = isNothing . (.upsertedBefore)
+
+-- | What a queue update replaced and wrote: the row the update read under
+-- its own lock, and the row as written. Handed to the caller beside the
+-- row it replaced so the caller can judge the transition. Mirrors Rust
+-- @UpdatedQueue@.
+data UpdatedQueue = UpdatedQueue
+  { updatedBefore :: QueueRecord,
+    updatedAfter  :: QueueRecord
+  }
+  deriving stock (Eq, Show)
 -- | What one claim from a queue took, and why it took nothing if it did.
 -- Mirrors Rust @Dequeued@.
 data Dequeued = Dequeued

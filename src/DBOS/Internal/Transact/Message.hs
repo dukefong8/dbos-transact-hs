@@ -62,6 +62,15 @@ send :: (ToJSON value, MonadSTM m, MonadCatch m, MonadThread m)
      => WorkflowCtx exec m -> WorkflowId -> Maybe Topic -> Maybe IdempotencyKey -> value -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 send wctx destination topic idempotencyKey value =
   sendWith wctx (SendMessage destination value topic idempotencyKey) sendOptionsDefault
+-- | This send's caller position: inside a step the enclosing checkpoint stands
+-- for the send, so no id is spent; at a boundary the spent step id is the
+-- caller's position, through the handed context or a captured parent alike.
+callerPosition :: (MonadSTM m, MonadThread m) => WorkflowCtx exec m -> m (Maybe (WorkflowId, Int))
+callerPosition wctx = do
+  stepped <- insideAStep wctx
+  if stepped then pure Nothing else do
+    stepId' <- nextStepId wctx
+    pure (Just (WorkflowId (workflowId wctx), stepId'))
 
 -- | 'send' with the options rather than the defaults: the fork fan-out.
 -- The message carries its destination, payload, topic, and idempotency
@@ -69,8 +78,7 @@ send wctx destination topic idempotencyKey value =
 sendWith :: forall value m exec. (ToJSON value, MonadSTM m, MonadCatch m, MonadThread m)
          => WorkflowCtx exec m -> SendMessage value -> SendOptions -> m (Either (TransactError.Error TransactError.EngineOnly) ())
 sendWith wctx message options = do
-  let workflowText = workflowId wctx
-      encoded = encodeWorkflowValue message.messageValue
+  let encoded = encodeWorkflowValue message.messageValue
       serialization = case encoded.serializedSerialization of
         Nothing -> Nothing
         Just (Serialization name) -> Just name
@@ -89,15 +97,8 @@ sendWith wctx message options = do
   case forced of
     Left exn -> pure (Left (TransactError.ErrorSerialization {what = "message", message = showText exn}))
     Right _ -> do
-      -- Inside a step the enclosing checkpoint stands for the send — through
-      -- the handed context or a captured parent, read together.
-      stepped <- insideAStep wctx
-      caller <-
-        if stepped
-          then pure Nothing
-          else do
-            stepId' <- nextStepId wctx
-            pure (Just (WorkflowId workflowText, stepId'))
+      -- Inside a step the enclosing checkpoint stands for the send.
+      caller <- callerPosition wctx
       -- Workflow and step sends alike present the sending execution; the
       -- client path below presents no owner and skips the fence.
       written <- withSystemDB wctx (\db -> SystemDB.sendMessage db encodedMessage serialization caller (Just (workflowOwner wctx)) fanOut)
@@ -135,17 +136,10 @@ sendBulkWith wctx messages options = do
   case forced of
     Left exn -> pure (Left (TransactError.ErrorSerialization {what = "message", message = showText exn}))
     Right () -> do
-      -- Inside a step the enclosing checkpoint stands for the send, so no
-      -- id is taken and nothing is recorded — exactly like a single send.
-      -- Otherwise the step id is the caller's position, and the
-      -- system database inserts the batch and records the step atomically.
-      stepped <- insideAStep wctx
-      caller <-
-        if stepped
-          then pure Nothing
-          else do
-            stepId' <- nextStepId wctx
-            pure (Just (WorkflowId (workflowId wctx), stepId'))
+      -- Inside a step the send is plain, exactly like a single send.
+      -- Otherwise the step id is the caller's position, recorded atomically
+      -- with the batch.
+      caller <- callerPosition wctx
       written <- withSystemDB wctx (\db -> SystemDB.sendMessages db encoded serialization caller (Just (workflowOwner wctx)) (options.sendToForks == ForksInclude))
       pure (either (Left . TransactError.fromExecution) Right written)
   where

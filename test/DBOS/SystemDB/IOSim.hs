@@ -74,6 +74,8 @@ import DBOS.SystemDB
     portableJsonSerialization,
     QueueName (..),
     QueueRecord (..),
+    UpsertedQueue (..),
+    UpdatedQueue (..),
     QueueUpdate (..),
     ScheduleFilter (..),
     ScheduleRecord (..),
@@ -108,6 +110,7 @@ import DBOS.SystemDB
     WorkflowStatus (..),
     WrittenBy (..),
     addTimeout,
+    applyQueueUpdate,
     changeSet,
     debounceStepName,
     debounceValidate,
@@ -267,14 +270,14 @@ instance SystemDB MockSystemDB (IOSim s) where
   listApplicationVersions = \cases _ -> pure (Right [mockVersion])
   getLatestApplicationVersion = \cases _ _ -> pure (Right (Just mockVersion))
   promoteApplicationVersion = \cases _ _ _ -> pure (Right ())
-  upsertQueue = \cases _ queue _ -> pure (Right (True, mockQueue queue.newQueueName))
+  upsertQueue = \cases _ queue _ -> pure (Right (UpsertedQueue {upsertedBefore = Nothing, upsertedAfter = mockQueue queue.newQueueName}))
   startQueuedWorkflows = \cases _ _ _ _ _ _ _ _ -> pure (Right (Dequeued [mockQueuedId] Nothing))
   countPendingQueueWorkflows = \cases _ _ -> pure (Right 0)
   getQueuePartitions = \cases _ _ -> pure (Right [mockPartition])
   startQueuedPartitionedWorkflows = \cases _ _ _ _ _ _ -> pure (Right [mockPartitionedId])
   getQueue = \cases _ name -> pure (Right (Just (mockQueue name)))
   listQueues = \cases _ _ -> pure (Right [mockQueue mockQueueName])
-  updateQueue = \cases _ name _ _ -> pure (Right (mockQueue name))
+  updateQueue = \cases _ name _ _ -> pure (Right (UpdatedQueue {updatedBefore = mockQueue name, updatedAfter = mockQueue name}))
   debounceDelayedWorkflow = \cases _ _ _ -> pure (Right (Debounced mockDebounced))
   getDeduplicationKeyHolder = \cases _ _ _ -> pure (Right (Just mockHolderId))
   deleteQueue = \cases _ _ -> pure (Right ())
@@ -1745,13 +1748,13 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     application <- readTVar db.memAppName
     let existing = Map.lookup queue.newQueueName queues
     case existing of
-      Just record | onExisting == LeaveExisting -> pure (Right (False, record))
+      Just record | onExisting == LeaveExisting -> pure (Right (UpsertedQueue {upsertedBefore = Just record, upsertedAfter = record}))
       _ -> do
         -- The SQL upsert falls back to the backend's application when the
         -- request names none, so a registered queue is never unclaimed.
         let record = memQueueRecord queue {newQueueAppName = queue.newQueueAppName <|> application}
         writeTVar db.memQueues (Map.insert queue.newQueueName record queues)
-        pure (Right (isNothing existing, record))
+        pure (Right (UpsertedQueue {upsertedBefore = existing, upsertedAfter = record}))
   -- The claim: worker/concurrency budgets from the queue's limits (rate
   -- limits are not modelled — Mem keeps no dequeue history, so a rate
   -- stop never fires here), candidates in priority/created order,
@@ -1882,13 +1885,13 @@ instance SystemDB (MemSystemDB s) (IOSim s) where
     case Map.lookup name queues of
       Nothing -> pure (Left (NotRegistered {kind = "Queue", name = name}))
       Just record
-        | isQueueUpdateEmpty update -> pure (Right record)
-        | otherwise -> case validate record (memApplyQueueUpdate update record) of
+        | isQueueUpdateEmpty update -> pure (Right (UpdatedQueue {updatedBefore = record, updatedAfter = record}))
+        | otherwise -> case validate record (applyQueueUpdate update record) of
             Left err -> pure (Left err)
             Right () -> do
-              let updated = memApplyQueueUpdate update record
+              let updated = applyQueueUpdate update record
               atomically (modifyTVar db.memQueues (Map.insert name updated))
-              pure (Right updated)
+              pure (Right (UpdatedQueue {updatedBefore = record, updatedAfter = updated}))
   debounceDelayedWorkflow db request caller = memDebounce db request caller
   deleteQueue db name = atomically (modifyTVar db.memQueues (Map.delete name)) >> pure (Right ())
   createSchedule db new _caller = do
@@ -2805,20 +2808,6 @@ memQueueRecord queue =
       queueRecordPartitionRateLimit = queue.newQueuePartitionRateLimit,
       queueRecordPollingInterval = queue.newQueuePollingInterval,
       queueRecordAppName = queue.newQueueAppName
-    }
-
-memApplyQueueUpdate :: QueueUpdate -> QueueRecord -> QueueRecord
-memApplyQueueUpdate update record =
-  record
-    { queueRecordConcurrency = fromMaybe record.queueRecordConcurrency (changeSet update.queueUpdateConcurrency),
-      queueRecordWorkerConcurrency = fromMaybe record.queueRecordWorkerConcurrency (changeSet update.queueUpdateWorkerConcurrency),
-      queueRecordRateLimit = fromMaybe record.queueRecordRateLimit (changeSet update.queueUpdateRateLimit),
-      queueRecordPriorityEnabled = fromMaybe record.queueRecordPriorityEnabled (changeSet update.queueUpdatePriorityEnabled),
-      queueRecordPartitionQueue = fromMaybe record.queueRecordPartitionQueue (changeSet update.queueUpdatePartitionQueue),
-      queueRecordPartitionConcurrency = fromMaybe record.queueRecordPartitionConcurrency (changeSet update.queueUpdatePartitionConcurrency),
-      queueRecordPartitionWorkerConcurrency = fromMaybe record.queueRecordPartitionWorkerConcurrency (changeSet update.queueUpdatePartitionWorkerConcurrency),
-      queueRecordPartitionRateLimit = fromMaybe record.queueRecordPartitionRateLimit (changeSet update.queueUpdatePartitionRateLimit),
-      queueRecordPollingInterval = fromMaybe record.queueRecordPollingInterval (changeSet update.queueUpdatePollingInterval)
     }
 
 memScheduleRecord :: NewSchedule -> Timestamp -> ScheduleRecord

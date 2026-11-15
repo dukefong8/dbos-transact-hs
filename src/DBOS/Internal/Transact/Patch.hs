@@ -36,8 +36,8 @@ where
 import DBOS.Internal.Prelude
 import DBOS.Internal.SystemDB.Class qualified as SystemDB
 import DBOS.Internal.SystemDB.Types (Outcome (..), StepTiming (..), WorkflowId (..), patchMarkerName, timestampNow)
-import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere)
-import DBOS.Internal.Transact.Context (WorkflowCtx (wctxTracer), claimStepId, driveScope, insideAStep, ownerToken, peekStepId, stepCtxBoundary, withSystemDB, workflowId)
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHereOn)
+import DBOS.Internal.Transact.Context (WorkflowCtx (wctxTracer), claimStepId, insideAStep, ownerToken, peekStepId, withSystemDB, workflowId)
 import DBOS.Internal.Transact.Error qualified as TransactError
 import DBOS.Internal.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import System.Log.FastLogger (ToLogStr (..))
@@ -126,8 +126,8 @@ pendingPatchWith wctx operation name marker = do
 -- read-claim-write once the position is confirmed still ours.
 drivePatch :: (MonadSTM m, MonadTime m, MonadThread m) => WorkflowCtx exec m -> Text -> Marker -> StepPlacement exec m -> m (Either (TransactError.Error TransactError.EngineOnly) Bool)
 drivePatch wctx name marker placement = do
-  here <- driveScope wctx
-  case checkHere placement (patchMarkerName name) (Just here) of
+  placed <- checkHereOn wctx placement (patchMarkerName name)
+  case placed of
     Left err -> pure (Left err)
     Right (DurabilityRecorded wctx' stepId') -> resolvePatch wctx' name marker stepId'
     Right DurabilityPlain ->

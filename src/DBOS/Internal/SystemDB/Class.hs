@@ -129,17 +129,18 @@ class Monad m => SystemDB db m where
   listApplicationVersions :: db -> m (Either Error [VersionInfo])
   getLatestApplicationVersion :: db -> Maybe Text -> m (Either Error (Maybe VersionInfo))
   promoteApplicationVersion :: db -> Text -> Maybe Text -> m (Either Error ())
-  -- | Whether the row was created, and the row as the write committed it.
-  -- The row comes from the same transaction, so a peer's update cannot
-  -- slip between the write and the receipt.
-  upsertQueue :: db -> NewQueue -> OnExistingQueue -> m (Either Error (Bool, QueueRecord))
+  -- | What the registration found and left, both read under its own lock:
+  -- the row there before ('Nothing' when this call created the queue)
+  -- and the row as committed. Both rows come from the same transaction,
+  -- so a peer's update cannot slip between the write and the receipt.
+  upsertQueue :: db -> NewQueue -> OnExistingQueue -> m (Either Error UpsertedQueue)
   startQueuedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Text -> Int64 -> Int64 -> Text -> m (Either Error Dequeued)
   countPendingQueueWorkflows :: db -> Text -> m (Either Error Int64)
   getQueuePartitions :: db -> Text -> m (Either Error [Text])
   startQueuedPartitionedWorkflows :: db -> QueueRecord -> Text -> Text -> Maybe Int64 -> Text -> m (Either Error [WorkflowId])
   getQueue :: db -> Text -> m (Either Error (Maybe QueueRecord))
   listQueues :: db -> AppScope -> m (Either Error [QueueRecord])
-  updateQueue :: db -> Text -> QueueUpdate -> (QueueRecord -> QueueRecord -> Either Error ()) -> m (Either Error QueueRecord)
+  updateQueue :: db -> Text -> QueueUpdate -> (QueueRecord -> QueueRecord -> Either Error ()) -> m (Either Error UpdatedQueue)
   debounceDelayedWorkflow :: db -> DebounceRequest -> Maybe StepCaller -> m (Either Error Debounce)
   getDeduplicationKeyHolder :: db -> Text -> Text -> m (Either Error (Maybe WorkflowId))
   deleteQueue :: db -> Text -> m (Either Error ())

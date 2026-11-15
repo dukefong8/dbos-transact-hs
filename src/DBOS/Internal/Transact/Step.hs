@@ -29,10 +29,10 @@ import DBOS.Internal.Prelude
 import DBOS.Internal.SystemDB.Class qualified as SystemDB
 import DBOS.Internal.SystemDB.Error qualified as SystemDBError
 import DBOS.Internal.SystemDB.Types (AwaitedOutcome (..), Duration, Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), WorkflowId (..), WorkflowRecord (..), WorkflowStatus (..), durationAsMillis, durationFromSecs, durationSeconds, durationMicros, secondsDuration, timestampNow)
-import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHereOn, placeCall)
 import DBOS.Internal.Transact.Config (Serializer (..), serializerName)
 import DBOS.Internal.Transact.Connection (Connection (..))
-import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, driveScope, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, stepCtxBoundary, stepStatusAt, trySync, withInheritedStepScope, withStep, withSystemDB, workflowId)
+import DBOS.Internal.Transact.Context (StepCtx (stepCtxWorkflow), WorkflowCtx (wctxConn, wctxTracer), cancelToken, cancellationToken, firstStepStatus, insideAStep, nextStepId, nextWorkflowMarker, ownerToken, stepCtxBoundary, stepStatusAt, trySync, withInheritedStepScope, withStep, withSystemDB, workflowId)
 import DBOS.Internal.Transact.Error qualified as TransactError
 import DBOS.Internal.Transact.Logger (LogEvent (..), LogSeverity (..), runTracer)
 import DBOS.Internal.Transact.Serialization (CodecError, SerializationError, codecErrorText, codecUnknownTag, decodeWorkflowValue, encodeWorkflowValue)
@@ -421,8 +421,8 @@ driveStepWith :: (FromJSON value, FromJSON e, ToJSON value, ToJSON e, Show e, Mo
                  (StepCtx exec m -> m (Either (TransactError.Error e) value)) ->
                  m (Either (TransactError.Error e) value)
 driveStepWith options wctx name placement body = do
-  here <- driveScope wctx
-  case checkHere placement name (Just here) of
+  placed <- checkHereOn wctx placement name
+  case placed of
     Left err -> pure (Left err)
     Right DurabilityPlain -> do
       let sctx = case placement of

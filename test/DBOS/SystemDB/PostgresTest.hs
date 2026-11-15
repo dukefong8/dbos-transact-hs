@@ -110,6 +110,8 @@ import DBOS.SystemDB
     timestampNow,
     timestampToEpochMs,
     databaseTimeNow,
+    UpdatedQueue (updatedAfter),
+    upsertedCreated,
   )
 import DBOS.Internal.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.Internal.SystemDB.Postgres.Backend qualified as Backend
@@ -1787,7 +1789,7 @@ queueTests getBackend =
         let name = "q-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
           created <- upsertQueue env (newQueue name) UpdateExisting
-          fmap fst created @?= Right True
+          fmap upsertedCreated created @?= Right True
           found <- getQueue env name
           case found of
             Right (Just record) -> record.queueRecordName @?= name
@@ -1800,9 +1802,9 @@ queueTests getBackend =
         let name = "q-" <> Text.take 8 unique
         withBackend getBackend $ \env -> do
           first <- upsertQueue env (newQueue name) UpdateExisting
-          fmap fst first @?= Right True
+          fmap upsertedCreated first @?= Right True
           second <- upsertQueue env (newQueue name) UpdateExisting
-          fmap fst second @?= Right False,
+          fmap upsertedCreated second @?= Right False,
       testCase "listing queues scopes but reading one does not" $ do
         unique <- freshWorkflowId
         let name = "q-" <> Text.take 8 unique
@@ -1850,9 +1852,9 @@ queueTests getBackend =
           _ <- upsertQueue env (newQueue name) {newQueueConcurrency = Just 2, newQueueWorkerConcurrency = Just 1} UpdateExisting
           updated <- updateQueue env name (defaultQueueUpdate {queueUpdateConcurrency = Set (Just 4)}) (\_ _ -> Right ())
           case updated of
-            Right record -> do
-              record.queueRecordConcurrency @?= Just 4
-              record.queueRecordWorkerConcurrency @?= Just 1
+            Right result -> do
+              result.updatedAfter.queueRecordConcurrency @?= Just 4
+              result.updatedAfter.queueRecordWorkerConcurrency @?= Just 1
             other -> fail ("expected the updated queue, got: " <> show other),
       testCase "an empty update is a no-op" $ do
         unique <- freshWorkflowId
@@ -1861,7 +1863,7 @@ queueTests getBackend =
           _ <- upsertQueue env (newQueue name) {newQueueConcurrency = Just 2} UpdateExisting
           stored <- updateQueue env name defaultQueueUpdate (\_ _ -> Left (invalidInput "validate" "must not be called"))
           case stored of
-            Right record -> record.queueRecordConcurrency @?= Just 2
+            Right result -> result.updatedAfter.queueRecordConcurrency @?= Just 2
             other -> fail ("expected the stored queue, got: " <> show other),
       testCase "updating a queue that is not registered is refused" $ do
         unique <- freshWorkflowId

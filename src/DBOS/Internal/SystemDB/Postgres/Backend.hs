@@ -106,7 +106,7 @@ import DBOS.Internal.SystemDB.Notify (Registry, Subscription, eventKey, eventsCh
 import DBOS.Internal.SystemDB.Postgres.Notifier (Notifier, enable, notifierNew, run, signal, stop)
 import DBOS.Internal.SystemDB.Postgres.Statements qualified as Statements
 import DBOS.Internal.SystemDB.Retry (RetryPolicy (..), SysdbEvent (..), defaultRetryPolicy, uuidEntropy, withRetry, withoutConflictReplay)
-import DBOS.Internal.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), AppScope (..), AttributeUpdate (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Dequeued (..), DequeueStop (..), Duration, EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdleTransactionTimeout (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), InitWorkflowCaller (..), WorkflowIdReusePolicy (..), QueueRecord (..), RateLimit (..), RenameBatching (..), RenameFrom, ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WakeTime (..), QualifiedWorkflowName, qualifiedName, qualifiedClassName, qualifiedConfigName, WorkflowOwner (..), DeleteCaller (..), StepCaller (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationSeconds, DatabaseTime (..), durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getEventStepName, getScheduleStepName, idleTimeoutMillis, idleTimeoutParameter, idleTimeoutValidate, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, forkStepName, cancelStepName, recvStepName, renameFromApplication, resumeStepName, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, setEventStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, urlSetsIdleTimeout, databaseTimeNow, validateAttributeUpdate, validateAttributes, validateNewWorkflow, refuseSelfTarget, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead, saturateTimeout, wakeArrives, wakeRemaining)
+import DBOS.Internal.SystemDB.Types (ApplicationRowCounts (..), ApplicationVersion (..), AppScope (..), AttributeUpdate (..), AwaitedOutcome (..), Debounce (..), DebounceHolder (..), DebounceRequest (..), Dequeued (..), DequeueStop (..), Duration, EncodedValue (..), EventRecord (..), ExecutorId (..), Fork (..), ForkOptions (..), ForkPoint (..), GetEventCaller (..), IdleTransactionTimeout (..), MessageUUID (..), NewQueue (..), NewSchedule (..), NewWorkflow (..), NotificationRecord (..), NotificationRow (..), OnExistingQueue (..), Outcome (..), OutcomeWrite (..), PollingConcurrency (PollingDefault, PollingUnlimited), QueueName (..), InitWorkflowCaller (..), WorkflowIdReusePolicy (..), QueueRecord (..), UpsertedQueue (..), UpdatedQueue (..), RateLimit (..), RenameBatching (..), RenameFrom, ScheduleFilter (..), ScheduleRecord (..), ScheduleStatus (..), ScheduleUpdate (..), EncodedSendMessage (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), StreamRead (..), StreamRecord (..), SysRewindOptions (..), Timestamp (..), Topic (..), VersionInfo (..), WorkflowDelay (..), WorkflowFilter (..), WorkflowId (..), WorkflowInitResult (..), WakeTime (..), QualifiedWorkflowName, qualifiedName, qualifiedClassName, qualifiedConfigName, WorkflowOwner (..), DeleteCaller (..), StepCaller (..), WorkflowRecord (..), WorkflowStatus (..), WrittenBy (..), pollingAtMost, pollingPermits, addTimeout, applyQueueUpdate, changeIsLeave, changeSet, closeStreamStepName, createScheduleStepName, debounceStepName, debounceValidate, deleteScheduleStepName, deleteStepName, dequeueSweepCap, durationAsMillis, durationSeconds, DatabaseTime (..), durationFromMs, durationFromSecs, durationSince, durationToMs, forkOptionsValidate, forkProblems, forkValidate, getEventStepName, getScheduleStepName, idleTimeoutMillis, idleTimeoutParameter, idleTimeoutValidate, initialStatus, internalQueueName, isQueueUpdateEmpty, isScheduleUpdateEmpty, isStreamClosed, listSchedulesStepName, messageUUIDForSend, nullTopicSentinel, outcomeColumns, outcomeStatus, parseScheduleStatus, parseWorkflowStatus, pauseScheduleStepName, portableJsonSerialization, forkStepName, cancelStepName, recvStepName, renameFromApplication, resumeStepName, renderApplicationName, resumeScheduleStepName, rewindStepName, scheduleStatusText, secondsDuration, sendBulkStepName, sendStepName, setEventStepName, sleepStepName, streamClosedSentinel, sysRewindValidate, timestampFromEpochMs, timestampFromIso8601, timestampNow, timestampToEpochMs, timestampToIso8601, updateScheduleStepName, upsertScheduleStepName, urlSetsIdleTimeout, databaseTimeNow, validateAttributeUpdate, validateAttributes, validateNewWorkflow, refuseSelfTarget, validateSendKeys, workflowStatusText, writeStreamStepName, databaseTimeRead, saturateTimeout, wakeArrives, wakeRemaining)
 import DBOS.Internal.SystemDB.Types qualified as Types
 import DBOS.Internal.Transact.Logger (SomeTracer, runTracer)
 import DBOS.Internal.Transact.Serialization (codecErrorText, decodeWorkflowValue, encodeWorkflowValue)
@@ -2527,18 +2527,14 @@ runForkCall env caller work = case caller of
   Nothing -> join <$> runTransaction env "fork_workflows" work
 
 -- | Sends one message or a batch: the oracle's @deliver@, whose only
--- difference between the two is the step name. Fork fan-out is refused
--- until @descendant_forks@ lands; an empty batch still records its step,
--- because a step id that nothing occupies is a hole a replay has to guess
--- about.
+-- difference between the two is the step name. A client send with no caller
+-- returns before opening a transaction when the batch is empty. A workflow's
+-- send still records its step, because a step id that nothing occupies is a
+-- hole a replay has to guess about.
 sendInternal :: PostgresSystemDB -> Text -> [EncodedSendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> IO (Either Error ())
 sendInternal _ _ messages _ Nothing _ _ | null messages = pure (Right ())
-sendInternal env stepName messages serialization caller owner sendToForks = do
-  -- The duplicate-key refusal applies to the caller's list, before fan-out:
-  -- one key fanning out to many recipients is legal. Mirrors the oracle.
-  case validateSendKeys messages of
-    Left err -> pure (Left err)
-    Right () -> deliverTo env stepName messages serialization caller owner sendToForks
+sendInternal env stepName messages serialization caller owner sendToForks =
+  deliverTo env stepName messages serialization caller owner sendToForks
 
 -- | Delivers a batch with the recipient set settled inside the same
 -- transaction as the insert: the walk, the write, and the step record are
@@ -2548,13 +2544,22 @@ sendInternal env stepName messages serialization caller owner sendToForks = do
 -- inside its transaction.
 deliverTo :: PostgresSystemDB -> Text -> [EncodedSendMessage] -> Maybe Text -> Maybe (WorkflowId, Int) -> Maybe WorkflowOwner -> Bool -> IO (Either Error ())
 deliverTo env stepName messages serialization caller owner sendToForks = do
-  fallbacks <- traverse (const (MessageUUID . UUID.toText <$> UUID.V4.nextRandom)) messages
+  fallbacks <- traverse (const (UUID.toText <$> UUID.V4.nextRandom)) messages
   timing <- StepTiming <$> timestampNow <*> timestampNow
   let roots = [destination | message <- messages, let Types.WorkflowId destination = message.sendDestinationId]
-  -- An execution's send opens with its ownership check; a client send
-  -- has no execution and skips it. A refused send delivers nothing. The
-  -- fork walk, the insert, and the step record share the one transaction,
-  -- so a fork committed before it started is walked with it.
+      sendStep = do
+        (Types.WorkflowId widText, stepId) <- caller
+        pure
+          Statements.SendStep
+            { sendStepWorkflowId = widText,
+              sendStepStepId = stepId,
+              sendStepName = stepName,
+              sendStepStartedAt = timestampToEpochMs timing.stepTimingStartedAt,
+              sendStepCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt,
+              sendStepAppName = env.psdbAppName
+            }
+  -- An execution's send opens with its ownership check; a client send has no
+  -- execution and skips it. A refused send delivers nothing.
   result <-
     runTransaction env "send_messages" $ do
       owned <- case owner of
@@ -2564,46 +2569,7 @@ deliverTo env stepName messages serialization caller owner sendToForks = do
            in Statements.checkOwnerTx ownerText o.ownerToken
       case owned of
         Left conflict -> Tx.condemn >> pure (Left conflict)
-        Right () -> do
-          byRoot <-
-            if sendToForks
-              then descendantForksTx roots
-              else pure Map.empty
-          let expanded =
-                [ (message {sendDestinationId = Types.WorkflowId recipient}, fallback)
-                | (message, fallback) <- zip messages fallbacks,
-                  let Types.WorkflowId destination = message.sendDestinationId,
-                  recipient <- destination : Map.findWithDefault [] destination byRoot
-                ]
-              destinations = [destination | (message, _) <- expanded, let Types.WorkflowId destination = message.sendDestinationId]
-              topics = [maybe nullTopicSentinel (\(Topic stored) -> stored) message.sendTopic | (message, _) <- expanded]
-              payloads = [(.serializedText) message.sendMessageBody | (message, _) <- expanded]
-              messageIds =
-                [ let MessageUUID scoped = messageUUIDForSend fallback message in scoped
-                | (message, fallback) <- expanded
-                ]
-              sendStep = do
-                (Types.WorkflowId widText, stepId) <- caller
-                pure
-                  Statements.SendStep
-                    { sendStepWorkflowId = widText,
-                      sendStepStepId = stepId,
-                      sendStepName = stepName,
-                      sendStepStartedAt = timestampToEpochMs timing.stepTimingStartedAt,
-                      sendStepCompletedAt = timestampToEpochMs timing.stepTimingCompletedAt,
-                      sendStepAppName = env.psdbAppName
-                    }
-              params =
-                Statements.SendMessagesParams
-                  { sendParamsDestinations = destinations,
-                    sendParamsTopics = topics,
-                    sendParamsPayloads = payloads,
-                    sendParamsMessageIds = messageIds,
-                    sendParamsSerialization = serialization,
-                    sendParamsStep = sendStep
-                  }
-          written <- Statements.sendMessagesTx env.psdbExecutorId params
-          pure (fmap (const (zip destinations topics)) written)
+        Right () -> deliverBatch env.psdbExecutorId messages fallbacks serialization sendStep sendToForks
   case join result of
     Left err
       | foreignKeyError err ->
@@ -2616,6 +2582,76 @@ deliverTo env stepName messages serialization caller owner sendToForks = do
       forM_ wakes $ \(destination, topic) ->
         wake env.psdbNotify (messageKey destination (Just topic))
       pure (Right ())
+
+-- | Deliver a batch inside the caller's transaction: the checked pairing, the
+-- fork walk, the insert, and the optional step record are one commit, so a
+-- fork created concurrently with a send is either walked with it or created
+-- after it. It can never be walked past and missed. The duplicate-key refusal
+-- lives here, once, over the caller's list before fan-out. Returns the
+-- (destination, topic) pairs the same-process wake hull needs.
+--
+-- The executor id rides along for the step record's claim fence. A client send
+-- has no execution and passes 'Nothing'.
+deliverBatch :: Maybe Text -> [EncodedSendMessage] -> [Text] -> Maybe Text -> Maybe Statements.SendStep -> Bool -> Tx.Transaction (Either Error [(Text, Text)])
+deliverBatch executorId messages fallbacks serialization sendStep sendToForks =
+  case pairMessages messages fallbacks of
+    Left err -> Tx.condemn >> pure (Left err)
+    Right paired -> do
+      expanded <- expandPaired sendToForks paired
+      written <- Statements.sendMessagesTx executorId (sendParamsOf serialization sendStep expanded)
+      pure (fmap (const (zip (sendDestinations expanded) (sendTopics expanded))) written)
+
+-- | Check the caller's list and pair each message with its fallback id. The
+-- duplicate-key rule applies before fan-out (one key fanning out to many
+-- recipients is legal), and fallbacks stay one per message.
+pairMessages :: [EncodedSendMessage] -> [Text] -> Either Error [(EncodedSendMessage, Text)]
+pairMessages messages fallbacks = do
+  validateSendKeys messages
+  if length fallbacks /= length messages
+    then Left (invalidInput "fallbacks" "one fallback id per message")
+    else Right (zip messages fallbacks)
+
+-- | The recipient set, settled inside the transaction so it cannot go stale
+-- before the insert. Statement failures propagate unchecked.
+expandPaired :: Bool -> [(EncodedSendMessage, Text)] -> Tx.Transaction [(EncodedSendMessage, Text)]
+expandPaired sendToForks paired
+  | not sendToForks = pure paired
+  | otherwise = do
+      byRoot <- descendantForksTx [destination | (message, _) <- paired, let Types.WorkflowId destination = message.sendDestinationId]
+      pure
+        [ (message {sendDestinationId = Types.WorkflowId recipient}, fallback)
+        | (message, fallback) <- paired,
+          let Types.WorkflowId destination = message.sendDestinationId,
+          recipient <- destination : Map.findWithDefault [] destination byRoot
+        ]
+
+-- | The insert parameters for one expanded batch: the four projections plus
+-- the serialization and the optional step record, derived the same way for
+-- every send path.
+sendParamsOf :: Maybe Text -> Maybe Statements.SendStep -> [(EncodedSendMessage, Text)] -> Statements.SendMessagesParams
+sendParamsOf serialization sendStep expanded =
+  Statements.SendMessagesParams
+    { sendParamsDestinations = sendDestinations expanded,
+      sendParamsTopics = sendTopics expanded,
+      sendParamsPayloads = [(.serializedText) message.sendMessageBody | (message, _) <- expanded],
+      sendParamsMessageIds =
+        [ let MessageUUID scoped = messageUUIDForSend (MessageUUID fallback) message in scoped
+          | (message, fallback) <- expanded
+        ],
+      sendParamsSerialization = serialization,
+      sendParamsStep = sendStep
+    }
+
+-- | Every expanded row's destination, in insert order.
+sendDestinations :: [(EncodedSendMessage, Text)] -> [Text]
+sendDestinations expanded =
+  [destination | (message, _) <- expanded, let Types.WorkflowId destination = message.sendDestinationId]
+
+-- | Every expanded row's topic, in insert order, with the oracle's sentinel
+-- for a message that names none.
+sendTopics :: [(EncodedSendMessage, Text)] -> [Text]
+sendTopics expanded =
+  [maybe nullTopicSentinel (\(Topic stored) -> stored) message.sendTopic | (message, _) <- expanded]
 
 -- | Every descendant of every root inside the caller's transaction, level by
 -- level: the recipient set cannot go stale before the insert. Statement
@@ -2634,73 +2670,27 @@ descendantForksTx roots = go Map.empty Set.empty roots
         else go children' seen' fresh
 
 -- | Send one message inside the caller's transaction: no step is recorded,
--- like every client send. A validation refusal rolls the caller's
--- transaction back (as Python raises before touching the connection); a
--- foreign-key failure aborts the caller's transaction through the statement.
+-- like every client send. A validation refusal rolls the caller's transaction
+-- back (as Python raises before touching the connection); a foreign-key
+-- failure aborts the caller's transaction through the statement.
 sendMessageInTx :: EncodedSendMessage -> Maybe Text -> Text -> Bool -> Tx.Transaction (Either Error ())
 sendMessageInTx message serialization fallback sendToForks =
   sendBatchInTx [message] serialization [fallback] sendToForks
 
 -- | Send a batch inside the caller's transaction: all rows land with the
--- caller's own writes or none do. Fallbacks are one per message, fixed by
--- the caller before composing (as 'deliverTo' fixes them before its
--- transaction); a length mismatch is refused rather than zipped silently.
--- Checked failures (validation) return 'Left' and condemn the caller's
--- transaction, so composed caller writes roll back with the refusal;
--- statement failures propagate unchecked through the session channel and
--- abort the same way. Backend-internal: applications compose through
--- 'withClientTransaction' and the 'clientSendMessagesInTx' wrappers, which
--- pre-validate so nothing runs on a refusal.
+-- caller's own writes or none do. Fallbacks are one per message, fixed by the
+-- caller before composing (as 'deliverTo' fixes them before its transaction);
+-- a length mismatch is refused rather than zipped silently. Checked failures
+-- (validation) return 'Left' and condemn the caller's transaction, so composed
+-- caller writes roll back with the refusal; statement failures propagate
+-- unchecked through the session channel and abort the same way. Backend-
+-- internal: applications compose through 'withClientTransaction' and the
+-- 'clientSendMessagesInTx' wrappers, which pre-validate so nothing runs on a
+-- refusal.
 sendBatchInTx :: [EncodedSendMessage] -> Maybe Text -> [Text] -> Bool -> Tx.Transaction (Either Error ())
 sendBatchInTx messages serialization fallbacks sendToForks = do
-  outcome <- runExceptT $ do
-    paired <- ExceptT (pure (pairMessages messages fallbacks))
-    expanded <- lift (expandPaired paired)
-    lift (insertExpanded expanded)
-  case outcome of
-    Left err -> Tx.condemn >> pure (Left err)
-    Right () -> pure (Right ())
-  where
-    -- | The checked scope, pure: duplicate keys are refused on the caller's
-    -- list before fan-out (one key fanning out is legal), and fallbacks
-    -- stay one per message.
-    pairMessages :: [EncodedSendMessage] -> [Text] -> Either Error [(EncodedSendMessage, Text)]
-    pairMessages pairedMessages pairedFallbacks = do
-      validateSendKeys pairedMessages
-      if length pairedFallbacks /= length pairedMessages
-        then Left (invalidInput "fallbacks" "one fallback id per message")
-        else Right (zip pairedMessages pairedFallbacks)
-    -- | The recipient set, settled inside the transaction so it cannot go
-    -- stale before the insert. Statement failures propagate unchecked.
-    expandPaired :: [(EncodedSendMessage, Text)] -> Tx.Transaction [(EncodedSendMessage, Text)]
-    expandPaired paired
-      | not sendToForks = pure paired
-      | otherwise = do
-          byRoot <- descendantForksTx [destination | (message, _) <- paired, let Types.WorkflowId destination = message.sendDestinationId]
-          pure
-            [ (message {sendDestinationId = Types.WorkflowId recipient}, fallback)
-            | (message, fallback) <- paired,
-              let Types.WorkflowId destination = message.sendDestinationId,
-              recipient <- destination : Map.findWithDefault [] destination byRoot
-            ]
-    -- | The batched insert, recording no step like every client send.
-    -- A foreign-key failure aborts the caller's transaction here.
-    insertExpanded :: [(EncodedSendMessage, Text)] -> Tx.Transaction ()
-    insertExpanded expanded =
-      void
-        ( Statements.sendMessagesTx Nothing
-            Statements.SendMessagesParams
-              { sendParamsDestinations = [destination | (message, _) <- expanded, let Types.WorkflowId destination = message.sendDestinationId],
-                sendParamsTopics = [maybe nullTopicSentinel (\(Topic stored) -> stored) message.sendTopic | (message, _) <- expanded],
-                sendParamsPayloads = [(.serializedText) message.sendMessageBody | (message, _) <- expanded],
-                sendParamsMessageIds =
-                  [ let MessageUUID scoped = messageUUIDForSend (MessageUUID fallback) message in scoped
-                    | (message, fallback) <- expanded
-                  ],
-                sendParamsSerialization = serialization,
-                sendParamsStep = Nothing
-              }
-        )
+  result <- deliverBatch Nothing messages fallbacks serialization Nothing sendToForks
+  pure (void result)
 
 -- | Enqueue a workflow inside the caller's transaction: the status row and
 -- the input commit with the caller's writes or not at all. 'Client'
@@ -3939,7 +3929,7 @@ instance SystemDB PostgresSystemDB IO where
         case inserted of
           Just raw -> case queueRecordFromRow raw of
             Left err      -> Tx.condemn >> pure (Left err)
-            Right record  -> pure (Right (True, record))
+            Right record  -> pure (Right (UpsertedQueue {upsertedBefore = Nothing, upsertedAfter = record}))
           Nothing -> do
             found <- Tx.statement name Statements.queueSelectForUpdateStatement
             case found of
@@ -3949,12 +3939,12 @@ instance SystemDB PostgresSystemDB IO where
                 Right record -> case resolveOwner "Queue" name owner (Just raw.queueRowAppName) of
                   Left err -> Tx.condemn >> pure (Left err)
                   Right _  -> case onExisting of
-                    LeaveExisting -> pure (Right (False, record))
+                    LeaveExisting -> pure (Right (UpsertedQueue {upsertedBefore = Just record, upsertedAfter = record}))
                     UpdateExisting -> do
                       updated <- Tx.statement params Statements.queueUpdateReturningStatement
                       case updated of
                         Nothing -> pure (Left (Malformed "the queue update returned no row"))
-                        Just raw' -> pure (fmap (\record' -> (False, record')) (queueRecordFromRow raw'))
+                        Just raw' -> pure (fmap (\record' -> UpsertedQueue {upsertedBefore = Just record, upsertedAfter = record'}) (queueRecordFromRow raw'))
   startQueuedWorkflows env queue executorId applicationVersion partitionKey localRunning partitionLocalRunning ownerToken =
     case partitionKey of
       Just "" -> pure (Left (invalidInput "partition_key" "must be absent rather than empty"))
@@ -4110,14 +4100,14 @@ instance SystemDB PostgresSystemDB IO where
         Just raw -> case queueRecordFromRow raw of
           Left err -> pure (Left err)
           Right record
-            | isQueueUpdateEmpty update -> pure (Right (Right record))
+            | isQueueUpdateEmpty update -> pure (Right (Right (UpdatedQueue {updatedBefore = record, updatedAfter = record})))
             | otherwise -> case validate record (applyQueueUpdate update record) of
                 Left err -> pure (Left err)
                 Right () -> do
                   written <- Tx.statement (queueUpdateParams name (applyQueueUpdate update record)) Statements.queueUpdateStatement
                   case written of
                     Nothing  -> pure (Right (Left (Malformed "the update wrote no queue row")))
-                    Just row -> pure (Right (queueRecordFromRow row))
+                    Just row -> pure (Right (fmap (UpdatedQueue record) (queueRecordFromRow row)))
     case result of
       Left err              -> pure (Left err)
       Right (Left err)      -> pure (Left err)

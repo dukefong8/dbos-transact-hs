@@ -32,10 +32,10 @@ import DBOS.Internal.Prelude
 import DBOS.Internal.SystemDB.Class qualified as SystemDB
 import DBOS.Internal.SystemDB.Error qualified as SystemDBError
 import DBOS.Internal.SystemDB.Types (AwaitedOutcome (..), Outcome (..), Serialization (..), SerializedWorkflowValue (..), StepRecord (..), StepTiming (..), Timestamp, WorkflowId (..), WorkflowRecord (..), WorkflowStatus, getResultStepName, timestampNow)
-import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHere, placeCall)
+import DBOS.Internal.Transact.Checkpoint (PendingStep (..), StepDurability (..), StepPlacement (..), checkHereOn, placeCall)
 import DBOS.Internal.Transact.Config (serializerName)
 import DBOS.Internal.Transact.Connection (Connection (..), runSystemDB)
-import DBOS.Internal.Transact.Context (LocalTaskOutcome (..), WorkflowCtx, driveScope, ownerToken, stepCtxBoundary, workflowId)
+import DBOS.Internal.Transact.Context (LocalTaskOutcome (..), WorkflowCtx, ownerToken, workflowId)
 import DBOS.Internal.Transact.Error qualified as TransactError
 
 -- | Where this handle's result comes from. The local channel carries the
@@ -165,8 +165,8 @@ driveAwait :: (MonadDelay m, MonadTime m, MonadSTM m, MonadMVar m, MonadThrow m,
               StepPlacement exec m ->
               m (Either (TransactError.Error e) (Maybe SerializedWorkflowValue))
 driveAwait wctx handle placement = do
-  here <- driveScope wctx
-  case checkHere placement getResultStepName (Just here) of
+  placed <- checkHereOn wctx placement getResultStepName
+  case placed of
     Left err                                 -> pure (Left err)
     Right DurabilityPlain                    -> fmap (>>= settledResult handle.workflowId) (settleOutcome handle)
     Right (DurabilityRecorded wctx' stepId') -> recordedAt wctx' stepId'
